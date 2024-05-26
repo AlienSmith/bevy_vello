@@ -2,11 +2,17 @@ use crate::integrations::VectorLoaderError;
 use crate::{VectorFile, VelloAsset};
 use bevy::prelude::*;
 use std::sync::Arc;
-
+use velato::VelatoError::Json;
 /// Deserialize a Lottie file from bytes.
 pub fn load_lottie_from_bytes(bytes: &[u8]) -> Result<VelloAsset, VectorLoaderError> {
     // Load Lottie JSON bytes with the Velato (bodymovin) parser
-    let composition = velato::Composition::from_slice(bytes).map_err(VectorLoaderError::Velato)?;
+    let composition = velato::Composition::from_slice(bytes).map_err(
+        |err|{
+            match err {
+                Json(info) => {VectorLoaderError::Velato(info)},
+                _ => todo!(),
+            }
+        })?;
 
     let width = composition.width as f32;
     let height = composition.height as f32;
