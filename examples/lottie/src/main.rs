@@ -1,6 +1,6 @@
-use bevy::asset::{embedded_asset, AssetMetaCheck};
+use bevy::asset::{ embedded_asset, AssetMetaCheck };
 use bevy::prelude::*;
-use bevy_vello::{prelude::*, VelloPlugin};
+use bevy_vello::{ prelude::*, VelloPlugin };
 
 fn main() {
     let mut app = App::new();
@@ -18,7 +18,7 @@ fn load_lottie(mut commands: Commands, asset_server: ResMut<AssetServer>) {
     // Yes, it's this simple.
     commands.spawn(VelloAssetBundle {
         vector: asset_server.load("embedded://lottie/assets/Tiger.json"),
-        debug_visualizations: DebugVisualizations::Visible,
+        debug_visualizations: DebugVisualizations::Hidden,
         transform: Transform::from_scale(Vec3::splat(0.5)),
         ..default()
     });

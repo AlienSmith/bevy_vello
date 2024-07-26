@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use bevy::utils::HashMap;
-use velato::model::{Brush, Shape};
+use velato::model::{ Brush, Shape };
 use velato::Composition;
 
 #[derive(PartialEq, Component, Default, Clone, Debug, Reflect)]
@@ -58,7 +58,9 @@ impl Theme {
             };
             let shapes = match &mut layer.content {
                 velato::model::Content::Shape(shapes) => shapes,
-                velato::model::Content::None | velato::model::Content::Instance { .. } => {
+                | velato::model::Content::Anchor
+                | velato::model::Content::None
+                | velato::model::Content::Instance { .. } => {
                     continue 'layers;
                 }
             };
@@ -66,7 +68,7 @@ impl Theme {
                 target_color.r().into(),
                 target_color.g().into(),
                 target_color.b().into(),
-                target_color.a().into(),
+                target_color.a().into()
             );
             for shape in shapes.iter_mut() {
                 recolor_shape(shape, target_color);
@@ -94,50 +96,54 @@ fn recolor_shape(shape: &mut Shape, target_color: vello::peniko::Color) {
 /// A helper method to recolor a brush with a target color.
 fn recolor_brush(brush: &mut Brush, target_color: vello::peniko::Color) {
     match brush {
-        velato::model::Brush::Fixed(brush) => match brush {
-            vello::peniko::Brush::Solid(solid) => {
-                *solid = target_color;
-            }
-            vello::peniko::Brush::Gradient(gradient) => {
-                for stop in gradient.stops.iter_mut() {
-                    stop.color = target_color;
-                }
-            }
-            vello::peniko::Brush::Image(_) => {}
-        },
-        velato::model::Brush::Animated(brush) => match brush {
-            velato::model::animated::Brush::Solid(brush) => match brush {
-                velato::model::Value::Fixed(solid) => {
+        velato::model::Brush::Fixed(brush) =>
+            match brush {
+                vello::peniko::Brush::Solid(solid) => {
                     *solid = target_color;
                 }
-                velato::model::Value::Animated(keyframes) => {
-                    for solid in keyframes.values.iter_mut() {
-                        *solid = target_color;
-                    }
-                }
-            },
-            velato::model::animated::Brush::Gradient(gr) => match &mut gr.stops {
-                velato::model::ColorStops::Fixed(stops) => {
-                    for stop in stops.iter_mut() {
+                vello::peniko::Brush::Gradient(gradient) => {
+                    for stop in gradient.stops.iter_mut() {
                         stop.color = target_color;
                     }
                 }
-                velato::model::ColorStops::Animated(stops) => {
-                    for _ in 0..stops.count {
-                        for stop in stops.values.iter_mut() {
-                            let _offset = stop[0];
-                            let r = &mut stop[1];
-                            *r = target_color.r as f64;
-                            let g = &mut stop[2];
-                            *g = target_color.g as f64;
-                            let b = &mut stop[3];
-                            *b = target_color.b as f64;
-                            let a = &mut stop[4];
-                            *a = target_color.a as f64;
+                vello::peniko::Brush::Image(_) => {}
+            }
+        velato::model::Brush::Animated(brush) =>
+            match brush {
+                velato::model::animated::Brush::Solid(brush) =>
+                    match brush {
+                        velato::model::Value::Fixed(solid) => {
+                            *solid = target_color;
+                        }
+                        velato::model::Value::Animated(keyframes) => {
+                            for solid in keyframes.values.iter_mut() {
+                                *solid = target_color;
+                            }
                         }
                     }
-                }
-            },
-        },
+                velato::model::animated::Brush::Gradient(gr) =>
+                    match &mut gr.stops {
+                        velato::model::ColorStops::Fixed(stops) => {
+                            for stop in stops.iter_mut() {
+                                stop.color = target_color;
+                            }
+                        }
+                        velato::model::ColorStops::Animated(stops) => {
+                            for _ in 0..stops.count {
+                                for stop in stops.values.iter_mut() {
+                                    let _offset = stop[0];
+                                    let r = &mut stop[1];
+                                    *r = target_color.r as f64;
+                                    let g = &mut stop[2];
+                                    *g = target_color.g as f64;
+                                    let b = &mut stop[3];
+                                    *b = target_color.b as f64;
+                                    let a = &mut stop[4];
+                                    *a = target_color.a as f64;
+                                }
+                            }
+                        }
+                    }
+            }
     }
 }
