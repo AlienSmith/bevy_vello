@@ -64,8 +64,10 @@ pub fn render_scene(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut vello_renderer: Local<Option<VelloRenderer>>,
-    #[cfg(feature = "lottie")] mut velato_renderer: ResMut<super::VelatoRenderer>
+    #[cfg(feature = "lottie")] mut velato_renderer: ResMut<super::VelatoRenderer>,
+    #[cfg(feature = "particles")] effect_cache: Res<bevy_hanabi::EffectCache>
 ) {
+    let _slice = *(effect_cache.obtain_export_buffer());
     let renderer = vello_renderer.get_or_insert_with(|| {
         VelloRenderer(
             Renderer::new(

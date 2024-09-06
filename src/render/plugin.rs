@@ -7,10 +7,10 @@ use bevy::asset::load_internal_asset;
 use bevy::prelude::*;
 use bevy::render::extract_component::ExtractComponentPlugin;
 use bevy::render::render_asset::RenderAssetPlugin;
+#[cfg(not(feature = "particles"))]
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{Render, RenderApp, RenderSet};
 use bevy::sprite::Material2dPlugin;
-
 pub struct VelloRenderPlugin;
 
 impl Plugin for VelloRenderPlugin {
@@ -50,7 +50,17 @@ impl Plugin for VelloRenderPlugin {
                     prepare::prepare_text_affines,
                 )
                     .in_set(RenderSet::Prepare),
-            )
+            );
+        #[cfg(feature = "particles")]
+        render_app
+            .add_systems(
+                Render,
+                systems::render_scene
+                    .in_set(RenderSet::Render)
+                    .run_if(resource_exists::<bevy_hanabi::render::EffectCache>),
+            );
+        #[cfg(not(feature = "particles"))]
+        render_app
             .add_systems(
                 Render,
                 systems::render_scene
