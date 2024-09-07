@@ -67,7 +67,6 @@ pub fn render_scene(
     #[cfg(feature = "lottie")] mut velato_renderer: ResMut<super::VelatoRenderer>,
     #[cfg(feature = "particles")] effect_cache: Res<bevy_hanabi::EffectCache>
 ) {
-    let _slice = *(effect_cache.obtain_export_buffer());
     let renderer = vello_renderer.get_or_insert_with(|| {
         VelloRenderer(
             Renderer::new(
@@ -194,6 +193,22 @@ pub fn render_scene(
                 .count() == render_queue.len();
 
         if !render_queue.is_empty() && !empty_encodings {
+            #[cfg(feature = "particles")]
+            renderer
+                .render_to_texture_with_external_particle_buffer(
+                    device.wgpu_device(),
+                    &queue,
+                    &scene_buffer,
+                    &gpu_image.texture_view,
+                    &(RenderParams {
+                        base_color: vello::peniko::Color::TRANSPARENT,
+                        width: gpu_image.size.x as u32,
+                        height: gpu_image.size.y as u32,
+                    }),
+                    &*effect_cache.obtain_export_buffer()
+                )
+                .unwrap();
+            #[cfg(not(feature = "particles"))]
             renderer
                 .render_to_texture(
                     device.wgpu_device(),

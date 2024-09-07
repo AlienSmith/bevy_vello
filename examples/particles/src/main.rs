@@ -97,7 +97,7 @@ fn setup(
     let age = writer.lit(0.).expr();
     let init_age = SetAttributeModifier::new(Attribute::AGE, age);
 
-    let lifetime = writer.lit(5.).expr();
+    let lifetime = writer.lit(10.).expr();
     let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     let init_pos = SetPositionCircleModifier {
@@ -110,7 +110,7 @@ fn setup(
     let init_vel = SetVelocityCircleModifier {
         center: writer.lit(Vec3::ZERO).expr(),
         axis: writer.lit(Vec3::Z).expr(),
-        speed: writer.lit(0.1).expr(),
+        speed: writer.lit(30.0).expr(),
     };
 
     let mut module = writer.finish();
@@ -147,12 +147,6 @@ fn setup(
         .insert(Name::new("effect:2d"));
 }
 
-fn update_plane(time: Res<Time>, mut query: Query<&mut Transform, With<Mesh2dHandle>>) {
-    let mut transform = query.single_mut();
-    // Move the plane back and forth to show particles ordering relative to it
-    transform.translation.z = (time.elapsed_seconds() * 2.5).sin() * 0.045 + 0.1;
-}
-
 fn setup_vector_graphics(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
     commands.spawn(VelloSceneBundle::default());
@@ -173,15 +167,32 @@ fn simple_animation(mut query_scene: Query<(&mut Transform, &mut VelloScene)>, t
     );
 
     // Animate the corner radius
-    scene.fill(
-        peniko::Fill::NonZero,
-        kurbo::Affine::default(),
-        peniko::Color::rgb(c.x as f64, c.y as f64, c.z as f64),
-        None,
-        &kurbo::RoundedRect::new(-50.0, -50.0, 50.0, 50.0, (sin_time as f64) * 50.0),
-    );
+    // scene.fill(
+    //     peniko::Fill::NonZero,
+    //     kurbo::Affine::default(),
+    //     peniko::Color::rgb(c.x as f64, c.y as f64, c.z as f64),
+    //     None,
+    //     &kurbo::RoundedRect::new(-50.0, -50.0, 50.0, 50.0, (sin_time as f64) * 50.0),
+    // );
 
-    transform.scale = Vec3::lerp(Vec3::ONE * 0.5, Vec3::ONE * 1.0, sin_time);
-    transform.translation = Vec3::lerp(Vec3::X * -100.0, Vec3::X * 100.0, sin_time);
-    transform.rotation = Quat::from_rotation_z(-std::f32::consts::TAU * sin_time);
+    scene.push_instance();
+        scene.fill(
+            peniko::Fill::NonZero,
+            kurbo::Affine::default(),
+            peniko::Color::rgb(c.x as f64, c.y as f64, c.z as f64),
+            None,
+            &kurbo::RoundedRect::new(-5.0, -5.0, 5.0, 5.0, (sin_time as f64) * 50.0),
+        );
+        // scene.stroke(
+        // &kurbo::Stroke::new(1.0),
+        // kurbo::Affine::translate((100.0, 100.0)),
+        // peniko::Color::rgb8(0, 255, 255),
+        // None,
+        // &kurbo::Rect::new(-5.0, -5.0, 5.0, 5.0),
+        // );
+    scene.pop_instance();
+
+    // transform.scale = Vec3::lerp(Vec3::ONE * 0.5, Vec3::ONE * 1.0, sin_time);
+    // transform.translation = Vec3::lerp(Vec3::X * -100.0, Vec3::X * 100.0, sin_time);
+    // transform.rotation = Quat::from_rotation_z(-std::f32::consts::TAU * sin_time);
 }
