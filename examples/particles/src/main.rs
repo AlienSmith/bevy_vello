@@ -5,12 +5,9 @@
 //! particle above or below the reference square.
 
 use bevy::{
-    log::LogPlugin,
     prelude::*,
-    render::{
-        camera::ScalingMode, render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
+    render::{ render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
     },
-    sprite::{MaterialMesh2dBundle, Mesh2dHandle},
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -18,7 +15,6 @@ use bevy::{
 use bevy_hanabi::prelude::*;
 
 use bevy::asset::AssetMetaCheck;
-use bevy::prelude::*;
 use bevy_vello::vello::{kurbo, peniko};
 use bevy_vello::{prelude::*, VelloPlugin};
 
@@ -62,31 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn setup(
     mut commands: Commands,
     mut effects: ResMut<Assets<EffectAsset>>,
-    // mut meshes: ResMut<Assets<Mesh>>,
-    // mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    // Spawn a 2D camera
-    // let mut camera = Camera2dBundle::default();
-    // camera.projection.scale = 1.0;
-    // camera.projection.scaling_mode = ScalingMode::FixedVertical(1.);
-    // commands.spawn(camera);
-
-    // Spawn a reference white square in the center of the screen at Z=0
-    // commands
-    //     .spawn(MaterialMesh2dBundle {
-    //         mesh: meshes
-    //             .add(Rectangle {
-    //                 half_size: Vec2::splat(0.1),
-    //             })
-    //             .into(),
-    //         material: materials.add(ColorMaterial {
-    //             color: Color::WHITE,
-    //             ..Default::default()
-    //         }),
-    //         ..Default::default()
-    //     })
-    //     .insert(Name::new("square"));
-
     // Create a color gradient for the particles
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.5, 0.5, 1.0, 1.0));
@@ -113,9 +85,7 @@ fn setup(
         speed: writer.lit(30.0).expr(),
     };
 
-    let mut module = writer.finish();
-
-    let round = RoundModifier::constant(&mut module, 2.0 / 3.0);
+    let module = writer.finish();
 
     // Create a new effect asset spawning 30 particles per second from a circle
     // and slowly fading from blue-ish to transparent over their lifetime.
@@ -132,8 +102,8 @@ fn setup(
                 gradient: Gradient::constant(Vec2::splat(0.02)),
                 screen_space_size: false,
             })
-            .render(ColorOverLifetimeModifier { gradient })
-            .render(round),
+            // .render(ColorOverLifetimeModifier { gradient })
+            // .render(round),
     );
 
     // Spawn an instance of the particle effect, and override its Z layer to
@@ -154,7 +124,7 @@ fn setup_vector_graphics(mut commands: Commands) {
 
 fn simple_animation(mut query_scene: Query<(&mut Transform, &mut VelloScene)>, time: Res<Time>) {
     let sin_time = time.elapsed_seconds().sin().mul_add(0.5, 0.5);
-    let (mut transform, mut scene) = query_scene.single_mut();
+    let (mut _transform, mut scene) = query_scene.single_mut();
 
     // Reset scene every frame
     *scene = VelloScene::default();
@@ -165,15 +135,6 @@ fn simple_animation(mut query_scene: Query<(&mut Transform, &mut VelloScene)>, t
         Vec3::new(-1.0, 1.0, 1.0),
         sin_time + 0.5,
     );
-
-    // Animate the corner radius
-    // scene.fill(
-    //     peniko::Fill::NonZero,
-    //     kurbo::Affine::default(),
-    //     peniko::Color::rgb(c.x as f64, c.y as f64, c.z as f64),
-    //     None,
-    //     &kurbo::RoundedRect::new(-50.0, -50.0, 50.0, 50.0, (sin_time as f64) * 50.0),
-    // );
 
     scene.push_instance();
         scene.fill(
