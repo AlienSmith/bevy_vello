@@ -99,9 +99,12 @@ fn setup(
             .init(init_age)
             .init(init_lifetime)
             .render(SizeOverLifetimeModifier {
-                gradient: Gradient::constant(Vec2::splat(0.02)),
+                gradient: Gradient::linear(Vec2::splat(2.0),Vec2::splat(0.0)),
                 screen_space_size: false,
-            })
+            }).render(OrientModifier {
+                mode: OrientMode::AlongVelocity,
+                rotation: None,
+            }).with_simulation_space(SimulationSpace::Local)
             // .render(ColorOverLifetimeModifier { gradient })
             // .render(round),
     );
