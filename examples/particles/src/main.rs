@@ -6,8 +6,7 @@
 
 use bevy::{
     prelude::*,
-    render::{ render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin,
-    },
+    render::{render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin},
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -15,8 +14,28 @@ use bevy::{
 use bevy_hanabi::prelude::*;
 
 use bevy::asset::AssetMetaCheck;
-use bevy_vello::vello::{kurbo, peniko};
 use bevy_vello::{prelude::*, VelloPlugin};
+use bevy_vello::{
+    vello::{kurbo, peniko},
+    VelloSceneSubBundle,
+};
+
+const BOUNDS: Vec2 = Vec2::new(1200.0, 640.0);
+
+/// player component
+#[derive(Component, Default)]
+struct Player {
+    /// linear speed in meters per second
+    movement_speed: f32,
+    /// rotation speed in radians per second
+    rotation_speed: f32,
+
+    spawn_count: u32,
+
+    last_spawn_time: f32,
+
+    spawn_count_limits: u32,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut wgpu_settings = WgpuSettings::default();
@@ -44,22 +63,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
-    app.add_systems(Startup, setup);
-    
     app.insert_resource(AssetMetaCheck::Never)
         .add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
-        .add_systems(Update, simple_animation)
+        .add_systems(Update, player_control_system)
         .run();
 
     Ok(())
 }
 
-fn setup(
-    mut commands: Commands,
-    mut effects: ResMut<Assets<EffectAsset>>,
-) {
-    // Create a color gradient for the particles
+fn make_default_rect_particles(scene: &mut VelloScene, index: u32) {
+    *scene = VelloScene::default();
+    scene.push_instance(index);
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgb(1.0, 0.0, 0.0),
+        None,
+        &kurbo::Rect::new(-2.5, -2.5, 2.5, 2.5),
+    );
+    scene.pop_instance();
+}
+
+fn default_effect(
+    effects: &mut ResMut<Assets<EffectAsset>>,
+    effect_allocator: &mut ResMut<EffectAssetCounter>,
+    count: f32,
+) -> (Handle<EffectAsset>, u32) {
+    let token = effect_allocator.alloc();
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.5, 0.5, 1.0, 1.0));
     gradient.add_key(1.0, Vec4::new(0.5, 0.5, 1.0, 0.0));
@@ -90,73 +121,146 @@ fn setup(
     // Create a new effect asset spawning 30 particles per second from a circle
     // and slowly fading from blue-ish to transparent over their lifetime.
     // By default the asset spawns the particles at Z=0.
-    let spawner = Spawner::rate(30.0.into());
-    let effect = effects.add(
-        EffectAsset::new(vec![4096], spawner, module)
-            .with_name("2d")
-            .init(init_pos)
-            .init(init_vel)
-            .init(init_age)
-            .init(init_lifetime)
-            .render(SizeOverLifetimeModifier {
-                gradient: Gradient::linear(Vec2::splat(2.0),Vec2::splat(0.0)),
-                screen_space_size: false,
-            }).render(OrientModifier {
-                mode: OrientMode::AlongVelocity,
-                rotation: None,
-            }).with_simulation_space(SimulationSpace::Local)
-            // .render(ColorOverLifetimeModifier { gradient })
-            // .render(round),
-    );
+    let spawner = Spawner::rate(count.into());
+    (
+        effects.add(
+            EffectAsset::new(vec![4096], spawner, module)
+                .with_name("2d")
+                .init(init_pos)
+                .init(init_vel)
+                .init(init_age)
+                .init(init_lifetime)
+                .render(SizeOverLifetimeModifier {
+                    gradient: Gradient::linear(Vec2::splat(2.0), Vec2::splat(0.0)),
+                    screen_space_size: false,
+                })
+                .render(OrientModifier {
+                    mode: OrientMode::AlongVelocity,
+                    rotation: None,
+                })
+                .with_simulation_space(SimulationSpace::Local)
+                .with_token(token), // .render(ColorOverLifetimeModifier { gradient })
+                                    // .render(round),
+        ),
+        token.index,
+    )
+}
 
+fn spawn_particles_at(
+    commands: &mut Commands,
+    effects: &mut ResMut<Assets<EffectAsset>>,
+    effect_allocator: &mut ResMut<EffectAssetCounter>,
+    translate: Vec3,
+    count: f32,
+) {
+    // Create a color gradient for the particles
+    let (effect, index) = default_effect(effects, effect_allocator, count);
+    let mut scene = VelloScene::default();
+    make_default_rect_particles(&mut scene, index);
     // Spawn an instance of the particle effect, and override its Z layer to
     // be above the reference white square previously spawned.
-    commands
-        .spawn(ParticleEffectBundle {
-            // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
-            effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
-            ..default()
-        })
-        .insert(Name::new("effect:2d"));
+    let id = commands
+        .spawn((
+            ParticleEffectBundle {
+                // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
+                effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
+                transform: Transform::from_translation(translate),
+                ..default()
+            },
+            VelloSceneSubBundle {
+                scene,
+                ..Default::default()
+            },
+        ))
+        .id();
 }
 
 fn setup_vector_graphics(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
-    commands.spawn(VelloSceneBundle::default());
+    let mut scene: VelloScene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgb(1.0, 1.0, 1.0),
+        None,
+        &kurbo::Rect::new(-2.5, -5.0, 2.5, 5.0),
+    );
+    commands.spawn((
+        VelloSceneBundle {
+            scene,
+            ..Default::default()
+        },
+        Player {
+            movement_speed: 500.0,                  // meters per second
+            rotation_speed: f32::to_radians(360.0), // degrees per second
+            spawn_count_limits: 2,
+            ..Default::default()
+        },
+    ));
 }
 
-fn simple_animation(mut query_scene: Query<(&mut Transform, &mut VelloScene)>, time: Res<Time>) {
-    let sin_time = time.elapsed_seconds().sin().mul_add(0.5, 0.5);
-    let (mut _transform, mut scene) = query_scene.single_mut();
+/// Demonstrates applying rotation and movement based on keyboard input.
+fn player_control_system(
+    time: Res<Time>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut query: Query<(&mut Player, &mut Transform)>,
+    mut commands: Commands,
+    mut effects: ResMut<Assets<EffectAsset>>,
+    mut effect_allocator: ResMut<EffectAssetCounter>,
+) {
+    let (mut ship, mut transform) = query.single_mut();
 
-    // Reset scene every frame
-    *scene = VelloScene::default();
+    let mut rotation_factor = 0.0;
+    let mut movement_factor = 0.0;
 
-    // Animate color green to blue
-    let c = Vec3::lerp(
-        Vec3::new(-1.0, 1.0, -1.0),
-        Vec3::new(-1.0, 1.0, 1.0),
-        sin_time + 0.5,
-    );
+    if keyboard_input.pressed(KeyCode::ArrowLeft) {
+        rotation_factor += 1.0;
+    }
 
-    scene.push_instance();
-        scene.fill(
-            peniko::Fill::NonZero,
-            kurbo::Affine::default(),
-            peniko::Color::rgb(c.x as f64, c.y as f64, c.z as f64),
-            None,
-            &kurbo::RoundedRect::new(-5.0, -5.0, 5.0, 5.0, (sin_time as f64) * 50.0),
-        );
-        // scene.stroke(
-        // &kurbo::Stroke::new(1.0),
-        // kurbo::Affine::translate((100.0, 100.0)),
-        // peniko::Color::rgb8(0, 255, 255),
-        // None,
-        // &kurbo::Rect::new(-5.0, -5.0, 5.0, 5.0),
-        // );
-    scene.pop_instance();
+    if keyboard_input.pressed(KeyCode::ArrowRight) {
+        rotation_factor -= 1.0;
+    }
 
-    // transform.scale = Vec3::lerp(Vec3::ONE * 0.5, Vec3::ONE * 1.0, sin_time);
-    // transform.translation = Vec3::lerp(Vec3::X * -100.0, Vec3::X * 100.0, sin_time);
-    // transform.rotation = Quat::from_rotation_z(-std::f32::consts::TAU * sin_time);
+    if keyboard_input.pressed(KeyCode::ArrowUp) {
+        movement_factor += 1.0;
+    }
+
+    if keyboard_input.pressed(KeyCode::ArrowDown) {
+        movement_factor -= 1.0;
+    }
+
+    if keyboard_input.pressed(KeyCode::Space) {
+        if ship.spawn_count < ship.spawn_count_limits
+            && time.elapsed_seconds() - ship.last_spawn_time > 0.5
+        {
+            let count = if ship.spawn_count == 0 { 30 } else { 5 };
+            spawn_particles_at(
+                &mut commands,
+                &mut effects,
+                &mut effect_allocator,
+                transform.translation,
+                count as f32,
+            );
+            ship.spawn_count += 1;
+            ship.last_spawn_time = time.elapsed_seconds();
+        }
+    }
+
+    // update the ship rotation around the Z axis (perpendicular to the 2D plane of the screen)
+    transform.rotate_z(rotation_factor * ship.rotation_speed * time.delta_seconds());
+
+    // get the ship's forward vector by applying the current rotation to the ships initial facing
+    // vector
+    let movement_direction = transform.rotation * Vec3::Y;
+    // get the distance the ship will move based on direction, the ship's movement speed and delta
+    // time
+    let movement_distance = movement_factor * ship.movement_speed * time.delta_seconds();
+    // create the change in translation using the new movement direction and distance
+    let translation_delta = movement_direction * movement_distance;
+    // update the ship translation with our new translation delta
+    transform.translation += translation_delta;
+
+    // bound the ship within the invisible level bounds
+    let extents = Vec3::from((BOUNDS / 2.0, 0.0));
+    transform.translation = transform.translation.min(extents).max(-extents);
 }
