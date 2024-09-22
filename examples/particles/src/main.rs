@@ -14,11 +14,11 @@ use bevy::{
 use bevy_hanabi::prelude::*;
 
 use bevy::asset::AssetMetaCheck;
-use bevy_vello::{prelude::*, VelloPlugin};
 use bevy_vello::{
+    integrations::{HanabiIntegrationPlugin, VelloSceneSubBundle},
     vello::{kurbo, peniko},
-    VelloSceneSubBundle,
 };
+use bevy_vello::{prelude::*, VelloPlugin};
 
 const BOUNDS: Vec2 = Vec2::new(1200.0, 640.0);
 
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..default()
                 }),
         )
-        .add_plugins(HanabiPlugin);
+        .add_plugins(HanabiIntegrationPlugin);
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
@@ -72,9 +72,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn make_default_rect_particles(scene: &mut VelloScene, index: u32) {
+fn make_default_rect_particles(scene: &mut VelloScene) {
     *scene = VelloScene::default();
-    scene.push_instance(index);
+    scene.push_instance(0, 0);
     scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::default(),
@@ -85,12 +85,7 @@ fn make_default_rect_particles(scene: &mut VelloScene, index: u32) {
     scene.pop_instance();
 }
 
-fn default_effect(
-    effects: &mut ResMut<Assets<EffectAsset>>,
-    effect_allocator: &mut ResMut<EffectAssetCounter>,
-    count: f32,
-) -> (Handle<EffectAsset>, u32) {
-    let token = effect_allocator.alloc();
+fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>, count: f32) -> Handle<EffectAsset> {
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.5, 0.5, 1.0, 1.0));
     gradient.add_key(1.0, Vec4::new(0.5, 0.5, 1.0, 0.0));
@@ -122,41 +117,36 @@ fn default_effect(
     // and slowly fading from blue-ish to transparent over their lifetime.
     // By default the asset spawns the particles at Z=0.
     let spawner = Spawner::rate(count.into());
-    (
-        effects.add(
-            EffectAsset::new(vec![4096], spawner, module)
-                .with_name("2d")
-                .init(init_pos)
-                .init(init_vel)
-                .init(init_age)
-                .init(init_lifetime)
-                .render(SizeOverLifetimeModifier {
-                    gradient: Gradient::linear(Vec2::splat(2.0), Vec2::splat(0.0)),
-                    screen_space_size: false,
-                })
-                .render(OrientModifier {
-                    mode: OrientMode::AlongVelocity,
-                    rotation: None,
-                })
-                .with_simulation_space(SimulationSpace::Local)
-                .with_token(token), // .render(ColorOverLifetimeModifier { gradient })
-                                    // .render(round),
-        ),
-        token.index,
+    effects.add(
+        EffectAsset::new(vec![4096], spawner, module)
+            .with_name("2d")
+            .init(init_pos)
+            .init(init_vel)
+            .init(init_age)
+            .init(init_lifetime)
+            .render(SizeOverLifetimeModifier {
+                gradient: Gradient::linear(Vec2::splat(2.0), Vec2::splat(0.0)),
+                screen_space_size: false,
+            })
+            .render(OrientModifier {
+                mode: OrientMode::AlongVelocity,
+                rotation: None,
+            })
+            .with_simulation_space(SimulationSpace::Local), // .render(ColorOverLifetimeModifier { gradient })
+                                                            // .render(round),
     )
 }
 
 fn spawn_particles_at(
     commands: &mut Commands,
     effects: &mut ResMut<Assets<EffectAsset>>,
-    effect_allocator: &mut ResMut<EffectAssetCounter>,
     translate: Vec3,
     count: f32,
 ) {
     // Create a color gradient for the particles
-    let (effect, index) = default_effect(effects, effect_allocator, count);
+    let effect = default_effect(effects, count);
     let mut scene = VelloScene::default();
-    make_default_rect_particles(&mut scene, index);
+    make_default_rect_particles(&mut scene);
     // Spawn an instance of the particle effect, and override its Z layer to
     // be above the reference white square previously spawned.
     let id = commands
@@ -193,7 +183,7 @@ fn setup_vector_graphics(mut commands: Commands) {
         Player {
             movement_speed: 500.0,                  // meters per second
             rotation_speed: f32::to_radians(360.0), // degrees per second
-            spawn_count_limits: 2,
+            spawn_count_limits: 100,
             ..Default::default()
         },
     ));
@@ -206,7 +196,6 @@ fn player_control_system(
     mut query: Query<(&mut Player, &mut Transform)>,
     mut commands: Commands,
     mut effects: ResMut<Assets<EffectAsset>>,
-    mut effect_allocator: ResMut<EffectAssetCounter>,
 ) {
     let (mut ship, mut transform) = query.single_mut();
 
@@ -237,7 +226,6 @@ fn player_control_system(
             spawn_particles_at(
                 &mut commands,
                 &mut effects,
-                &mut effect_allocator,
                 transform.translation,
                 count as f32,
             );

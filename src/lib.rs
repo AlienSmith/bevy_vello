@@ -70,13 +70,6 @@ pub struct VelloAssetBundle {
 }
 
 #[derive(Bundle, Default)]
-pub struct VelloSceneSubBundle {
-    pub scene: VelloScene,
-    /// The coordinate space in which this scene should be rendered.
-    pub coordinate_space: CoordinateSpace,
-}
-
-#[derive(Bundle, Default)]
 pub struct VelloSceneBundle {
     /// Scene to render
     pub scene: VelloScene,

@@ -14,6 +14,9 @@ pub mod lottie;
 #[cfg(feature = "experimental-dotLottie")]
 pub mod dot_lottie;
 
+pub mod hanabi;
+pub use hanabi::{HanabiIntegrationPlugin, VelloSceneSubBundle};
+
 mod error;
 pub use error::VectorLoaderError;
 
