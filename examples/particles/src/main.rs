@@ -72,13 +72,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn make_default_rect_particles(scene: &mut VelloScene) {
+fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
+    let value = (96.0 + (particle_index as f32) * 8.0) / 256.0;
+    let mut color: peniko::Color = peniko::Color::rgb(value as f64, 0.0, 0.0);
     *scene = VelloScene::default();
     scene.push_instance(0, 0);
     scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::default(),
-        peniko::Color::rgb(1.0, 0.0, 0.0),
+        color,
         None,
         &kurbo::Rect::new(-2.5, -2.5, 2.5, 2.5),
     );
@@ -118,19 +120,15 @@ fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>, count: f32) -> Hand
     // By default the asset spawns the particles at Z=0.
     let spawner = Spawner::rate(count.into());
     effects.add(
-        EffectAsset::new(vec![4096], spawner, module)
+        EffectAsset::new(vec![5], spawner, module)
             .with_name("2d")
             .init(init_pos)
             .init(init_vel)
             .init(init_age)
             .init(init_lifetime)
             .render(SizeOverLifetimeModifier {
-                gradient: Gradient::linear(Vec2::splat(2.0), Vec2::splat(0.0)),
+                gradient: Gradient::constant(Vec2::splat(2.0)),
                 screen_space_size: false,
-            })
-            .render(OrientModifier {
-                mode: OrientMode::AlongVelocity,
-                rotation: None,
             })
             .with_simulation_space(SimulationSpace::Local), // .render(ColorOverLifetimeModifier { gradient })
                                                             // .render(round),
@@ -142,11 +140,12 @@ fn spawn_particles_at(
     effects: &mut ResMut<Assets<EffectAsset>>,
     translate: Vec3,
     count: f32,
+    particle_index: u32,
 ) {
     // Create a color gradient for the particles
     let effect = default_effect(effects, count);
     let mut scene = VelloScene::default();
-    make_default_rect_particles(&mut scene);
+    make_default_rect_particles(&mut scene, particle_index);
     // Spawn an instance of the particle effect, and override its Z layer to
     // be above the reference white square previously spawned.
     let id = commands
@@ -183,7 +182,7 @@ fn setup_vector_graphics(mut commands: Commands) {
         Player {
             movement_speed: 500.0,                  // meters per second
             rotation_speed: f32::to_radians(360.0), // degrees per second
-            spawn_count_limits: 100,
+            spawn_count_limits: 15,
             ..Default::default()
         },
     ));
@@ -218,20 +217,22 @@ fn player_control_system(
         movement_factor -= 1.0;
     }
 
-    if keyboard_input.pressed(KeyCode::Space) {
-        if ship.spawn_count < ship.spawn_count_limits
-            && time.elapsed_seconds() - ship.last_spawn_time > 0.5
-        {
-            let count = if ship.spawn_count == 0 { 30 } else { 5 };
-            spawn_particles_at(
-                &mut commands,
-                &mut effects,
-                transform.translation,
-                count as f32,
-            );
-            ship.spawn_count += 1;
-            ship.last_spawn_time = time.elapsed_seconds();
-        }
+    if ship.spawn_count < ship.spawn_count_limits
+        && time.elapsed_seconds() - ship.last_spawn_time > 0.5
+    {
+        let count = 1;
+        spawn_particles_at(
+            &mut commands,
+            &mut effects,
+            transform.translation,
+            count as f32,
+            ship.spawn_count,
+        );
+        ship.spawn_count += 1;
+        ship.last_spawn_time = time.elapsed_seconds();
+    }
+    if ship.spawn_count == ship.spawn_count_limits {
+        println!("limits");
     }
 
     // update the ship rotation around the Z axis (perpendicular to the 2D plane of the screen)
