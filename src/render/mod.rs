@@ -1,5 +1,4 @@
 //! Components and logic for rendering.
-
 use bevy::prelude::*;
 use bevy::render::mesh::MeshVertexBufferLayout;
 use bevy::render::render_resource::{
@@ -7,7 +6,6 @@ use bevy::render::render_resource::{
     VertexBufferLayout, VertexFormat, VertexStepMode,
 };
 use bevy::sprite::{Material2d, Material2dKey};
-
 mod extract;
 mod plugin;
 mod prepare;
