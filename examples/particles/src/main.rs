@@ -120,7 +120,7 @@ fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>, count: f32) -> Hand
     // By default the asset spawns the particles at Z=0.
     let spawner = Spawner::rate(30.0.into());
     effects.add(
-        EffectAsset::new(vec![4096], spawner, module)
+        EffectAsset::new(vec![2048], spawner, module)
             .with_name("2d")
             .init(init_pos)
             .init(init_vel)
@@ -182,7 +182,7 @@ fn setup_vector_graphics(mut commands: Commands) {
         Player {
             movement_speed: 500.0,                  // meters per second
             rotation_speed: f32::to_radians(360.0), // degrees per second
-            spawn_count_limits: 20,
+            spawn_count_limits: 99,
             ..Default::default()
         },
     ));
