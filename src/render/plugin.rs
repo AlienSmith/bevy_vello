@@ -16,6 +16,12 @@ use bevy::sprite::Material2dPlugin;
 use bevy_hanabi::HanabiDriverNode;
 pub struct VelloRenderPlugin;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
+pub enum VelloPrepareSystems {
+    PrepareAssects,
+    PrepareScene,
+}
+
 pub mod main_graph {
     pub mod node {
         use bevy::render::render_graph::RenderLabel;
@@ -72,6 +78,15 @@ impl Plugin for VelloRenderPlugin {
                     extract::scene_instances,
                 ),
             )
+            .configure_sets(
+                Render,
+                (
+                    VelloPrepareSystems::PrepareAssects
+                        .before(VelloPrepareSystems::PrepareScene)
+                        .after(RenderSet::Prepare),
+                    VelloPrepareSystems::PrepareScene.before(RenderSet::Render),
+                ),
+            )
             .add_systems(
                 Render,
                 (
@@ -79,20 +94,20 @@ impl Plugin for VelloRenderPlugin {
                     prepare::prepare_scene_affines,
                     prepare::prepare_text_affines,
                 )
-                    .in_set(RenderSet::Prepare),
+                    .in_set(VelloPrepareSystems::PrepareAssects),
             );
         #[cfg(feature = "particles")]
         render_app.add_systems(
             Render,
             systems::prepare_scene
-                .in_set(RenderSet::Render)
+                .in_set(VelloPrepareSystems::PrepareScene)
                 .run_if(resource_exists::<bevy_hanabi::render::EffectCache>),
         );
         #[cfg(not(feature = "particles"))]
         render_app.add_systems(
             Render,
             systems::prepare_scene
-                .in_set(RenderSet::Render)
+                .in_set(VelloPrepareSystems::PrepareScene)
                 .run_if(resource_exists::<RenderDevice>),
         );
 

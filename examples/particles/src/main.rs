@@ -118,9 +118,9 @@ fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>, count: f32) -> Hand
     // Create a new effect asset spawning 30 particles per second from a circle
     // and slowly fading from blue-ish to transparent over their lifetime.
     // By default the asset spawns the particles at Z=0.
-    let spawner = Spawner::rate(count.into());
+    let spawner = Spawner::rate(30.0.into());
     effects.add(
-        EffectAsset::new(vec![5], spawner, module)
+        EffectAsset::new(vec![4096], spawner, module)
             .with_name("2d")
             .init(init_pos)
             .init(init_vel)
@@ -182,7 +182,7 @@ fn setup_vector_graphics(mut commands: Commands) {
         Player {
             movement_speed: 500.0,                  // meters per second
             rotation_speed: f32::to_radians(360.0), // degrees per second
-            spawn_count_limits: 15,
+            spawn_count_limits: 20,
             ..Default::default()
         },
     ));
@@ -217,22 +217,21 @@ fn player_control_system(
         movement_factor -= 1.0;
     }
 
-    if ship.spawn_count < ship.spawn_count_limits
-        && time.elapsed_seconds() - ship.last_spawn_time > 0.5
-    {
-        let count = 1;
-        spawn_particles_at(
-            &mut commands,
-            &mut effects,
-            transform.translation,
-            count as f32,
-            ship.spawn_count,
-        );
-        ship.spawn_count += 1;
-        ship.last_spawn_time = time.elapsed_seconds();
-    }
-    if ship.spawn_count == ship.spawn_count_limits {
-        println!("limits");
+    if keyboard_input.pressed(KeyCode::Space) {
+        if ship.spawn_count < ship.spawn_count_limits
+            && time.elapsed_seconds() - ship.last_spawn_time > 0.5
+        {
+            let count = 1;
+            spawn_particles_at(
+                &mut commands,
+                &mut effects,
+                transform.translation,
+                count as f32,
+                ship.spawn_count,
+            );
+            ship.spawn_count += 1;
+            ship.last_spawn_time = time.elapsed_seconds();
+        }
     }
 
     // update the ship rotation around the Z axis (perpendicular to the 2D plane of the screen)
