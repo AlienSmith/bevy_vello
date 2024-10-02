@@ -368,6 +368,7 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
         let gpu_images = world.resource::<RenderAssets<Image>>();
         let device = world.resource::<RenderDevice>();
         let queue = world.resource::<RenderQueue>();
+        #[cfg(feature = "particles")]
         let effect_cache = world.resource::<bevy_hanabi::EffectCache>();
 
         for (_entity, batches) in self.render_query.iter_manual(world) {
@@ -392,11 +393,13 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                         )
                         .unwrap();
                     #[cfg(not(feature = "particles"))]
-                    renderer
+                    self.renderer
+                        .lock()
+                        .unwrap()
                         .render_to_texture(
                             device.wgpu_device(),
                             &queue,
-                            &scene_buffer,
+                            &batches.scene,
                             &gpu_image.texture_view,
                             &(RenderParams {
                                 base_color: vello::peniko::Color::TRANSPARENT,

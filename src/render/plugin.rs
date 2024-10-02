@@ -9,7 +9,6 @@ use bevy::prelude::*;
 use bevy::render::extract_component::ExtractComponentPlugin;
 use bevy::render::render_asset::RenderAssetPlugin;
 use bevy::render::render_graph::RenderGraph;
-#[cfg(not(feature = "particles"))]
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{Render, RenderApp, RenderSet};
 use bevy::sprite::Material2dPlugin;
@@ -96,14 +95,6 @@ impl Plugin for VelloRenderPlugin {
                 )
                     .in_set(VelloPrepareSystems::PrepareAssects),
             );
-        #[cfg(feature = "particles")]
-        render_app.add_systems(
-            Render,
-            systems::prepare_scene
-                .in_set(VelloPrepareSystems::PrepareScene)
-                .run_if(resource_exists::<bevy_hanabi::render::EffectCache>),
-        );
-        #[cfg(not(feature = "particles"))]
         render_app.add_systems(
             Render,
             systems::prepare_scene
@@ -138,6 +129,11 @@ impl Plugin for VelloRenderPlugin {
         // runs before the camera driver, since rendering needs to access simulated
         // particles.
         graph.add_node(main_graph::node::VelloDriverNode, VelloRenderDriverNode {});
+        #[cfg(feature = "particles")]
         graph.add_node_edge(HanabiDriverNode, main_graph::node::VelloDriverNode);
+        graph.add_node_edge(
+            main_graph::node::VelloDriverNode,
+            bevy::render::graph::CameraDriverLabel,
+        );
     }
 }

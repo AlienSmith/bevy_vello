@@ -35,6 +35,8 @@ struct Player {
     last_spawn_time: f32,
 
     spawn_count_limits: u32,
+
+    effect: Option<Handle<EffectAsset>>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
     let value = (96.0 + (particle_index as f32) * 8.0) / 256.0;
-    let mut color: peniko::Color = peniko::Color::rgb(value as f64, 0.0, 0.0);
+    let color: peniko::Color = peniko::Color::rgb(value as f64, 0.0, 0.0);
     *scene = VelloScene::default();
     scene.push_instance(0, 0);
     scene.fill(
@@ -87,7 +89,7 @@ fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
     scene.pop_instance();
 }
 
-fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>, count: f32) -> Handle<EffectAsset> {
+fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAsset> {
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.5, 0.5, 1.0, 1.0));
     gradient.add_key(1.0, Vec4::new(0.5, 0.5, 1.0, 0.0));
@@ -137,13 +139,11 @@ fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>, count: f32) -> Hand
 
 fn spawn_particles_at(
     commands: &mut Commands,
-    effects: &mut ResMut<Assets<EffectAsset>>,
+    effect: Handle<EffectAsset>,
     translate: Vec3,
-    count: f32,
     particle_index: u32,
 ) {
     // Create a color gradient for the particles
-    let effect = default_effect(effects, count);
     let mut scene = VelloScene::default();
     make_default_rect_particles(&mut scene, particle_index);
     // Spawn an instance of the particle effect, and override its Z layer to
@@ -221,12 +221,14 @@ fn player_control_system(
         if ship.spawn_count < ship.spawn_count_limits
             && time.elapsed_seconds() - ship.last_spawn_time > 0.5
         {
-            let count = 1;
+            if ship.effect.is_none() {
+                ship.effect = Some(default_effect(&mut effects));
+            }
+            let effect = ship.effect.as_ref().unwrap().clone();
             spawn_particles_at(
                 &mut commands,
-                &mut effects,
+                effect,
                 transform.translation,
-                count as f32,
                 ship.spawn_count,
             );
             ship.spawn_count += 1;
