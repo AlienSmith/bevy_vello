@@ -1,8 +1,7 @@
 //! Logic for rendering debug visualizations
 use crate::text::VelloTextAlignment;
 use crate::{CoordinateSpace, VelloAsset, VelloAssetAlignment, VelloFont, VelloText, ZFunction};
-use bevy::math::Vec3Swizzles;
-use bevy::prelude::*;
+use bevy::{color::palettes::css, math::Vec3Swizzles, prelude::*};
 
 const RED_X_SIZE: f32 = 8.0;
 
@@ -212,12 +211,12 @@ fn draw_origin(gizmos: &mut Gizmos, projection: &OrthographicProjection, origin:
     let from = origin + RED_X_SIZE * Vec2::splat(1.0) * projection.scale;
     let to = origin + RED_X_SIZE * Vec2::splat(-1.0) * projection.scale;
 
-    gizmos.line_2d(from, to, Color::RED);
+    gizmos.line_2d(from, to, css::RED);
 
     let from = origin + RED_X_SIZE * Vec2::new(1.0, -1.0) * projection.scale;
     let to = origin + RED_X_SIZE * Vec2::new(-1.0, 1.0) * projection.scale;
 
-    gizmos.line_2d(from, to, Color::RED);
+    gizmos.line_2d(from, to, css::RED);
 }
 
 /// A helper method to draw the bounding box
@@ -263,7 +262,7 @@ fn draw_bounding_box(gizmos: &mut Gizmos, z_fn: &ZFunction, position: Vec2, size
     //     Color::WHITE,
     // );
     // ```
-    const Z_COLOR: Color = Color::GREEN;
+    const Z_COLOR: Srgba = css::GREEN;
     match z_fn {
         ZFunction::TransformX => gizmos.line_2d(
             position + Vec2::new(0.0, -half_height),

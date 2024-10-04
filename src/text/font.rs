@@ -1,8 +1,6 @@
 use super::vello_text::VelloText;
 use super::VelloTextAlignment;
-use bevy::prelude::*;
-use bevy::reflect::TypePath;
-use bevy::render::render_asset::RenderAsset;
+use bevy::{prelude::*, reflect::TypePath, render::render_asset::RenderAsset};
 use std::sync::Arc;
 use vello::glyph::skrifa::{FontRef, MetadataProvider};
 use vello::glyph::Glyph;
@@ -18,19 +16,15 @@ pub struct VelloFont {
 }
 
 impl RenderAsset for VelloFont {
-    type PreparedAsset = VelloFont;
+    type SourceAsset = VelloFont;
 
     type Param = ();
 
-    fn asset_usage(&self) -> bevy::render::render_asset::RenderAssetUsages {
-        Default::default()
-    }
-
     fn prepare_asset(
-        self,
+        source_asset: Self::SourceAsset,
         _param: &mut bevy::ecs::system::SystemParamItem<Self::Param>,
-    ) -> Result<Self::PreparedAsset, bevy::render::render_asset::PrepareAssetError<Self>> {
-        Ok(self)
+    ) -> Result<Self, bevy::render::render_asset::PrepareAssetError<Self::SourceAsset>> {
+        Ok(source_asset)
     }
 }
 

@@ -32,7 +32,7 @@ fn add_remove_effect(
 ) {
     for (entity, mut effect, mut scene) in query.iter_mut() {
         let size = effect_assets
-            .get(effect.handle.clone())
+            .get(&effect.handle)
             .unwrap()
             .capacities()
             .len();

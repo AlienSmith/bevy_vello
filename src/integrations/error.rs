@@ -1,4 +1,4 @@
-use bevy::utils::thiserror::{self, Error};
+use thiserror::{self, Error};
 
 #[derive(Debug, Error)]
 pub enum VectorLoaderError {
