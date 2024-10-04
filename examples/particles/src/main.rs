@@ -59,6 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ..default()
                     }),
                     ..default()
+                })
+                .set(AssetPlugin {
+                    meta_check: AssetMetaCheck::Never,
+                    ..default()
                 }),
         )
         .add_plugins(HanabiIntegrationPlugin);
@@ -147,20 +151,18 @@ fn spawn_particles_at(
     make_default_rect_particles(&mut scene, particle_index);
     // Spawn an instance of the particle effect, and override its Z layer to
     // be above the reference white square previously spawned.
-    let id = commands
-        .spawn((
-            ParticleEffectBundle {
-                // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
-                effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
-                transform: Transform::from_translation(translate),
-                ..default()
-            },
-            VelloSceneSubBundle {
-                scene,
-                ..Default::default()
-            },
-        ))
-        .id();
+    commands.spawn((
+        ParticleEffectBundle {
+            // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
+            effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
+            transform: Transform::from_translation(translate),
+            ..default()
+        },
+        VelloSceneSubBundle {
+            scene,
+            ..Default::default()
+        },
+    ));
 }
 
 fn setup_vector_graphics(mut commands: Commands) {

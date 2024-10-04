@@ -7,7 +7,7 @@ use bevy::{
     render::{extract_component::ExtractComponent, Extract},
     window::PrimaryWindow,
 };
-
+#[allow(dead_code)]
 #[derive(Component, Clone)]
 pub struct ExtractedRenderAsset {
     pub asset: VelloAsset,
@@ -15,6 +15,7 @@ pub struct ExtractedRenderAsset {
     pub transform: GlobalTransform,
     pub render_mode: CoordinateSpace,
     pub ui_node: Option<Node>,
+    //TODO: support these alpha
     pub alpha: f32,
     #[cfg(feature = "lottie")]
     pub theme: Option<crate::Theme>,
