@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
 
     let mut app = App::default();
-    app.insert_resource(ClearColor(Color::DARK_GRAY))
+    app.insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
                 .set(RenderPlugin {
@@ -65,8 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
-    app.insert_resource(AssetMetaCheck::Never)
-        .add_plugins(VelloPlugin)
+    app.add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
         .add_systems(Update, player_control_system)
         .run();

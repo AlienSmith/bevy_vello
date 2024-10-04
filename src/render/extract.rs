@@ -1,22 +1,25 @@
-use super::z_function::ZFunction;
-use crate::text::VelloTextAlignment;
-use crate::{CoordinateSpace, VelloAsset, VelloAssetAlignment, VelloFont, VelloScene, VelloText};
-use bevy::prelude::*;
-use bevy::render::{extract_component::ExtractComponent, Extract};
-use bevy::window::PrimaryWindow;
+use crate::{
+    text::VelloTextAlignment, CoordinateSpace, VelloAsset, VelloAssetAlignment, VelloFont,
+    VelloScene, VelloText,
+};
+use bevy::{
+    prelude::*,
+    render::{extract_component::ExtractComponent, Extract},
+    window::PrimaryWindow,
+};
 
 #[derive(Component, Clone)]
 pub struct ExtractedRenderAsset {
     pub asset: VelloAsset,
     pub alignment: VelloAssetAlignment,
     pub transform: GlobalTransform,
-    pub z_function: ZFunction,
+    pub render_mode: CoordinateSpace,
+    pub ui_node: Option<Node>,
+    pub alpha: f32,
     #[cfg(feature = "lottie")]
     pub theme: Option<crate::Theme>,
-    pub render_mode: CoordinateSpace,
+    #[cfg(feature = "lottie")]
     pub playhead: f64,
-    pub alpha: f32,
-    pub ui_node: Option<Node>,
 }
 
 #[cfg(feature = "svg")]
@@ -27,7 +30,6 @@ pub fn extract_svg_instances(
             &Handle<VelloAsset>,
             &VelloAssetAlignment,
             &CoordinateSpace,
-            &ZFunction,
             &GlobalTransform,
             Option<&Node>,
             &ViewVisibility,
@@ -40,7 +42,6 @@ pub fn extract_svg_instances(
         vello_vector_handle,
         alignment,
         coord_space,
-        z_function,
         transform,
         ui_node,
         view_visibility,
@@ -60,13 +61,13 @@ pub fn extract_svg_instances(
                     asset: asset.to_owned(),
                     transform: *transform,
                     alignment: *alignment,
-                    z_function: *z_function,
+                    render_mode: *coord_space,
+                    ui_node: ui_node.cloned(),
+                    alpha: *alpha,
                     #[cfg(feature = "lottie")]
                     theme: None,
-                    render_mode: *coord_space,
+                    #[cfg(feature = "lottie")]
                     playhead: 0.0,
-                    alpha: *alpha,
-                    ui_node: ui_node.cloned(),
                 });
             }
         }
@@ -81,7 +82,6 @@ pub fn extract_lottie_instances(
             &Handle<VelloAsset>,
             &VelloAssetAlignment,
             &CoordinateSpace,
-            &ZFunction,
             &GlobalTransform,
             &crate::Playhead,
             Option<&crate::Theme>,
@@ -96,7 +96,6 @@ pub fn extract_lottie_instances(
         vello_vector_handle,
         alignment,
         coord_space,
-        z_function,
         transform,
         playhead,
         theme,
@@ -119,7 +118,6 @@ pub fn extract_lottie_instances(
                     asset: asset.to_owned(),
                     transform: *transform,
                     alignment: *alignment,
-                    z_function: *z_function,
                     theme: theme.cloned(),
                     render_mode: *coord_space,
                     playhead,
@@ -136,6 +134,7 @@ pub struct ExtractedRenderScene {
     pub scene: VelloScene,
     pub transform: GlobalTransform,
     pub render_mode: CoordinateSpace,
+    pub ui_node: Option<Node>,
 }
 
 pub fn scene_instances(
@@ -147,10 +146,11 @@ pub fn scene_instances(
             &GlobalTransform,
             &ViewVisibility,
             &InheritedVisibility,
+            Option<&Node>,
         )>,
     >,
 ) {
-    for (scene, coord_space, transform, view_visibility, inherited_visibility) in
+    for (scene, coord_space, transform, view_visibility, inherited_visibility, ui_node) in
         query_scenes.iter()
     {
         if view_visibility.get() && inherited_visibility.get() {
@@ -158,6 +158,7 @@ pub fn scene_instances(
                 transform: *transform,
                 render_mode: *coord_space,
                 scene: scene.clone(),
+                ui_node: ui_node.cloned(),
             });
         }
     }

@@ -1,4 +1,4 @@
-use bevy::{ecs::query, prelude::*};
+use bevy::prelude::*;
 use bevy_hanabi::prelude::*;
 
 use crate::{CoordinateSpace, VelloScene};

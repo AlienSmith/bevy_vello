@@ -17,7 +17,7 @@ fn main() {
     .add_plugins(EguiPlugin)
     .add_plugins(VelloPlugin)
     .init_resource::<EmbeddedAssetRegistry>()
-    //.add_plugins(bevy_pancam::PanCamPlugin)
+    .add_plugins(bevy_pancam::PanCamPlugin)
     .add_systems(Startup, setup_vector_graphics)
     .add_systems(Update, (print_metadata, ui::controls_ui));
     embedded_asset!(app, "assets/calendar.json");

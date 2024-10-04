@@ -2,7 +2,6 @@ use super::extract::{ExtractedRenderAsset, ExtractedRenderText, SSRenderTarget};
 use super::plugin::simulate_graph::VelloSimulateGraph;
 use super::prepare::PreparedAffine;
 use crate::render::extract::ExtractedRenderScene;
-use crate::render::prepare::PreparedZIndex;
 use crate::{CoordinateSpace, VelloCanvasMaterial, VelloFont};
 use bevy::ecs::system::lifetimeless::Read;
 use bevy::prelude::*;
@@ -63,7 +62,7 @@ pub fn setup_image(images: &mut Assets<Image>, window: &WindowResolution) -> Han
 pub fn prepare_scene(
     mut commands: Commands,
     ss_render_target: Query<&SSRenderTarget>,
-    query_render_vectors: Query<(&PreparedAffine, &PreparedZIndex, &ExtractedRenderAsset)>,
+    query_render_vectors: Query<(&PreparedAffine, &ExtractedRenderAsset)>,
     query_render_scenes: Query<(&PreparedAffine, &ExtractedRenderScene)>,
     query_render_texts: Query<(&PreparedAffine, &ExtractedRenderText)>,
     mut font_render_assets: ResMut<RenderAssets<VelloFont>>,
@@ -91,30 +90,36 @@ pub fn prepare_scene(
         let mut render_queue: Vec<(f32, CoordinateSpace, (Affine, RenderItem))> =
             query_render_vectors
                 .iter()
-                .map(|(&a, &b, c)| (*b, c.render_mode, (*a, RenderItem::Asset(c))))
+                .map(|(&affine, asset)| {
+                    (
+                        asset.transform.translation().z,
+                        asset.render_mode,
+                        (*affine, RenderItem::Asset(asset)),
+                    )
+                })
                 .collect();
-        render_queue.extend(query_render_scenes.iter().map(|(&a, b)| {
+        render_queue.extend(query_render_scenes.iter().map(|(&affine, scene)| {
             (
-                b.transform.translation().z,
-                b.render_mode,
-                (*a, RenderItem::Scene(b)),
+                scene.transform.translation().z,
+                scene.render_mode,
+                (*affine, RenderItem::Scene(scene)),
             )
         }));
-        render_queue.extend(query_render_texts.iter().map(|(&a, b)| {
+        render_queue.extend(query_render_texts.iter().map(|(&affine, text)| {
             (
-                b.transform.translation().z,
-                b.render_mode,
-                (*a, RenderItem::Text(b)),
+                text.transform.translation().z,
+                text.render_mode,
+                (*affine, RenderItem::Text(text)),
             )
         }));
 
         // Sort by render mode with screen space on top, then by z-index
         render_queue.sort_by(
-            |(a_z_index, a_render_mode, _), (b_z_index, b_render_mode, _)| {
+            |(a_z_index, a_coord_space, _), (b_z_index, b_coord_space, _)| {
                 let z_index = a_z_index
                     .partial_cmp(b_z_index)
                     .unwrap_or(std::cmp::Ordering::Equal);
-                let render_mode = a_render_mode.cmp(b_render_mode);
+                let render_mode = a_coord_space.cmp(b_coord_space);
                 render_mode.then(z_index)
             },
         );
@@ -283,7 +288,9 @@ pub fn setup_ss_rendertarget(
         .spawn(MaterialMesh2dBundle {
             mesh,
             material,
-            transform: Transform::from_translation(0.001 * Vec3::NEG_Z), // Make sure the vello canvas renders behind Gizmos
+            transform: Transform::from_translation(0.001 * Vec3::NEG_Z), /* Make sure the vello
+                                                                          * canvas renders behind
+                                                                          * Gizmos */
             ..Default::default()
         })
         .insert(NoFrustumCulling)

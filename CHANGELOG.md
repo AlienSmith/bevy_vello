@@ -10,6 +10,50 @@ Subheadings to categorize changes are `added, changed, deprecated, removed, fixe
 
 ## Unreleased
 
+### Removed
+
+- Removed `ZFunction`s from the render pipeline. Now ordering is based solely on the `Transform`'s z component. If you dependeded on this behavior, you'll need to adjust the transform Z in a system prior to render.
+
+## 0.5.1
+
+### Fixed
+
+- Updated to patch vello 0.2.1. It is now no-longer possible to panic when the vello encodings are empty.
+- The demo CI now deploys that bevy_pancam has been updated to bevy 0.14
+
+## 0.5.0
+
+### Added
+
+- New `scene_ui` example demonstrating a `VelloScene` attached to a `bevy::ui::Node`.
+
+### Changed
+
+- Updated to bevy 0.14
+- Updated to vello 0.2
+- Updated to velato 0.3
+- Updated to vello_svg 0.3
+
+### Fixed
+
+- Removed `Arc` in another `Arc` for `VelloFont`
+- Opacity now correctly applies to SVG assets.
+- Opacity now applies correctly to the lottie image group, rather than each element and path within it, causing overdraw.
+- `VelloScene` components on `bevy::ui::Node` entities now account for Bevy's UI layout systems and render at the expected viewport coordinates
+
+### Removed
+
+- Pancam and/or egui from all examples besides the demo, as external dependencies can bottleneck upgrading to the next bevy version.
+
+## 0.4.2
+
+### Fixed
+
+- Updated to vello_svg v0.2.0, fixing viewboxes.
+- Updates to velato v0.2.0, fixing viewboxes.
+
+## 0.4.1 (Yanked)
+
 ## 0.4.0
 
 ### Added
