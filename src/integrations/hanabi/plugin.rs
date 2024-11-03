@@ -37,7 +37,7 @@ fn add_remove_effect(
             .capacities()
             .len();
         let token = asset_counter.alloc(entity.clone(), size as u32);
-        println!("initialized {}", token.index);
+        //println!("initialized {}", token.index);
         effect.token = token;
         scene.set_instance_index_in_export_buffer(token.index, token.size);
     }

@@ -16,6 +16,7 @@ use bevy_hanabi::prelude::*;
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     integrations::{HanabiIntegrationPlugin, VelloSceneSubBundle},
+    vello::scene::StorkeExpand,
     vello::{kurbo, peniko},
 };
 use bevy_vello::{prelude::*, VelloPlugin};
@@ -78,16 +79,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
+    use vello::kurbo::*;
     let value = (96.0 + (particle_index as f32) * 8.0) / 256.0;
-    let color: peniko::Color = peniko::Color::rgb(value as f64, 0.0, 0.0);
+    let color = peniko::Color::rgb(value as f64, 0.0, 0.0);
+    let color1 = peniko::Color::rgb(0.0, 1.0, 1.0);
     *scene = VelloScene::default();
     scene.push_instance(0, 0);
-    scene.fill(
-        peniko::Fill::NonZero,
+    let mut path = vello::kurbo::BezPath::new();
+    path.push(PathEl::MoveTo(Point { x: -5.0, y: 0.0 }));
+    path.push(PathEl::LineTo(Point { x: 5.0, y: 0.0 }));
+    scene.stroke(
+        &vello::kurbo::Stroke::new(12.0).with_solid_ratio(0.0),
         kurbo::Affine::default(),
         color,
         None,
-        &kurbo::Rect::new(-2.5, -2.5, 2.5, 2.5),
+        &path,
+    );
+    scene.stroke(
+        &vello::kurbo::Stroke::new(2.0),
+        kurbo::Affine::default(),
+        color1,
+        None,
+        &path,
     );
     scene.pop_instance();
 }
@@ -134,6 +147,10 @@ fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAss
             .render(SizeOverLifetimeModifier {
                 gradient: Gradient::constant(Vec2::splat(2.0)),
                 screen_space_size: false,
+            })
+            .render(OrientModifier {
+                mode: OrientMode::AlongVelocity,
+                rotation: None,
             })
             .with_simulation_space(SimulationSpace::Local), // .render(ColorOverLifetimeModifier { gradient })
                                                             // .render(round),
