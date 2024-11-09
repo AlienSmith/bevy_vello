@@ -4,6 +4,11 @@ const CopyPlugin = require("copy-webpack-plugin");
 const dist = path.resolve(__dirname, "dist");
 
 module.exports = {
+  devServer: {
+  https: true,
+  port: 8080, // Choose your preferred port
+  host: '0.0.0.0', // Allow access from any IP
+  },
   entry: {
     index: "./js/index.js"
   },
@@ -18,6 +23,20 @@ module.exports = {
       ],
     }),
   ],
+  module: {
+    rules: [
+      {
+        test: /\.js$/,
+        exclude: /node_modules/,
+        use: {
+          loader: 'babel-loader',
+          options: {
+            presets: ['@babel/preset-env', '@babel/preset-react']
+          }
+        },
+      },
+    ],
+  },
   experiments: {
     asyncWebAssembly: true,
   },
