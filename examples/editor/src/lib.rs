@@ -1,3 +1,12 @@
+mod wasm {
+    extern crate wasm_bindgen;
+    use wasm_bindgen::prelude::wasm_bindgen;
+    #[wasm_bindgen(start)]
+    pub fn runner() {
+        crate::run();
+    }
+}
+
 use bevy::prelude::*;
 use bevy_vello::{
     prelude::*,
@@ -5,14 +14,14 @@ use bevy_vello::{
     VelloPlugin,
 };
 
-fn main() {
+pub fn run() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
         .add_systems(Update, simple_animation)
         .run();
-    bevy::log::warn!("Initialize");
+    bevy::log::warn!("Lib Initializer");
 }
 
 fn setup_vector_graphics(mut commands: Commands) {
@@ -45,5 +54,5 @@ fn simple_animation(mut query_scene: Query<(&mut Transform, &mut VelloScene)>, t
     transform.scale = Vec3::lerp(Vec3::ONE * 0.5, Vec3::ONE * 1.0, sin_time);
     transform.translation = Vec3::lerp(Vec3::X * -100.0, Vec3::X * 100.0, sin_time);
     transform.rotation = Quat::from_rotation_z(-std::f32::consts::TAU * sin_time);
-    bevy::log::warn!("Update");
+    bevy::log::warn!("Lib Update");
 }

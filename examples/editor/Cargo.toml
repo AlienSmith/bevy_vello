@@ -1,5 +1,5 @@
 [package]
-name = "scene"
+name = "editor"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -7,12 +7,12 @@ repository.workspace = true
 publish = false
 
 [lib]
-name = "scene"
+name = "editor"
 crate-type = ["cdylib"]
 
 [[bin]]
 # Stop the PDB collision warning on windows
-name = "scene_bin"
+name = "editor_bin"
 path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
