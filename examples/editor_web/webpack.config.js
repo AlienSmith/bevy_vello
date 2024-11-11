@@ -10,7 +10,7 @@ module.exports = {
   host: '0.0.0.0', // Allow access from any IP
   },
   entry: {
-    index: "./js/index.js"
+    index: "./src/index.js"
   },
   output: {
     path: dist,
@@ -35,7 +35,15 @@ module.exports = {
           }
         },
       },
+      {
+        test: /\.tsx?$/, // 处理 .ts 和 .tsx 文件
+        use: 'ts-loader',
+        exclude: /node_modules/,
+      },
     ],
+  },
+  resolve: {
+    extensions: ['.tsx', '.ts', '.js'], // 支持导入时省略扩展名
   },
   experiments: {
     asyncWebAssembly: true,
