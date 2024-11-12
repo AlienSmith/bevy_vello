@@ -19,7 +19,9 @@ function loadExternalTraceFiles(files: FileList) {
         files[0].arrayBuffer().then((bin) =>{
             let data = new Uint8Array(bin);
             alert("file provided" + name);
-            load_assets_from_bytes(name, data);
+            load_assets_from_bytes(name, data).then((value: number) => {
+                alert("asset mounted" + value);
+            });
         } )
     }
 }

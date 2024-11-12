@@ -61,6 +61,7 @@ thiserror = "1.0.61"
 # TODO: Remove after https://github.com/linebender/velato/pull/19
 serde_json = "1"
 crossbeam-channel = "0.5"
+futures = "0.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.42"
