@@ -22,3 +22,4 @@ bevy = { workspace = true }
 wasm-bindgen = "0.2.65"
 js-sys = "0.3.64"
 wasm-bindgen-futures = "0.4.42"
+futures = "0.3"
