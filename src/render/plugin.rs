@@ -18,6 +18,7 @@ use bevy::{
     },
     sprite::Material2dPlugin,
 };
+#[cfg(feature = "particles")]
 use bevy_hanabi::HanabiDriverNode;
 pub struct VelloRenderPlugin;
 
