@@ -12,6 +12,7 @@ members = [
   "examples/scene_ui",
   "examples/particles",
   "examples/editor",
+  "examples/avian"
 ]
 
 [workspace.package]
@@ -62,6 +63,7 @@ thiserror = "1.0.61"
 serde_json = "1"
 crossbeam-channel = "0.5"
 futures = "0.3"
+avian2d = "0.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.42"
