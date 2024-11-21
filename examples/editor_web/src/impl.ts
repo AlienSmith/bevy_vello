@@ -1,4 +1,4 @@
-import init, {load_assets_from_bytes} from "editor";
+import init, {load_lottie_assets_from_bytes, load_svg_assets_from_bytes} from "editor";
 import * as dat from "dat.gui";
 init()
 let obj = {
@@ -19,9 +19,15 @@ function loadExternalTraceFiles(files: FileList) {
         files[0].arrayBuffer().then((bin) =>{
             let data = new Uint8Array(bin);
             alert("file provided" + name);
-            load_assets_from_bytes(name, data).then((value: number) => {
-                alert("asset mounted" + value);
-            });
+            if (remain[0] == "svg"){
+                load_svg_assets_from_bytes(data).then((value: number) => {
+                    alert("asset mounted" + value);
+                });
+            }else if (remain[0] == "json") {
+                load_lottie_assets_from_bytes(data).then((value: number) => {
+                    alert("asset mounted" + value);
+                });
+            }
         } )
     }
 }

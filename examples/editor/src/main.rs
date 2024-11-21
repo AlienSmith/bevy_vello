@@ -1,7 +1,8 @@
 use bevy::{asset::AssetMetaCheck, prelude::*};
 use bevy_vello::{
     dock::{
-        lottie_loader::LottieLoaderPlugin, stream_factory::push_dock, svg_loader::SvgLoaderPlugin,
+        commands::*, lottie_loader::LottieLoaderPlugin, stream_factory::*,
+        svg_loader::SvgLoaderPlugin,
     },
     VelloPlugin,
 };
@@ -12,12 +13,12 @@ use std::sync::{Arc, Mutex};
 //Reciver is Send but not sync, add mutex make a send type also sync
 #[derive(Resource)]
 struct SVGReceivers {
-    svg_r: Arc<Mutex<oneshot::Receiver<u32>>>,
+    svg_r: Arc<Mutex<oneshot::Receiver<DockCommandResult>>>,
 }
 
 #[derive(Resource)]
 struct LOTTIEReceivers {
-    lottie_r: Arc<Mutex<oneshot::Receiver<u32>>>,
+    lottie_r: Arc<Mutex<oneshot::Receiver<DockCommandResult>>>,
 }
 
 fn main() {
@@ -36,8 +37,8 @@ fn main() {
 
 fn receive(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
-    let svg_r = push_dock("fountain.svg".to_owned(), SVG_DATA.to_vec());
-    let lottie_r = push_dock("tiger.json".to_owned(), LOTTIE_DATA.to_vec());
+    let svg_r = dock_push_commands(DockCommand::LoadSVGAssets(SVG_DATA.to_vec()));
+    let lottie_r = dock_push_commands(DockCommand::LoadLottieAssets(LOTTIE_DATA.to_vec()));
     commands.insert_resource(SVGReceivers {
         svg_r: Arc::new(Mutex::new(svg_r)),
     });
@@ -57,7 +58,14 @@ fn recieve_check(
             match value {
                 Ok(v) => {
                     commands.remove_resource::<SVGReceivers>();
-                    println!("svg loaded with value {}", v);
+                    match v {
+                        DockCommandResult::Ok(index) => {
+                            println!("svg loaded with value {}", index);
+                        }
+                        DockCommandResult::NotOk(s) => {
+                            println!("{}", s);
+                        }
+                    }
                 }
                 Err(_) => {
                     println!("svg not loaded");
@@ -74,7 +82,14 @@ fn recieve_check(
             match r {
                 Ok(v) => {
                     commands.remove_resource::<LOTTIEReceivers>();
-                    println!("lottie loaded with value {}", v);
+                    match v {
+                        DockCommandResult::Ok(index) => {
+                            println!("lottie loaded with value {}", index);
+                        }
+                        DockCommandResult::NotOk(s) => {
+                            println!("{}", s);
+                        }
+                    }
                 }
                 Err(_) => println!("lottie not loaded"),
             }
