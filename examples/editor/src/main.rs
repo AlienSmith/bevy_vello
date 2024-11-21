@@ -1,9 +1,6 @@
 use bevy::{asset::AssetMetaCheck, prelude::*};
 use bevy_vello::{
-    dock::{
-        commands::*, lottie_loader::LottieLoaderPlugin, stream_factory::*,
-        svg_loader::SvgLoaderPlugin,
-    },
+    dock::{commands::*, stream_factory::*, DockPlugin},
     VelloPlugin,
 };
 const SVG_DATA: &[u8] = include_bytes!("./assets/fountain.svg");
@@ -28,8 +25,7 @@ fn main() {
         ..default()
     }))
     .add_plugins(VelloPlugin)
-    .add_plugins(SvgLoaderPlugin)
-    .add_plugins(LottieLoaderPlugin)
+    .add_plugins(DockPlugin)
     .add_systems(Startup, receive)
     .add_systems(Update, recieve_check);
     app.run();
@@ -61,6 +57,18 @@ fn recieve_check(
                     match v {
                         DockCommandResult::Ok(index) => {
                             println!("svg loaded with value {}", index);
+                            for i in 0..10 {
+                                for j in 0..10 {
+                                    let _ = dock_push_commands(DockCommand::SpawnEntity(
+                                        index,
+                                        Transform::from_translation(Vec3 {
+                                            x: i as f32 * 50.0,
+                                            y: j as f32 * 50.0,
+                                            z: 0.0,
+                                        }),
+                                    ));
+                                }
+                            }
                         }
                         DockCommandResult::NotOk(s) => {
                             println!("{}", s);
