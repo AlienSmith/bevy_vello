@@ -2,6 +2,8 @@ use bevy::{
     app::{App, Plugin, Update},
     prelude::{IntoSystemSetConfigs, SystemSet},
 };
+use entity_modifier::EntityModifierPlugin;
+use entity_remover::EntityRemoverPlugin;
 use entity_spawner::EntitySpawnerPlugin;
 use lottie_loader::LottieLoaderPlugin;
 use svg_loader::SvgLoaderPlugin;
@@ -17,6 +19,10 @@ pub mod avain_picker;
 pub mod commands;
 
 pub mod entity_spawner;
+
+pub mod entity_remover;
+
+pub mod entity_modifier;
 
 pub struct DockPlugin;
 
@@ -44,6 +50,8 @@ impl Plugin for DockPlugin {
         )
         .add_plugins(LottieLoaderPlugin)
         .add_plugins(SvgLoaderPlugin)
-        .add_plugins(EntitySpawnerPlugin);
+        .add_plugins(EntitySpawnerPlugin)
+        .add_plugins(EntityRemoverPlugin)
+        .add_plugins(EntityModifierPlugin);
     }
 }

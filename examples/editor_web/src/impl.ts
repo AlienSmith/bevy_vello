@@ -1,5 +1,6 @@
-import init, {load_lottie_assets_from_bytes, load_svg_assets_from_bytes} from "editor";
+import init, {load_lottie_assets_from_bytes, load_svg_assets_from_bytes, spawn_entity, Transform2D} from "editor";
 import * as dat from "dat.gui";
+Error.stackTraceLimit = 100;
 init()
 let obj = {
     load: () => {console.log("loaded")}
@@ -22,6 +23,9 @@ function loadExternalTraceFiles(files: FileList) {
             if (remain[0] == "svg"){
                 load_svg_assets_from_bytes(data).then((value: number) => {
                     alert("asset mounted" + value);
+                    spawn_entity(value, new Transform2D(0,0,0,1,1,0)).then((id) =>{
+                        alert("entity_spawn" + id);
+                    })
                 });
             }else if (remain[0] == "json") {
                 load_lottie_assets_from_bytes(data).then((value: number) => {

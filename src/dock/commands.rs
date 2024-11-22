@@ -4,7 +4,7 @@ use bevy::prelude::Transform;
 pub enum DockCommand {
     LoadSVGAssets(Vec<u8>),
     LoadLottieAssets(Vec<u8>),
-    RemoveAssets(u32),
+    RemoveEntity(u32),
     SpawnEntity(u32, Transform),
     Transform(u32, Transform),
 }
@@ -13,7 +13,7 @@ pub(crate) fn command_to_dispatcher(command: &DockCommand) -> DockCommandDispatc
     match command {
         DockCommand::LoadSVGAssets(_) => DockCommandDispatcherType::LoadSVGAssets,
         DockCommand::LoadLottieAssets(_) => DockCommandDispatcherType::LoadLottieAssets,
-        DockCommand::RemoveAssets(_) => DockCommandDispatcherType::RemoveAssets,
+        DockCommand::RemoveEntity(_) => DockCommandDispatcherType::RemoveEntity,
         DockCommand::SpawnEntity(_, _) => DockCommandDispatcherType::SpawnEntity,
         DockCommand::Transform(_, _) => DockCommandDispatcherType::Transform,
     }
@@ -23,7 +23,7 @@ pub(crate) fn command_to_dispatcher(command: &DockCommand) -> DockCommandDispatc
 pub(crate) enum DockCommandDispatcherType {
     LoadSVGAssets = 0,
     LoadLottieAssets = 1,
-    RemoveAssets = 2,
+    RemoveEntity = 2,
     SpawnEntity = 3,
     Transform = 4,
 }
