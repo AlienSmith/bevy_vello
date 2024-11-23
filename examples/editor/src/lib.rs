@@ -112,10 +112,20 @@ mod wasm {
 
 pub fn run() {
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(AssetPlugin {
-        meta_check: AssetMetaCheck::Never,
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                meta_check: AssetMetaCheck::Never,
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    canvas: Some("#mygame-canvas".into()),
+                    ..default()
+                }),
+                ..default()
+            }),
+    )
     .add_plugins(VelloPlugin)
     .add_plugins(DockPlugin)
     .add_systems(Startup, recieve_svg);
