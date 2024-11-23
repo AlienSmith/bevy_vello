@@ -64,8 +64,8 @@ mod wasm {
         }
     }
 
-    #[wasm_bindgen(start)]
-    pub fn runner() {
+    #[wasm_bindgen]
+    pub fn start() {
         crate::run();
     }
     fn result_to_js_value(result: DockCommandResult) -> JsValue {
