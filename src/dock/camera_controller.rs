@@ -2,7 +2,7 @@ use crate::dock::stream_factory::*;
 use bevy::prelude::*;
 use crossbeam_channel::Receiver;
 
-use super::commands::{DockCommand, DockCommandDispatcherType};
+use super::commands::{DockCommand, DockCommandDispatcherType, DockCommandResult};
 
 pub struct DockCameraPlugin;
 #[derive(Resource)]
@@ -30,10 +30,12 @@ fn modify_camera(
     if let Ok(index) = r.r.try_recv() {
         let data = dock_get_command(index);
         if let DockCommand::ModifyCamera(pos, scale) = data.data {
+            bevy::log::info!("camera moved to {}", pos);
             let (mut transform, mut orth) = query.single_mut();
             transform.translation.x = pos.x;
             transform.translation.y = pos.y;
             orth.scale = scale;
+            let _ = data.s.send(DockCommandResult::Ok(1));
         }
     }
 }

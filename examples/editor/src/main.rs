@@ -69,6 +69,13 @@ fn recieve_check(
                                             z: 0.0,
                                         }),
                                     ));
+                                    let _ = dock_push_commands(DockCommand::ModifyCamera(
+                                        Vec2 {
+                                            x: i as f32 * 50.0,
+                                            y: j as f32 * 50.0,
+                                        },
+                                        1.0,
+                                    ));
                                 }
                             }
                         }

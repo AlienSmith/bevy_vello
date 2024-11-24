@@ -1,4 +1,4 @@
-use bevy::{asset::AssetMetaCheck, color::palettes::css::WHITE, prelude::*};
+use bevy::{asset::AssetMetaCheck, prelude::*};
 use bevy_vello::{dock::DockPlugin, VelloPlugin};
 
 mod wasm {

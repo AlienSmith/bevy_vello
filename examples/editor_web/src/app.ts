@@ -3,14 +3,14 @@ import * as dat from "dat.gui";
 import { GUIController } from "dat.gui";
 import { GUIWrapper } from "./utils";
 import log from 'loglevel';
-import { CameraController } from "./camera_control";
+import { CameraController } from "./camera_controller";
 
 Error.stackTraceLimit = 100;
 
 log.setLevel(log.levels.INFO);
 let app: null|Application = null;
-const input_canvas = document.getElementById('mygame-canvas') as HTMLCanvasElement;
-init().then(()=>{log.info("WASM LOADED"); app = new Application(input_canvas); start(); });
+const overlay = document.getElementById("overlay");
+init().then(()=>{log.info("WASM LOADED"); app = new Application(overlay); start(); });
 class EntityItem extends GUIWrapper{
     name: string;
     id: number;
@@ -78,12 +78,12 @@ class Application {
     gui:dat.GUI;
     drop: DropWrapper;
     assets: Array<AssetItem>;
-    canvas: HTMLCanvasElement;
+    input_overlay: HTMLElement;
     camera_controller: CameraController;
-    constructor(canvas: HTMLCanvasElement){  
+    constructor(overlay: HTMLElement){  
         this.gui = new dat.GUI();
         this.assets = new Array<AssetItem>();
-        this.canvas = canvas;
+        this.input_overlay = overlay;
         this.drop = new DropWrapper((files:FileList) =>{
             this.loadExternalTraceFiles(files);
         })
@@ -91,7 +91,7 @@ class Application {
         document.ondrop = (ev: DragEvent) => {
             this.drop.ondrop(ev);
         };
-        this.camera_controller = new CameraController(this.canvas);
+        this.camera_controller = new CameraController(this.input_overlay);
         log.info("Application Created")
     }
 
