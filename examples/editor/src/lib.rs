@@ -1,13 +1,10 @@
-use bevy::{asset::AssetMetaCheck, prelude::*};
-use bevy_vello::{
-    dock::{lottie_loader::LottieLoaderPlugin, svg_loader::SvgLoaderPlugin, DockPlugin},
-    VelloPlugin,
-};
+use bevy::{asset::AssetMetaCheck, color::palettes::css::WHITE, prelude::*};
+use bevy_vello::{dock::DockPlugin, VelloPlugin};
 
 mod wasm {
     extern crate wasm_bindgen;
     use bevy::{
-        math::{Quat, Vec3},
+        math::{Quat, Vec2, Vec3},
         prelude::Transform,
     };
     use bevy_vello::dock::commands::{DockCommand, DockCommandResult};
@@ -108,6 +105,13 @@ mod wasm {
             transform.into(),
         )))
     }
+    #[wasm_bindgen]
+    pub fn modify_camera(x: f32, y: f32, scale: f32) -> js_sys::Promise {
+        pack_reciever(dock_push_commands(DockCommand::ModifyCamera(
+            Vec2::new(x, y),
+            scale,
+        )))
+    }
 }
 
 pub fn run() {
@@ -127,11 +131,6 @@ pub fn run() {
             }),
     )
     .add_plugins(VelloPlugin)
-    .add_plugins(DockPlugin)
-    .add_systems(Startup, recieve_svg);
+    .add_plugins(DockPlugin);
     app.run();
-}
-
-fn recieve_svg(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
 }

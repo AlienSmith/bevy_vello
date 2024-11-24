@@ -8,6 +8,7 @@ module.exports = {
   https: true,
   port: 8080, // Choose your preferred port
   host: '0.0.0.0', // Allow access from any IP
+  open: true,
   },
   entry: {
     index: "./src/index.js"

@@ -1,4 +1,4 @@
-use bevy::prelude::Transform;
+use bevy::{math::Vec2, prelude::Transform};
 
 #[derive(Clone, Debug)]
 pub enum DockCommand {
@@ -7,6 +7,7 @@ pub enum DockCommand {
     RemoveEntity(u32),
     SpawnEntity(u32, Transform),
     Transform(u32, Transform),
+    ModifyCamera(Vec2, f32),
 }
 
 pub(crate) fn command_to_dispatcher(command: &DockCommand) -> DockCommandDispatcherType {
@@ -16,6 +17,7 @@ pub(crate) fn command_to_dispatcher(command: &DockCommand) -> DockCommandDispatc
         DockCommand::RemoveEntity(_) => DockCommandDispatcherType::RemoveEntity,
         DockCommand::SpawnEntity(_, _) => DockCommandDispatcherType::SpawnEntity,
         DockCommand::Transform(_, _) => DockCommandDispatcherType::Transform,
+        DockCommand::ModifyCamera(_, _) => DockCommandDispatcherType::ModifyCamera,
     }
 }
 
@@ -26,6 +28,7 @@ pub(crate) enum DockCommandDispatcherType {
     RemoveEntity = 2,
     SpawnEntity = 3,
     Transform = 4,
+    ModifyCamera = 5,
 }
 
 impl DockCommandDispatcherType {

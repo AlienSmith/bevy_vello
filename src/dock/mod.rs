@@ -2,6 +2,7 @@ use bevy::{
     app::{App, Plugin, Update},
     prelude::{IntoSystemSetConfigs, SystemSet},
 };
+use camera_controller::DockCameraPlugin;
 use entity_modifier::EntityModifierPlugin;
 use entity_remover::EntityRemoverPlugin;
 use entity_spawner::EntitySpawnerPlugin;
@@ -23,6 +24,8 @@ pub mod entity_spawner;
 pub mod entity_remover;
 
 pub mod entity_modifier;
+
+pub mod camera_controller;
 
 pub struct DockPlugin;
 
@@ -52,6 +55,7 @@ impl Plugin for DockPlugin {
         .add_plugins(SvgLoaderPlugin)
         .add_plugins(EntitySpawnerPlugin)
         .add_plugins(EntityRemoverPlugin)
-        .add_plugins(EntityModifierPlugin);
+        .add_plugins(EntityModifierPlugin)
+        .add_plugins(DockCameraPlugin);
     }
 }

@@ -1,20 +1,16 @@
 import init, {start, load_lottie_assets_from_bytes, load_svg_assets_from_bytes, remove_entity, modify_entity, spawn_entity, Transform2D} from "editor";
 import * as dat from "dat.gui";
 import { GUIController } from "dat.gui";
+import { GUIWrapper } from "./utils";
+import log from 'loglevel';
+import { CameraController } from "./camera_control";
+
 Error.stackTraceLimit = 100;
-init().then(()=>{start();});
 
-export abstract class GUIWrapper {
-    gui: dat.GUI | null = null;
-    parent_gui: dat.GUI | null = null;
-    destroy() {
-      if (this.gui !== null && this.parent_gui !== null) {
-        this.parent_gui.removeFolder(this.gui);
-        this.gui = null;
-      }
-    }
-}
-
+log.setLevel(log.levels.INFO);
+let app: null|Application = null;
+const input_canvas = document.getElementById('mygame-canvas') as HTMLCanvasElement;
+init().then(()=>{log.info("WASM LOADED"); app = new Application(input_canvas); start(); });
 class EntityItem extends GUIWrapper{
     name: string;
     id: number;
@@ -51,7 +47,7 @@ class EntityItem extends GUIWrapper{
         this.destroy();
     }
     setEntityTransform(){
-        console.log("x:" + this.x + "y:" + this.y)
+        log.info("x:" + this.x + "y:" + this.y)
         modify_entity(this.id, new Transform2D(this.x,this.y,this.r,this.s_x,this.s_y,this.depth));
     }
 }
@@ -69,6 +65,7 @@ class AssetItem extends GUIWrapper{
         this.gui.add(this, "entitySpawn");
         this.gui.open();
         this.entities = new Array<EntityItem>();
+        log.info(`Asset created ............`)
     }
     entitySpawn(){
         spawn_entity(this.id, new Transform2D(100,0,0,1,1,0)).then((entity_id) =>{
@@ -81,9 +78,12 @@ class Application {
     gui:dat.GUI;
     drop: DropWrapper;
     assets: Array<AssetItem>;
-    constructor(){  
+    canvas: HTMLCanvasElement;
+    camera_controller: CameraController;
+    constructor(canvas: HTMLCanvasElement){  
         this.gui = new dat.GUI();
         this.assets = new Array<AssetItem>();
+        this.canvas = canvas;
         this.drop = new DropWrapper((files:FileList) =>{
             this.loadExternalTraceFiles(files);
         })
@@ -91,11 +91,14 @@ class Application {
         document.ondrop = (ev: DragEvent) => {
             this.drop.ondrop(ev);
         };
+        this.camera_controller = new CameraController(this.canvas);
+        log.info("Application Created")
     }
 
     loadSVGAsset(name:string, data: Uint8Array) {
         load_svg_assets_from_bytes(data).then((id) =>{
-            this.assets.push(new AssetItem(name, id, this.gui))
+            this.assets.push(new AssetItem(name, id, this.gui));
+            setup_mouse_input();
         });
     }
 
@@ -129,7 +132,7 @@ class Application {
 
 
 function removeDragData(ev: DragEvent) {
-    console.log("Removing drag data");
+    log.info("Removing drag data");
   
     if (ev.dataTransfer.items) {
       // Use DataTransferItemList interface to remove the drag data
@@ -146,7 +149,7 @@ class DropWrapper {
       this.f = f;
     }
     ondrop(ev: DragEvent) {
-      console.log("File(s) dropped");
+      log.info("File(s) dropped");
   
       // Prevent default behavior (Prevent file from being opened)
       ev.preventDefault();
@@ -158,4 +161,6 @@ class DropWrapper {
   
 }
 
-new Application()
+function setup_mouse_input(){
+    
+}

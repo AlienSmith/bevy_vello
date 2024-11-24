@@ -10,6 +10,7 @@
         "clean-all": "rimraf --glob dist **/pkg target node_modules"
     },
     "devDependencies": {
+        "@types/dat.gui": "^0.7.10",
         "copy-webpack-plugin": "^11.0.0",
         "rimraf": "^5.0.1",
         "ts-loader": "^9.5.1",
@@ -17,17 +18,20 @@
         "webpack": "^5.88.2",
         "webpack-cli": "^5.1.4",
         "webpack-dev-server": "^4.15.1",
-        "webpack-merge": "^5.9.0",
-        "@types/dat.gui": "^0.7.10"
+        "webpack-merge": "^5.9.0"
     },
     "dependencies": {
         "@babel/core": "^7.26.0",
         "@babel/preset-env": "^7.26.0",
         "@babel/preset-react": "^7.25.9",
-        "dat.gui": "^0.7.9",
+        "@types/gl-matrix": "^3.2.0",
+        "@types/loglevel": "^1.6.3",
         "babel-loader": "^9.2.1",
+        "dat.gui": "^0.7.9",
         "editor": "link:../editor/pkg",
+        "gl-matrix": "^3.4.3",
         "html-webpack-plugin": "^5.6.3",
+        "loglevel": "^1.9.2",
         "react": "^18.3.1",
         "react-dom": "^18.3.1"
     }

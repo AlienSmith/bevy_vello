@@ -18,6 +18,8 @@ struct LOTTIEReceivers {
     lottie_r: Arc<Mutex<oneshot::Receiver<DockCommandResult>>>,
 }
 
+use bevy::color::palettes::css::WHITE;
+
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(AssetPlugin {
@@ -27,12 +29,12 @@ fn main() {
     .add_plugins(VelloPlugin)
     .add_plugins(DockPlugin)
     .add_systems(Startup, receive)
-    .add_systems(Update, recieve_check);
+    .add_systems(Update, recieve_check)
+    .add_systems(Update, draw_cursor);
     app.run();
 }
 
 fn receive(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
     let svg_r = dock_push_commands(DockCommand::LoadSVGAssets(SVG_DATA.to_vec()));
     let lottie_r = dock_push_commands(DockCommand::LoadLottieAssets(LOTTIE_DATA.to_vec()));
     commands.insert_resource(SVGReceivers {
@@ -106,4 +108,23 @@ fn recieve_check(
             println!("The sender was dropped without sending a value.");
         }
     }
+}
+
+fn draw_cursor(
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    windows: Query<&Window>,
+    mut gizmos: Gizmos,
+) {
+    let (camera, camera_transform) = camera_query.single();
+
+    let Some(cursor_position) = windows.single().cursor_position() else {
+        return;
+    };
+
+    // Calculate a world position based on the cursor's position.
+    let Some(point) = camera.viewport_to_world_2d(camera_transform, cursor_position) else {
+        return;
+    };
+
+    gizmos.circle_2d(point, 10., WHITE);
 }
