@@ -26,15 +26,21 @@ fn modify_entity(
     r: Res<EntityModifierReciever>,
     mut query: Query<&mut Transform, With<Handle<VelloAsset>>>,
 ) {
-    if let Ok(id) = r.r.try_recv() {
-        bevy::log::info!("get_dock {}", id.clone());
-        let data = dock_get_command(id);
-        if let DockCommand::Transform(entity_id, transform) = &data.data {
-            let entity = dock_get_entity_with_id(*entity_id);
+    let mut last: Option<DockData> = None;
+    while let Ok(id) = r.r.try_recv() {
+        //we through the previous ones away
+        if let Some(dock_data) = last.take() {
+            let _ = dock_data.s.send(DockCommandResult::Ok(2));
+        }
+        last = Some(dock_get_command(id));
+    }
+    if let Some(data) = last {
+        if let DockCommand::Transform(entity_id, transform) = data.data {
+            let entity = dock_get_entity_with_id(entity_id);
             if let Ok(mut item) = query.get_mut(entity) {
-                *item = *transform;
+                *item = transform;
             }
-            let _ = data.s.send(DockCommandResult::Ok(*entity_id));
+            let _ = data.s.send(DockCommandResult::Ok(entity_id));
         } else {
             let _ = data
                 .s

@@ -27,8 +27,15 @@ fn modify_camera(
     mut query: Query<(&mut Transform, &mut OrthographicProjection), With<Camera>>,
     r: Res<CameraModifiedReciever>,
 ) {
-    if let Ok(index) = r.r.try_recv() {
-        let data = dock_get_command(index);
+    let mut last: Option<DockData> = None;
+    while let Ok(index) = r.r.try_recv() {
+        //we through the previous ones away
+        if let Some(dock_data) = last.take() {
+            let _ = dock_data.s.send(DockCommandResult::Ok(2));
+        }
+        last = Some(dock_get_command(index));
+    }
+    if let Some(data) = last {
         if let DockCommand::ModifyCamera(pos, scale) = data.data {
             bevy::log::info!("camera moved to {}", pos);
             let (mut transform, mut orth) = query.single_mut();
