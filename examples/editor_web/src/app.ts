@@ -1,4 +1,4 @@
-import init, {start, load_lottie_assets_from_bytes, load_svg_assets_from_bytes, remove_entity, modify_entity, spawn_entity, Transform2D} from "editor";
+import init, { start, load_lottie_assets_from_bytes, load_svg_assets_from_bytes, remove_entity, modify_entity, spawn_entity, Transform2D } from "editor";
 import * as dat from "dat.gui";
 import { GUIController } from "dat.gui";
 import { GUIWrapper } from "./utils";
@@ -8,10 +8,10 @@ import { CameraController } from "./camera_controller";
 Error.stackTraceLimit = 100;
 
 log.setLevel(log.levels.INFO);
-let app: null|Application = null;
+let app: null | Application = null;
 const overlay = document.getElementById("overlay");
-init().then(()=>{log.info("WASM LOADED"); app = new Application(overlay); start(); });
-class EntityItem extends GUIWrapper{
+init().then(() => { log.info("WASM LOADED"); app = new Application(overlay); start(); });
+class EntityItem extends GUIWrapper {
     name: string;
     id: number;
     x: number = 0;
@@ -20,7 +20,7 @@ class EntityItem extends GUIWrapper{
     s_x: number = 1;
     s_y: number = 1;
     depth: number = 0;
-    constructor(name: string, id:number, gui:dat.GUI){
+    constructor(name: string, id: number, gui: dat.GUI) {
         super()
         this.parent_gui = gui;
         this.name = name;
@@ -30,33 +30,33 @@ class EntityItem extends GUIWrapper{
         this.gui = gui.addFolder("entity_" + name);
         let transform_gui = this.gui.addFolder("Transform");
         let temp = new Array<GUIController<object>>();
-        temp.push(transform_gui.add(this,"x", -100, 100));
-        temp.push(transform_gui.add(this,"y", -100, 100));
-        temp.push(transform_gui.add(this,"s_x", 0.01, 10));
-        temp.push(transform_gui.add(this,"s_y", 0.01, 10));
-        temp.push(transform_gui.add(this,"r", 0, 10));
-        temp.push(transform_gui.add(this,"depth", 0, 10));
-        temp.forEach((item)=>{
-            item.onChange(()=>{this.setEntityTransform()});
+        temp.push(transform_gui.add(this, "x", -100, 100));
+        temp.push(transform_gui.add(this, "y", -100, 100));
+        temp.push(transform_gui.add(this, "s_x", 0.01, 10));
+        temp.push(transform_gui.add(this, "s_y", 0.01, 10));
+        temp.push(transform_gui.add(this, "r", 0, 10));
+        temp.push(transform_gui.add(this, "depth", 0, 10));
+        temp.forEach((item) => {
+            item.onChange(() => { this.setEntityTransform() });
         });
         this.gui.add(this, "entityRemove");
         this.gui.open();
     }
-    entityRemove(){
+    entityRemove() {
         remove_entity(this.id);
         this.destroy();
     }
-    setEntityTransform(){
+    setEntityTransform() {
         log.info("x:" + this.x + "y:" + this.y)
-        modify_entity(this.id, new Transform2D(this.x,this.y,this.r,this.s_x,this.s_y,this.depth));
+        modify_entity(this.id, new Transform2D(this.x, this.y, this.r, this.s_x, this.s_y, this.depth));
     }
 }
 
-class AssetItem extends GUIWrapper{
+class AssetItem extends GUIWrapper {
     name: string;
     id: number;
     entities: Array<EntityItem>;
-    constructor(name: string, id:number, gui:dat.GUI){
+    constructor(name: string, id: number, gui: dat.GUI) {
         super()
         this.parent_gui = gui;
         this.name = name;
@@ -67,24 +67,24 @@ class AssetItem extends GUIWrapper{
         this.entities = new Array<EntityItem>();
         log.info(`Asset created ............`)
     }
-    entitySpawn(){
-        spawn_entity(this.id, new Transform2D(100,0,0,1,1,0)).then((entity_id) =>{
-            this.entities.push(new EntityItem(this.name + entity_id, entity_id,this.gui));
+    entitySpawn() {
+        spawn_entity(this.id, new Transform2D(100, 0, 0, 1, 1, 0)).then((entity_id) => {
+            this.entities.push(new EntityItem(this.name + entity_id, entity_id, this.gui));
         });
     }
 }
 
 class Application {
-    gui:dat.GUI;
+    gui: dat.GUI;
     drop: DropWrapper;
     assets: Array<AssetItem>;
     input_overlay: HTMLElement;
     camera_controller: CameraController;
-    constructor(overlay: HTMLElement){  
+    constructor(overlay: HTMLElement) {
         this.gui = new dat.GUI();
         this.assets = new Array<AssetItem>();
         this.input_overlay = overlay;
-        this.drop = new DropWrapper((files:FileList) =>{
+        this.drop = new DropWrapper((files: FileList) => {
             this.loadExternalTraceFiles(files);
         })
         document.ondragover = onDragOver;
@@ -95,15 +95,15 @@ class Application {
         log.info("Application Created")
     }
 
-    loadSVGAsset(name:string, data: Uint8Array) {
-        load_svg_assets_from_bytes(data).then((id) =>{
+    loadSVGAsset(name: string, data: Uint8Array) {
+        load_svg_assets_from_bytes(data).then((id) => {
             this.assets.push(new AssetItem(name, id, this.gui));
             setup_mouse_input();
         });
     }
 
-    loadLottieAsset(name:string, data: Uint8Array) {
-        load_lottie_assets_from_bytes(data).then((id) =>{
+    loadLottieAsset(name: string, data: Uint8Array) {
+        load_lottie_assets_from_bytes(data).then((id) => {
             this.assets.push(new AssetItem(name, id, this.gui))
         });
     }
@@ -112,19 +112,19 @@ class Application {
         if (files.length === 1) {
             let name = files[0].name;
             let [_, ...remain] = name.split(".");
-            if (remain.length != 1 || (remain[0] != "svg" && remain[0] != "json")){
+            if (remain.length != 1 || (remain[0] != "svg" && remain[0] != "json")) {
                 alert("invalid input, please provide a svg or lottie file");
                 return;
             }
-            files[0].arrayBuffer().then((bin) =>{
+            files[0].arrayBuffer().then((bin) => {
                 let data = new Uint8Array(bin);
                 alert("file provided" + name);
-                if (remain[0] == "svg"){
+                if (remain[0] == "svg") {
                     this.loadSVGAsset(name, data);
-                }else if (remain[0] == "json") {
+                } else if (remain[0] == "json") {
                     this.loadLottieAsset(name, data);
                 }
-            } )
+            })
         }
     }
 
@@ -133,34 +133,34 @@ class Application {
 
 function removeDragData(ev: DragEvent) {
     log.info("Removing drag data");
-  
+
     if (ev.dataTransfer.items) {
-      // Use DataTransferItemList interface to remove the drag data
-      ev.dataTransfer.items.clear();
+        // Use DataTransferItemList interface to remove the drag data
+        ev.dataTransfer.items.clear();
     }
 }
-  
+
 function onDragOver(ev: DragEvent) {
     ev.preventDefault();
 }
 class DropWrapper {
     f: (file: FileList) => void;
     constructor(f: (file: FileList) => void) {
-      this.f = f;
+        this.f = f;
     }
     ondrop(ev: DragEvent) {
-      log.info("File(s) dropped");
-  
-      // Prevent default behavior (Prevent file from being opened)
-      ev.preventDefault();
-      this.f(ev.dataTransfer.files);
-      // Pass event to removeDragData for cleanup
-      removeDragData(ev);
-      return 0;
+        log.info("File(s) dropped");
+
+        // Prevent default behavior (Prevent file from being opened)
+        ev.preventDefault();
+        this.f(ev.dataTransfer.files);
+        // Pass event to removeDragData for cleanup
+        removeDragData(ev);
+        return 0;
     }
-  
+
 }
 
-function setup_mouse_input(){
-    
+function setup_mouse_input() {
+
 }

@@ -8,6 +8,7 @@ pub enum DockCommand {
     SpawnEntity(u32, Transform),
     Transform(u32, Transform),
     ModifyCamera(Vec2, f32),
+    PickEntity(Vec2),
 }
 
 pub(crate) fn command_to_dispatcher(command: &DockCommand) -> DockCommandDispatcherType {
@@ -18,6 +19,7 @@ pub(crate) fn command_to_dispatcher(command: &DockCommand) -> DockCommandDispatc
         DockCommand::SpawnEntity(_, _) => DockCommandDispatcherType::SpawnEntity,
         DockCommand::Transform(_, _) => DockCommandDispatcherType::Transform,
         DockCommand::ModifyCamera(_, _) => DockCommandDispatcherType::ModifyCamera,
+        DockCommand::PickEntity(_) => DockCommandDispatcherType::PickEntity,
     }
 }
 
@@ -29,6 +31,7 @@ pub(crate) enum DockCommandDispatcherType {
     SpawnEntity = 3,
     Transform = 4,
     ModifyCamera = 5,
+    PickEntity = 6,
 }
 
 impl DockCommandDispatcherType {
