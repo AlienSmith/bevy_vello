@@ -14,7 +14,8 @@ export class CameraController {
     input_overlay: HTMLElement;
     enabled: boolean;
     left_button_down: boolean;
-    constructor(overlay: HTMLElement) {
+    app_pick_entity: (id: number) => void;
+    constructor(overlay: HTMLElement, app_pick_entity: (id: number) => void) {
         const rect = overlay.getBoundingClientRect();
         this.window_size = gl_matrix.vec2.fromValues(rect.width, rect.height);
         this.current_pos = gl_matrix.vec2.fromValues(0, 0);
@@ -26,13 +27,22 @@ export class CameraController {
         this.enabled = true;
         this.left_button_down = false;
         this.register_inputs();
+        this.app_pick_entity = app_pick_entity;
     }
     register_inputs() {
         this.input_overlay.addEventListener("dblclick", (event) => {
             if (event.button === 0) {
                 log.warn("clicked");
                 let pos = this.camera_to_world(gl_matrix.vec2.fromValues(event.clientX, event.clientY));
-                pick_entity(pos[0], pos[1], pick_radius * this.camera_scale).then((value: any) => { log.warn(value) });
+                pick_entity(pos[0], pos[1], pick_radius * this.camera_scale).then((value: any) => {
+                    if (typeof value === 'number') {
+                        if (value === 0) {
+                            log.info("pick no entity");
+                        } else {
+                            this.app_pick_entity(value)
+                        }
+                    }
+                });
             }
             event.preventDefault();
         });
