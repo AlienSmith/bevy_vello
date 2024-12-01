@@ -23,6 +23,8 @@ use bevy_vello::{prelude::*, VelloPlugin};
 
 const BOUNDS: Vec2 = Vec2::new(1200.0, 640.0);
 
+const DEFAULT_PARTICLES: &[u8] = include_bytes!("../2d_default.particles");
+
 /// player component
 #[derive(Component, Default)]
 struct Player {
@@ -105,7 +107,7 @@ fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
     scene.pop_instance();
 }
 
-fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAsset> {
+fn _make_default_effect() -> EffectAsset {
     let mut gradient = Gradient::new();
     gradient.add_key(0.0, Vec4::new(0.5, 0.5, 1.0, 1.0));
     gradient.add_key(1.0, Vec4::new(0.5, 0.5, 1.0, 0.0));
@@ -137,23 +139,28 @@ fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAss
     // and slowly fading from blue-ish to transparent over their lifetime.
     // By default the asset spawns the particles at Z=0.
     let spawner = Spawner::rate(30.0.into());
+    EffectAsset::new(vec![2048], spawner, module)
+        .with_name("2d_default")
+        .init(init_pos)
+        .init(init_vel)
+        .init(init_age)
+        .init(init_lifetime)
+        .render(SizeOverLifetimeModifier {
+            gradient: Gradient::constant(Vec2::splat(2.0)),
+            screen_space_size: false,
+        })
+        .render(OrientModifier {
+            mode: OrientMode::AlongVelocity,
+            rotation: None,
+        })
+        .with_simulation_space(SimulationSpace::Local)
+}
+
+fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAsset> {
+    let custom_asset = ron::de::from_bytes::<EffectAsset>(&DEFAULT_PARTICLES).unwrap();
     effects.add(
-        EffectAsset::new(vec![2048], spawner, module)
-            .with_name("2d")
-            .init(init_pos)
-            .init(init_vel)
-            .init(init_age)
-            .init(init_lifetime)
-            .render(SizeOverLifetimeModifier {
-                gradient: Gradient::constant(Vec2::splat(2.0)),
-                screen_space_size: false,
-            })
-            .render(OrientModifier {
-                mode: OrientMode::AlongVelocity,
-                rotation: None,
-            })
-            .with_simulation_space(SimulationSpace::Local), // .render(ColorOverLifetimeModifier { gradient })
-                                                            // .render(round),
+        custom_asset, // .render(ColorOverLifetimeModifier { gradient })
+                      // .render(round),
     )
 }
 
@@ -271,4 +278,19 @@ fn player_control_system(
     // bound the ship within the invisible level bounds
     let extents = Vec3::from((BOUNDS / 2.0, 0.0));
     transform.translation = transform.translation.min(extents).max(-extents);
+}
+
+#[cfg(test)]
+mod test {
+    use ron::ser::PrettyConfig;
+    use std::fs::File;
+    use std::io::Write;
+    #[test]
+    fn export_default_effect() {
+        let effect = crate::_make_default_effect();
+        let s = ron::ser::to_string_pretty(&effect, PrettyConfig::new().new_line("\n".to_string()))
+            .unwrap();
+        let mut file = File::create("2d_default.particles").unwrap();
+        file.write_all(s.as_bytes()).unwrap();
+    }
 }
