@@ -1,4 +1,5 @@
 import * as dat from "dat.gui";
+import * as gl_matrix from "gl-matrix";
 export abstract class GUIWrapper {
   gui: dat.GUI | null = null;
   parent_gui: dat.GUI | null = null;

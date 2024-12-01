@@ -2,6 +2,8 @@ import * as gl_matrix from "gl-matrix";
 import { modify_camera, pick_entity } from "editor";
 import * as log from "loglevel";
 
+const pick_radius: number = 10.0;
+
 export class CameraController {
     window_size: gl_matrix.vec2;
     camera_pos: gl_matrix.vec2;
@@ -30,7 +32,7 @@ export class CameraController {
             if (event.button === 0) {
                 log.warn("clicked");
                 let pos = this.camera_to_world(gl_matrix.vec2.fromValues(event.clientX, event.clientY));
-                pick_entity(pos[0], pos[1]).then((value: any) => { log.warn(value) });
+                pick_entity(pos[0], pos[1], pick_radius * this.camera_scale).then((value: any) => { log.warn(value) });
             }
             event.preventDefault();
         });
@@ -76,7 +78,7 @@ export class CameraController {
         //we got y axies of different direction
         this.camera_pos[1] += this.camera_scale * delta[1];
 
-        log.info("pos" + this.camera_pos, "scale" + this.camera_scale);
+        //log.info("pos" + this.camera_pos, "scale" + this.camera_scale);
         modify_camera(this.camera_pos[0], this.camera_pos[1], this.camera_scale);
     }
     camera_to_world(pos: gl_matrix.vec2): gl_matrix.vec2 {

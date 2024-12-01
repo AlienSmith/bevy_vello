@@ -59,25 +59,37 @@ fn recieve_check(
                     match v {
                         DockCommandResult::Ok(index) => {
                             println!("svg loaded with value {}", index);
-                            for i in 0..10 {
-                                for j in 0..10 {
-                                    let _ = dock_push_commands(DockCommand::SpawnEntity(
-                                        index,
-                                        Transform::from_translation(Vec3 {
-                                            x: i as f32 * 50.0,
-                                            y: j as f32 * 50.0,
-                                            z: 0.0,
-                                        }),
-                                    ));
-                                    let _ = dock_push_commands(DockCommand::ModifyCamera(
-                                        Vec2 {
-                                            x: i as f32 * 50.0,
-                                            y: j as f32 * 50.0,
-                                        },
-                                        1.0,
-                                    ));
-                                }
-                            }
+                            // for i in 0..10 {
+                            //     for j in 0..10 {
+                            //         let _ = dock_push_commands(DockCommand::SpawnEntity(
+                            //             index,
+                            //             Transform::from_translation(Vec3 {
+                            //                 x: i as f32 * 50.0,
+                            //                 y: j as f32 * 50.0,
+                            //                 z: 0.0,
+                            //             }),
+                            //         ));
+                            //         let _ = dock_push_commands(DockCommand::ModifyCamera(
+                            //             Vec2 {
+                            //                 x: i as f32 * 50.0,
+                            //                 y: j as f32 * 50.0,
+                            //             },
+                            //             1.0,
+                            //         ));
+                            //     }
+                            // }
+                            let _ = dock_push_commands(DockCommand::SpawnEntity(
+                                index,
+                                Transform::from_translation(Vec3 {
+                                    x: 100.0,
+                                    y: 100.0,
+                                    z: 0.0,
+                                }),
+                            ));
+                            let _ = dock_push_commands(DockCommand::PickEntity(
+                                Vec2 { x: 100.0, y: 100.0 },
+                                100.0,
+                            ));
                         }
                         DockCommandResult::NotOk(s) => {
                             println!("{}", s);

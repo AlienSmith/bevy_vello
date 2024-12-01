@@ -19,11 +19,21 @@ pub struct DockData {
     pub data: DockCommand,
     pub s: oneshot::Sender<DockCommandResult>,
 }
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct IDGen {
     command: u32,
     entities: u32,
     assets: u32,
+}
+impl Default for IDGen {
+    fn default() -> Self {
+        //start all id with 1 leaving 0 as invalid index
+        Self {
+            command: 1,
+            entities: 1,
+            assets: 1,
+        }
+    }
 }
 impl IDGen {
     fn fetch_add(value: &mut u32) -> u32 {
@@ -46,6 +56,7 @@ impl IDGen {
 struct Dock {
     commands: HashMap<u32, DockData>,
     entities: HashMap<u32, Entity>,
+    inver_entities: HashMap<Entity, u32>,
     assets: HashMap<u32, Handle<VelloAsset>>,
     messenger: HashMap<u32, DockDispatcher>,
     id_generator: IDGen,
@@ -65,10 +76,13 @@ impl Dock {
     pub(crate) fn push_entitie(&mut self, entity: Entity) -> u32 {
         let id = self.id_generator.next_entity_id();
         self.entities.insert(id, entity);
+        self.inver_entities.insert(entity, id);
         id
     }
 
     pub(crate) fn remove_entitie(&mut self, id: u32) {
+        let entity = self.get_entity_with_id(id);
+        let _ = self.inver_entities.remove(&entity);
         let _ = self.entities.remove(&id);
     }
 
@@ -76,6 +90,13 @@ impl Dock {
         self.entities
             .get(&id)
             .expect("none existing entity")
+            .clone()
+    }
+
+    pub(crate) fn get_entity_id(&self, entity: Entity) -> u32 {
+        self.inver_entities
+            .get(&entity)
+            .expect("none existing entity id")
             .clone()
     }
 
@@ -134,6 +155,10 @@ pub(crate) fn dock_remove_entitie(id: u32) {
 
 pub(crate) fn dock_get_entity_with_id(id: u32) -> Entity {
     EXTERNAL_DATA_DOCK.read().unwrap().get_entity_with_id(id)
+}
+
+pub(crate) fn dock_get_entity_id(entity: Entity) -> u32 {
+    EXTERNAL_DATA_DOCK.read().unwrap().get_entity_id(entity)
 }
 
 pub(crate) fn dock_push_asset(asset: Handle<VelloAsset>) -> u32 {

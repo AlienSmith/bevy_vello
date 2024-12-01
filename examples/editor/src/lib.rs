@@ -112,6 +112,13 @@ mod wasm {
             scale,
         )))
     }
+    #[wasm_bindgen]
+    pub fn pick_entity(x: f32, y: f32, radius: f32) -> js_sys::Promise {
+        pack_reciever(dock_push_commands(DockCommand::PickEntity(
+            Vec2::new(x, y),
+            radius,
+        )))
+    }
 }
 
 pub fn run() {
@@ -125,6 +132,7 @@ pub fn run() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     canvas: Some("#mygame-canvas".into()),
+                    fit_canvas_to_parent: true,
                     ..default()
                 }),
                 ..default()

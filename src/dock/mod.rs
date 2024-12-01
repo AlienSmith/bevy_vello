@@ -1,3 +1,5 @@
+use avain_picker::AvainPickerPlugin;
+use avian2d::{prelude::PhysicsDebugPlugin, PhysicsPlugins};
 use bevy::{
     app::{App, Plugin, Update},
     prelude::{IntoSystemSetConfigs, SystemSet},
@@ -56,6 +58,9 @@ impl Plugin for DockPlugin {
         .add_plugins(EntitySpawnerPlugin)
         .add_plugins(EntityRemoverPlugin)
         .add_plugins(EntityModifierPlugin)
-        .add_plugins(DockCameraPlugin);
+        .add_plugins(DockCameraPlugin)
+        .add_plugins(PhysicsPlugins::default().with_length_unit(20.0))
+        .add_plugins(PhysicsDebugPlugin::default())
+        .add_plugins(AvainPickerPlugin);
     }
 }

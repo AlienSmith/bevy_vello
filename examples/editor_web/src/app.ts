@@ -98,7 +98,6 @@ class Application {
     loadSVGAsset(name: string, data: Uint8Array) {
         load_svg_assets_from_bytes(data).then((id) => {
             this.assets.push(new AssetItem(name, id, this.gui));
-            setup_mouse_input();
         });
     }
 
@@ -161,6 +160,3 @@ class DropWrapper {
 
 }
 
-function setup_mouse_input() {
-
-}

@@ -1,3 +1,4 @@
+use avian2d::prelude::*;
 use bevy::app::App;
 use bevy::app::Plugin;
 use bevy::prelude::*;
@@ -29,11 +30,16 @@ fn spawn_vello_bundle(mut commands: Commands, r: Res<EntitySpawnerReciever>) {
         if let DockCommand::SpawnEntity(asset_id, transform) = &data.data {
             let asset = dock_get_asset_with_id(*asset_id);
             let entity = commands
-                .spawn(VelloAssetBundle {
-                    vector: asset,
-                    transform: *transform,
-                    ..default()
-                })
+                .spawn((
+                    VelloAssetBundle {
+                        vector: asset,
+                        transform: *transform,
+                        ..default()
+                    },
+                    Sensor,
+                    RigidBody::Static,
+                    Collider::rectangle(100.0, 100.0),
+                ))
                 .id();
             let entity_id = dock_push_entitie(entity);
             let _ = data.s.send(DockCommandResult::Ok(entity_id));
