@@ -1,4 +1,4 @@
-import init from "../pkg/scene.js";
+import init from "../out/particles.js";
 window.addEventListener("load", () => {
   init();
 });

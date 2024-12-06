@@ -5,9 +5,9 @@ mod wasm {
     extern crate wasm_bindgen;
     use bevy::{
         math::{Quat, Vec2, Vec3},
-        prelude::Transform,
+        prelude::{Entity, Transform},
     };
-    use bevy_vello::dock::commands::{DockCommand, DockCommandResult};
+    use bevy_vello::dock::commands::{DockCommand, DockCommandResult, EntityType};
     use bevy_vello::dock::stream_factory::*;
     use futures::channel::oneshot::Receiver;
     use wasm_bindgen::prelude::*;
@@ -88,10 +88,20 @@ mod wasm {
         pack_reciever(dock_push_commands(DockCommand::LoadLottieAssets(data)))
     }
     #[wasm_bindgen]
-    pub fn spawn_entity(asset_id: u32, transform: Transform2D) -> js_sys::Promise {
+    pub fn spawn_entity(
+        asset_id: u32,
+        transform: Transform2D,
+        is_particle: bool,
+    ) -> js_sys::Promise {
+        let entity_type = if is_particle {
+            EntityType::Particle
+        } else {
+            EntityType::Vello
+        };
         pack_reciever(dock_push_commands(DockCommand::SpawnEntity(
             asset_id,
             transform.into(),
+            entity_type,
         )))
     }
     #[wasm_bindgen]

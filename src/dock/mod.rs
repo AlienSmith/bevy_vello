@@ -9,7 +9,10 @@ use entity_modifier::EntityModifierPlugin;
 use entity_remover::EntityRemoverPlugin;
 use entity_spawner::EntitySpawnerPlugin;
 use lottie_loader::LottieLoaderPlugin;
+use particle_loader::ParticleLoaderPlugin;
 use svg_loader::SvgLoaderPlugin;
+
+use crate::integrations::HanabiIntegrationPlugin;
 
 #[cfg(feature = "lottie")]
 pub mod lottie_loader;
@@ -28,6 +31,8 @@ pub mod entity_remover;
 pub mod entity_modifier;
 
 pub mod camera_controller;
+
+pub mod particle_loader;
 
 pub struct DockPlugin;
 
@@ -61,6 +66,8 @@ impl Plugin for DockPlugin {
         .add_plugins(DockCameraPlugin)
         .add_plugins(PhysicsPlugins::default().with_length_unit(20.0))
         .add_plugins(PhysicsDebugPlugin::default())
-        .add_plugins(AvainPickerPlugin);
+        .add_plugins(AvainPickerPlugin)
+        .add_plugins(HanabiIntegrationPlugin)
+        .add_plugins(ParticleLoaderPlugin);
     }
 }

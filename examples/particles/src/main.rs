@@ -43,28 +43,18 @@ struct Player {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut wgpu_settings = WgpuSettings::default();
-    wgpu_settings
-        .features
-        .set(WgpuFeatures::VERTEX_WRITABLE_STORAGE, true);
-
     let mut app = App::default();
     app.insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
-                .set(RenderPlugin {
-                    render_creation: wgpu_settings.into(),
-                    synchronous_pipeline_compilation: false,
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "🎆 Hanabi — 2d".to_string(),
-                        ..default()
-                    }),
-                    ..default()
-                })
                 .set(AssetPlugin {
                     meta_check: AssetMetaCheck::Never,
+                    ..default()
+                })
+                .set(bevy::log::LogPlugin {
+                    // Uncomment this to override the default log settings:
+                    level: bevy::log::Level::TRACE,
+                    filter: "wgpu=warn,bevy_ecs=info".to_string(),
                     ..default()
                 }),
         )
@@ -86,6 +76,13 @@ fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
     let color = peniko::Color::rgb(value as f64, 0.0, 0.0);
     let color1 = peniko::Color::rgb(0.0, 1.0, 1.0);
     *scene = VelloScene::default();
+    scene.stroke(
+        &Stroke::new(2.0),
+        Affine::default(),
+        color1,
+        None,
+        &Circle::new(Point { x: -5.0, y: 0.0 }, 10.0),
+    );
     scene.push_instance(0, 0);
     let mut path = vello::kurbo::BezPath::new();
     path.push(PathEl::MoveTo(Point { x: -5.0, y: 0.0 }));
@@ -154,6 +151,7 @@ fn _make_default_effect() -> EffectAsset {
             rotation: None,
         })
         .with_simulation_space(SimulationSpace::Local)
+        .build()
 }
 
 fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAsset> {
@@ -175,6 +173,7 @@ fn spawn_particles_at(
     make_default_rect_particles(&mut scene, particle_index);
     // Spawn an instance of the particle effect, and override its Z layer to
     // be above the reference white square previously spawned.
+    bevy::log::info!("asset {:?}", effect);
     commands.spawn((
         ParticleEffectBundle {
             // Assign the Z layer so it appears in the egui inspector and can be modified at runtime

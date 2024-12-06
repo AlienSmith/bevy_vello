@@ -1,4 +1,5 @@
 use bevy::{prelude::*, utils::HashMap};
+use bevy_hanabi::EffectAsset;
 use crossbeam_channel::{unbounded, SendError};
 use futures::channel::oneshot;
 
@@ -24,6 +25,7 @@ pub struct IDGen {
     command: u32,
     entities: u32,
     assets: u32,
+    particle_assets: u32,
 }
 impl Default for IDGen {
     fn default() -> Self {
@@ -32,6 +34,7 @@ impl Default for IDGen {
             command: 1,
             entities: 1,
             assets: 1,
+            particle_assets: 1,
         }
     }
 }
@@ -50,6 +53,9 @@ impl IDGen {
     pub fn next_assets_id(&mut self) -> u32 {
         IDGen::fetch_add(&mut self.assets)
     }
+    pub fn next_particle_assets_id(&mut self) -> u32 {
+        IDGen::fetch_add(&mut self.particle_assets)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +64,7 @@ struct Dock {
     entities: HashMap<u32, Entity>,
     inver_entities: HashMap<Entity, u32>,
     assets: HashMap<u32, Handle<VelloAsset>>,
+    particle_assets: HashMap<u32, Handle<EffectAsset>>,
     messenger: HashMap<u32, DockDispatcher>,
     id_generator: IDGen,
 }
@@ -112,6 +119,23 @@ impl Dock {
 
     pub(crate) fn get_asset_with_id(&self, id: u32) -> Handle<VelloAsset> {
         self.assets.get(&id).expect("none existing entity").clone()
+    }
+
+    pub(crate) fn push_particle_asset(&mut self, asset: Handle<EffectAsset>) -> u32 {
+        let id = self.id_generator.next_particle_assets_id();
+        self.particle_assets.insert(id, asset);
+        id
+    }
+
+    pub(crate) fn remove_particle_asset(&mut self, id: u32) {
+        self.particle_assets.remove(&id);
+    }
+
+    pub(crate) fn get_particle_asset_with_id(&self, id: u32) -> Handle<EffectAsset> {
+        self.particle_assets
+            .get(&id)
+            .expect("none existing entity")
+            .clone()
     }
 
     pub fn push_commands(&mut self, command: DockCommand) -> oneshot::Receiver<DockCommandResult> {
@@ -171,6 +195,27 @@ pub(crate) fn dock_remove_asset(id: u32) {
 
 pub(crate) fn dock_get_asset_with_id(id: u32) -> Handle<VelloAsset> {
     EXTERNAL_DATA_DOCK.read().unwrap().get_asset_with_id(id)
+}
+
+pub(crate) fn dock_push_particle_asset(asset: Handle<EffectAsset>) -> u32 {
+    EXTERNAL_DATA_DOCK
+        .write()
+        .unwrap()
+        .push_particle_asset(asset)
+}
+
+pub(crate) fn dock_remove_particle_asset(id: u32) {
+    EXTERNAL_DATA_DOCK
+        .write()
+        .unwrap()
+        .remove_particle_asset(id)
+}
+
+pub(crate) fn dock_get_particle_asset_with_id(id: u32) -> Handle<EffectAsset> {
+    EXTERNAL_DATA_DOCK
+        .read()
+        .unwrap()
+        .get_particle_asset_with_id(id)
 }
 
 pub fn dock_push_commands(command: DockCommand) -> oneshot::Receiver<DockCommandResult> {
