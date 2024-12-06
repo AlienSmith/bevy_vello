@@ -113,7 +113,7 @@ impl Dock {
         id
     }
 
-    pub(crate) fn remove_asset(&mut self, id: u32) {
+    pub(crate) fn _remove_asset(&mut self, id: u32) {
         self.assets.remove(&id);
     }
 
@@ -127,7 +127,7 @@ impl Dock {
         id
     }
 
-    pub(crate) fn remove_particle_asset(&mut self, id: u32) {
+    pub(crate) fn _remove_particle_asset(&mut self, id: u32) {
         self.particle_assets.remove(&id);
     }
 
@@ -189,8 +189,8 @@ pub(crate) fn dock_push_asset(asset: Handle<VelloAsset>) -> u32 {
     EXTERNAL_DATA_DOCK.write().unwrap().push_asset(asset)
 }
 
-pub(crate) fn dock_remove_asset(id: u32) {
-    EXTERNAL_DATA_DOCK.write().unwrap().remove_asset(id)
+pub(crate) fn _dock_remove_asset(id: u32) {
+    EXTERNAL_DATA_DOCK.write().unwrap()._remove_asset(id)
 }
 
 pub(crate) fn dock_get_asset_with_id(id: u32) -> Handle<VelloAsset> {
@@ -204,14 +204,14 @@ pub(crate) fn dock_push_particle_asset(asset: Handle<EffectAsset>) -> u32 {
         .push_particle_asset(asset)
 }
 
-pub(crate) fn dock_remove_particle_asset(id: u32) {
+pub(crate) fn _dock_remove_particle_asset(id: u32) {
     EXTERNAL_DATA_DOCK
         .write()
         .unwrap()
-        .remove_particle_asset(id)
+        ._remove_particle_asset(id)
 }
 
-pub(crate) fn dock_get_particle_asset_with_id(id: u32) -> Handle<EffectAsset> {
+pub fn dock_get_particle_asset_with_id(id: u32) -> Handle<EffectAsset> {
     EXTERNAL_DATA_DOCK
         .read()
         .unwrap()
@@ -235,8 +235,8 @@ pub fn test_dock() {
     let svg_r = dock_register_loader(DockCommandDispatcherType::LoadSVGAssets);
     let json_r = dock_register_loader(DockCommandDispatcherType::LoadLottieAssets);
 
-    dock_push_commands(DockCommand::LoadSVGAssets(svg_data));
-    dock_push_commands(DockCommand::LoadLottieAssets(json_data));
+    let _ = dock_push_commands(DockCommand::LoadSVGAssets(svg_data));
+    let _ = dock_push_commands(DockCommand::LoadLottieAssets(json_data));
 
     if let Ok(id) = svg_r.try_recv() {
         println!("svg provided with {:?}", dock_get_command(id));

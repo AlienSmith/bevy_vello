@@ -3,6 +3,7 @@ use bevy::app::Plugin;
 use bevy::prelude::*;
 
 use crate::VelloAsset;
+use crate::VelloScene;
 
 use super::commands::*;
 use super::stream_factory::*;
@@ -24,7 +25,7 @@ impl Plugin for EntityModifierPlugin {
 
 fn modify_entity(
     r: Res<EntityModifierReciever>,
-    mut query: Query<&mut Transform, With<Handle<VelloAsset>>>,
+    mut query: Query<&mut Transform, Or<(With<VelloScene>, With<Handle<VelloAsset>>)>>,
 ) {
     let mut last: Option<DockData> = None;
     while let Ok(id) = r.r.try_recv() {

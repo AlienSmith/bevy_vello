@@ -1,4 +1,4 @@
-import init, { start, load_lottie_assets_from_bytes, load_svg_assets_from_bytes, remove_entity, modify_entity, spawn_entity, Transform2D } from "editor";
+import init, { start, load_lottie_assets_from_bytes, load_svg_assets_from_bytes, remove_entity, modify_entity, spawn_entity, Transform2D, load_particle_assets_from_bytes } from "editor";
 import * as dat from "dat.gui";
 import { GUIController } from "dat.gui";
 import { GUIWrapper } from "./utils";
@@ -27,11 +27,15 @@ class EntityContainer extends GUIWrapper {
         this.presentGui(id);
     }
     removeEntity(id: number) {
+        if (this.last_id === id) {
+            this.last_id = 0;
+        }
         this.entities.delete(id);
     }
     removeLastGui() {
         if (this.last_id != 0) {
             this.entities.get(this.last_id).remove_gui();
+            this.last_id = 0;
         }
     }
     presentGui(entity_id: number) {
@@ -54,6 +58,17 @@ class EntityItem extends GUIWrapper {
     s_y: number = 1;
     depth: number = 0;
     remove_this_from_collection: (id: number) => void;
+
+    constructor(name: string, id: number, gui: dat.GUI, remove_this: (id: number) => void) {
+        super()
+        this.parent_gui = gui;
+        this.name = name;
+        this.id = id;
+        this.x = 0;
+        this.y = 0;
+        this.remove_this_from_collection = remove_this;
+    }
+
     build_gui() {
         this.gui = this.parent_gui.addFolder("entity_" + this.name);
         let transform_gui = this.gui.addFolder("Transform");
@@ -76,20 +91,12 @@ class EntityItem extends GUIWrapper {
         this.destroy_gui()
     }
 
-    constructor(name: string, id: number, gui: dat.GUI, remove_this: (id: number) => void) {
-        super()
-        this.parent_gui = gui;
-        this.name = name;
-        this.id = id;
-        this.x = 0;
-        this.y = 0;
-        this.remove_this_from_collection = remove_this;
-    }
     entityRemove() {
+        this.destroy_gui();
         this.remove_this_from_collection(this.id);
         remove_entity(this.id);
-        this.destroy_gui();
     }
+
     setEntityTransform() {
         log.info("x:" + this.x + "y:" + this.y)
         modify_entity(this.id, new Transform2D(this.x, this.y, this.r, this.s_x, this.s_y, this.depth));
@@ -99,21 +106,23 @@ class EntityItem extends GUIWrapper {
 class AssetItem extends GUIWrapper {
     name: string;
     id: number;
-    addEntity: (name: string, id: number) => void;
-    constructor(name: string, id: number, gui: dat.GUI, add_entity: (name: string, id: number) => void) {
+    is_particle: boolean;
+    addEntityToContainer: (name: string, id: number) => void;
+    constructor(name: string, id: number, gui: dat.GUI, is_particle: boolean, add_entity_to_container: (name: string, id: number) => void) {
         super()
         this.parent_gui = gui;
         this.name = name;
         this.id = id;
+        this.is_particle = is_particle;
         this.gui = gui.addFolder("asset_" + name);
         this.gui.add(this, "entitySpawn");
         this.gui.open();
-        this.addEntity = add_entity;
+        this.addEntityToContainer = add_entity_to_container;
         log.info(`Asset created ............`)
     }
     entitySpawn() {
-        spawn_entity(this.id, new Transform2D(0, 0, 0, 1, 1, 0)).then((entity_id) => {
-            this.addEntity(this.name + entity_id, entity_id);
+        spawn_entity(this.id, new Transform2D(0, 0, 0, 1, 1, 0), this.is_particle).then((entity_id) => {
+            this.addEntityToContainer(this.name + entity_id, entity_id);
         });
     }
 }
@@ -143,21 +152,29 @@ class Application {
 
     loadSVGAsset(name: string, data: Uint8Array) {
         load_svg_assets_from_bytes(data).then((id) => {
-            this.assets.push(new AssetItem(name, id, this.gui, (name: string, id: number) => {
-                this.addEntity(name, id);
+            this.assets.push(new AssetItem(name, id, this.gui, false, (name: string, id: number) => {
+                this.addEntityToContainer(name, id);
             }));
         });
     }
 
     loadLottieAsset(name: string, data: Uint8Array) {
         load_lottie_assets_from_bytes(data).then((id) => {
-            this.assets.push(new AssetItem(name, id, this.gui, (name: string, id: number) => {
-                this.addEntity(name, id);
+            this.assets.push(new AssetItem(name, id, this.gui, false, (name: string, id: number) => {
+                this.addEntityToContainer(name, id);
             }))
         });
     }
 
-    addEntity(name: string, id: number) {
+    loadParticleAsset(name: string, data: Uint8Array) {
+        load_particle_assets_from_bytes(data).then((id) => {
+            this.assets.push(new AssetItem(name, id, this.gui, true, (name: string, id: number) => {
+                this.addEntityToContainer(name, id);
+            }))
+        });
+    }
+
+    addEntityToContainer(name: string, id: number) {
         this.entities.addEntity(name, id);
     }
 
@@ -165,8 +182,8 @@ class Application {
         if (files.length === 1) {
             let name = files[0].name;
             let [_, ...remain] = name.split(".");
-            if (remain.length != 1 || (remain[0] != "svg" && remain[0] != "json")) {
-                alert("invalid input, please provide a svg or lottie file");
+            if (remain.length != 1 || (remain[0] != "svg" && remain[0] != "json" && remain[0] != "particles")) {
+                alert("invalid input, please provide a svg, lottie or particles file");
                 return;
             }
             files[0].arrayBuffer().then((bin) => {
@@ -176,6 +193,8 @@ class Application {
                     this.loadSVGAsset(name, data);
                 } else if (remain[0] == "json") {
                     this.loadLottieAsset(name, data);
+                } else if (remain[0] == "particles") {
+                    this.loadParticleAsset(name, data);
                 }
             })
         }

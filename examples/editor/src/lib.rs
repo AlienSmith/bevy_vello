@@ -5,7 +5,7 @@ mod wasm {
     extern crate wasm_bindgen;
     use bevy::{
         math::{Quat, Vec2, Vec3},
-        prelude::{Entity, Transform},
+        prelude::Transform,
     };
     use bevy_vello::dock::commands::{DockCommand, DockCommandResult, EntityType};
     use bevy_vello::dock::stream_factory::*;
@@ -65,12 +65,14 @@ mod wasm {
     pub fn start() {
         crate::run();
     }
+
     fn result_to_js_value(result: DockCommandResult) -> JsValue {
         match result {
             DockCommandResult::Ok(i) => JsValue::from(i),
             DockCommandResult::NotOk(s) => JsValue::from(s),
         }
     }
+
     fn pack_reciever(receiver: Receiver<DockCommandResult>) -> js_sys::Promise {
         future_to_promise(async move {
             match receiver.await {
@@ -79,14 +81,22 @@ mod wasm {
             }
         })
     }
+
     #[wasm_bindgen]
     pub fn load_svg_assets_from_bytes(data: Vec<u8>) -> js_sys::Promise {
         pack_reciever(dock_push_commands(DockCommand::LoadSVGAssets(data)))
     }
+
     #[wasm_bindgen]
     pub fn load_lottie_assets_from_bytes(data: Vec<u8>) -> js_sys::Promise {
         pack_reciever(dock_push_commands(DockCommand::LoadLottieAssets(data)))
     }
+
+    #[wasm_bindgen]
+    pub fn load_particle_assets_from_bytes(data: Vec<u8>) -> js_sys::Promise {
+        pack_reciever(dock_push_commands(DockCommand::LoadParticleAssets(data)))
+    }
+
     #[wasm_bindgen]
     pub fn spawn_entity(
         asset_id: u32,
@@ -104,10 +114,12 @@ mod wasm {
             entity_type,
         )))
     }
+
     #[wasm_bindgen]
     pub fn remove_entity(entity_id: u32) -> js_sys::Promise {
         pack_reciever(dock_push_commands(DockCommand::RemoveEntity(entity_id)))
     }
+
     #[wasm_bindgen]
     pub fn modify_entity(entity_id: u32, transform: Transform2D) -> js_sys::Promise {
         pack_reciever(dock_push_commands(DockCommand::Transform(
@@ -115,6 +127,7 @@ mod wasm {
             transform.into(),
         )))
     }
+
     #[wasm_bindgen]
     pub fn modify_camera(x: f32, y: f32, scale: f32) -> js_sys::Promise {
         pack_reciever(dock_push_commands(DockCommand::ModifyCamera(
@@ -122,6 +135,7 @@ mod wasm {
             scale,
         )))
     }
+
     #[wasm_bindgen]
     pub fn pick_entity(x: f32, y: f32, radius: f32) -> js_sys::Promise {
         pack_reciever(dock_push_commands(DockCommand::PickEntity(
@@ -132,23 +146,30 @@ mod wasm {
 }
 
 pub fn run() {
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(AssetPlugin {
-                meta_check: AssetMetaCheck::Never,
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    canvas: Some("#mygame-canvas".into()),
-                    fit_canvas_to_parent: true,
+    let mut app = App::default();
+    app.insert_resource(ClearColor(Color::linear_rgb(0.3, 0.3, 0.3)))
+        .add_plugins(
+            DefaultPlugins
+                .set(AssetPlugin {
+                    meta_check: AssetMetaCheck::Never,
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        canvas: Some("#mygame-canvas".into()),
+                        fit_canvas_to_parent: true,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(bevy::log::LogPlugin {
+                    // Uncomment this to override the default log settings:
+                    // level: bevy::log::Level::TRACE,
+                    // filter: "wgpu=warn,bevy_ecs=info".to_string(),
                     ..default()
                 }),
-                ..default()
-            }),
-    )
-    .add_plugins(VelloPlugin)
-    .add_plugins(DockPlugin);
-    app.run();
+        )
+        .add_plugins(DockPlugin)
+        .add_plugins(VelloPlugin)
+        .run();
 }

@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-bevy_vello = { path = "../../" , features = ["svg", "lottie"]}
+bevy_vello = { path = "../../" , features = ["svg", "lottie", "particles"]}
 bevy = { workspace = true }
 wasm-bindgen = "0.2.65"
 js-sys = "0.3.64"

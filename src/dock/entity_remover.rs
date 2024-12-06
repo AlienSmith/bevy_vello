@@ -22,12 +22,13 @@ impl Plugin for EntityRemoverPlugin {
 
 fn despawn_entity(mut commands: Commands, r: Res<EntityRemoverReciever>) {
     if let Ok(id) = r.r.try_recv() {
-        bevy::log::info!("get_dock {}", id.clone());
+        bevy::log::info!("remove_dock {}", id.clone());
         let data = dock_get_command(id);
-        if let DockCommand::RemoveEntity(asset_id) = &data.data {
-            let entity = dock_get_entity_with_id(*asset_id);
+        if let DockCommand::RemoveEntity(entity_id) = &data.data {
+            let entity = dock_get_entity_with_id(*entity_id);
+            bevy::log::info!("remove entity id {}, {:?}", *entity_id, entity);
             commands.entity(entity).despawn();
-            dock_remove_entitie(id);
+            dock_remove_entitie(*entity_id);
             let _ = data.s.send(DockCommandResult::Ok(1));
         } else {
             let _ = data

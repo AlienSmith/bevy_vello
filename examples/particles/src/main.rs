@@ -4,10 +4,7 @@
 //! tweaked at runtime via the egui inspector to move the 2D rendering layer of
 //! particle above or below the reference square.
 
-use bevy::{
-    prelude::*,
-    render::{render_resource::WgpuFeatures, settings::WgpuSettings, RenderPlugin},
-};
+use bevy::prelude::*;
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 

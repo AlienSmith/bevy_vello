@@ -1,5 +1,3 @@
-use std::path;
-
 use crate::integrations::VelloSceneSubBundle;
 use crate::VelloAssetBundle;
 use crate::VelloScene;
@@ -35,7 +33,6 @@ fn spawn_vello_bundle(mut commands: Commands, r: Res<EntitySpawnerReciever>) {
         if let DockCommand::SpawnEntity(asset_id, transform, entity_type) = &data.data {
             match entity_type {
                 EntityType::Vello => {
-                    bevy::log::info!("spawn entity with vello asset {}", id.clone());
                     let asset = dock_get_asset_with_id(*asset_id);
                     let entity = commands
                         .spawn((
@@ -51,6 +48,12 @@ fn spawn_vello_bundle(mut commands: Commands, r: Res<EntitySpawnerReciever>) {
                         .id();
                     let entity_id = dock_push_entitie(entity);
                     let _ = data.s.send(DockCommandResult::Ok(entity_id));
+                    bevy::log::info!(
+                        "spawn entity with vello asset {}, id {}, entity{:?}",
+                        id.clone(),
+                        entity_id,
+                        entity
+                    );
                 }
                 EntityType::Particle => {
                     let effect = dock_get_particle_asset_with_id(*asset_id);
@@ -68,7 +71,7 @@ fn spawn_vello_bundle(mut commands: Commands, r: Res<EntitySpawnerReciever>) {
                         .spawn((
                             ParticleEffectBundle {
                                 // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
-                                effect: ParticleEffect::new(effect).with_z_layer_2d(Some(1.0)),
+                                effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
                                 transform: *transform,
                                 ..default()
                             },
@@ -76,10 +79,19 @@ fn spawn_vello_bundle(mut commands: Commands, r: Res<EntitySpawnerReciever>) {
                                 scene,
                                 ..Default::default()
                             },
+                            Sensor,
+                            RigidBody::Static,
+                            Collider::rectangle(100.0, 100.0),
                         ))
                         .id();
                     let entity_id = dock_push_entitie(entity);
                     let _ = data.s.send(DockCommandResult::Ok(entity_id));
+                    bevy::log::info!(
+                        "spawn entity with particle asset {}, id {}, entity{:?}",
+                        id.clone(),
+                        entity_id,
+                        entity
+                    );
                 }
             }
         } else {
