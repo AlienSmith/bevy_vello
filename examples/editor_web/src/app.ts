@@ -107,6 +107,7 @@ class AssetItem extends GUIWrapper {
     name: string;
     id: number;
     is_particle: boolean;
+    secondary_id: number;
     addEntityToContainer: (name: string, id: number) => void;
     constructor(name: string, id: number, gui: dat.GUI, is_particle: boolean, add_entity_to_container: (name: string, id: number) => void) {
         super()
@@ -114,14 +115,16 @@ class AssetItem extends GUIWrapper {
         this.name = name;
         this.id = id;
         this.is_particle = is_particle;
-        this.gui = gui.addFolder("asset_" + name);
+        this.secondary_id = 0;
+        this.gui = gui.addFolder("asset_" + name + "__:" + id);
+        this.gui.add(this, "secondary_id");
         this.gui.add(this, "entitySpawn");
         this.gui.open();
         this.addEntityToContainer = add_entity_to_container;
         log.info(`Asset created ............`)
     }
     entitySpawn() {
-        spawn_entity(this.id, new Transform2D(0, 0, 0, 1, 1, 0), this.is_particle).then((entity_id) => {
+        spawn_entity(this.id, new Transform2D(0, 0, 0, 1, 1, 0), this.is_particle, this.secondary_id).then((entity_id) => {
             this.addEntityToContainer(this.name + entity_id, entity_id);
         });
     }

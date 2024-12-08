@@ -102,6 +102,7 @@ mod wasm {
         asset_id: u32,
         transform: Transform2D,
         is_particle: bool,
+        secondary_id: u32,
     ) -> js_sys::Promise {
         let entity_type = if is_particle {
             EntityType::Particle
@@ -112,6 +113,7 @@ mod wasm {
             asset_id,
             transform.into(),
             entity_type,
+            secondary_id,
         )))
     }
 

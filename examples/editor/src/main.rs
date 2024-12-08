@@ -36,6 +36,13 @@ struct LOTTIEReceivers {
     lottie_r: Arc<Mutex<oneshot::Receiver<DockCommandResult>>>,
 }
 
+#[derive(Resource)]
+struct ParticleVelloIndexes {
+    svg_id: u32,
+    particle_id: u32,
+    spawned: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::default();
     app.insert_resource(ClearColor(Color::BLACK))
@@ -55,9 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(DockPlugin)
         .add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
+        .add_systems(Update, another_particle_system)
         .add_systems(Update, particle_system)
         .add_systems(Update, svg_system)
-        .add_systems(Update, lottie_system)
+        //.add_systems(Update, lottie_system)
         .add_systems(Update, draw_cursor)
         .run();
 
@@ -79,10 +87,35 @@ fn setup_vector_graphics(mut commands: Commands) {
     commands.insert_resource(ParticleRecievers {
         p_r: Arc::new(Mutex::new(particle_r)),
     });
+    commands.insert_resource(ParticleVelloIndexes {
+        svg_id: 0,
+        particle_id: 0,
+        spawned: false,
+    });
+}
+
+fn another_particle_system(mut pv: ResMut<ParticleVelloIndexes>) {
+    if !pv.spawned && pv.svg_id != 0 && pv.particle_id != 0 {
+        pv.spawned = true;
+        let _ = dock_push_commands(DockCommand::SpawnEntity(
+            pv.particle_id,
+            Transform::from_translation(Vec3 {
+                x: 50.0,
+                y: 50.0,
+                z: 1.0,
+            }),
+            EntityType::Particle,
+            pv.svg_id,
+        ));
+    }
 }
 
 /// Demonstrates applying rotation and movement based on keyboard input.
-fn particle_system(mut commands: Commands, particle_recievers: Option<ResMut<ParticleRecievers>>) {
+fn particle_system(
+    mut commands: Commands,
+    particle_recievers: Option<ResMut<ParticleRecievers>>,
+    mut pv: ResMut<ParticleVelloIndexes>,
+) {
     if let Some(l_rs) = particle_recievers {
         let p_rs = &mut *l_rs.p_r.lock().unwrap();
         if let Some(r) = p_rs.now_or_never() {
@@ -92,16 +125,18 @@ fn particle_system(mut commands: Commands, particle_recievers: Option<ResMut<Par
                     match v {
                         DockCommandResult::Ok(index) => {
                             println!("particle loaded with value {}", index);
+                            pv.particle_id = index;
                             // let effect = dock_get_particle_asset_with_id(index);
-                            let _ = dock_push_commands(DockCommand::SpawnEntity(
-                                index,
-                                Transform::from_translation(Vec3 {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    z: 1.0,
-                                }),
-                                EntityType::Particle,
-                            ));
+                            // let _ = dock_push_commands(DockCommand::SpawnEntity(
+                            //     index,
+                            //     Transform::from_translation(Vec3 {
+                            //         x: 0.0,
+                            //         y: 0.0,
+                            //         z: 1.0,
+                            //     }),
+                            //     EntityType::Particle,
+                            //     0,
+                            // ));
                             // spawn_particles_at(
                             //     &mut commands,
                             //     effect,
@@ -125,7 +160,11 @@ fn particle_system(mut commands: Commands, particle_recievers: Option<ResMut<Par
     }
 }
 
-fn svg_system(mut commands: Commands, svg_recivers: Option<ResMut<SVGReceivers>>) {
+fn svg_system(
+    mut commands: Commands,
+    svg_recivers: Option<ResMut<SVGReceivers>>,
+    mut pv: ResMut<ParticleVelloIndexes>,
+) {
     if let Some(rcs) = svg_recivers {
         let rs = &mut *rcs.svg_r.lock().unwrap();
         if let Some(value) = rs.now_or_never() {
@@ -135,22 +174,24 @@ fn svg_system(mut commands: Commands, svg_recivers: Option<ResMut<SVGReceivers>>
                     match v {
                         DockCommandResult::Ok(index) => {
                             println!("svg loaded with value {}", index);
-                            let _ = dock_push_commands(DockCommand::SpawnEntity(
-                                index,
-                                Transform::from_translation(Vec3 {
-                                    x: 100.0,
-                                    y: 100.0,
-                                    z: 0.0,
-                                }),
-                                EntityType::Vello,
-                            ));
-                            let _ = dock_push_commands(DockCommand::PickEntity(
-                                Vec2 {
-                                    x: -100.0,
-                                    y: -100.0,
-                                },
-                                100.0,
-                            ));
+                            pv.svg_id = index;
+                            // let _ = dock_push_commands(DockCommand::SpawnEntity(
+                            //     index,
+                            //     Transform::from_translation(Vec3 {
+                            //         x: 100.0,
+                            //         y: 100.0,
+                            //         z: 0.0,
+                            //     }),
+                            //     EntityType::Vello,
+                            //     0,
+                            // ));
+                            // let _ = dock_push_commands(DockCommand::PickEntity(
+                            //     Vec2 {
+                            //         x: -100.0,
+                            //         y: -100.0,
+                            //     },
+                            //     100.0,
+                            // ));
                         }
                         DockCommandResult::NotOk(s) => {
                             println!("{}", s);
@@ -191,6 +232,7 @@ fn lottie_system(mut commands: Commands, lottie_recivers: Option<ResMut<LOTTIERe
                                     z: 1.0,
                                 }),
                                 EntityType::Vello,
+                                0,
                             ));
                         }
                         DockCommandResult::NotOk(s) => {

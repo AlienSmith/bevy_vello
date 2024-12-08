@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .set(bevy::log::LogPlugin {
                     // Uncomment this to override the default log settings:
-                    level: bevy::log::Level::TRACE,
-                    filter: "wgpu=warn,bevy_ecs=info".to_string(),
+                    // level: bevy::log::Level::TRACE,
+                    // filter: "wgpu=warn,bevy_ecs=info".to_string(),
                     ..default()
                 }),
         )
@@ -74,13 +74,19 @@ fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
     let color1 = peniko::Color::rgb(0.0, 1.0, 1.0);
     *scene = VelloScene::default();
     scene.stroke(
+        &vello::kurbo::Stroke::new(12.0).with_solid_ratio(0.0),
+        kurbo::Affine::default(),
+        color,
+        None,
+        &Circle::new(Point { x: -5.0, y: 0.0 }, 10.0),
+    );
+    scene.stroke(
         &Stroke::new(2.0),
         Affine::default(),
         color1,
         None,
         &Circle::new(Point { x: -5.0, y: 0.0 }, 10.0),
     );
-    scene.push_instance(0, 0);
     let mut path = vello::kurbo::BezPath::new();
     path.push(PathEl::MoveTo(Point { x: -5.0, y: 0.0 }));
     path.push(PathEl::LineTo(Point { x: 5.0, y: 0.0 }));
@@ -98,7 +104,6 @@ fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
         None,
         &path,
     );
-    scene.pop_instance();
 }
 
 fn _make_default_effect() -> EffectAsset {
