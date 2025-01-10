@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Update, particle_system)
         .add_systems(Update, svg_system)
         //.add_systems(Update, lottie_system)
-        .add_systems(Update, draw_cursor)
+        //.add_systems(Update, draw_cursor)
         .run();
 
     Ok(())

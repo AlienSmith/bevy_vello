@@ -45,7 +45,8 @@ pub fn setup_image(images: &mut Assets<Image>, window: &WindowResolution) -> Han
             sample_count: 1,
             usage: TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_DST
-                | TextureUsages::STORAGE_BINDING,
+                | TextureUsages::STORAGE_BINDING
+                | TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         },
         ..default()
