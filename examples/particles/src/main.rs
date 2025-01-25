@@ -200,6 +200,12 @@ fn setup_vector_graphics(mut commands: Commands) {
         None,
         &kurbo::Rect::new(-2.5, -5.0, 2.5, 5.0),
     );
+    let mut light_scene: VelloScene = VelloScene::default();
+    light_scene.push_point_light(kurbo::Affine::scale(1600.0), &[1.0, 1.0, 1.0, 1.0]);
+    commands.spawn((VelloSceneBundle {
+        scene: light_scene,
+        ..Default::default()
+    },));
     commands.spawn((
         VelloSceneBundle {
             scene,
