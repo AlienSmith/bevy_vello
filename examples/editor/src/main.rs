@@ -14,7 +14,7 @@ use bevy_vello::dock::{
     stream_factory::dock_push_commands,
     DockPlugin,
 };
-use bevy_vello::VelloPlugin;
+use bevy_vello::{add_default_light, VelloPlugin};
 use futures::{channel::oneshot, FutureExt};
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(DockPlugin)
         .add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
+        .add_systems(Startup, add_default_light)
         .add_systems(Update, another_particle_system)
         .add_systems(Update, particle_system)
         .add_systems(Update, svg_system)

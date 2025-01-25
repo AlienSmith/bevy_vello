@@ -144,3 +144,12 @@ impl From<vello::Scene> for VelloScene {
         Self(scene)
     }
 }
+
+pub fn add_default_light(mut commands: Commands) {
+    let mut light_scene: VelloScene = VelloScene::default();
+    light_scene.push_point_light(kurbo::Affine::scale(1600.0), &[1.0, 1.0, 1.0, 1.0]);
+    commands.spawn((VelloSceneBundle {
+        scene: light_scene,
+        ..Default::default()
+    },));
+}
