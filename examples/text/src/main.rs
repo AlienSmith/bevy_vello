@@ -2,7 +2,9 @@ use bevy::{
     asset::{embedded_asset, AssetMetaCheck},
     prelude::*,
 };
-use bevy_vello::{prelude::*, text::VelloTextAlignment, vello::peniko, VelloPlugin};
+use bevy_vello::{
+    add_default_light, prelude::*, text::VelloTextAlignment, vello::peniko, VelloPlugin,
+};
 
 fn main() {
     let mut app = App::new();
@@ -13,7 +15,12 @@ fn main() {
     .add_plugins(VelloPlugin)
     .add_systems(
         Startup,
-        (setup_camera, setup_screenspace_text, setup_worldspace_text),
+        (
+            setup_camera,
+            setup_screenspace_text,
+            setup_worldspace_text,
+            add_default_light,
+        ),
     );
     embedded_asset!(app, "assets/Rubik-Medium.ttf");
     embedded_asset!(app, "assets/Rubik-Medium.ttf");

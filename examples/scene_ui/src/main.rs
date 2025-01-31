@@ -1,5 +1,5 @@
 use bevy::{color::palettes::css, prelude::*};
-use bevy_vello::{prelude::*, VelloPlugin};
+use bevy_vello::{add_default_light, prelude::*, VelloPlugin};
 use std::f64::consts::{FRAC_PI_4, SQRT_2};
 
 fn main() {
@@ -7,6 +7,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(VelloPlugin)
         .add_systems(Startup, setup_ui)
+        .add_systems(Startup, add_default_light)
         .add_systems(Update, update_ui)
         .run();
 }

@@ -1,15 +1,20 @@
 use bevy::prelude::*;
 use bevy_vello::{
+    add_default_light,
     prelude::*,
     vello::{kurbo, peniko},
     VelloPlugin,
 };
+
+#[derive(Component, Default)]
+struct ContentScene {}
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
+        .add_systems(Startup, add_default_light)
         .add_systems(Update, simple_animation)
         .run();
     bevy::log::warn!("Initialize");
@@ -17,10 +22,13 @@ fn main() {
 
 fn setup_vector_graphics(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
-    commands.spawn(VelloSceneBundle::default());
+    commands.spawn((VelloSceneBundle::default(), ContentScene::default()));
 }
 
-fn simple_animation(mut query_scene: Query<(&mut Transform, &mut VelloScene)>, time: Res<Time>) {
+fn simple_animation(
+    mut query_scene: Query<(&mut Transform, &mut VelloScene), With<ContentScene>>,
+    time: Res<Time>,
+) {
     let sin_time = time.elapsed_seconds().sin().mul_add(0.5, 0.5);
     let (mut transform, mut scene) = query_scene.single_mut();
     // Reset scene every frame

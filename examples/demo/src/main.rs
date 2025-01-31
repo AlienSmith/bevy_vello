@@ -6,7 +6,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::EguiPlugin;
-use bevy_vello::{prelude::*, VelloPlugin};
+use bevy_vello::{add_default_light, prelude::*, VelloPlugin};
 
 fn main() {
     let mut app = App::new();
@@ -19,6 +19,7 @@ fn main() {
     .init_resource::<EmbeddedAssetRegistry>()
     .add_plugins(bevy_pancam::PanCamPlugin)
     .add_systems(Startup, setup_vector_graphics)
+    .add_systems(Startup, add_default_light)
     .add_systems(Update, (print_metadata, ui::controls_ui));
     embedded_asset!(app, "assets/calendar.json");
     app.run();

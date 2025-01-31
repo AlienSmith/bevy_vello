@@ -12,9 +12,9 @@ use bevy_hanabi::prelude::*;
 
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
+    add_default_light,
     integrations::{HanabiIntegrationPlugin, VelloSceneSubBundle},
-    vello::scene::StorkeExpand,
-    vello::{kurbo, peniko},
+    vello::{kurbo, peniko, scene::StorkeExpand},
 };
 use bevy_vello::{prelude::*, VelloPlugin};
 
@@ -61,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // app.add_plugins(WorldInspectorPlugin::default());
     app.add_plugins(VelloPlugin)
         .add_systems(Startup, setup_vector_graphics)
+        .add_systems(Startup, add_default_light)
         .add_systems(Update, player_control_system)
         .run();
 
@@ -200,12 +201,7 @@ fn setup_vector_graphics(mut commands: Commands) {
         None,
         &kurbo::Rect::new(-2.5, -5.0, 2.5, 5.0),
     );
-    let mut light_scene: VelloScene = VelloScene::default();
-    light_scene.push_point_light(kurbo::Affine::scale(1600.0), &[1.0, 1.0, 1.0, 1.0]);
-    commands.spawn((VelloSceneBundle {
-        scene: light_scene,
-        ..Default::default()
-    },));
+
     commands.spawn((
         VelloSceneBundle {
             scene,

@@ -2,7 +2,7 @@ use bevy::{
     asset::{embedded_asset, AssetMetaCheck},
     prelude::*,
 };
-use bevy_vello::{prelude::*, VelloPlugin};
+use bevy_vello::{add_default_light, prelude::*, VelloPlugin};
 
 fn main() {
     let mut app = App::new();
@@ -11,6 +11,7 @@ fn main() {
         ..default()
     }))
     .add_plugins(VelloPlugin)
+    .add_systems(Startup, add_default_light)
     .add_systems(Startup, load_lottie);
     embedded_asset!(app, "assets/Tiger.json");
     app.run();

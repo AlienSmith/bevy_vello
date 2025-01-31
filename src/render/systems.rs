@@ -377,6 +377,8 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
         let gpu_images = world.resource::<RenderAssets<GpuImage>>();
         let device = world.resource::<RenderDevice>();
         let queue = world.resource::<RenderQueue>();
+        let time = world.resource::<Time>();
+        let time_in_second = time.elapsed_seconds();
         #[cfg(feature = "particles")]
         let effect_cache = world.resource::<bevy_hanabi::EffectCache>();
 
@@ -397,7 +399,7 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                                 base_color: vello::peniko::Color::TRANSPARENT,
                                 width: gpu_image.size.x as u32,
                                 height: gpu_image.size.y as u32,
-                                time_in_second: 0.0,
+                                time_in_second,
                             }),
                             &*effect_cache.obtain_export_buffer(),
                         )
@@ -415,6 +417,7 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                                 base_color: vello::peniko::Color::TRANSPARENT,
                                 width: gpu_image.size.x as u32,
                                 height: gpu_image.size.y as u32,
+                                time_in_second,
                             }),
                         )
                         .unwrap();

@@ -2,7 +2,7 @@ use bevy::{
     asset::{embedded_asset, AssetMetaCheck},
     prelude::*,
 };
-use bevy_vello::{prelude::*, VelloPlugin};
+use bevy_vello::{add_default_light, prelude::*, VelloPlugin};
 
 fn main() {
     let mut app = App::new();
@@ -11,7 +11,8 @@ fn main() {
         ..default()
     }))
     .add_plugins(VelloPlugin)
-    .add_systems(Startup, load_svg);
+    .add_systems(Startup, load_svg)
+    .add_systems(Startup, add_default_light);
     embedded_asset!(app, "assets/fountain.svg");
     app.run();
 }
