@@ -400,6 +400,7 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                                 width: gpu_image.size.x as u32,
                                 height: gpu_image.size.y as u32,
                                 time_in_second,
+                                environment_light_intensity: 2.0,
                             }),
                             &*effect_cache.obtain_export_buffer(),
                         )
@@ -418,6 +419,7 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                                 width: gpu_image.size.x as u32,
                                 height: gpu_image.size.y as u32,
                                 time_in_second,
+                                environment_light_intensity: 2.0,
                             }),
                         )
                         .unwrap();

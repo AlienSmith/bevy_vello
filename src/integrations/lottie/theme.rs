@@ -110,7 +110,7 @@ fn recolor_brush(brush: &mut Brush, target_color: vello::peniko::Color) {
                     stop.color = target_color;
                 }
             }
-            vello::peniko::Brush::Image(_) => {}
+            _ => {}
         },
         velato::model::Brush::Animated(brush) => match brush {
             velato::model::animated::Brush::Solid(brush) => match brush {
