@@ -24,3 +24,6 @@ js-sys = "0.3.64"
 wasm-bindgen-futures = "0.4.42"
 futures = "0.3"
 avian2d = "0.1"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
