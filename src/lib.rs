@@ -145,6 +145,14 @@ impl From<vello::Scene> for VelloScene {
     }
 }
 
+#[derive(Component, Default, Clone)]
+pub struct VelloSceneRepalyer(vello::SceneReplayer);
+impl From<vello::SceneReplayer> for VelloSceneRepalyer {
+    fn from(replayer: vello::SceneReplayer) -> Self {
+        Self(replayer)
+    }
+}
+
 pub fn add_default_light(mut commands: Commands) {
     let mut light_scene: VelloScene = VelloScene::default();
     let light_radius = 800.0;

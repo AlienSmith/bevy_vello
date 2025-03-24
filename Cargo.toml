@@ -12,7 +12,9 @@ members = [
   "examples/scene_ui",
   "examples/particles",
   "examples/editor",
-  "examples/avian"
+  "examples/avian",
+  "example_libs/tankgame_lib",
+  "examples/tankgame_bin"
 ]
 
 [workspace.package]
