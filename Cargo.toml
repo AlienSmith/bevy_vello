@@ -14,6 +14,7 @@ members = [
   "examples/editor",
   "examples/avian",
   "example_libs/tankgame_lib",
+  "example_libs/particles_lib",
   "examples/tankgame_bin"
 ]
 

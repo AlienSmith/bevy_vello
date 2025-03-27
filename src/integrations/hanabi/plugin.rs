@@ -1,6 +1,17 @@
 use bevy::prelude::*;
 use bevy_hanabi::prelude::*;
 
+//Use to Intergarte Hanabi with vello
+//To use this crate you need to make sure
+//1. enable particles feature on bevy vello "bevy_vello = { path = "../../", features = ["particles"] }"
+//2. Disable AssetMetaCheck on App like following
+//    App::new()
+//        .add_plugins(DefaultPlugins.set(AssetPlugin {
+//            meta_check: AssetMetaCheck::Never,
+//            ..default()
+//        }))
+//3. have fun
+
 use crate::{CoordinateSpace, VelloScene};
 pub struct HanabiIntegrationPlugin;
 

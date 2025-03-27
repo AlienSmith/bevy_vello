@@ -1,13 +1,18 @@
 use std::str;
 
-use bevy::prelude::*;
+use bevy::{asset::AssetMetaCheck, prelude::*};
 use bevy_vello::{
     add_default_light,
+    integrations::HanabiIntegrationPlugin,
     prelude::*,
     vello::{kurbo::Affine, peniko::PBRImages},
     VelloPlugin, VelloSceneRepalyer,
 };
-use tankgame_lib::tank;
+use tankgame_lib::{
+    init_particles_player,
+    tank::{self, shell::update_shell},
+    update_particle_scene, ParticlesPlayer,
+};
 
 const BASE: &[u8] = include_bytes!("../base.txt");
 const GUN: &[u8] = include_bytes!("../gun.txt");
@@ -15,13 +20,21 @@ const TURRENT: &[u8] = include_bytes!("../turrent.txt");
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(AssetPlugin {
+            meta_check: AssetMetaCheck::Never,
+            ..default()
+        }))
+        .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(VelloPlugin)
+        .insert_resource(ParticlesPlayer::default())
         .add_systems(Startup, setup_vector_graphics)
         .add_systems(Startup, add_default_light)
+        .add_systems(Startup, init_particles_player)
         .add_systems(Update, tank::base::control_system)
         .add_systems(Update, tank::turrent::control_system)
         .add_systems(Update, tank::gun::control_system)
+        .add_systems(Update, update_particle_scene)
+        .add_systems(Update, update_shell)
         .run();
     bevy::log::warn!("Initialize");
 }

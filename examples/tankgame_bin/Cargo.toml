@@ -8,6 +8,6 @@ publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-bevy_vello = { path = "../../" }
+bevy_vello = { path = "../../", features = ["particles"] }
 bevy = { workspace = true }
 tankgame_lib = {path = "../../example_libs/tankgame_lib"}
