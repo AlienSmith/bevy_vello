@@ -34,7 +34,6 @@ impl Gun {
 
 pub fn control_system(
     mut commands: Commands,
-    player: Res<ParticlesPlayer>,
     time: Res<Time>,
     button: Res<ButtonInput<MouseButton>>,
     mut query_scene: Query<(&mut Transform, &mut Gun, &GlobalTransform)>,

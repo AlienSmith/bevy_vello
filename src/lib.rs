@@ -24,7 +24,7 @@ pub mod prelude {
 
     pub use crate::{
         debug::DebugVisualizations,
-        integrations::{VectorFile, VelloAsset, VelloAssetAlignment},
+        integrations::{VectorFile, VelloAsset, VelloAssetAlignment, VelloReplaySceneAsset},
         render::VelloCanvasMaterial,
         text::{VelloFont, VelloText, VelloTextAlignment},
         CoordinateSpace, VelloAssetBundle, VelloScene, VelloSceneBundle, VelloTextBundle,
@@ -146,8 +146,8 @@ impl From<vello::Scene> for VelloScene {
 }
 
 #[derive(Component, Default, Clone)]
-pub struct VelloSceneRepalyer(vello::SceneReplayer);
-impl From<vello::SceneReplayer> for VelloSceneRepalyer {
+pub struct VelloSceneReplayer(vello::SceneReplayer);
+impl From<vello::SceneReplayer> for VelloSceneReplayer {
     fn from(replayer: vello::SceneReplayer) -> Self {
         Self(replayer)
     }

@@ -4,7 +4,9 @@
 //! tweaked at runtime via the egui inspector to move the 2D rendering layer of
 //! particle above or below the reference square.
 
-use bevy::prelude::*;
+use std::time::Duration;
+
+use bevy::{ecs::entity, prelude::*};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
@@ -14,9 +16,22 @@ use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     add_default_light,
     integrations::{HanabiIntegrationPlugin, VelloSceneSubBundle},
-    vello::{kurbo, peniko, scene::StorkeExpand},
+    vello::{
+        kurbo,
+        peniko::{self, GlowColor},
+        scene::StorkeExpand,
+    },
 };
 use bevy_vello::{prelude::*, VelloPlugin};
+use ron::value::Float;
+
+#[derive(Clone, Default, Component)]
+pub struct ExplosionFading {
+    timer: Timer,
+    init_color: Vec3,
+    end_color: Vec3,
+    particle_scales: f32,
+}
 
 const BOUNDS: Vec2 = Vec2::new(1200.0, 640.0);
 
@@ -38,7 +53,7 @@ struct Player {
 
     effect: Option<Handle<EffectAsset>>,
 }
-
+//Notic without "meta_check: AssetMetaCheck::Never" bevy would complain about the HanabiNode.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::default();
     app.insert_resource(ClearColor(Color::BLACK))
@@ -59,51 +74,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
-    app.add_plugins(VelloPlugin)
-        .add_systems(Startup, setup_vector_graphics)
-        .add_systems(Startup, add_default_light)
-        .add_systems(Update, player_control_system)
-        .run();
+    app.add_plugins(VelloPlugin).run();
+    // .add_systems(Startup, setup_vector_graphics)
+    // .add_systems(Startup, add_default_light)
+    // .add_systems(Update, player_control_system)
+    // .add_systems(Update, simple_animation)
+    // .run();
 
     Ok(())
 }
 
-fn make_default_rect_particles(scene: &mut VelloScene, particle_index: u32) {
+fn make_default_rect_particles(scene: &mut VelloScene) {
     use vello::kurbo::*;
-    let value = (96.0 + (particle_index as f32) * 8.0) / 256.0;
-    let color = peniko::Color::rgb(value as f64, 0.0, 0.0);
-    let color1 = peniko::Color::rgb(0.0, 1.0, 1.0);
+    let color = GlowColor {
+        color: peniko::Color::rgb(0.5, 0.0, 0.0),
+        glow: 4.0,
+    };
     *scene = VelloScene::default();
-    scene.stroke(
-        &vello::kurbo::Stroke::new(12.0).with_solid_ratio(0.0),
+    scene.fill(
+        peniko::Fill::NonZero,
         kurbo::Affine::default(),
         color,
         None,
         &Circle::new(Point { x: -5.0, y: 0.0 }, 10.0),
-    );
-    scene.stroke(
-        &Stroke::new(2.0),
-        Affine::default(),
-        color1,
-        None,
-        &Circle::new(Point { x: -5.0, y: 0.0 }, 10.0),
-    );
-    let mut path = vello::kurbo::BezPath::new();
-    path.push(PathEl::MoveTo(Point { x: -5.0, y: 0.0 }));
-    path.push(PathEl::LineTo(Point { x: 5.0, y: 0.0 }));
-    scene.stroke(
-        &vello::kurbo::Stroke::new(12.0).with_solid_ratio(0.0),
-        kurbo::Affine::default(),
-        color,
-        None,
-        &path,
-    );
-    scene.stroke(
-        &vello::kurbo::Stroke::new(2.0),
-        kurbo::Affine::default(),
-        color1,
-        None,
-        &path,
     );
 }
 
@@ -117,7 +110,7 @@ fn _make_default_effect() -> EffectAsset {
     let age = writer.lit(0.).expr();
     let init_age = SetAttributeModifier::new(Attribute::AGE, age);
 
-    let lifetime = writer.lit(10.).expr();
+    let lifetime = writer.lit(2.0).expr();
     let init_lifetime = SetAttributeModifier::new(Attribute::LIFETIME, lifetime);
 
     let init_pos = SetPositionCircleModifier {
@@ -127,24 +120,34 @@ fn _make_default_effect() -> EffectAsset {
         dimension: ShapeDimension::Surface,
     };
 
+    let speed = writer.add_property("speed", Value::Scalar(ScalarValue::Float(100.0)));
+    let speed = writer.prop(speed);
+
     let init_vel = SetVelocityCircleModifier {
         center: writer.lit(Vec3::ZERO).expr(),
         axis: writer.lit(Vec3::Z).expr(),
-        speed: writer.lit(30.0).expr(),
+        speed: (writer.rand(ValueType::Scalar(ScalarType::Float))
+            * (writer.lit(3.0)
+                - writer.lit(2.0) * writer.rand(ValueType::Scalar(ScalarType::Float)))
+            * speed)
+            .expr(),
     };
+
+    let drag = writer.add_property("drag", Value::Scalar(ScalarValue::Float(4.0)));
+    let drag = writer.prop(drag).expr();
+
+    let update_drag = LinearDragModifier::new(drag);
 
     let module = writer.finish();
 
-    // Create a new effect asset spawning 30 particles per second from a circle
-    // and slowly fading from blue-ish to transparent over their lifetime.
-    // By default the asset spawns the particles at Z=0.
-    let spawner = Spawner::rate(30.0.into());
+    let spawner = Spawner::once(100.0.into(), true);
     EffectAsset::new(vec![2048], spawner, module)
         .with_name("2d_default")
         .init(init_pos)
         .init(init_vel)
         .init(init_age)
         .init(init_lifetime)
+        .update(update_drag)
         .render(SizeOverLifetimeModifier {
             gradient: Gradient::constant(Vec2::splat(2.0)),
             screen_space_size: false,
@@ -159,6 +162,7 @@ fn _make_default_effect() -> EffectAsset {
 
 fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAsset> {
     let custom_asset = ron::de::from_bytes::<EffectAsset>(&DEFAULT_PARTICLES).unwrap();
+    //let custom_asset = _make_default_effect();
     effects.add(
         custom_asset, // .render(ColorOverLifetimeModifier { gradient })
                       // .render(round),
@@ -173,20 +177,89 @@ fn spawn_particles_at(
 ) {
     // Create a color gradient for the particles
     let mut scene = VelloScene::default();
-    make_default_rect_particles(&mut scene, particle_index);
+    make_default_rect_particles(&mut scene);
     // Spawn an instance of the particle effect, and override its Z layer to
     // be above the reference white square previously spawned.
     bevy::log::info!("asset {:?}", effect);
+    let mut ep1 = EffectProperties::default();
+    ep1.set("speed", (60.0).into());
+
+    let mut ep0 = EffectProperties::default();
+    ep0.set("speed", (140.0).into());
+
+    let mut scene = VelloScene::default();
+    make_default_rect_particles(&mut scene);
     commands.spawn((
         ParticleEffectBundle {
             // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
-            effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
-            transform: Transform::from_translation(translate),
+            effect: ParticleEffect::new(effect.clone()).with_z_layer_2d(Some(0.1)),
+            transform: Transform::from_translation(Vec3 {
+                x: translate.x,
+                y: translate.y,
+                z: 0.0,
+            }),
+            effect_properties: ep0,
             ..default()
         },
         VelloSceneSubBundle {
             scene,
             ..Default::default()
+        },
+        ExplosionFading {
+            timer: Timer::from_seconds(2.0, TimerMode::Once),
+            init_color: Vec3::new(3.0, 1.8, 0.6),
+            end_color: Vec3::new(0.5, 0.5, 0.5),
+            particle_scales: 10.0,
+        },
+    ));
+
+    let mut scene = VelloScene::default();
+    make_default_rect_particles(&mut scene);
+    commands.spawn((
+        ParticleEffectBundle {
+            // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
+            effect: ParticleEffect::new(effect.clone()).with_z_layer_2d(Some(0.1)),
+            transform: Transform::from_translation(Vec3 {
+                x: translate.x,
+                y: translate.y,
+                z: 1.0,
+            }),
+            ..Default::default()
+        },
+        VelloSceneSubBundle {
+            scene,
+            ..Default::default()
+        },
+        ExplosionFading {
+            timer: Timer::from_seconds(2.0, TimerMode::Once),
+            init_color: Vec3::new(1.0, 1.0, 1.0),
+            end_color: Vec3::new(0.2, 0.2, 0.2),
+            particle_scales: 15.0,
+        },
+    ));
+    let mut scene = VelloScene::default();
+    make_default_rect_particles(&mut scene);
+    commands.spawn((
+        ParticleEffectBundle {
+            // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
+            effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
+            transform: Transform::from_translation(Vec3 {
+                x: translate.x,
+                y: translate.y,
+                z: 2.0,
+            }),
+            effect_properties: ep1,
+            ..default()
+        },
+        VelloSceneSubBundle {
+            scene,
+            ..Default::default()
+        },
+        ExplosionFading {
+            timer: Timer::from_seconds(2.0, TimerMode::Once),
+            init_color: Vec3::new(3.0, 1.8, 0.6),
+            end_color: Vec3::new(0.5, 0.5, 0.5),
+            particle_scales: 6.0,
         },
     ));
 }
@@ -295,5 +368,50 @@ mod test {
             .unwrap();
         let mut file = File::create("2d_default.particles").unwrap();
         file.write_all(s.as_bytes()).unwrap();
+    }
+}
+
+fn simple_animation(
+    mut commands: Commands,
+    mut query_scene: Query<(&mut VelloScene, &mut ExplosionFading, Entity)>,
+    time: Res<Time>,
+) {
+    for (mut scene, mut e_timer, entity) in query_scene.iter_mut() {
+        e_timer.timer.tick(time.delta());
+        let time = e_timer.timer.elapsed_secs() / 2.0;
+        let (radius, alpha) = if time < 0.7 {
+            (e_timer.particle_scales, 1.0)
+        } else {
+            let tt = (time - 0.7) / 0.3;
+            let ttt = tt * tt * (3.0 - 2.0 * tt);
+            let r = e_timer.particle_scales * 0.5 + e_timer.particle_scales * 0.5 * (1.0 - ttt);
+            (r, (1.0 - ttt))
+        };
+        let color = e_timer.init_color * (1.0 - time) + e_timer.end_color * time;
+        let glow = color.length();
+        let color = GlowColor {
+            color: peniko::Color::rgba(
+                (color.x / glow) as f64,
+                (color.y / glow) as f64,
+                (color.z / glow) as f64,
+                alpha.into(),
+            ),
+            glow,
+        };
+        if let Some((particle_index, particle_size)) = scene.get_instance_index_in_export_buffer() {
+            *scene = VelloScene::default();
+            scene.fill(
+                peniko::Fill::NonZero,
+                kurbo::Affine::default(),
+                color,
+                None,
+                &kurbo::Circle::new(kurbo::Point { x: -5.0, y: 0.0 }, radius.into()),
+            );
+            scene.set_instance_index_in_export_buffer(particle_index, particle_size);
+        }
+        if e_timer.timer.finished() {
+            commands.entity(entity).despawn();
+            info!("particle despawned");
+        }
     }
 }

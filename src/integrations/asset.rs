@@ -1,5 +1,51 @@
 use crate::VectorFile;
-use bevy::{prelude::*, reflect::TypePath};
+use bevy::{
+    asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
+    prelude::*,
+    reflect::TypePath,
+};
+use thiserror::Error;
+use vello::ReuseSceneReplayer;
+#[derive(Asset, TypePath, Clone)]
+pub struct VelloReplaySceneAsset {
+    pub player: ReuseSceneReplayer,
+}
+
+#[derive(Default)]
+pub struct VelloReplaySceneAssetLoader;
+
+/// Possible errors that can be produced by [`VelloReplaySceneAssetLoader`]
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum VelloReplaySceneAssetLoaderError {
+    /// An [IO](std::io) Error
+    #[error("Could not load asset: {0}")]
+    Io(#[from] std::io::Error),
+    /// A [RON](ron) Error
+    #[error("Could not parse RON: {0}")]
+    ReplayerError(#[from] vello::SceneReplayerError),
+}
+
+impl AssetLoader for VelloReplaySceneAssetLoader {
+    type Asset = VelloReplaySceneAsset;
+    type Settings = ();
+    type Error = VelloReplaySceneAssetLoaderError;
+    async fn load<'a>(
+        &'a self,
+        reader: &'a mut Reader<'_>,
+        _settings: &'a (),
+        _load_context: &'a mut LoadContext<'_>,
+    ) -> Result<VelloReplaySceneAsset, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        let player = vello::ReuseSceneReplayer::new(&bytes)?;
+        Ok(VelloReplaySceneAsset { player })
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["scene"]
+    }
+}
 
 #[derive(Asset, TypePath, Clone)]
 pub struct VelloAsset {

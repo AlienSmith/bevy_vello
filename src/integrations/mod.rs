@@ -21,7 +21,9 @@ mod error;
 pub use error::VectorLoaderError;
 
 mod asset;
-pub use asset::{VelloAsset, VelloAssetAlignment};
+pub use asset::{
+    VelloAsset, VelloAssetAlignment, VelloReplaySceneAsset, VelloReplaySceneAssetLoader,
+};
 
 #[derive(Clone)]
 pub enum VectorFile {

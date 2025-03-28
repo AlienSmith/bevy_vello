@@ -1,5 +1,6 @@
 use crate::{
-    debug::DebugVisualizationsPlugin, render::VelloRenderPlugin, text::VelloFontLoader, VelloAsset,
+    debug::DebugVisualizationsPlugin, integrations::VelloReplaySceneAssetLoader,
+    prelude::VelloReplaySceneAsset, render::VelloRenderPlugin, text::VelloFontLoader, VelloAsset,
     VelloFont,
 };
 use bevy::prelude::*;
@@ -12,7 +13,9 @@ impl Plugin for VelloPlugin {
             .add_plugins(DebugVisualizationsPlugin)
             .init_asset::<VelloAsset>()
             .init_asset::<VelloFont>()
-            .init_asset_loader::<VelloFontLoader>();
+            .init_asset::<VelloReplaySceneAsset>()
+            .init_asset_loader::<VelloFontLoader>()
+            .init_asset_loader::<VelloReplaySceneAssetLoader>();
         #[cfg(feature = "svg")]
         app.add_plugins(crate::integrations::svg::SvgIntegrationPlugin);
         #[cfg(feature = "lottie")]
