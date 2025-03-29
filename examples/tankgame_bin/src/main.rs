@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::{asset::AssetMetaCheck, utils::HashMap};
+use bevy::{asset::AssetMetaCheck, input::mouse::MouseWheel};
 use bevy_vello::{
     add_default_light,
     integrations::HanabiIntegrationPlugin,
@@ -13,57 +13,8 @@ use tankgame_lib::{
     tank::{self, shell::update_shell},
     update_particle_scene, ParticlesPlayer,
 };
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-#[repr(C)]
-pub struct TankPartsType(pub u32);
-
-impl TankPartsType {
-    pub const BASE: Self = Self(0);
-    pub const TURRENT: Self = Self(1);
-    pub const GUN: Self = Self(2);
-}
-
-impl From<TankPartsType> for usize {
-    fn from(value: TankPartsType) -> Self {
-        value.0 as usize
-    }
-}
-
-#[derive(Resource, Clone, Default)]
-pub struct TankParts {
-    pub id_to_index: HashMap<AssetId<VelloReplaySceneAsset>, usize>,
-    pub parts: Vec<Handle<VelloReplaySceneAsset>>,
-    pub load_state: Vec<bool>,
-}
-
-impl TankParts {
-    pub fn push(&mut self, handle: Handle<VelloReplaySceneAsset>) {
-        let index = self.parts.len();
-        let id = handle.id();
-        self.id_to_index.insert(id, index);
-        self.parts.push(handle);
-        self.load_state.push(false);
-    }
-
-    pub fn get_index<T: Into<usize>>(&self, index: T) -> Option<Handle<VelloReplaySceneAsset>> {
-        let index = index.into();
-        if self.parts.len() > index && self.load_state[index] {
-            return Some(self.parts[index].clone());
-        }
-        None
-    }
-
-    pub fn mark_as_loaded(&mut self, id: &AssetId<VelloReplaySceneAsset>) {
-        if let Some(index) = self.id_to_index.get(id) {
-            self.load_state[*index] = true;
-        }
-    }
-
-    pub fn all_loaded(&self) -> bool {
-        self.load_state.iter().all(|&loaded| loaded)
-    }
-}
+use tankgame_lib::{update_edge_pan_camera, TankPartsType};
+use tankgame_lib::{EdgePanCamera, TankParts};
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum GameState {
@@ -104,6 +55,7 @@ fn main() {
                 tank::gun::control_system,
                 update_particle_scene,
                 update_shell,
+                update_edge_pan_camera,
             )
                 .run_if(in_state(GameState::Game)),
         )
@@ -140,7 +92,7 @@ fn setup_vector_graphics(
     parts: ResMut<TankParts>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn((Camera2dBundle::default(), EdgePanCamera::default()));
     let mut b_s = VelloScene::default();
     custom_assets
         .get(&parts.get_index(TankPartsType::BASE).unwrap())
