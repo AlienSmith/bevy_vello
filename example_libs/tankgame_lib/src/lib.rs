@@ -16,10 +16,12 @@ pub mod camera {
 }
 
 pub mod collision;
+pub mod text;
 
 pub use camera::edge_pan_camera::{update_edge_pan_camera, EdgePanCamera};
 pub use collision::{handle_collisions, ColliderFlags, ColliderResponds, Health};
 pub use enemy::alien::{spawn_static_enemy_at, static_alien_control_system};
+pub use text::{pop_text_update, spawn_pop_text_at, PopTextAnim};
 
 pub use tank::particles::{
     init_particles_player, spawn_particle_at, update_particle_scene, ParticleSceneAnim,
