@@ -1,0 +1,80 @@
+use bevy::prelude::*;
+use bevy_vello::{
+    prelude::skrifa::raw::tables::stat::Stat,
+    vello::{
+        kurbo::{Affine, BezPath, PathEl, Stroke},
+        peniko::{Color, Gradient},
+    },
+    VelloScene, VelloSceneBundle,
+};
+
+use crate::{spawn_particle_at, ParticlesPlayer};
+#[derive(Clone, Component)]
+pub struct Shell {
+    movement_speed: f32,
+    timer: Timer,
+}
+//width = 14.0
+fn make_shell_scene(length: f64, width: f64, steps: usize) -> VelloScene {
+    let mut path = BezPath::new();
+    path.push(PathEl::MoveTo((0.0, 0.0).into()));
+    path.push(PathEl::LineTo((length, 0.0).into()));
+    let mut scene = VelloScene::default();
+    let mut color_stops = vec![];
+    let step = 1.0 / (steps as f64);
+    for i in 0..steps {
+        let value = 0.0 + (i as f64) * step;
+        color_stops.push(Color::rgba((value * value) as f64, 0.0, 0.0, value));
+    }
+
+    let linear = Gradient::new_linear((0.0, 0.0), (length, 0.0)).with_stops(color_stops.as_slice());
+    scene.stroke(
+        &Stroke::new(width * 0.5),
+        Affine::translate((-1.0 * length, 0.0)),
+        &linear,
+        None,
+        &path,
+    );
+    scene
+}
+
+pub fn spawn_sell(commands: &mut Commands, start: Vec2, target: Vec2, movement_speed: f32) {
+    let diff = target - start;
+    let length = (diff).length();
+    let time = length / movement_speed;
+    let from = Vec3::X;
+    let to = Vec3::new(diff.x / length, diff.y / length, 0.0);
+    let quat = Quat::from_rotation_arc(from, to).normalize();
+    let transform =
+        Transform::from_rotation(quat).with_translation(Vec3::new(start.x, start.y, 0.));
+    commands.spawn((
+        VelloSceneBundle {
+            scene: make_shell_scene(400.0, 20.0, 4),
+            transform,
+            ..Default::default()
+        },
+        Shell {
+            movement_speed,
+            timer: Timer::from_seconds(time, TimerMode::Once),
+        },
+    ));
+}
+
+pub fn update_shell(
+    mut commands: Commands,
+    mut shell_query: Query<(&mut Transform, &mut Shell, &GlobalTransform, Entity)>,
+    player: Res<ParticlesPlayer>,
+    time: Res<Time>,
+) {
+    for (mut transform, mut shell, global_transform, entity) in shell_query.iter_mut() {
+        let movement_direction = transform.rotation * Vec3::X;
+        let translation_delta = movement_direction * shell.movement_speed * time.delta_seconds();
+        transform.translation += translation_delta;
+        shell.timer.tick(time.delta());
+        if shell.timer.finished() {
+            let pos = global_transform.translation();
+            spawn_particle_at(&mut commands, &player, pos);
+            commands.entity(entity).despawn();
+        }
+    }
+}
