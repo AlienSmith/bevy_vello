@@ -1,6 +1,6 @@
 use avian2d::prelude::*;
-use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
+use bevy::{asset::AssetMetaCheck, math::VectorSpace};
 use bevy_vello::{
     add_default_light,
     integrations::HanabiIntegrationPlugin,
@@ -10,8 +10,8 @@ use bevy_vello::{
 };
 use std::str;
 use tankgame_lib::{
-    handle_collisions, spawn_static_enemy_at, static_alien_control_system, update_edge_pan_camera,
-    EdgePanCamera, TankParts, TankPartsType,
+    handle_collisions, pop_text_update, spawn_pop_text_at, spawn_static_enemy_at,
+    static_alien_control_system, update_edge_pan_camera, EdgePanCamera, TankParts, TankPartsType,
 };
 use tankgame_lib::{
     init_particles_player,
@@ -26,11 +26,22 @@ enum GameState {
     Game,
 }
 
-pub fn test_spawn_enemy(mut commands: Commands, mut asset_server: ResMut<AssetServer>) {
+pub fn test_spawn_enemy(mut commands: Commands, asset_server: Res<AssetServer>) {
     spawn_static_enemy_at(
         &mut commands,
         Transform::from_scale(Vec3::new(0.05, 0.05, 1.0)),
-        &mut asset_server,
+        &asset_server,
+    );
+}
+
+pub fn test_spawn_pop_text(mut commands: Commands, asset_server: Res<AssetServer>) {
+    spawn_pop_text_at(
+        &mut commands,
+        &asset_server,
+        Vec3::new(0.0, 0.0, 1000.0),
+        "12345",
+        100.0,
+        "fonts/Rubik-Medium.ttf",
     );
 }
 
@@ -42,7 +53,7 @@ fn main() {
         }))
         .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(PhysicsPlugins::default())
-        .add_plugins(PhysicsDebugPlugin::default())
+        //.add_plugins(PhysicsDebugPlugin::default())
         .add_plugins(VelloPlugin)
         .insert_resource(ParticlesPlayer::default())
         .insert_resource(TankParts::default())
@@ -59,6 +70,7 @@ fn main() {
                 add_default_light,
                 init_particles_player,
                 test_spawn_enemy,
+                test_spawn_pop_text,
             ),
         )
         .add_systems(
@@ -72,6 +84,7 @@ fn main() {
                 update_edge_pan_camera,
                 handle_collisions,
                 static_alien_control_system,
+                pop_text_update,
             )
                 .run_if(in_state(GameState::Game)),
         )

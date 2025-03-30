@@ -26,7 +26,7 @@ pub fn init_particles_player(
 
 use bevy_vello::velato::model::Value;
 
-use crate::{ColliderFlags, ColliderResponds, Health};
+use crate::{collision::SingleFrameCollider, ColliderFlags, ColliderResponds, Health};
 
 #[derive(Component, Clone, Default)]
 pub struct ParticleSceneAnim {
@@ -127,12 +127,21 @@ pub fn spawn_particle_at(commands: &mut Commands, player: &Res<ParticlesPlayer>,
             ..Default::default()
         },
         anim,
+    ));
+    commands.spawn((
+        Transform::from_translation(Vec3 {
+            x: translate.x,
+            y: translate.y,
+            z: 0.0,
+        }),
         Health { health: 1.0 },
-        Collider::circle(50.0),
+        Collider::circle(80.0),
         ColliderResponds {
             damage: 2.0,
             allowed_collider_masks: ColliderFlags::None,
             collider_type: ColliderFlags::EXPLOSION,
+            ..Default::default()
         },
+        SingleFrameCollider::default(),
     ));
 }

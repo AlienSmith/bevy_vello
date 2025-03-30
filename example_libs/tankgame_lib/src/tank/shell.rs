@@ -65,6 +65,7 @@ pub fn spawn_sell(commands: &mut Commands, start: Vec2, target: Vec2, movement_s
             damage: 1.0,
             allowed_collider_masks: ColliderFlags::ALIEN,
             collider_type: ColliderFlags::SHELL,
+            ..Default::default()
         },
         Health { health: 1.0 },
     ));

@@ -10,7 +10,7 @@ pub struct StaticEnemy {}
 pub fn spawn_static_enemy_at(
     commands: &mut Commands,
     transform: Transform,
-    asset_server: &mut ResMut<AssetServer>,
+    asset_server: &Res<AssetServer>,
 ) {
     commands.spawn((
         VelloAssetBundle {
@@ -28,8 +28,9 @@ pub fn spawn_static_enemy_at(
             damage: 1.0,
             allowed_collider_masks: ColliderFlags::SHELL | ColliderFlags::EXPLOSION,
             collider_type: ColliderFlags::ALIEN,
+            spawn_damage_text: true,
         },
-        Health { health: 1.0 },
+        Health { health: 3.0 },
         StaticEnemy::default(),
     ));
 }
