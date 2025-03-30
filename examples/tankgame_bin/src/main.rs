@@ -1,5 +1,6 @@
+use avian2d::prelude::*;
+use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
-use bevy::{asset::AssetMetaCheck, input::mouse::MouseWheel};
 use bevy_vello::{
     add_default_light,
     integrations::HanabiIntegrationPlugin,
@@ -9,18 +10,28 @@ use bevy_vello::{
 };
 use std::str;
 use tankgame_lib::{
+    handle_collisions, spawn_static_enemy_at, static_alien_control_system, update_edge_pan_camera,
+    EdgePanCamera, TankParts, TankPartsType,
+};
+use tankgame_lib::{
     init_particles_player,
     tank::{self, shell::update_shell},
     update_particle_scene, ParticlesPlayer,
 };
-use tankgame_lib::{update_edge_pan_camera, TankPartsType};
-use tankgame_lib::{EdgePanCamera, TankParts};
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum GameState {
     #[default]
     Loading,
     Game,
+}
+
+pub fn test_spawn_enemy(mut commands: Commands, mut asset_server: ResMut<AssetServer>) {
+    spawn_static_enemy_at(
+        &mut commands,
+        Transform::from_scale(Vec3::new(0.05, 0.05, 1.0)),
+        &mut asset_server,
+    );
 }
 
 fn main() {
@@ -30,6 +41,8 @@ fn main() {
             ..default()
         }))
         .add_plugins(HanabiIntegrationPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .add_plugins(PhysicsDebugPlugin::default())
         .add_plugins(VelloPlugin)
         .insert_resource(ParticlesPlayer::default())
         .insert_resource(TankParts::default())
@@ -45,6 +58,7 @@ fn main() {
                 setup_vector_graphics,
                 add_default_light,
                 init_particles_player,
+                test_spawn_enemy,
             ),
         )
         .add_systems(
@@ -56,6 +70,8 @@ fn main() {
                 update_particle_scene,
                 update_shell,
                 update_edge_pan_camera,
+                handle_collisions,
+                static_alien_control_system,
             )
                 .run_if(in_state(GameState::Game)),
         )

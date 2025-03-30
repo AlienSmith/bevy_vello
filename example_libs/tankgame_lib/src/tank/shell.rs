@@ -1,6 +1,6 @@
+use avian2d::prelude::Collider;
 use bevy::prelude::*;
 use bevy_vello::{
-    prelude::skrifa::raw::tables::stat::Stat,
     vello::{
         kurbo::{Affine, BezPath, PathEl, Stroke},
         peniko::{Color, Gradient},
@@ -8,7 +8,10 @@ use bevy_vello::{
     VelloScene, VelloSceneBundle,
 };
 
-use crate::{spawn_particle_at, ParticlesPlayer};
+use crate::{
+    collision::{ColliderFlags, ColliderResponds, Health},
+    spawn_particle_at, ParticlesPlayer,
+};
 #[derive(Clone, Component)]
 pub struct Shell {
     movement_speed: f32,
@@ -29,7 +32,7 @@ fn make_shell_scene(length: f64, width: f64, steps: usize) -> VelloScene {
 
     let linear = Gradient::new_linear((0.0, 0.0), (length, 0.0)).with_stops(color_stops.as_slice());
     scene.stroke(
-        &Stroke::new(width * 0.5),
+        &Stroke::new(width),
         Affine::translate((-1.0 * length, 0.0)),
         &linear,
         None,
@@ -49,7 +52,7 @@ pub fn spawn_sell(commands: &mut Commands, start: Vec2, target: Vec2, movement_s
         Transform::from_rotation(quat).with_translation(Vec3::new(start.x, start.y, 0.));
     commands.spawn((
         VelloSceneBundle {
-            scene: make_shell_scene(400.0, 20.0, 4),
+            scene: make_shell_scene(400.0, 10.0, 4),
             transform,
             ..Default::default()
         },
@@ -57,21 +60,34 @@ pub fn spawn_sell(commands: &mut Commands, start: Vec2, target: Vec2, movement_s
             movement_speed,
             timer: Timer::from_seconds(time, TimerMode::Once),
         },
+        Collider::circle(6.0),
+        ColliderResponds {
+            damage: 1.0,
+            allowed_collider_masks: ColliderFlags::ALIEN,
+            collider_type: ColliderFlags::SHELL,
+        },
+        Health { health: 1.0 },
     ));
 }
 
 pub fn update_shell(
     mut commands: Commands,
-    mut shell_query: Query<(&mut Transform, &mut Shell, &GlobalTransform, Entity)>,
+    mut shell_query: Query<(
+        &mut Transform,
+        &mut Shell,
+        &GlobalTransform,
+        &Health,
+        Entity,
+    )>,
     player: Res<ParticlesPlayer>,
     time: Res<Time>,
 ) {
-    for (mut transform, mut shell, global_transform, entity) in shell_query.iter_mut() {
+    for (mut transform, mut shell, global_transform, health, entity) in shell_query.iter_mut() {
         let movement_direction = transform.rotation * Vec3::X;
         let translation_delta = movement_direction * shell.movement_speed * time.delta_seconds();
         transform.translation += translation_delta;
         shell.timer.tick(time.delta());
-        if shell.timer.finished() {
+        if shell.timer.finished() || health.health <= 0.0 {
             let pos = global_transform.translation();
             spawn_particle_at(&mut commands, &player, pos);
             commands.entity(entity).despawn();

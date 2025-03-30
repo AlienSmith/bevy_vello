@@ -1,3 +1,4 @@
+use avian2d::prelude::Collider;
 use bevy::prelude::*;
 use bevy_hanabi::prelude::*;
 use bevy_vello::{
@@ -24,6 +25,8 @@ pub fn init_particles_player(
 }
 
 use bevy_vello::velato::model::Value;
+
+use crate::{ColliderFlags, ColliderResponds, Health};
 
 #[derive(Component, Clone, Default)]
 pub struct ParticleSceneAnim {
@@ -88,6 +91,7 @@ pub fn update_particle_scene(
 }
 
 pub fn spawn_particle_at(commands: &mut Commands, player: &Res<ParticlesPlayer>, translate: Vec3) {
+    info!("spawn particles");
     let effect = player.explosion.clone().unwrap();
     let anim = ParticleSceneAnim {
         timer: Timer::from_seconds(2.0, TimerMode::Once),
@@ -123,5 +127,12 @@ pub fn spawn_particle_at(commands: &mut Commands, player: &Res<ParticlesPlayer>,
             ..Default::default()
         },
         anim,
+        Health { health: 1.0 },
+        Collider::circle(50.0),
+        ColliderResponds {
+            damage: 2.0,
+            allowed_collider_masks: ColliderFlags::None,
+            collider_type: ColliderFlags::EXPLOSION,
+        },
     ));
 }

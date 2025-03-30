@@ -1,8 +1,5 @@
-use bevy::{prelude::*, window::PrimaryWindow};
-
-use crate::{spawn_particle_at, ParticlesPlayer};
-
 use super::shell::spawn_sell;
+use bevy::{prelude::*, window::PrimaryWindow};
 #[derive(Clone, Component)]
 pub struct Gun {
     timer: Option<Timer>,
