@@ -9,7 +9,7 @@ use bevy_vello::{
 };
 
 use crate::{
-    collision::{ColliderFlags, ColliderResponds, Health},
+    collision::{ColliderFlags, ColliderResponds, Health, SingleFrameCollider},
     spawn_particle_at, ParticlesPlayer,
 };
 #[derive(Clone, Component)]
@@ -62,12 +62,49 @@ pub fn spawn_sell(commands: &mut Commands, start: Vec2, target: Vec2, movement_s
         },
         Collider::circle(6.0),
         ColliderResponds {
-            damage: 1.0,
+            damage: 0.0,
             allowed_collider_masks: ColliderFlags::ALIEN,
             collider_type: ColliderFlags::SHELL,
             ..Default::default()
         },
         Health { health: 1.0 },
+    ));
+}
+
+pub fn spawn_shell_damage_collider(commands: &mut Commands, translate: Vec3, scale: f32) {
+    //contact
+    commands.spawn((
+        Transform::from_translation(Vec3 {
+            x: translate.x,
+            y: translate.y,
+            z: 0.0,
+        }),
+        Health { health: 0.0 },
+        Collider::circle(scale),
+        ColliderResponds {
+            damage: 1.0,
+            allowed_collider_masks: ColliderFlags::None,
+            collider_type: ColliderFlags::EXPLOSION,
+            ..Default::default()
+        },
+        SingleFrameCollider::default(),
+    ));
+    //explosion
+    commands.spawn((
+        Transform::from_translation(Vec3 {
+            x: translate.x,
+            y: translate.y,
+            z: 0.0,
+        }),
+        Health { health: 1.0 },
+        Collider::circle(80.0),
+        ColliderResponds {
+            damage: 2.0,
+            allowed_collider_masks: ColliderFlags::None,
+            collider_type: ColliderFlags::EXPLOSION,
+            ..Default::default()
+        },
+        SingleFrameCollider::default(),
     ));
 }
 
@@ -92,6 +129,7 @@ pub fn update_shell(
             let pos = global_transform.translation();
             spawn_particle_at(&mut commands, &player, pos);
             commands.entity(entity).despawn();
+            spawn_shell_damage_collider(&mut commands, pos, 6.0);
         }
     }
 }

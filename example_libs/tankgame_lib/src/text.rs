@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy_hanabi::Random;
 use bevy_vello::prelude::*;
 use bevy_vello::velato::model::{Animated, Value};
 use bevy_vello::vello::peniko::GlowColor;
@@ -47,16 +46,11 @@ impl PopTextAnim {
 fn linear_move_upward(base: kurbo::Point, size: f32) -> Value<kurbo::Point> {
     let x_offset: f64 = rand::random();
     let size = size as f64;
-    use bevy_vello::velato::runtime::model::value::Time;
+    use bevy_vello::velato::model::Time;
+    use bevy_vello::velato::runtime::SimpleEasing;
     let times = vec![
-        Time {
-            frame: 0.0,
-            ..Default::default()
-        },
-        Time {
-            frame: 1.0,
-            ..Default::default()
-        },
+        Time::new(0.0, SimpleEasing::EaseOut, false),
+        Time::new(0.7, SimpleEasing::None, true),
     ];
     let values = vec![base, base + (x_offset * size, size * 3.0)];
     Value::Animated(Animated { times, values })
@@ -64,16 +58,15 @@ fn linear_move_upward(base: kurbo::Point, size: f32) -> Value<kurbo::Point> {
 
 pub fn spawn_pop_text_at(
     commands: &mut Commands,
-    asset_server: &Res<AssetServer>,
+    fonts: &Res<DefaultFonts>,
     translate: Vec3,
     string: &str,
     size: f32,
-    font_path: &'static str,
 ) {
     let base_x = translate.x as f64;
     let base_y = translate.y as f64;
     let anim = PopTextAnim::new(
-        0.5,
+        2.0,
         linear_move_upward((base_x, base_y).into(), size),
         Value::Fixed(1.0),
         Value::Fixed(GlowColor {
@@ -85,7 +78,7 @@ pub fn spawn_pop_text_at(
 
     commands.spawn((
         VelloTextBundle {
-            font: asset_server.load(font_path),
+            font: fonts.default_font.clone(),
             text: VelloText {
                 content: string.to_string(),
                 size,
@@ -120,4 +113,9 @@ pub fn pop_text_update(
             command.entity(entity).despawn();
         }
     }
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct DefaultFonts {
+    pub default_font: Handle<VelloFont>,
 }

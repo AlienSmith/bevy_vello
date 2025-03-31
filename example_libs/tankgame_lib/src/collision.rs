@@ -1,5 +1,5 @@
 use avian2d::prelude::*;
-use bevy::{prelude::*, transform::commands};
+use bevy::prelude::*;
 use bitflags::bitflags;
 bitflags! {
     /// Represents a set of flags.
@@ -25,13 +25,24 @@ pub fn match_tag_to_mask(tag: ColliderFlags, mask: ColliderFlags) -> bool {
 
 use bevy::prelude::Component;
 
-use crate::spawn_pop_text_at;
-#[derive(Component, Clone, Default)]
+use crate::{spawn_pop_text_at, text::DefaultFonts};
+#[derive(Component, Clone)]
 pub struct ColliderResponds {
     pub damage: f32,
     pub allowed_collider_masks: ColliderFlags,
     pub collider_type: ColliderFlags,
     pub spawn_damage_text: bool,
+}
+
+impl Default for ColliderResponds {
+    fn default() -> Self {
+        Self {
+            damage: Default::default(),
+            allowed_collider_masks: Default::default(),
+            collider_type: Default::default(),
+            spawn_damage_text: Default::default(),
+        }
+    }
 }
 #[derive(Component, Clone, Default)]
 
@@ -44,10 +55,10 @@ pub struct Health {
 
 pub fn handle_collisions(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     mut collision_events: EventReader<Collision>,
     mut c_query: Query<(&mut Health, &ColliderResponds)>,
     s_query: Query<Entity, With<SingleFrameCollider>>,
+    fonts: Res<DefaultFonts>,
 ) {
     for Collision(contacts) in collision_events.read() {
         if let Ok([(mut health1, responds1), (mut health2, responds2)]) =
@@ -58,20 +69,20 @@ pub fn handle_collisions(
             let mut damage: Option<String> = None;
             if match_tag_to_mask(responds2.collider_type, responds1.allowed_collider_masks) {
                 health1.health -= responds2.damage;
-                if responds1.spawn_damage_text {
+                if responds1.spawn_damage_text && responds2.damage > 0.0 {
                     damage = Some(responds2.damage.to_string());
                 }
             }
             if match_tag_to_mask(responds1.collider_type, responds2.allowed_collider_masks) {
                 health2.health -= responds1.damage;
-                if responds1.spawn_damage_text {
+                if responds2.spawn_damage_text && responds1.damage > 0.0 {
                     damage = Some(responds1.damage.to_string());
                 }
             }
             if let Some(damage_string) = damage {
                 spawn_pop_text_at(
                     &mut commands,
-                    &asset_server,
+                    &fonts,
                     Vec3 {
                         x: pos.x,
                         y: pos.y,
@@ -79,13 +90,12 @@ pub fn handle_collisions(
                     },
                     &damage_string,
                     20.0,
-                    "fonts/Rubik-Medium.ttf",
                 );
             }
         }
-    }
-    //clean up single frame colliders
-    for entity in s_query.iter() {
-        commands.entity(entity).despawn();
+        //clean up single frame colliders
+        for entity in s_query.iter() {
+            commands.entity(entity).despawn();
+        }
     }
 }

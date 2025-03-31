@@ -128,20 +128,4 @@ pub fn spawn_particle_at(commands: &mut Commands, player: &Res<ParticlesPlayer>,
         },
         anim,
     ));
-    commands.spawn((
-        Transform::from_translation(Vec3 {
-            x: translate.x,
-            y: translate.y,
-            z: 0.0,
-        }),
-        Health { health: 1.0 },
-        Collider::circle(80.0),
-        ColliderResponds {
-            damage: 2.0,
-            allowed_collider_masks: ColliderFlags::None,
-            collider_type: ColliderFlags::EXPLOSION,
-            ..Default::default()
-        },
-        SingleFrameCollider::default(),
-    ));
 }

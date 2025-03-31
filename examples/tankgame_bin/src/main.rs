@@ -1,6 +1,6 @@
 use avian2d::prelude::*;
+use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
-use bevy::{asset::AssetMetaCheck, math::VectorSpace};
 use bevy_vello::{
     add_default_light,
     integrations::HanabiIntegrationPlugin,
@@ -11,7 +11,8 @@ use bevy_vello::{
 use std::str;
 use tankgame_lib::{
     handle_collisions, pop_text_update, spawn_pop_text_at, spawn_static_enemy_at,
-    static_alien_control_system, update_edge_pan_camera, EdgePanCamera, TankParts, TankPartsType,
+    static_alien_control_system, text::DefaultFonts, update_edge_pan_camera, EdgePanCamera,
+    TankParts, TankPartsType,
 };
 use tankgame_lib::{
     init_particles_player,
@@ -34,14 +35,13 @@ pub fn test_spawn_enemy(mut commands: Commands, asset_server: Res<AssetServer>) 
     );
 }
 
-pub fn test_spawn_pop_text(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub fn test_spawn_pop_text(mut commands: Commands, fonts: Res<DefaultFonts>) {
     spawn_pop_text_at(
         &mut commands,
-        &asset_server,
+        &fonts,
         Vec3::new(0.0, 0.0, 1000.0),
         "12345",
         100.0,
-        "fonts/Rubik-Medium.ttf",
     );
 }
 
@@ -57,8 +57,9 @@ fn main() {
         .add_plugins(VelloPlugin)
         .insert_resource(ParticlesPlayer::default())
         .insert_resource(TankParts::default())
+        .insert_resource(DefaultFonts::default())
         .init_state::<GameState>()
-        .add_systems(Startup, setup_tank_parts)
+        .add_systems(Startup, setup_resources)
         .add_systems(
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),
@@ -80,13 +81,20 @@ fn main() {
                 tank::turrent::control_system,
                 tank::gun::control_system,
                 update_particle_scene,
-                update_shell,
                 update_edge_pan_camera,
-                handle_collisions,
                 static_alien_control_system,
                 pop_text_update,
+                update_shell,
             )
                 .run_if(in_state(GameState::Game)),
+        )
+        .add_systems(
+            PostUpdate,
+            (
+                handle_collisions
+                    .after(PhysicsSet::StepSimulation)
+                    .before(PhysicsSet::Sync), // Important!
+            ),
         )
         .run();
     bevy::log::warn!("Initialize");
@@ -110,10 +118,15 @@ fn check_assets_loaded(
     }
 }
 
-fn setup_tank_parts(mut tank_parts: ResMut<TankParts>, asset_server: Res<AssetServer>) {
+fn setup_resources(
+    mut fonts: ResMut<DefaultFonts>,
+    mut tank_parts: ResMut<TankParts>,
+    asset_server: Res<AssetServer>,
+) {
     tank_parts.push(asset_server.load("scenes/base.scene"));
     tank_parts.push(asset_server.load("scenes/turrent.scene"));
     tank_parts.push(asset_server.load("scenes/gun.scene"));
+    fonts.default_font = asset_server.load("fonts/Rubik-Medium.ttf");
 }
 
 fn setup_vector_graphics(
