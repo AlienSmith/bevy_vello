@@ -63,7 +63,7 @@ pub fn spawn_sell(commands: &mut Commands, start: Vec2, target: Vec2, movement_s
         Collider::circle(6.0),
         ColliderResponds {
             damage: 0.0,
-            allowed_collider_masks: ColliderFlags::ALIEN,
+            allowed_collider_masks: ColliderFlags::ALIEN | ColliderFlags::DECOR,
             collider_type: ColliderFlags::SHELL,
             ..Default::default()
         },

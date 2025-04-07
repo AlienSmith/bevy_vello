@@ -12,3 +12,4 @@ bevy_vello = { path = "../../", features = ["particles"] }
 bevy = { workspace = true }
 tankgame_lib = {path = "../../example_libs/tankgame_lib"}
 avian2d = "0.1.2"
+seldom_state = "0.11"

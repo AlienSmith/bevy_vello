@@ -10,6 +10,7 @@ bitflags! {
         const SHELL = 0b00000010;
         const ALIEN = 0b00000100;
         const EXPLOSION = 0b00001000;
+        const DECOR = 0b00010000;
     }
 }
 
