@@ -31,3 +31,5 @@ dist/
 
 # Generated on wasm-pack failure
 **/unsupported.js
+/examples/tankgame_bin/*.scene
+/examples/tankgame_bin/assets/scenes/*.scene

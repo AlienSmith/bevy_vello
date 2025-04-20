@@ -8,6 +8,7 @@ pub mod tank {
 
 pub mod enemy {
     pub mod alien;
+    pub mod zombie;
 }
 
 pub mod camera {

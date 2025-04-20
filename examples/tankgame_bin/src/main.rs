@@ -1,4 +1,6 @@
 mod scene_gen;
+use std::default;
+
 use avian2d::prelude::*;
 use bevy::asset::AssetMetaCheck;
 use bevy::math::vec3;
@@ -18,6 +20,19 @@ use tankgame_lib::{
     update_particle_scene, ParticlesPlayer,
 };
 use tankgame_lib::{make_sprite_sheet_scene_from_vello_replay_scene, TankGameAssetsMetaData};
+
+#[derive(Clone, Copy, Default, Reflect)]
+pub enum ZombieStates {
+    #[default]
+    IDLE,
+    ATTACK,
+    MOVE_TO(Vec2),
+}
+#[derive(Clone, Component, Reflect)]
+struct ZombieStateSwitch {
+    current_state: ZombieStates,
+    just_changed: bool,
+}
 
 #[derive(Clone, Component, Reflect)]
 struct Zombie;
@@ -82,22 +97,25 @@ fn update_cursor_position(
         .and_then(|cursor_position| camera.viewport_to_world_2d(transform, cursor_position));
 }
 
-fn attack_click(mouse: Res<ButtonInput<MouseButton>>) -> Result<(), ()> {
-    if mouse.just_pressed(MouseButton::Left) {
-        Ok(())
-    } else {
-        Err(())
-    }
-}
-
-fn click(
+fn update_on_click(
     mouse: Res<ButtonInput<MouseButton>>,
     cursor_position: Res<CursorPosition>,
-) -> Option<Vec2> {
-    mouse
+    mut query: Query<&mut ZombieStateSwitch>,
+) {
+    let mut item = query.single_mut();
+    if mouse.just_pressed(MouseButton::Left) {
+        item.just_changed = true;
+        item.current_state = ZombieStates::ATTACK;
+    } else if let Some(pos) = mouse
         .just_pressed(MouseButton::Right)
         .then_some(())
         .and(**cursor_position)
+    {
+        item.just_changed = true;
+        item.current_state = ZombieStates::MOVE_TO(pos);
+    } else {
+        item.just_changed = false;
+    }
 }
 
 pub fn test_spawn_zombie(
@@ -115,22 +133,46 @@ pub fn test_spawn_zombie(
         None,
         None,
     );
+    let move_trigger = move |In(entity): In<Entity>, states: Query<&ZombieStateSwitch>| {
+        let state = states.get(entity).unwrap();
+        if state.just_changed {
+            if let ZombieStates::MOVE_TO(pos) = &state.current_state {
+                return Ok(*pos);
+            }
+        }
+        return Err(());
+    };
+
+    let attack_trigger = move |In(entity): In<Entity>, states: Query<&ZombieStateSwitch>| {
+        let state = states.get(entity).unwrap();
+        if state.just_changed {
+            if let ZombieStates::ATTACK = &state.current_state {
+                return Ok(());
+            }
+        }
+        return Err(());
+    };
+
     // commands.spawn();
     commands.spawn((
+        ZombieStateSwitch {
+            current_state: ZombieStates::IDLE,
+            just_changed: false,
+        },
         Zombie,
         Idle,
         StateMachine::default()
-            // When the player clicks, go there
-            .trans_builder(click, |_: &Idle, pos| {
+            .trans_builder(move_trigger, |_: &Idle, pos| {
                 Some(GoToSelection {
                     speed: 200.,
                     target: pos,
                 })
             })
+            // When the player clicks, go there
             // `done` triggers when the `Done` component is added to the entity. When they're done
             // going to the selection, idle.
             .trans::<GoToSelection, _>(done(Some(Done::Success)), Idle)
-            .trans::<Idle, _>(attack_click, Attack { timer: None })
+            .trans::<AnyState, _>(attack_trigger, Attack { timer: None })
             .trans::<Attack, _>(done(Some(Done::Success)), Idle)
             .set_trans_logging(true),
         VelloSceneBundle {
@@ -360,6 +402,7 @@ fn main() {
                 on_add_idle_to_zombie,
                 on_add_attack_to_zombie,
                 update_attack_timer,
+                update_on_click,
             )
                 .run_if(in_state(GameState::Game)),
         )
