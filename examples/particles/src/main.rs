@@ -74,12 +74,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
-    app.add_plugins(VelloPlugin).run();
-    // .add_systems(Startup, setup_vector_graphics)
-    // .add_systems(Startup, add_default_light)
-    // .add_systems(Update, player_control_system)
-    // .add_systems(Update, simple_animation)
-    // .run();
+    app.add_plugins(VelloPlugin)
+        .add_systems(Startup, setup_vector_graphics)
+        .add_systems(Startup, add_default_light)
+        .add_systems(Update, player_control_system)
+        .run();
 
     Ok(())
 }
