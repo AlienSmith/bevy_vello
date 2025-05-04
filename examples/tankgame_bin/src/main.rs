@@ -5,10 +5,11 @@ use avian2d::prelude::*;
 use bevy::asset::AssetMetaCheck;
 use bevy::math::vec3;
 use bevy::prelude::*;
+use bevy::reflect::EnumInfo;
 use bevy_vello::{
     add_default_light, integrations::HanabiIntegrationPlugin, prelude::*, VelloPlugin,
 };
-use seldom_state::prelude::*;
+
 use tankgame_lib::{
     handle_collisions, pop_text_update, spawn_pop_text_at, spawn_static_enemy_at, spawn_stone_at,
     spawn_tree_at, static_alien_control_system, text::DefaultFonts, update_edge_pan_camera,
@@ -19,68 +20,10 @@ use tankgame_lib::{
     tank::{self, shell::update_shell},
     update_particle_scene, ParticlesPlayer,
 };
-use tankgame_lib::{make_sprite_sheet_scene_from_vello_replay_scene, TankGameAssetsMetaData};
-
-#[derive(Clone, Copy, Default, Reflect)]
-pub enum ZombieStates {
-    #[default]
-    IDLE,
-    ATTACK,
-    MOVE_TO(Vec2),
-}
-#[derive(Clone, Component, Reflect)]
-struct ZombieStateSwitch {
-    current_state: ZombieStates,
-    just_changed: bool,
-}
-
-#[derive(Clone, Component, Reflect)]
-struct Zombie;
-
-#[derive(Clone, Component, Reflect)]
-#[component(storage = "SparseSet")]
-struct Idle;
-
-#[derive(Clone, Copy, Component, Reflect)]
-#[component(storage = "SparseSet")]
-struct GoToSelection {
-    speed: f32,
-    target: Vec2,
-}
-
-#[derive(Clone, Component, Reflect)]
-#[component(storage = "SparseSet")]
-struct Attack {
-    timer: Option<Timer>,
-}
-
-fn go_to_target(
-    mut commands: Commands,
-    mut go_to_selections: Query<(Entity, &mut Transform, &GlobalTransform, &GoToSelection)>,
-    time: Res<Time>,
-) {
-    for (entity, mut transform, global_transform, go_to_selection) in &mut go_to_selections {
-        let target = go_to_selection.target;
-        let delta = target - transform.translation.truncate();
-        let movement = delta.normalize_or_zero() * go_to_selection.speed * time.delta_seconds();
-        let global_to_local = global_transform.compute_matrix().inverse();
-        let dif_3_local = global_to_local.transform_vector3(movement.extend(0.0));
-        let x = vec3(1.0, 0.0, 0.0);
-        let cross = x.cross(dif_3_local).z;
-        let angle = x.angle_between(dif_3_local);
-        let rotate_direction = cross.signum();
-        if movement.length() > delta.length() {
-            transform.translation = target.extend(transform.translation.z);
-            // The player has reached the target! Add the `Done` component to the player, causing
-            // `done` to trigger. It will be automatically removed later this frame.
-            commands.entity(entity).insert(Done::Success);
-            info!("Done!")
-        } else {
-            transform.translation += movement.extend(0.);
-        }
-        transform.rotate_z(rotate_direction * angle);
-    }
-}
+use tankgame_lib::{
+    make_sprite_sheet_scene_from_vello_replay_scene, spawn_zombie_at, StateAwarePlugin,
+    TankGameAssetsMetaData, Zombie, ZombieInputComponent, ZombieInputEvent,
+};
 
 #[derive(Default, Deref, DerefMut, Resource)]
 struct CursorPosition(Option<Vec2>);
@@ -97,24 +40,25 @@ fn update_cursor_position(
         .and_then(|cursor_position| camera.viewport_to_world_2d(transform, cursor_position));
 }
 
-fn update_on_click(
+fn test_zombie_input(
     mouse: Res<ButtonInput<MouseButton>>,
     cursor_position: Res<CursorPosition>,
-    mut query: Query<&mut ZombieStateSwitch>,
+    mut zombies: Query<&mut ZombieInputComponent>,
 ) {
-    let mut item = query.single_mut();
-    if mouse.just_pressed(MouseButton::Left) {
-        item.just_changed = true;
-        item.current_state = ZombieStates::ATTACK;
+    //clear all previous events
+    let this_frame_event = if mouse.just_pressed(MouseButton::Left) {
+        Some(ZombieInputEvent::Attack)
     } else if let Some(pos) = mouse
         .just_pressed(MouseButton::Right)
         .then_some(())
         .and(**cursor_position)
     {
-        item.just_changed = true;
-        item.current_state = ZombieStates::MOVE_TO(pos);
+        Some(ZombieInputEvent::MoveTo(pos))
     } else {
-        item.just_changed = false;
+        None
+    };
+    for mut input in zombies.iter_mut() {
+        input.event = this_frame_event;
     }
 }
 
@@ -123,159 +67,13 @@ pub fn test_spawn_zombie(
     parts: Res<TankGameAssets>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
-    let mut b_s = VelloScene::default();
-    make_sprite_sheet_scene_from_vello_replay_scene(
-        &mut b_s,
-        &custom_assets,
+    spawn_zombie_at(
+        &mut commands,
         &parts,
-        TankGameAssetsType::ZOMBIE_IDEL,
-        None,
-        None,
-        None,
+        &custom_assets,
+        Vec3::new(200.0, 200.0, -100.0),
+        0.4,
     );
-    let move_trigger = move |In(entity): In<Entity>, states: Query<&ZombieStateSwitch>| {
-        let state = states.get(entity).unwrap();
-        if state.just_changed {
-            if let ZombieStates::MOVE_TO(pos) = &state.current_state {
-                return Ok(*pos);
-            }
-        }
-        return Err(());
-    };
-
-    let attack_trigger = move |In(entity): In<Entity>, states: Query<&ZombieStateSwitch>| {
-        let state = states.get(entity).unwrap();
-        if state.just_changed {
-            if let ZombieStates::ATTACK = &state.current_state {
-                return Ok(());
-            }
-        }
-        return Err(());
-    };
-
-    // commands.spawn();
-    commands.spawn((
-        ZombieStateSwitch {
-            current_state: ZombieStates::IDLE,
-            just_changed: false,
-        },
-        Zombie,
-        Idle,
-        StateMachine::default()
-            .trans_builder(move_trigger, |_: &Idle, pos| {
-                Some(GoToSelection {
-                    speed: 200.,
-                    target: pos,
-                })
-            })
-            // When the player clicks, go there
-            // `done` triggers when the `Done` component is added to the entity. When they're done
-            // going to the selection, idle.
-            .trans::<GoToSelection, _>(done(Some(Done::Success)), Idle)
-            .trans::<AnyState, _>(attack_trigger, Attack { timer: None })
-            .trans::<Attack, _>(done(Some(Done::Success)), Idle)
-            .set_trans_logging(true),
-        VelloSceneBundle {
-            scene: b_s,
-            transform: Transform::from_xyz(200.0, 200.0, -100.0),
-            ..Default::default()
-        },
-    ));
-}
-
-fn on_add_attack_to_zombie(
-    time: Res<Time>,
-    mut query: Query<(&mut VelloScene, &mut Attack), (Added<Attack>, With<Zombie>)>,
-    parts: Res<TankGameAssets>,
-    custom_assets: Res<Assets<VelloReplaySceneAsset>>,
-) {
-    let mut temp: Option<VelloScene> = None;
-    for (mut scene, mut attack) in query.iter_mut() {
-        if temp.is_none() {
-            let start_time = time.elapsed_seconds();
-            let mut b_s = VelloScene::default();
-            make_sprite_sheet_scene_from_vello_replay_scene(
-                &mut b_s,
-                &custom_assets,
-                &parts,
-                TankGameAssetsType::ZOMBIE_ATTACK,
-                Some(false),
-                Some(start_time),
-                Some(9.0),
-            );
-            temp = Some(b_s);
-        }
-        *scene = temp.clone().unwrap();
-        attack.timer = Some(Timer::from_seconds(1.1, TimerMode::Once));
-    }
-}
-
-fn update_attack_timer(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut query: Query<(Entity, &mut Attack), With<Zombie>>,
-) {
-    for (entity, mut attack) in query.iter_mut() {
-        if let Some(timer) = &mut attack.timer {
-            timer.tick(time.delta());
-            if timer.finished() {
-                commands.entity(entity).insert(Done::Success);
-                info!("Done!")
-            }
-        }
-    }
-}
-
-fn on_add_move_to_zombie(
-    time: Res<Time>,
-    mut query: Query<&mut VelloScene, (Added<GoToSelection>, With<Zombie>)>,
-    parts: Res<TankGameAssets>,
-    custom_assets: Res<Assets<VelloReplaySceneAsset>>,
-) {
-    let mut temp: Option<VelloScene> = None;
-    for mut scene in query.iter_mut() {
-        if temp.is_none() {
-            let start_time = time.elapsed_seconds();
-            let mut b_s = VelloScene::default();
-            make_sprite_sheet_scene_from_vello_replay_scene(
-                &mut b_s,
-                &custom_assets,
-                &parts,
-                TankGameAssetsType::ZOMBIE_MOVE,
-                None,
-                Some(start_time),
-                None,
-            );
-            temp = Some(b_s);
-        }
-        *scene = temp.clone().unwrap();
-    }
-}
-
-fn on_add_idle_to_zombie(
-    time: Res<Time>,
-    mut query: Query<&mut VelloScene, (Added<Idle>, With<Zombie>)>,
-    parts: Res<TankGameAssets>,
-    custom_assets: Res<Assets<VelloReplaySceneAsset>>,
-) {
-    let mut temp: Option<VelloScene> = None;
-    for mut scene in query.iter_mut() {
-        if temp.is_none() {
-            let start_time = time.elapsed_seconds();
-            let mut b_s = VelloScene::default();
-            make_sprite_sheet_scene_from_vello_replay_scene(
-                &mut b_s,
-                &custom_assets,
-                &parts,
-                TankGameAssetsType::ZOMBIE_IDEL,
-                None,
-                Some(start_time),
-                None,
-            );
-            temp = Some(b_s);
-        }
-        *scene = temp.clone().unwrap();
-    }
 }
 
 pub fn test_spawn_deco(
@@ -352,19 +150,10 @@ enum GameState {
 }
 
 fn main() {
+    let tank_lib_plugin = StateAwarePlugin::new(GameState::Game);
     App::new()
-        .add_plugins(DefaultPlugins.set(AssetPlugin {
-            meta_check: AssetMetaCheck::Never,
-            ..default()
-        }))
-        .add_plugins(HanabiIntegrationPlugin)
-        .add_plugins(PhysicsPlugins::default())
+        .add_plugins(tank_lib_plugin)
         .add_plugins(PhysicsDebugPlugin::default())
-        .add_plugins(VelloPlugin)
-        .add_plugins(StateMachinePlugin)
-        .insert_resource(ParticlesPlayer::default())
-        .insert_resource(TankGameAssets::default())
-        .insert_resource(DefaultFonts::default())
         .insert_resource(CursorPosition::default())
         .init_state::<GameState>()
         .add_systems(Startup, setup_resources)
@@ -379,40 +168,14 @@ fn main() {
                 test_spawn_deco,
                 add_default_light,
                 init_particles_player,
-                test_spawn_enemy,
+                //test_spawn_enemy,
                 test_spawn_pop_text,
                 test_spawn_zombie,
             ),
         )
         .add_systems(
             Update,
-            (
-                tank::base::control_system,
-                tank::turrent::control_system,
-                tank::gun::control_system,
-                update_particle_scene,
-                update_edge_pan_camera,
-                static_alien_control_system,
-                pop_text_update,
-                update_shell,
-                update_tree,
-                update_cursor_position,
-                go_to_target,
-                on_add_move_to_zombie,
-                on_add_idle_to_zombie,
-                on_add_attack_to_zombie,
-                update_attack_timer,
-                update_on_click,
-            )
-                .run_if(in_state(GameState::Game)),
-        )
-        .add_systems(
-            PostUpdate,
-            (
-                handle_collisions
-                    .after(PhysicsSet::StepSimulation)
-                    .before(PhysicsSet::Sync), // Important!
-            ),
+            (test_zombie_input, update_cursor_position).run_if(in_state(GameState::Game)),
         )
         .run();
     bevy::log::warn!("Initialize");

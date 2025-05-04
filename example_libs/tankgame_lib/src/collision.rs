@@ -10,7 +10,8 @@ bitflags! {
         const SHELL = 0b00000010;
         const ALIEN = 0b00000100;
         const EXPLOSION = 0b00001000;
-        const DECOR = 0b00010000;
+        const ENEMY_DAMAGE = 0b00010000;
+        const DECOR = 0b00100000;
     }
 }
 
@@ -58,15 +59,18 @@ pub fn handle_collisions(
     mut commands: Commands,
     mut collision_events: EventReader<Collision>,
     mut c_query: Query<(&mut Health, &ColliderResponds)>,
-    s_query: Query<Entity, With<SingleFrameCollider>>,
+    colliders: Query<(&Position, &Rotation)>,
     fonts: Res<DefaultFonts>,
 ) {
     for Collision(contacts) in collision_events.read() {
+        let Ok((position, rotation)) = colliders.get(contacts.entity1) else {
+            continue;
+        };
         if let Ok([(mut health1, responds1), (mut health2, responds2)]) =
             c_query.get_many_mut([contacts.entity1, contacts.entity2])
         {
             //Only one of them would be enemy.
-            let pos = contacts.manifolds[0].contacts[0].point1;
+            let pos = contacts.manifolds[0].contacts[0].global_point1(position, rotation);
             let mut damage: Option<String> = None;
             if match_tag_to_mask(responds2.collider_type, responds1.allowed_collider_masks) {
                 health1.health -= responds2.damage;
@@ -94,9 +98,15 @@ pub fn handle_collisions(
                 );
             }
         }
-        //clean up single frame colliders
-        for entity in s_query.iter() {
-            commands.entity(entity).despawn();
-        }
+    }
+}
+
+pub fn remove_single_frame_colliders(
+    mut commands: Commands,
+    s_query: Query<Entity, With<SingleFrameCollider>>,
+) {
+    //clean up single frame colliders
+    for entity in s_query.iter() {
+        commands.entity(entity).despawn();
     }
 }

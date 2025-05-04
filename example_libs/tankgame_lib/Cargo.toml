@@ -21,3 +21,4 @@ particle_lib = {path = "../particles_lib"}
 avian2d = "0.1.2"
 bitflags = "2.9.0"
 rand = "0.8.0"
+seldom_state = "0.11"

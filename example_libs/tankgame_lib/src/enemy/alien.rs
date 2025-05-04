@@ -35,10 +35,7 @@ pub fn spawn_static_enemy_at(
     ));
 }
 
-pub fn static_alien_control_system(
-    mut commands: Commands,
-    a_query: Query<(&Health, Entity), With<StaticEnemy>>,
-) {
+pub fn static_alien_control_system(mut commands: Commands, a_query: Query<(&Health, Entity)>) {
     for (health, entity) in a_query.iter() {
         if health.health <= 0.0 {
             info!("Static Alien being killed");

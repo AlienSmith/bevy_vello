@@ -78,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Startup, setup_vector_graphics)
         .add_systems(Startup, add_default_light)
         .add_systems(Update, player_control_system)
+        .add_systems(Update, simple_animation)
         .run();
 
     Ok(())
@@ -139,7 +140,7 @@ fn _make_default_effect() -> EffectAsset {
 
     let module = writer.finish();
 
-    let spawner = Spawner::once(100.0.into(), true);
+    let spawner = Spawner::once(255.0.into(), true);
     EffectAsset::new(vec![2048], spawner, module)
         .with_name("2d_default")
         .init(init_pos)
@@ -151,17 +152,13 @@ fn _make_default_effect() -> EffectAsset {
             gradient: Gradient::constant(Vec2::splat(2.0)),
             screen_space_size: false,
         })
-        .render(OrientModifier {
-            mode: OrientMode::AlongVelocity,
-            rotation: None,
-        })
         .with_simulation_space(SimulationSpace::Local)
         .build()
 }
 
 fn default_effect(effects: &mut ResMut<Assets<EffectAsset>>) -> Handle<EffectAsset> {
-    let custom_asset = ron::de::from_bytes::<EffectAsset>(&DEFAULT_PARTICLES).unwrap();
-    //let custom_asset = _make_default_effect();
+    //let custom_asset = ron::de::from_bytes::<EffectAsset>(&DEFAULT_PARTICLES).unwrap();
+    let custom_asset = _make_default_effect();
     effects.add(
         custom_asset, // .render(ColorOverLifetimeModifier { gradient })
                       // .render(round),
@@ -212,55 +209,55 @@ fn spawn_particles_at(
         },
     ));
 
-    let mut scene = VelloScene::default();
-    make_default_rect_particles(&mut scene);
-    commands.spawn((
-        ParticleEffectBundle {
-            // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
-            effect: ParticleEffect::new(effect.clone()).with_z_layer_2d(Some(0.1)),
-            transform: Transform::from_translation(Vec3 {
-                x: translate.x,
-                y: translate.y,
-                z: 1.0,
-            }),
-            ..Default::default()
-        },
-        VelloSceneSubBundle {
-            scene,
-            ..Default::default()
-        },
-        ExplosionFading {
-            timer: Timer::from_seconds(2.0, TimerMode::Once),
-            init_color: Vec3::new(1.0, 1.0, 1.0),
-            end_color: Vec3::new(0.2, 0.2, 0.2),
-            particle_scales: 15.0,
-        },
-    ));
-    let mut scene = VelloScene::default();
-    make_default_rect_particles(&mut scene);
-    commands.spawn((
-        ParticleEffectBundle {
-            // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
-            effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
-            transform: Transform::from_translation(Vec3 {
-                x: translate.x,
-                y: translate.y,
-                z: 2.0,
-            }),
-            effect_properties: ep1,
-            ..default()
-        },
-        VelloSceneSubBundle {
-            scene,
-            ..Default::default()
-        },
-        ExplosionFading {
-            timer: Timer::from_seconds(2.0, TimerMode::Once),
-            init_color: Vec3::new(3.0, 1.8, 0.6),
-            end_color: Vec3::new(0.5, 0.5, 0.5),
-            particle_scales: 6.0,
-        },
-    ));
+    // let mut scene = VelloScene::default();
+    // make_default_rect_particles(&mut scene);
+    // commands.spawn((
+    //     ParticleEffectBundle {
+    //         // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
+    //         effect: ParticleEffect::new(effect.clone()).with_z_layer_2d(Some(0.1)),
+    //         transform: Transform::from_translation(Vec3 {
+    //             x: translate.x,
+    //             y: translate.y,
+    //             z: 1.0,
+    //         }),
+    //         ..Default::default()
+    //     },
+    //     VelloSceneSubBundle {
+    //         scene,
+    //         ..Default::default()
+    //     },
+    //     ExplosionFading {
+    //         timer: Timer::from_seconds(2.0, TimerMode::Once),
+    //         init_color: Vec3::new(1.0, 1.0, 1.0),
+    //         end_color: Vec3::new(0.2, 0.2, 0.2),
+    //         particle_scales: 15.0,
+    //     },
+    // ));
+    // let mut scene = VelloScene::default();
+    // make_default_rect_particles(&mut scene);
+    // commands.spawn((
+    //     ParticleEffectBundle {
+    //         // Assign the Z layer so it appears in the egui inspector and can be modified at runtime
+    //         effect: ParticleEffect::new(effect).with_z_layer_2d(Some(0.1)),
+    //         transform: Transform::from_translation(Vec3 {
+    //             x: translate.x,
+    //             y: translate.y,
+    //             z: 2.0,
+    //         }),
+    //         effect_properties: ep1,
+    //         ..default()
+    //     },
+    //     VelloSceneSubBundle {
+    //         scene,
+    //         ..Default::default()
+    //     },
+    //     ExplosionFading {
+    //         timer: Timer::from_seconds(2.0, TimerMode::Once),
+    //         init_color: Vec3::new(3.0, 1.8, 0.6),
+    //         end_color: Vec3::new(0.5, 0.5, 0.5),
+    //         particle_scales: 6.0,
+    //     },
+    // ));
 }
 
 fn setup_vector_graphics(mut commands: Commands) {
