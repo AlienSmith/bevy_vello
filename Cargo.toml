@@ -15,7 +15,8 @@ members = [
   "examples/avian",
   "example_libs/tankgame_lib",
   "example_libs/particles_lib",
-  "examples/tankgame_bin"
+  "examples/tankgame_bin",
+  "examples/blood_paint"
 ]
 
 [workspace.package]

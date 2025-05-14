@@ -168,7 +168,7 @@ fn main() {
                 test_spawn_deco,
                 add_default_light,
                 init_particles_player,
-                //test_spawn_enemy,
+                test_spawn_enemy,
                 test_spawn_pop_text,
                 test_spawn_zombie,
             ),
@@ -236,13 +236,45 @@ fn setup_resources(
         asset_server.load("scenes/zombie_attack_3_3_9.scene"),
         TankGameAssetsMetaData::SpriteSheet(9),
     );
+    tank_parts.push(
+        asset_server.load("scenes/gunflare_2_2_4.scene"),
+        TankGameAssetsMetaData::SpriteSheet(4),
+    );
+    tank_parts.push(
+        asset_server.load("scenes/gunfire_2_2_4.scene"),
+        TankGameAssetsMetaData::SpriteSheet(4),
+    );
 
     fonts.default_font = asset_server.load("fonts/Rubik-Medium.ttf");
 }
 
+pub fn spawn_gun_fire_at(
+    commands: &mut Commands,
+    parts: &Res<TankGameAssets>,
+    custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
+    transform: Transform,
+    start_time: f32,
+) {
+    let mut b_s = VelloScene::default();
+    make_sprite_sheet_scene_from_vello_replay_scene(
+        &mut b_s,
+        &custom_assets,
+        &parts,
+        TankGameAssetsType::GUN_FIRE,
+        Some(true),
+        Some(start_time),
+        Some(16.0),
+    );
+    commands.spawn((VelloSceneBundle {
+        scene: b_s,
+        transform,
+        ..Default::default()
+    },));
+}
+
 fn setup_vector_graphics(
     mut commands: Commands,
-    parts: ResMut<TankGameAssets>,
+    parts: Res<TankGameAssets>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     commands.spawn((Camera2dBundle::default(), EdgePanCamera::default()));
@@ -297,4 +329,16 @@ fn setup_vector_graphics(
                     ));
                 });
         });
+
+    // spawn_gun_fire_at(
+    //     &mut commands,
+    //     &parts,
+    //     &custom_assets,
+    //     Transform::from_translation(Vec3 {
+    //         x: 0.0,
+    //         y: 0.0,
+    //         z: 65536.0,
+    //     }),
+    //     0.0,
+    // )
 }

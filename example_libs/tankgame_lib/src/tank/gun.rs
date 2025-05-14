@@ -1,5 +1,11 @@
+use crate::{
+    make_sprite_sheet_scene_from_vello_replay_scene, spawn_one_time_sprite_sheet_at,
+    TankGameAssets, TankGameAssetsType,
+};
+
 use super::shell::spawn_sell;
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::{math::vec3, prelude::*, window::PrimaryWindow};
+use bevy_vello::prelude::*;
 #[derive(Clone, Component)]
 pub struct Gun {
     timer: Option<Timer>,
@@ -36,6 +42,8 @@ pub fn control_system(
     mut query_scene: Query<(&mut Transform, &mut Gun, &GlobalTransform)>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
+    parts: Res<TankGameAssets>,
+    custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     let mouse_pos = if let Some(mouse_position) = windows
         .iter()
@@ -56,6 +64,23 @@ pub fn control_system(
                     camera.viewport_to_world_2d(camera_transform, cursor_position)
                 {
                     let gun_end = global_transform.transform_point(Vec3::Y * gun.gun_length);
+                    // {
+                    //     let from = Vec3::X;
+                    //     let to = global_transform.up();
+                    //     let quat = Quat::from_rotation_arc(from, *to).normalize();
+                    //     let transform = Transform::from_scale(vec3(0.5, 0.5, 0.5))
+                    //         .with_rotation(quat)
+                    //         .with_translation(Vec3::new(gun_end.x, gun_end.y, 65536.));
+                    //     let _ = spawn_one_time_sprite_sheet_at(
+                    //         &mut commands,
+                    //         &parts,
+                    //         &custom_assets,
+                    //         transform,
+                    //         time.elapsed_seconds(),
+                    //         0.4,
+                    //         TankGameAssetsType::GUN_FIRE,
+                    //     );
+                    // }
                     spawn_sell(
                         &mut commands,
                         Vec2 {

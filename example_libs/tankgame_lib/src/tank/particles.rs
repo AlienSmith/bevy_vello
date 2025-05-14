@@ -19,7 +19,7 @@ pub fn init_particles_player(
     mut player: ResMut<ParticlesPlayer>,
 ) {
     if player.explosion.is_none() {
-        let handle = effects.add(particle_lib::make_explosion_effect());
+        let handle = effects.add(particles_lib::make_explosion_effect());
         player.explosion = Some(handle);
     }
 }
