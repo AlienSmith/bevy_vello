@@ -8,6 +8,7 @@ use bevy::prelude::*;
 mod plugin;
 pub use plugin::VelloPlugin;
 
+pub mod collision;
 pub mod debug;
 pub mod dock;
 pub mod integrations;
@@ -17,6 +18,7 @@ pub mod text;
 // Re-exports
 pub use velato;
 pub use vello;
+use vello::{kurbo::BezPath, CollisionScene};
 pub use vello_svg;
 
 pub mod prelude {
@@ -118,6 +120,8 @@ pub struct VelloTextBundle {
 /// A simple newtype component wrapper for [`vello::Scene`] for rendering.
 #[derive(Component, Default, Clone)]
 pub struct VelloScene(vello::Scene);
+
+pub use collision::VelloCollider;
 
 impl std::ops::Deref for VelloScene {
     type Target = vello::Scene;
