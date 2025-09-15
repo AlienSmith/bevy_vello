@@ -3,7 +3,7 @@
 //! An integration to render SVG and Lottie assets in Bevy with Vello.
 
 use crate::prelude::*;
-use bevy::prelude::*;
+use bevy::{a11y::accesskit::Affine, prelude::*};
 
 mod plugin;
 pub use plugin::VelloPlugin;
@@ -170,4 +170,22 @@ pub fn add_default_light(mut commands: Commands) {
         scene: light_scene,
         ..Default::default()
     },));
+}
+
+pub fn mat4_to_affine(raw_transform: Mat4) -> kurbo::Affine {
+    let transform: [f32; 16] = raw_transform.to_cols_array();
+
+    // | a c e |
+    // | b d f |
+    // | 0 0 1 |
+    let transform: [f64; 6] = [
+        transform[0] as f64,  // a
+        -transform[1] as f64, // b
+        -transform[4] as f64, // c
+        transform[5] as f64,  // d
+        transform[12] as f64, // e
+        transform[13] as f64, // f
+    ];
+
+    kurbo::Affine::new(transform)
 }

@@ -1,7 +1,7 @@
 use super::extract::{
     ExtractedPixelScale, ExtractedRenderAsset, ExtractedRenderScene, ExtractedRenderText,
 };
-use crate::CoordinateSpace;
+use crate::{mat4_to_affine, CoordinateSpace};
 use bevy::{
     prelude::*,
     render::{camera::ExtractedCamera, view::ExtractedView},
@@ -43,6 +43,7 @@ impl PrepareRenderInstance for ExtractedRenderAsset {
 
         let raw_transform = match self.render_mode {
             CoordinateSpace::ScreenSpace => {
+                //we could not figure out how to apply the inverse world to screen matrix to cancel it out. need gpu to support screen space.
                 todo!();
                 // let mut model_matrix = world_transform.compute_matrix().mul_scalar(pixel_scale);
 
@@ -249,30 +250,17 @@ pub fn prepare_text_affines(
         let vello_matrix = ndc_to_pixels_matrix * view_proj_matrix;
         //let inv = vello_matrix.inverse();
 
-        let raw_transform = match render_text.render_mode {
+        let affine = match render_text.render_mode {
             CoordinateSpace::ScreenSpace => {
-                todo!();
-                //inv * world_transform.compute_matrix().mul_scalar(pixel_scale.0)
+                todo!()
+                // let b = mat4_to_affine(world_transform.compute_matrix().mul_scalar(pixel_scale.0));
+                // let a = mat4_to_affine(vello_matrix);
+                // let i_a = a.inverse();
+                // i_a * b
             }
-            CoordinateSpace::WorldSpace => model_matrix,
+            CoordinateSpace::WorldSpace => mat4_to_affine(model_matrix),
         };
 
-        let transform: [f32; 16] = raw_transform.to_cols_array();
-
-        // | a c e |
-        // | b d f |
-        // | 0 0 1 |
-        let transform: [f64; 6] = [
-            transform[0] as f64,  // a
-            -transform[1] as f64, // b
-            -transform[4] as f64, // c
-            transform[5] as f64,  // d
-            transform[12] as f64, // e
-            transform[13] as f64, // f
-        ];
-
-        commands
-            .entity(entity)
-            .insert(PreparedAffine(Affine::new(transform)));
+        commands.entity(entity).insert(PreparedAffine(affine));
     }
 }
