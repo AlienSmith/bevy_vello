@@ -25,6 +25,8 @@ pub use asset::{
     VelloAsset, VelloAssetAlignment, VelloReplaySceneAsset, VelloReplaySceneAssetLoader,
 };
 
+pub mod physics;
+
 #[derive(Clone)]
 pub enum VectorFile {
     #[cfg(feature = "svg")]

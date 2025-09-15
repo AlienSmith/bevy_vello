@@ -5,6 +5,7 @@ use crate::render::extract::ExtractedRenderScene;
 use crate::{CoordinateSpace, VelloCanvasMaterial, VelloFont};
 use bevy::ecs::system::lifetimeless::Read;
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::mesh::Indices;
 use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
 use bevy::render::render_graph::{NodeRunError, RenderGraphContext, SlotInfo};
@@ -13,7 +14,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
-use bevy::render::view::NoFrustumCulling;
+use bevy::render::view::{ExtractedView, NoFrustumCulling};
 use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
 use bevy::window::{WindowResized, WindowResolution};
 use vello::kurbo::Affine;
@@ -62,6 +63,7 @@ pub fn setup_image(images: &mut Assets<Image>, window: &WindowResolution) -> Han
 #[allow(clippy::complexity)]
 pub fn prepare_scene(
     mut commands: Commands,
+    camera: Query<(&ExtractedCamera, &ExtractedView), With<Camera2d>>,
     ss_render_target: Query<&SSRenderTarget>,
     query_render_vectors: Query<(&PreparedAffine, &ExtractedRenderAsset)>,
     query_render_scenes: Query<(&PreparedAffine, &ExtractedRenderScene)>,
@@ -199,6 +201,42 @@ pub fn prepare_scene(
             .count()
             == render_queue.len();
         let should_render = !render_queue.is_empty() && !empty_encodings;
+
+        if let Ok((camera, view)) = camera.get_single() {
+            let size_pixels: UVec2 = camera.physical_viewport_size.unwrap();
+            let (pixels_x, pixels_y) = (size_pixels.x as f32, size_pixels.y as f32);
+            let ndc_to_pixels_matrix = Mat4::from_cols_array_2d(&[
+                [pixels_x / 2.0, 0.0, 0.0, pixels_x / 2.0],
+                [0.0, pixels_y / 2.0, 0.0, pixels_y / 2.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ])
+            .transpose();
+
+            let (projection_mat, view_mat) = {
+                let mut view_mat = view.world_from_view.compute_matrix();
+                view_mat.w_axis.y *= -1.0;
+
+                (view.clip_from_view, view_mat)
+            };
+
+            let view_proj_matrix = ndc_to_pixels_matrix * projection_mat * view_mat.inverse();
+            let transform: [f32; 16] = view_proj_matrix.to_cols_array();
+
+            // | a c e |
+            // | b d f |
+            // | 0 0 1 |
+            let transform: [f64; 6] = [
+                transform[0] as f64,  // a
+                transform[1] as f64,  // b
+                transform[4] as f64,  // c
+                transform[5] as f64,  // d
+                transform[12] as f64, // e
+                transform[13] as f64, // f
+            ];
+            scene_buffer.set_transform(Affine::new(transform));
+        }
+
         batch = VelloRenderBatches {
             should_render,
             scene: scene_buffer,

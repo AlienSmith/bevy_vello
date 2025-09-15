@@ -23,7 +23,6 @@ fn main() {
         ),
     );
     embedded_asset!(app, "assets/Rubik-Medium.ttf");
-    embedded_asset!(app, "assets/Rubik-Medium.ttf");
     app.run();
 }
 
@@ -63,7 +62,7 @@ fn setup_screenspace_text(mut commands: Commands, asset_server: ResMut<AssetServ
     commands.spawn(VelloTextBundle {
         font: asset_server.load("embedded://text/assets/Rubik-Medium.ttf"),
         text: VelloText {
-            content: "Text rendered by Vello!".to_string(),
+            content: "Welcome to the text Test".to_string(),
             size: 15.0,
             brush: Some(peniko::Brush::Solid(peniko::Color::RED)),
         },

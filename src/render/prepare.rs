@@ -43,47 +43,51 @@ impl PrepareRenderInstance for ExtractedRenderAsset {
 
         let raw_transform = match self.render_mode {
             CoordinateSpace::ScreenSpace => {
-                let mut model_matrix = world_transform.compute_matrix().mul_scalar(pixel_scale);
+                todo!();
+                // let mut model_matrix = world_transform.compute_matrix().mul_scalar(pixel_scale);
 
-                let vector_size = Vec2::new(self.asset.width, self.asset.height);
+                // let vector_size = Vec2::new(self.asset.width, self.asset.height);
 
-                // Make the screen space vector instance sized to fill the
-                // entire UI Node box if it's bundled with a Node
-                if let Some(node) = &self.ui_node {
-                    let fill_scale = node.size() / vector_size;
-                    model_matrix.x_axis.x *= fill_scale.x;
-                    model_matrix.y_axis.y *= fill_scale.y;
-                }
+                // // Make the screen space vector instance sized to fill the
+                // // entire UI Node box if it's bundled with a Node
+                // if let Some(node) = &self.ui_node {
+                //     let fill_scale = node.size() / vector_size;
+                //     model_matrix.x_axis.x *= fill_scale.x;
+                //     model_matrix.y_axis.y *= fill_scale.y;
+                // }
 
-                let mut local_center_matrix = local_center_matrix;
-                local_center_matrix.w_axis.y *= -1.0;
-                model_matrix * local_center_matrix
+                // let mut local_center_matrix = local_center_matrix;
+                // local_center_matrix.w_axis.y *= -1.0;
+
+                // let (pixels_x, pixels_y) = (viewport_size.x as f32, viewport_size.y as f32);
+                // let ndc_to_pixels_matrix = Mat4::from_cols_array_2d(&[
+                //     [pixels_x / 2.0, 0.0, 0.0, pixels_x / 2.0],
+                //     [0.0, pixels_y / 2.0, 0.0, pixels_y / 2.0],
+                //     [0.0, 0.0, 1.0, 0.0],
+                //     [0.0, 0.0, 0.0, 1.0],
+                // ])
+                // .transpose();
+
+                // let (projection_mat, view_mat) = {
+                //     let mut view_mat = view.world_from_view.compute_matrix();
+                //     view_mat.w_axis.y *= -1.0;
+
+                //     (view.clip_from_view, view_mat)
+                // };
+
+                // let view_proj_matrix = projection_mat * view_mat.inverse();
+
+                // let temp = ndc_to_pixels_matrix * view_proj_matrix;
+                // let inv = temp.inverse();
+                // inv * model_matrix * local_center_matrix
             }
             CoordinateSpace::WorldSpace => {
                 let local_matrix = local_center_matrix;
 
-                let (pixels_x, pixels_y) = (viewport_size.x as f32, viewport_size.y as f32);
-                let ndc_to_pixels_matrix = Mat4::from_cols_array_2d(&[
-                    [pixels_x / 2.0, 0.0, 0.0, pixels_x / 2.0],
-                    [0.0, pixels_y / 2.0, 0.0, pixels_y / 2.0],
-                    [0.0, 0.0, 1.0, 0.0],
-                    [0.0, 0.0, 0.0, 1.0],
-                ])
-                .transpose();
-
                 let mut model_matrix = world_transform.compute_matrix() * local_matrix;
                 model_matrix.w_axis.y *= -1.0;
 
-                let (projection_mat, view_mat) = {
-                    let mut view_mat = view.world_from_view.compute_matrix();
-                    view_mat.w_axis.y *= -1.0;
-
-                    (view.clip_from_view, view_mat)
-                };
-
-                let view_proj_matrix = projection_mat * view_mat.inverse();
-
-                ndc_to_pixels_matrix * view_proj_matrix * model_matrix
+                model_matrix
             }
         };
 
@@ -149,40 +153,43 @@ pub fn prepare_scene_affines(
 
         let raw_transform = match render_scene.render_mode {
             CoordinateSpace::ScreenSpace => {
-                let mut model_matrix = world_transform.compute_matrix().mul_scalar(pixel_scale.0);
+                todo!();
+                // let mut model_matrix = world_transform.compute_matrix().mul_scalar(pixel_scale.0);
 
-                if let Some(node) = &render_scene.ui_node {
-                    // The Bevy Transform for a UI node seems to always have the origin
-                    // of the translation at the center of its bounding box. Here we
-                    // move the origin back to the top left, so that, e.g., drawing a
-                    // shape with center=(20,20) inside of a 40x40 UI node results in
-                    // the shape being centered within the node.
-                    let Vec2 { x, y } = node.size() * pixel_scale.0;
-                    model_matrix.w_axis.x -= x / 2.0;
-                    model_matrix.w_axis.y -= y / 2.0;
+                // if let Some(node) = &render_scene.ui_node {
+                //     // The Bevy Transform for a UI node seems to always have the origin
+                //     // of the translation at the center of its bounding box. Here we
+                //     // move the origin back to the top left, so that, e.g., drawing a
+                //     // shape with center=(20,20) inside of a 40x40 UI node results in
+                //     // the shape being centered within the node.
+                //     let Vec2 { x, y } = node.size() * pixel_scale.0;
+                //     model_matrix.w_axis.x -= x / 2.0;
+                //     model_matrix.w_axis.y -= y / 2.0;
 
-                    // Note that there's no need to flip the Y axis in this case, as
-                    // Bevy handles it for us.
-                } else {
-                    model_matrix.w_axis.y *= -1.0;
-                }
+                //     // Note that there's no need to flip the Y axis in this case, as
+                //     // Bevy handles it for us.
+                // } else {
+                //     model_matrix.w_axis.y *= -1.0;
+                // }
 
-                model_matrix
+                // let (projection_mat, view_mat) = {
+                //     let mut view_mat = view.world_from_view.compute_matrix();
+                //     view_mat.w_axis.y *= -1.0;
+
+                //     (view.clip_from_view, view_mat)
+                // };
+
+                // let view_proj_matrix = projection_mat * view_mat.inverse();
+
+                // let temp = ndc_to_pixels_matrix * view_proj_matrix;
+                // let inv = temp.inverse();
+                // inv * model_matrix
             }
             CoordinateSpace::WorldSpace => {
                 let mut model_matrix = world_transform.compute_matrix();
                 model_matrix.w_axis.y *= -1.0;
 
-                let (projection_mat, view_mat) = {
-                    let mut view_mat = view.world_from_view.compute_matrix();
-                    view_mat.w_axis.y *= -1.0;
-
-                    (view.clip_from_view, view_mat)
-                };
-
-                let view_proj_matrix = projection_mat * view_mat.inverse();
-
-                ndc_to_pixels_matrix * view_proj_matrix * model_matrix
+                model_matrix
             }
         };
 
@@ -240,12 +247,14 @@ pub fn prepare_text_affines(
 
         let view_proj_matrix = projection_mat * view_mat.inverse();
         let vello_matrix = ndc_to_pixels_matrix * view_proj_matrix;
+        //let inv = vello_matrix.inverse();
 
         let raw_transform = match render_text.render_mode {
             CoordinateSpace::ScreenSpace => {
-                world_transform.compute_matrix().mul_scalar(pixel_scale.0)
+                todo!();
+                //inv * world_transform.compute_matrix().mul_scalar(pixel_scale.0)
             }
-            CoordinateSpace::WorldSpace => vello_matrix * model_matrix,
+            CoordinateSpace::WorldSpace => model_matrix,
         };
 
         let transform: [f32; 16] = raw_transform.to_cols_array();

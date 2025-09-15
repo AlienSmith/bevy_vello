@@ -2,7 +2,7 @@ mod scene_gen;
 use std::default;
 
 use avian2d::prelude::*;
-use bevy::asset::AssetMetaCheck;
+use bevy::asset::{embedded_asset, AssetMetaCheck};
 use bevy::math::vec3;
 use bevy::prelude::*;
 use bevy::reflect::EnumInfo;
@@ -151,12 +151,12 @@ enum GameState {
 
 fn main() {
     let tank_lib_plugin = StateAwarePlugin::new(GameState::Game);
-    App::new()
-        .add_plugins(tank_lib_plugin)
+    let mut app = App::new();
+    app.add_plugins(tank_lib_plugin)
         .add_plugins(PhysicsDebugPlugin::default())
         .insert_resource(CursorPosition::default())
         .init_state::<GameState>()
-        .add_systems(Startup, setup_resources)
+        .add_systems(Startup, (setup_resources, setup_on_screen_info))
         .add_systems(
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),
@@ -176,8 +176,9 @@ fn main() {
         .add_systems(
             Update,
             (test_zombie_input, update_cursor_position).run_if(in_state(GameState::Game)),
-        )
-        .run();
+        );
+    embedded_asset!(app, "../assets/Rubik-Medium.ttf");
+    app.run();
     bevy::log::warn!("Initialize");
 }
 
@@ -270,6 +271,22 @@ pub fn spawn_gun_fire_at(
         transform,
         ..Default::default()
     },));
+}
+
+fn setup_on_screen_info(mut commands: Commands, asset_server: ResMut<AssetServer>) {
+    commands.spawn(VelloTextBundle {
+        font: asset_server.load("embedded://text/assets/Rubik-Medium.ttf"),
+        text: VelloText {
+            content: "Welcome to the test ground!".to_string(),
+            size: 15.0,
+            brush: Some(peniko::Brush::Solid(peniko::Color::RED)),
+        },
+        alignment: bevy_vello::text::VelloTextAlignment::TopLeft,
+        transform: Transform::from_xyz(100.0, 85.0, 0.0),
+        coordinate_space: CoordinateSpace::ScreenSpace,
+        debug_visualizations: DebugVisualizations::Visible,
+        ..default()
+    });
 }
 
 fn setup_vector_graphics(
