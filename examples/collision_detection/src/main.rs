@@ -6,7 +6,11 @@
 
 use std::time::Duration;
 
-use bevy::{ecs::entity, prelude::*};
+use bevy::{
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    ecs::entity,
+    prelude::*,
+};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
@@ -97,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(TankGameAssets::default())
         .insert_resource(UiState::default())
         .add_plugins(HanabiIntegrationPlugin)
-        .add_plugins(EguiPlugin);
+        .add_plugins(EguiPlugin)
+        .add_plugins(FrameTimeDiagnosticsPlugin::default());
     // Systems that create Egui widgets should be run during the `CoreSet::Update` set,
     // or after the `EguiSet::BeginPass` system (which belongs to the `CoreSet::PreUpdate` set).
 
@@ -125,10 +130,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn ui_example_system(mut ui_state: ResMut<UiState>, mut contexts: EguiContexts) {
+fn ui_example_system(
+    mut ui_state: ResMut<UiState>,
+    mut contexts: EguiContexts,
+    diagnostics: Res<DiagnosticsStore>,
+) {
     egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
         ui_state.just_clear = false;
         ui_state.just_spawn = false;
+        // Get the FPS diagnostic path
+        let fps_path = FrameTimeDiagnosticsPlugin::FPS;
+
+        // Fetch the FPS value
+        if let Some(fps) = diagnostics.get(&fps_path) {
+            if let Some(value) = fps.value() {
+                ui.label(format!("FPS: {:.1}", value));
+            }
+            if let Some(avg) = fps.average() {
+                ui.label(format!("Avg FPS: {:.1}", avg));
+            }
+        }
         if ui.button("Quit").clicked() {
             std::process::exit(0);
         }

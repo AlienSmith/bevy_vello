@@ -1,7 +1,7 @@
 use crate::{
-    debug::DebugVisualizationsPlugin, integrations::VelloReplaySceneAssetLoader,
-    prelude::VelloReplaySceneAsset, render::VelloRenderPlugin, text::VelloFontLoader, VelloAsset,
-    VelloFont,
+    collision::VelloCollisionPlugin, debug::DebugVisualizationsPlugin,
+    integrations::VelloReplaySceneAssetLoader, prelude::VelloReplaySceneAsset,
+    render::VelloRenderPlugin, text::VelloFontLoader, VelloAsset, VelloFont,
 };
 use bevy::prelude::*;
 
@@ -11,6 +11,7 @@ impl Plugin for VelloPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(VelloRenderPlugin)
             .add_plugins(DebugVisualizationsPlugin)
+            .add_plugins(VelloCollisionPlugin)
             .init_asset::<VelloAsset>()
             .init_asset::<VelloFont>()
             .init_asset::<VelloReplaySceneAsset>()

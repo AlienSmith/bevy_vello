@@ -2,9 +2,10 @@ use bevy::{
     ecs::{component::Component, entity::Entity, system::Resource},
     utils::PassHash,
 };
+pub use plugin::VelloCollisionPlugin;
 use vello::{
     kurbo::{self, BezPath},
-    CollisionScene,
+    CollisionResult, CollisionScene,
 };
 
 mod extract;
@@ -14,6 +15,12 @@ mod systems;
 
 #[derive(Default, Resource, Clone)]
 pub struct VelloCollisionScene(CollisionScene);
+
+#[derive(Default, Resource, Clone)]
+pub struct ExtractedVelloCollisionScene {
+    pub(crate) scene: CollisionScene,
+    pub(crate) sender: Option<Sender<Vec<CollisionResult>>>,
+}
 
 impl std::ops::Deref for VelloCollisionScene {
     type Target = CollisionScene;
@@ -46,5 +53,21 @@ impl VelloCollider {
             shape: path.clone(),
             aabb: *aabb,
         }
+    }
+}
+
+use crossbeam_channel::{bounded, Receiver, Sender};
+
+// Thread-safe channel for GPU → Main thread communication
+#[derive(Resource)]
+pub struct GpuDataChannel<T: Send + 'static> {
+    pub sender: Sender<T>,
+    pub receiver: Receiver<T>,
+}
+
+impl<T: Send + 'static> GpuDataChannel<T> {
+    pub fn new(capacity: usize) -> Self {
+        let (sender, receiver) = bounded(capacity);
+        Self { sender, receiver }
     }
 }
