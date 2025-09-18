@@ -72,6 +72,7 @@ crossbeam-channel = "0.5"
 futures = "0.3"
 avian2d = "0.1"
 ron = "0.8"
+nalgebra = "0.33.0"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.42"

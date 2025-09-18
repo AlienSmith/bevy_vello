@@ -33,7 +33,7 @@ impl Plugin for VelloCollisionPlugin {
                 (
                     update_collision_world,
                     make_collision_scene.after(update_collision_world),
-                    print_collision_results,
+                    //print_collision_results,
                 ),
             );
     }

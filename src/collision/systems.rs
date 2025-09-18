@@ -1,5 +1,5 @@
-use bevy::{ecs::entity, prelude::*};
-use vello::{kurbo::Vec2, CollisionResult};
+use bevy::prelude::*;
+use vello::CollisionResult;
 
 use crate::{
     collision::{GpuDataChannel, VelloCollisionScene, VelloCollisionWorld},

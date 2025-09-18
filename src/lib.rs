@@ -3,7 +3,7 @@
 //! An integration to render SVG and Lottie assets in Bevy with Vello.
 
 use crate::prelude::*;
-use bevy::{a11y::accesskit::Affine, prelude::*};
+use bevy::prelude::*;
 
 mod plugin;
 pub use plugin::VelloPlugin;
@@ -18,7 +18,6 @@ pub mod text;
 // Re-exports
 pub use velato;
 pub use vello;
-use vello::{kurbo::BezPath, CollisionScene};
 pub use vello_svg;
 
 pub mod prelude {
@@ -123,6 +122,8 @@ pub struct VelloScene(vello::Scene);
 
 pub use collision::VelloCollider;
 
+pub use integrations::physics::VelloCollisionResponsePlugin;
+
 impl std::ops::Deref for VelloScene {
     type Target = vello::Scene;
 
@@ -188,4 +189,64 @@ pub fn mat4_to_affine(raw_transform: Mat4) -> kurbo::Affine {
     ];
 
     kurbo::Affine::new(transform)
+}
+
+pub fn affine_to_mat4(affine: kurbo::Affine) -> Mat4 {
+    let coeffs = affine.as_coeffs();
+
+    // The Affine coefficients are in the order:
+    // [a, b, c, d, e, f] corresponding to:
+    // | a c e |
+    // | b d f |
+    // | 0 0 1 |
+
+    Mat4::from_cols_array(&[
+        coeffs[0] as f32,
+        -coeffs[1] as f32,
+        0.0,
+        0.0, // column 0
+        -coeffs[2] as f32,
+        coeffs[3] as f32,
+        0.0,
+        0.0, // column 1
+        0.0,
+        0.0,
+        1.0,
+        0.0, // column 2
+        coeffs[4] as f32,
+        coeffs[5] as f32,
+        0.0,
+        1.0, // column 3
+    ])
+}
+
+pub fn affine_to_transform(affine: kurbo::Affine, z: f32) -> Transform {
+    let coeffs = affine.as_coeffs();
+
+    // Extract translation
+    let translation = Vec3::new(
+        coeffs[4] as f32, // e (x translation)
+        coeffs[5] as f32, // f (y translation)
+        z,                // z translation (2D, so 0)
+    );
+
+    // Extract rotation and scale from the 2x2 matrix [a c; b d]
+    let a = coeffs[0] as f32;
+    let b = coeffs[1] as f32;
+    let c = coeffs[2] as f32;
+    let d = coeffs[3] as f32;
+
+    // Calculate scale (assuming uniform scaling)
+    let scale_x = (a * a + b * b).sqrt();
+    let scale_y = (c * c + d * d).sqrt();
+    let scale = Vec3::new(scale_x, scale_y, 1.0);
+
+    // Calculate rotation (extract angle from the upper 2x2 matrix)
+    let angle = b.atan2(a); // atan2(b, a) gives the rotation angle
+
+    Transform {
+        translation,
+        rotation: Quat::from_rotation_z(angle),
+        scale,
+    }
 }

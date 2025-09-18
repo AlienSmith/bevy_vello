@@ -26,7 +26,7 @@ use bevy_vello::{
         peniko::{self, GlowColor},
         scene::StorkeExpand,
     },
-    VelloCollider,
+    VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
 use particles_lib::Explosion;
@@ -109,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
     app.add_plugins(VelloPlugin)
+        .add_plugins(VelloCollisionResponsePlugin)
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_default_light)
         .add_systems(Startup, setup_resources)
@@ -193,7 +194,15 @@ fn setup_entity(mut commands: Commands) {
             scene,
             ..Default::default()
         },
-        VelloCollider::new(&rect_path, &rect),
+        VelloCollider::new(
+            &rect_path,
+            &rect,
+            Vec2::new(50.0, 0.0),
+            GlowColor {
+                color: peniko::Color::rgb(1.0, 0.0, 0.0),
+                glow: 1.0,
+            },
+        ),
     ));
 
     let mut scene1: VelloScene = VelloScene::default();
@@ -207,10 +216,18 @@ fn setup_entity(mut commands: Commands) {
     commands.spawn((
         VelloSceneBundle {
             scene: scene1,
-            transform: Transform::from_translation(Vec3::new(40.0, 40.0, 0.0)),
+            transform: Transform::from_translation(Vec3::new(500.0, 0.0, 0.0)),
             ..Default::default()
         },
-        VelloCollider::new(&rect_path, &rect),
+        VelloCollider::new(
+            &rect_path,
+            &rect,
+            Vec2::new(-50.0, 0.0),
+            GlowColor {
+                color: peniko::Color::rgb(0.0, 1.0, 0.0),
+                glow: 1.0,
+            },
+        ),
     ));
 }
 

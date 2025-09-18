@@ -1,11 +1,11 @@
 use bevy::{
     ecs::{component::Component, entity::Entity, system::Resource},
-    utils::PassHash,
+    math::Vec2,
 };
 pub use plugin::VelloCollisionPlugin;
 use vello::{
     kurbo::{self, BezPath},
-    CollisionResult, CollisionScene,
+    peniko, CollisionResult, CollisionScene,
 };
 
 mod extract;
@@ -38,20 +38,31 @@ impl std::ops::DerefMut for VelloCollisionScene {
 
 #[derive(Default, Resource, Clone)]
 pub struct VelloCollisionWorld {
-    collision_pairs: Vec<(Entity, Entity)>,
+    pub(crate) collision_pairs: Vec<(Entity, Entity)>,
 }
 
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
-    shape: BezPath,
-    aabb: kurbo::Rect,
+    pub(crate) shape: BezPath,
+    pub(crate) aabb: kurbo::Rect,
+    pub(crate) initial_velocity: Vec2,
+    pub(crate) inverse_mass: f32,
+    pub(crate) debug_color: peniko::GlowColor,
 }
 
 impl VelloCollider {
-    pub fn new(path: &BezPath, aabb: &kurbo::Rect) -> Self {
+    pub fn new(
+        path: &BezPath,
+        aabb: &kurbo::Rect,
+        initial_velocity: Vec2,
+        color: peniko::GlowColor,
+    ) -> Self {
         Self {
             shape: path.clone(),
             aabb: *aabb,
+            initial_velocity,
+            inverse_mass: 1.0,
+            debug_color: color,
         }
     }
 }

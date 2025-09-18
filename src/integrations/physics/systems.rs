@@ -1,0 +1,121 @@
+use crate::{
+    affine_to_transform,
+    collision::{GpuDataChannel, VelloCollisionWorld},
+    integrations::physics::VelloConstraintWorld,
+    mat4_to_affine, VelloCollider, VelloScene,
+};
+use bevy::prelude::*;
+use nalgebra::Vector2;
+use vello::{
+    kurbo::{self, Affine, BezPath},
+    peniko, CollisionResult,
+};
+
+pub fn generate_soft_body_for_collider(
+    query: Query<(Entity, &VelloCollider, &GlobalTransform), Added<VelloCollider>>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    for (entity, collider, transform) in query.iter() {
+        constraint_world.data.create_soft_body_from_path(
+            &collider.shape,
+            &mat4_to_affine(transform.compute_matrix()),
+            nalgebra::Vector2::<f32>::new(collider.initial_velocity.x, collider.initial_velocity.y),
+            collider.inverse_mass,
+            entity,
+        );
+    }
+}
+
+pub fn update_collider_from_soft_body(
+    mut query: Query<(&mut VelloCollider, &mut Transform)>,
+    constraint_world: Res<VelloConstraintWorld>,
+) {
+    constraint_world.data.get_colliders_from_soft_body(
+        |index: Entity, path: BezPath, affine: Affine, rect: kurbo::Rect| {
+            if let Ok((mut collider, mut transform)) = query.get_mut(index) {
+                let z = transform.translation.z;
+                let target_transform = affine_to_transform(affine, z);
+                *transform = target_transform;
+                collider.shape = path;
+                collider.aabb = rect;
+            }
+        },
+    );
+}
+
+pub fn make_collision_constraints(
+    collision_channel: Res<GpuDataChannel<Vec<CollisionResult>>>,
+    collision_world: Res<VelloCollisionWorld>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    match collision_channel.receiver.try_recv() {
+        Ok(data) => {
+            let len = data.len();
+            let len_c = collision_world.collision_pairs.len();
+            if len == len_c {
+                for (index, c) in data.iter().enumerate() {
+                    //valid surface normal means valid results
+                    if c.a_position_normal[2] != 0.0 || c.a_position_normal[3] != 0.0 {
+                        let a_position =
+                            Vector2::<f32>::new(c.a_position_normal[0], c.a_position_normal[1]);
+                        let b_position =
+                            Vector2::<f32>::new(c.b_position_normal[0], c.b_position_normal[1]);
+                        let a_curve_index = c.b_position_normal[3] as u32;
+                        let b_curve_index = c.b_position_normal[2] as u32;
+                        let diff = a_position - b_position;
+                        let a_normal =
+                            Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
+                        let b_normal = -a_normal;
+                        if diff.magnitude_squared() != 0.0 {
+                            let (a_index, b_index) = collision_world.collision_pairs[index];
+                            let mut collider_index = a_index;
+                            let mut current_position = a_position;
+                            let target_position = b_position;
+                            let mut curve_index = a_curve_index;
+                            constraint_world.data.add_one_time_collision_constraint(
+                                collider_index,
+                                curve_index as usize,
+                                current_position,
+                                target_position,
+                                b_normal,
+                            );
+                            collider_index = b_index;
+                            current_position = b_position;
+                            curve_index = b_curve_index;
+                            let target_position = a_position;
+                            constraint_world.data.add_one_time_collision_constraint(
+                                collider_index,
+                                curve_index as usize,
+                                current_position,
+                                target_position,
+                                a_normal,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn update_constraint_world(
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    time: Res<Time>,
+) {
+    let delta = time.delta_seconds();
+    constraint_world.data.step(delta);
+}
+
+pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider)>) {
+    for (mut s, c) in q.iter_mut() {
+        s.reset();
+        s.fill(
+            peniko::Fill::NonZero,
+            Affine::IDENTITY,
+            c.debug_color,
+            None,
+            &c.shape,
+        );
+    }
+}
