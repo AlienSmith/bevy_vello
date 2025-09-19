@@ -1,6 +1,6 @@
 use bevy::{
     ecs::{component::Component, entity::Entity, system::Resource},
-    math::Vec2,
+    math::{Vec2, Vec4},
 };
 pub use plugin::VelloCollisionPlugin;
 use vello::{
@@ -8,10 +8,13 @@ use vello::{
     peniko, CollisionResult, CollisionScene,
 };
 
+mod broad_phase;
 mod extract;
 mod plugin;
 mod prepare;
 mod systems;
+
+use broad_phase::BroadPhaseQbvh;
 
 #[derive(Default, Resource, Clone)]
 pub struct VelloCollisionScene(CollisionScene);
@@ -41,6 +44,11 @@ pub struct VelloCollisionWorld {
     pub(crate) collision_pairs: Vec<(Entity, Entity)>,
 }
 
+#[derive(Default, Resource, Clone)]
+pub struct VelloCollisionBroadPhase {
+    pub(crate) broad_phase: BroadPhaseQbvh,
+}
+
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
@@ -64,6 +72,15 @@ impl VelloCollider {
             inverse_mass: 1.0,
             debug_color: color,
         }
+    }
+
+    pub fn get_aabb(&self) -> Vec4 {
+        Vec4::new(
+            self.aabb.x0 as f32,
+            self.aabb.y0 as f32,
+            self.aabb.x1 as f32,
+            self.aabb.y1 as f32,
+        )
     }
 }
 

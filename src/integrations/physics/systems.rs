@@ -16,13 +16,18 @@ pub fn generate_soft_body_for_collider(
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
     for (entity, collider, transform) in query.iter() {
-        constraint_world.data.create_soft_body_from_path(
-            &collider.shape,
-            &mat4_to_affine(transform.compute_matrix()),
-            nalgebra::Vector2::<f32>::new(collider.initial_velocity.x, collider.initial_velocity.y),
-            collider.inverse_mass,
-            entity,
-        );
+        if collider.inverse_mass != 0.0 {
+            constraint_world.data.create_soft_body_from_path(
+                &collider.shape,
+                &mat4_to_affine(transform.compute_matrix()),
+                nalgebra::Vector2::<f32>::new(
+                    collider.initial_velocity.x,
+                    collider.initial_velocity.y,
+                ),
+                collider.inverse_mass,
+                entity,
+            );
+        }
     }
 }
 
