@@ -61,6 +61,7 @@ pub fn make_collision_constraints(
                 for (index, c) in data.iter().enumerate() {
                     //valid surface normal means valid results
                     if c.a_position_normal[2] != 0.0 || c.a_position_normal[3] != 0.0 {
+                        info!("{:?}", c);
                         let a_position =
                             Vector2::<f32>::new(c.a_position_normal[0], c.a_position_normal[1]);
                         let b_position =

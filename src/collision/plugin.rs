@@ -1,9 +1,11 @@
 use bevy::app::App;
 use bevy::app::Plugin;
+use bevy::app::PostUpdate;
 use bevy::app::Update;
 use bevy::ecs::schedule::IntoSystemConfigs;
 use bevy::render::ExtractSchedule;
 use bevy::render::RenderApp;
+use bevy::transform::TransformSystem;
 use vello::CollisionResult;
 
 use crate::collision::broad_phase::update_broad_phase;
@@ -30,12 +32,14 @@ impl Plugin for VelloCollisionPlugin {
             .insert_resource(VelloCollisionBroadPhase::default())
             .insert_resource(GpuDataChannel::<Vec<CollisionResult>>::new(1))
             .add_systems(
-                Update,
+                PostUpdate,
                 (
                     update_broad_phase,
-                    make_collision_scene.after(update_broad_phase),
+                    make_collision_scene,
                     //print_collision_results,
-                ),
+                )
+                    .chain()
+                    .after(TransformSystem::TransformPropagate),
             );
     }
 }

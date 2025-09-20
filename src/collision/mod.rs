@@ -64,12 +64,13 @@ impl VelloCollider {
         aabb: &kurbo::Rect,
         initial_velocity: Vec2,
         color: peniko::GlowColor,
+        inverse_mass: f32,
     ) -> Self {
         Self {
             shape: path.clone(),
             aabb: *aabb,
             initial_velocity,
-            inverse_mass: 1.0,
+            inverse_mass,
             debug_color: color,
         }
     }

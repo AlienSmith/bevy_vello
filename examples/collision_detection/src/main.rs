@@ -4,34 +4,30 @@
 //! tweaked at runtime via the egui inspector to move the 2D rendering layer of
 //! particle above or below the reference square.
 
-use std::time::Duration;
+use std::f32::consts::PI;
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    ecs::entity,
     prelude::*,
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
-use bevy_hanabi::prelude::*;
 
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     add_default_light,
-    integrations::{HanabiIntegrationPlugin, VelloSceneSubBundle},
+    integrations::HanabiIntegrationPlugin,
     vello::{
-        kurbo::{self, Affine, Shape, Stroke},
+        kurbo::{self, BezPath, Shape},
         peniko::{self, GlowColor},
-        scene::StorkeExpand,
     },
     VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
 use particles_lib::Explosion;
-use ron::value::Float;
-use tankgame_lib::{decor::make_scene_from_vello_replay_scene, prelude::*, update_particle_scene};
+use tankgame_lib::prelude::*;
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum GameState {
     #[default]
@@ -72,12 +68,6 @@ impl Default for ParticleState {
             is_trace: false,
         }
     }
-}
-
-#[derive(Clone, Default, Component)]
-pub struct BloodPaintParticles {
-    explosion: Explosion,
-    death_timer: Timer,
 }
 
 //Notic without "meta_check: AssetMetaCheck::Never" bevy would complain about the HanabiNode.
@@ -176,58 +166,126 @@ fn setup_back_ground(mut commands: Commands) {
 }
 
 fn setup_entity(mut commands: Commands) {
-    let mut scene: VelloScene = VelloScene::default();
+    let make_rect = || {
+        let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
+        let rect_path = rect.to_path(0.1);
+        (rect_path, rect)
+    };
 
-    let rect = kurbo::Rect::new(-24.0, -24.0, 24.0, 24.0);
-    let rect_path = rect.to_path(0.1);
-
-    scene.fill(
-        peniko::Fill::NonZero,
-        kurbo::Affine::default(),
-        peniko::Color::rgba(1.0, 0.0, 0.0, 0.7),
-        None,
-        &rect,
+    make_collision_shape(
+        &mut commands,
+        Vec4::new(0.0, 0.0, 45.0, 1.0),
+        make_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, -50.0),
+        1.0,
     );
 
-    commands.spawn((
-        VelloSceneBundle {
-            scene,
-            ..Default::default()
-        },
-        VelloCollider::new(
-            &rect_path,
-            &rect,
-            Vec2::new(50.0, 0.0),
-            GlowColor {
-                color: peniko::Color::rgb(1.0, 0.0, 0.0),
-                glow: 1.0,
-            },
-        ),
-    ));
+    // make_collision_shape(
+    //     &mut commands,
+    //     Vec4::new(0.0, -300.0, 0.0, 1.0),
+    //     make_rect,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(0.0, 0.0),
+    //     0.0,
+    // );
+    make_static_scene(&mut commands);
+}
 
-    let mut scene1: VelloScene = VelloScene::default();
-    scene1.fill(
+fn make_static_scene(commands: &mut Commands) {
+    let make_long_rect = || {
+        let rect: kurbo::Rect = kurbo::Rect::new(-980.0, -10.0, 980.0, 10.0);
+        let rect_path = rect.to_path(0.1);
+        (rect_path, rect)
+    };
+    let make_short_rect = || {
+        let rect = kurbo::Rect::new(-560.0, -10.0, 560.0, 10.0);
+        let rect_path = rect.to_path(0.1);
+        (rect_path, rect)
+    };
+    make_collision_shape(
+        commands,
+        Vec4::new(0.0, -300.0, 0.0, 1.0),
+        make_long_rect,
+        GlowColor {
+            color: peniko::Color::rgb(0.0, 1.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, 0.0),
+        0.0,
+    );
+
+    // make_collision_shape(
+    //     commands,
+    //     Vec4::new(0.0, -960.0, 0.0, 1.0),
+    //     make_long_rect,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(-0.0, 0.0),
+    //     0.0,
+    // );
+
+    // make_collision_shape(
+    //     commands,
+    //     Vec4::new(540.0, 0.0, 90.0, 1.0),
+    //     make_short_rect,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(-0.0, 0.0),
+    //     0.0,
+    // );
+
+    // make_collision_shape(
+    //     commands,
+    //     Vec4::new(-540.0, 0.0, 90.0, 1.0),
+    //     make_short_rect,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(-0.0, 0.0),
+    //     0.0,
+    // );
+}
+
+fn make_collision_shape(
+    commands: &mut Commands,
+    transform: Vec4,
+    f: impl Fn() -> (BezPath, kurbo::Rect),
+    color: peniko::GlowColor,
+    velocity: Vec2,
+    inverse_mass: f32,
+) {
+    let mut scene: VelloScene = VelloScene::default();
+    let (shape, rect) = f();
+    scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::default(),
         peniko::Color::rgba(0.0, 1.0, 0.0, 0.7),
         None,
-        &rect,
+        &shape,
     );
     commands.spawn((
         VelloSceneBundle {
-            scene: scene1,
-            transform: Transform::from_translation(Vec3::new(500.0, 0.0, 0.0)),
+            scene,
+            transform: Transform {
+                translation: Vec3::new(transform.x, transform.y, 0.0),
+                rotation: Quat::from_rotation_z(transform.z.to_radians()),
+                scale: Vec3::new(transform.w, transform.w, 1.0),
+            },
             ..Default::default()
         },
-        VelloCollider::new(
-            &rect_path,
-            &rect,
-            Vec2::new(-50.0, 0.0),
-            GlowColor {
-                color: peniko::Color::rgb(0.0, 1.0, 0.0),
-                glow: 1.0,
-            },
-        ),
+        VelloCollider::new(&shape, &rect, velocity, color, inverse_mass),
     ));
 }
 

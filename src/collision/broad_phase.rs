@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::transform;
 use parry2d::bounding_volume::Aabb;
 use parry2d::math::Point;
 use parry2d::partitioning::IndexedData;
@@ -10,9 +11,13 @@ use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionWorld;
 use crate::VelloCollider;
 
-pub fn compute_aabb_from_collider(collider: &VelloCollider) -> Aabb {
+pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &GlobalTransform) -> Aabb {
+    let position = transform.translation();
     let bbox = collider.get_aabb();
-    let result = Aabb::new(Point::new(bbox.x, bbox.y), Point::new(bbox.z, bbox.w));
+    let result = Aabb::new(
+        Point::new(bbox.x + position.x, bbox.y + position.y),
+        Point::new(bbox.z + position.x, bbox.w + position.y),
+    );
     result
 }
 
@@ -62,7 +67,7 @@ impl BroadPhaseQbvh {
     }
     pub fn update(
         &mut self,
-        all_colliders: &Query<(Entity, &VelloCollider)>,
+        all_colliders: &Query<(Entity, &VelloCollider, &GlobalTransform)>,
         modified_colliders: &Query<(Entity, &VelloCollider), Changed<VelloCollider>>,
         removed_collider: &mut RemovedComponents<VelloCollider>,
         collision_world: &mut ResMut<VelloCollisionWorld>,
@@ -85,8 +90,11 @@ impl BroadPhaseQbvh {
         let full_rebuild = self.qbvh.raw_nodes().is_empty();
         if full_rebuild {
             self.qbvh.clear_and_rebuild(
-                all_colliders.iter().map(|(index, collider)| {
-                    (ColliderHandle(index), compute_aabb_from_collider(collider))
+                all_colliders.iter().map(|(index, collider, &transform)| {
+                    (
+                        ColliderHandle(index),
+                        compute_aabb_from_collider(collider, &transform),
+                    )
                 }),
                 margin,
             );
@@ -102,8 +110,8 @@ impl BroadPhaseQbvh {
             }
 
             let _ = self.qbvh.refit(margin, &mut self.workspace, |handle| {
-                let (_entity, collider) = all_colliders.get(handle.0).unwrap();
-                compute_aabb_from_collider(collider)
+                let (_entity, collider, transform) = all_colliders.get(handle.0).unwrap();
+                compute_aabb_from_collider(collider, transform)
             });
             // self.qbvh
             //     .traverse_bvtt_with_stack(&self.qbvh, &mut visitor, &mut self.stack);
@@ -115,7 +123,7 @@ impl BroadPhaseQbvh {
 }
 
 pub fn update_broad_phase(
-    all_colliders: Query<(Entity, &VelloCollider)>,
+    all_colliders: Query<(Entity, &VelloCollider, &GlobalTransform)>,
     modified_colliders: Query<(Entity, &VelloCollider), Changed<VelloCollider>>,
     mut removed_collider: RemovedComponents<VelloCollider>,
     mut collision_world: ResMut<VelloCollisionWorld>,
