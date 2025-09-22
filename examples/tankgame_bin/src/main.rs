@@ -156,7 +156,7 @@ fn main() {
         .add_plugins(PhysicsDebugPlugin::default())
         .insert_resource(CursorPosition::default())
         .init_state::<GameState>()
-        .add_systems(Startup, (setup_resources, setup_on_screen_info))
+        .add_systems(Startup, setup_resources)
         .add_systems(
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),

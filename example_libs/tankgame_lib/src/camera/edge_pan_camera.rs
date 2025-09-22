@@ -1,5 +1,6 @@
 use bevy::input::mouse::MouseWheel;
 pub use bevy::prelude::*;
+use bevy::render::camera::CameraProjection;
 pub use bevy::window::PrimaryWindow;
 #[derive(Component)]
 pub struct EdgePanCamera {
@@ -13,7 +14,9 @@ impl Default for EdgePanCamera {
         Self {
             pan_speed: 500.0,
             edge_margin: 50.0,
-            zoom_level: 1.0,
+            zoom_level: 1.5, //The application always use a DPI scaling of 1.5 despite os settings,
+                             //in other words the logical size and physical size of the view port is always different.
+                             //could be a problem with winit or bevy. use zoom to make it 1 unit to 1 px.
         }
     }
 }
@@ -34,8 +37,8 @@ pub fn update_edge_pan_camera(
         // Zoom in/out with scroll wheel
         camera.zoom_level = (camera.zoom_level - event.y * 0.1).clamp(0.01, 5.0);
         // Keep zoom reasonable
-        projection.scale = camera.zoom_level;
     }
+    projection.scale = camera.zoom_level;
     if let Some(cursor_pos) = window.cursor_position() {
         let window_size = Vec2::new(window.width(), window.height());
         let mut movement = Vec2::ZERO;

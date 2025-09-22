@@ -2,15 +2,17 @@ use bevy::{
     app::{Plugin, PostUpdate},
     ecs::schedule::IntoSystemConfigs,
     math::Vec2,
-    transform::TransformSystem,
 };
 
-use crate::integrations::physics::{
-    systems::{
-        generate_soft_body_for_collider, make_collision_constraints,
-        update_collider_from_soft_body, update_constraint_world, visualize_colliders,
+use crate::{
+    collision::CollisionSystems,
+    integrations::physics::{
+        systems::{
+            generate_soft_body_for_collider, make_collision_constraints,
+            update_collider_from_soft_body, update_constraint_world, visualize_colliders,
+        },
+        VelloConstraintWorld,
     },
-    VelloConstraintWorld,
 };
 
 pub struct VelloCollisionResponsePlugin;
@@ -28,7 +30,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                     visualize_colliders,
                 )
                     .chain()
-                    .after(TransformSystem::TransformPropagate),
+                    .in_set(CollisionSystems::CollisionResponse),
             );
     }
 }

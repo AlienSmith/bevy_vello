@@ -48,9 +48,10 @@ pub fn update_collider_from_soft_body(
     );
 }
 
+//consume the collision result togather with the collision pairs.
 pub fn make_collision_constraints(
     collision_channel: Res<GpuDataChannel<Vec<CollisionResult>>>,
-    collision_world: Res<VelloCollisionWorld>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
     match collision_channel.receiver.try_recv() {
@@ -103,6 +104,7 @@ pub fn make_collision_constraints(
         }
         _ => {}
     }
+    collision_world.collision_pairs.clear();
 }
 
 pub fn update_constraint_world(

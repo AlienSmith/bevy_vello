@@ -1,5 +1,5 @@
 use bevy::{
-    ecs::{component::Component, entity::Entity, system::Resource},
+    ecs::{component::Component, entity::Entity, schedule::SystemSet, system::Resource},
     math::{Vec2, Vec4},
 };
 pub use plugin::VelloCollisionPlugin;
@@ -41,7 +41,18 @@ impl std::ops::DerefMut for VelloCollisionScene {
 
 #[derive(Default, Resource, Clone)]
 pub struct VelloCollisionWorld {
+    pub(crate) collision_pairs_bvh: Vec<(Entity, Entity)>,
     pub(crate) collision_pairs: Vec<(Entity, Entity)>,
+}
+
+impl VelloCollisionWorld {
+    pub fn update_collision_pairs_if_previous_one_has_been_consumed(&mut self) -> bool {
+        if self.collision_pairs.is_empty() {
+            self.collision_pairs.append(&mut self.collision_pairs_bvh);
+            return true;
+        }
+        return false;
+    }
 }
 
 #[derive(Default, Resource, Clone)]
@@ -99,4 +110,10 @@ impl<T: Send + 'static> GpuDataChannel<T> {
         let (sender, receiver) = bounded(capacity);
         Self { sender, receiver }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
+pub enum CollisionSystems {
+    Collision,         // Your first phase
+    CollisionResponse, // Your second phase (runs after Phase1)
 }

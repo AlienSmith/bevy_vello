@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::transform;
 use parry2d::bounding_volume::Aabb;
 use parry2d::math::Point;
 use parry2d::partitioning::IndexedData;
@@ -81,7 +80,7 @@ impl BroadPhaseQbvh {
         let mut visitor = BoundingVolumeIntersectionsSimultaneousVisitor::new(
             |co1: &ColliderHandle, co2: &ColliderHandle| {
                 if *co1 != *co2 {
-                    collision_world.collision_pairs.push((co1.0, co2.0));
+                    collision_world.collision_pairs_bvh.push((co1.0, co2.0));
                 }
                 true
             },

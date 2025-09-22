@@ -9,6 +9,7 @@ use std::f32::consts::PI;
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
+    window::WindowResolution,
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -81,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..default()
                 })
                 .set(bevy::log::LogPlugin {
-                    // Uncomment this to override the default log settings:
+                    // Uncomment this to override the default log settings:0
                     // level: bevy::log::Level::TRACE,
                     // filter: "wgpu=warn,bevy_ecs=info".to_string(),
                     ..default()
@@ -112,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             (
                 ui_example_system,
+                update_edge_pan_camera,
                 //update_blood_particles.after(ui_example_system),
             )
                 .run_if(in_state(GameState::Game)),
@@ -149,7 +151,7 @@ fn ui_example_system(
 
 //make a white background
 fn setup_back_ground(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn((Camera2dBundle::default(), EdgePanCamera::default()));
     let mut scene: VelloScene = VelloScene::default();
     scene.fill(
         peniko::Fill::NonZero,
@@ -177,85 +179,73 @@ fn setup_entity(mut commands: Commands) {
         Vec4::new(0.0, 0.0, 45.0, 1.0),
         make_rect,
         GlowColor {
-            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            color: peniko::Color::rgb(0.0, 1.0, 0.0),
             glow: 1.0,
         },
         Vec2::new(0.0, -50.0),
         1.0,
     );
-
-    // make_collision_shape(
-    //     &mut commands,
-    //     Vec4::new(0.0, -300.0, 0.0, 1.0),
-    //     make_rect,
-    //     GlowColor {
-    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
-    //         glow: 1.0,
-    //     },
-    //     Vec2::new(0.0, 0.0),
-    //     0.0,
-    // );
     make_static_scene(&mut commands);
 }
 
 fn make_static_scene(commands: &mut Commands) {
     let make_long_rect = || {
-        let rect: kurbo::Rect = kurbo::Rect::new(-980.0, -10.0, 980.0, 10.0);
+        let rect: kurbo::Rect = kurbo::Rect::new(-980.0, -20.0, 980.0, 20.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
     let make_short_rect = || {
-        let rect = kurbo::Rect::new(-560.0, -10.0, 560.0, 10.0);
+        let rect = kurbo::Rect::new(-560.0, -20.0, 560.0, 20.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
     make_collision_shape(
         commands,
-        Vec4::new(0.0, -300.0, 0.0, 1.0),
+        Vec4::new(0.0, 540.0, 0.0, 1.0),
         make_long_rect,
         GlowColor {
-            color: peniko::Color::rgb(0.0, 1.0, 0.0),
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
             glow: 1.0,
         },
         Vec2::new(0.0, 0.0),
         0.0,
     );
 
-    // make_collision_shape(
-    //     commands,
-    //     Vec4::new(0.0, -960.0, 0.0, 1.0),
-    //     make_long_rect,
-    //     GlowColor {
-    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
-    //         glow: 1.0,
-    //     },
-    //     Vec2::new(-0.0, 0.0),
-    //     0.0,
-    // );
+    make_collision_shape(
+        commands,
+        Vec4::new(0.0, -540.0, 0.0, 1.0),
+        make_long_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, 0.0),
+        0.0,
+    );
 
-    // make_collision_shape(
-    //     commands,
-    //     Vec4::new(540.0, 0.0, 90.0, 1.0),
-    //     make_short_rect,
-    //     GlowColor {
-    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
-    //         glow: 1.0,
-    //     },
-    //     Vec2::new(-0.0, 0.0),
-    //     0.0,
-    // );
+    make_collision_shape(
+        commands,
+        Vec4::new(-960.0, 0.0, 90.0, 1.0),
+        make_short_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(-0.0, 0.0),
+        0.0,
+    );
 
-    // make_collision_shape(
-    //     commands,
-    //     Vec4::new(-540.0, 0.0, 90.0, 1.0),
-    //     make_short_rect,
-    //     GlowColor {
-    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
-    //         glow: 1.0,
-    //     },
-    //     Vec2::new(-0.0, 0.0),
-    //     0.0,
-    // );
+    make_collision_shape(
+        commands,
+        Vec4::new(960.0, 0.0, 90.0, 1.0),
+        make_short_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(-0.0, 0.0),
+        0.0,
+    );
 }
 
 fn make_collision_shape(
