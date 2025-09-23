@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    collision::{VelloCollisionScene, VelloCollisionWorld},
+    collision::{VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO},
     mat4_to_affine, VelloCollider,
 };
 
@@ -15,9 +15,11 @@ pub fn make_collision_scene(
     if r.update_collision_pairs_if_previous_one_has_been_consumed() {
         for (a, b) in &r.collision_pairs {
             let (c_a, t_a) = query.get(*a).unwrap();
-            let affine_a = mat4_to_affine(t_a.compute_matrix());
+            let affine_a =
+                mat4_to_affine(t_a.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
             let (c_b, t_b) = query.get(*b).unwrap();
-            let affine_b = mat4_to_affine(t_b.compute_matrix());
+            let affine_b =
+                mat4_to_affine(t_b.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
             scene.encode_colliders(
                 (0.0, 1.0).into(),
                 &c_a.shape,

@@ -1,6 +1,6 @@
 use crate::{
     affine_to_transform,
-    collision::{GpuDataChannel, VelloCollisionWorld},
+    collision::{GpuDataChannel, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO},
     integrations::physics::VelloConstraintWorld,
     mat4_to_affine, VelloCollider, VelloScene,
 };
@@ -58,15 +58,20 @@ pub fn make_collision_constraints(
         Ok(data) => {
             let len = data.len();
             let len_c = collision_world.collision_pairs.len();
+            let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
             if len == len_c {
                 for (index, c) in data.iter().enumerate() {
                     //valid surface normal means valid results
                     if c.a_position_normal[2] != 0.0 || c.a_position_normal[3] != 0.0 {
                         info!("{:?}", c);
-                        let a_position =
-                            Vector2::<f32>::new(c.a_position_normal[0], c.a_position_normal[1]);
-                        let b_position =
-                            Vector2::<f32>::new(c.b_position_normal[0], c.b_position_normal[1]);
+                        let a_position = Vector2::<f32>::new(
+                            c.a_position_normal[0] * scaling,
+                            c.a_position_normal[1] * scaling,
+                        );
+                        let b_position = Vector2::<f32>::new(
+                            c.b_position_normal[0] * scaling,
+                            c.b_position_normal[1] * scaling,
+                        );
                         let a_curve_index = c.b_position_normal[3] as u32;
                         let b_curve_index = c.b_position_normal[2] as u32;
                         let diff = a_position - b_position;

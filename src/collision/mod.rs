@@ -14,6 +14,8 @@ mod plugin;
 mod prepare;
 mod systems;
 
+pub const VELLO_COLLISION_WORLD_RATIO: f32 = 2.0;
+
 use broad_phase::BroadPhaseQbvh;
 
 #[derive(Default, Resource, Clone)]
