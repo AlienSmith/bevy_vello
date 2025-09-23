@@ -1,6 +1,6 @@
 use crate::{
-    make_sprite_sheet_scene_from_vello_replay_scene, spawn_one_time_sprite_sheet_at,
-    TankGameAssets, TankGameAssetsType,
+    make_sprite_sheet_scene_from_vello_replay_scene, spawn_one_time_sprite_sheet_at, AssetManager,
+    TankGameAssetsType,
 };
 
 use super::shell::spawn_sell;
@@ -42,7 +42,7 @@ pub fn control_system(
     mut query_scene: Query<(&mut Transform, &mut Gun, &GlobalTransform)>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     let mouse_pos = if let Some(mouse_position) = windows

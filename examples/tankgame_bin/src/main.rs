@@ -6,6 +6,7 @@ use bevy::asset::{embedded_asset, AssetMetaCheck};
 use bevy::math::vec3;
 use bevy::prelude::*;
 use bevy::reflect::EnumInfo;
+use bevy_vello::integrations::TankGameAssetsMetaData;
 use bevy_vello::{
     add_default_light, integrations::HanabiIntegrationPlugin, prelude::*, VelloPlugin,
 };
@@ -13,7 +14,7 @@ use bevy_vello::{
 use tankgame_lib::{
     handle_collisions, pop_text_update, spawn_pop_text_at, spawn_static_enemy_at, spawn_stone_at,
     spawn_tree_at, static_alien_control_system, text::DefaultFonts, update_edge_pan_camera,
-    update_tree, EdgePanCamera, TankGameAssets, TankGameAssetsType,
+    update_tree, AssetManager, EdgePanCamera, TankGameAssetsType,
 };
 use tankgame_lib::{
     init_particles_player,
@@ -21,8 +22,8 @@ use tankgame_lib::{
     update_particle_scene, ParticlesPlayer,
 };
 use tankgame_lib::{
-    make_sprite_sheet_scene_from_vello_replay_scene, spawn_zombie_at, StateAwarePlugin,
-    TankGameAssetsMetaData, Zombie, ZombieInputComponent, ZombieInputEvent,
+    make_sprite_sheet_scene_from_vello_replay_scene, spawn_zombie_at, StateAwarePlugin, Zombie,
+    ZombieInputComponent, ZombieInputEvent,
 };
 
 #[derive(Default, Deref, DerefMut, Resource)]
@@ -64,7 +65,7 @@ fn test_zombie_input(
 
 pub fn test_spawn_zombie(
     mut commands: Commands,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     spawn_zombie_at(
@@ -78,7 +79,7 @@ pub fn test_spawn_zombie(
 
 pub fn test_spawn_deco(
     mut commands: Commands,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     spawn_tree_at(
@@ -184,7 +185,7 @@ fn main() {
 
 fn check_assets_loaded(
     mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
-    mut tank_parts: ResMut<TankGameAssets>,
+    mut tank_parts: ResMut<AssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for ev in ev_asset.read() {
@@ -202,7 +203,7 @@ fn check_assets_loaded(
 
 fn setup_resources(
     mut fonts: ResMut<DefaultFonts>,
-    mut tank_parts: ResMut<TankGameAssets>,
+    mut tank_parts: ResMut<AssetManager>,
     asset_server: Res<AssetServer>,
 ) {
     tank_parts.push(
@@ -251,7 +252,7 @@ fn setup_resources(
 
 pub fn spawn_gun_fire_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     transform: Transform,
     start_time: f32,
@@ -291,7 +292,7 @@ fn setup_on_screen_info(mut commands: Commands, asset_server: ResMut<AssetServer
 
 fn setup_vector_graphics(
     mut commands: Commands,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     commands.spawn((Camera2dBundle::default(), EdgePanCamera::default()));

@@ -16,7 +16,7 @@ use bevy_hanabi::prelude::*;
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     add_default_light,
-    integrations::{HanabiIntegrationPlugin, VelloSceneSubBundle},
+    integrations::{HanabiIntegrationPlugin, TankGameAssetsMetaData, VelloSceneSubBundle},
     vello::{
         kurbo::{self, Affine, Stroke},
         peniko::{self, GlowColor},
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
         )
         .init_state::<GameState>()
-        .insert_resource(TankGameAssets::default())
+        .insert_resource(AssetManager::default())
         .insert_resource(UiState::default())
         .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(EguiPlugin);
@@ -159,7 +159,7 @@ fn ui_example_system(mut ui_state: ResMut<UiState>, mut contexts: EguiContexts) 
 
 fn update_blood_particles(
     mut commands: Commands,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
     time: Res<Time>,
     ui_state: Res<UiState>,
@@ -220,7 +220,7 @@ fn setup_back_ground(mut commands: Commands) {
 
 fn check_assets_loaded(
     mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
-    mut tank_parts: ResMut<TankGameAssets>,
+    mut tank_parts: ResMut<AssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for ev in ev_asset.read() {
@@ -236,7 +236,7 @@ fn check_assets_loaded(
     }
 }
 
-fn setup_resources(mut tank_parts: ResMut<TankGameAssets>, asset_server: Res<AssetServer>) {
+fn setup_resources(mut tank_parts: ResMut<AssetManager>, asset_server: Res<AssetServer>) {
     tank_parts.push(
         asset_server.load("scenes/blood.scene"),
         TankGameAssetsMetaData::default(),
@@ -245,7 +245,7 @@ fn setup_resources(mut tank_parts: ResMut<TankGameAssets>, asset_server: Res<Ass
 
 pub fn spawn_blood_particles_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     time_in_seconds: f32,
     cone_angle: f32,

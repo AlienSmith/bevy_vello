@@ -1,6 +1,6 @@
 use crate::{
     collision::{ColliderFlags, ColliderResponds, Health, SingleFrameCollider},
-    make_sprite_sheet_scene_from_vello_replay_scene, TankGameAssets, TankGameAssetsType,
+    make_sprite_sheet_scene_from_vello_replay_scene, AssetManager, TankGameAssetsType,
 };
 use avian2d::prelude::*;
 use bevy::{
@@ -45,7 +45,7 @@ pub struct Attack {
 
 pub fn spawn_zombie_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     translation: Vec3,
     scale: f32,
@@ -144,7 +144,7 @@ pub fn spawn_zombie_at(
 pub fn on_add_attack_to_zombie(
     time: Res<Time>,
     mut query: Query<(&mut VelloScene, &mut Attack), (Added<Attack>, With<Zombie>)>,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     let mut temp: Option<VelloScene> = None;
@@ -201,7 +201,7 @@ pub fn update_zombie_attack(
 pub fn on_add_move_to_zombie(
     time: Res<Time>,
     mut query: Query<&mut VelloScene, (Added<GoToSelection>, With<Zombie>)>,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     let mut temp: Option<VelloScene> = None;
@@ -227,7 +227,7 @@ pub fn on_add_move_to_zombie(
 pub fn on_add_idle_to_zombie(
     time: Res<Time>,
     mut query: Query<&mut VelloScene, (Added<Idle>, With<Zombie>)>,
-    parts: Res<TankGameAssets>,
+    parts: Res<AssetManager>,
     custom_assets: Res<Assets<VelloReplaySceneAsset>>,
 ) {
     let mut temp: Option<VelloScene> = None;

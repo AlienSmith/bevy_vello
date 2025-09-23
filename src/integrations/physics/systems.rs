@@ -7,8 +7,9 @@ use crate::{
 use bevy::prelude::*;
 use nalgebra::Vector2;
 use vello::{
-    kurbo::{self, Affine, BezPath},
-    peniko, CollisionResult,
+    kurbo::{self, Affine, BezPath, Shape, Stroke},
+    peniko::{self, GlowColor},
+    CollisionResult,
 };
 
 pub fn generate_soft_body_for_collider(
@@ -120,15 +121,31 @@ pub fn update_constraint_world(
     constraint_world.data.step(delta);
 }
 
-pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider)>) {
-    for (mut s, c) in q.iter_mut() {
+pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &GlobalTransform)>) {
+    for (mut s, c, _transform) in q.iter_mut() {
         s.reset();
-        s.fill(
+        s.fill_with_shadow(
             peniko::Fill::NonZero,
             Affine::IDENTITY,
             c.debug_color,
             None,
             &c.shape,
+            true,
         );
+        //draw bbox
+        // {
+        //     let affine = mat4_to_affine(_transform.compute_matrix());
+        //     let transform = Affine::translate(affine.translation()) * affine.inverse();
+        //     s.stroke(
+        //         &Stroke::new(1.0),
+        //         transform,
+        //         GlowColor {
+        //             color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+        //             glow: 5.0,
+        //         },
+        //         None,
+        //         &c.aabb.to_path(0.1),
+        //     );
+        // }
     }
 }

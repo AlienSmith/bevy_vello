@@ -1,12 +1,12 @@
 use bevy::prelude::*;
 use bevy_vello::prelude::*;
 
-use crate::{TankGameAssets, TankGameAssetsType};
+use crate::{AssetManager, TankGameAssetsType};
 
 pub fn make_sprite_sheet_scene_from_vello_replay_scene(
     scene: &mut VelloScene,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     part_type: TankGameAssetsType,
     is_loop: Option<bool>,
     start_time: Option<f32>,
@@ -22,7 +22,7 @@ pub fn make_sprite_sheet_scene_from_vello_replay_scene(
 
 pub fn spawn_sprite_sheet_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     transform: Transform,
     parts_type: TankGameAssetsType,

@@ -22,7 +22,8 @@ pub use error::VectorLoaderError;
 
 mod asset;
 pub use asset::{
-    VelloAsset, VelloAssetAlignment, VelloReplaySceneAsset, VelloReplaySceneAssetLoader,
+    TankGameAssetsMetaData, VelloAsset, VelloAssetAlignment, VelloAssetManager,
+    VelloReplaySceneAsset, VelloReplaySceneAssetLoader,
 };
 
 pub mod physics;

@@ -65,7 +65,7 @@ pub struct VelloCollisionBroadPhase {
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
-    pub(crate) aabb: kurbo::Rect,
+    pub(crate) aabb: kurbo::Rect, //aabb will only take the effect of position ignoring entity rotation and scale.
     pub(crate) initial_velocity: Vec2,
     pub(crate) inverse_mass: f32,
     pub(crate) debug_color: peniko::GlowColor,

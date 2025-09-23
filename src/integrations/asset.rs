@@ -140,3 +140,101 @@ impl VelloAssetAlignment {
         )
     }
 }
+
+#[derive(Clone, Default)]
+pub enum TankGameAssetsMetaData {
+    #[default]
+    PBR,
+    //we need the total frame counts
+    SpriteSheet(u32),
+}
+
+use bevy::utils::HashMap;
+
+pub trait AssetWithMeta: Asset {
+    type Meta: Clone + Default; // Metadata type for this asset
+}
+
+//pub type TankAssetManager = AssetManager<VelloReplaySceneAsset>;
+
+#[derive(Default)]
+pub struct AssetEntry<T: AssetWithMeta> {
+    pub handle: Handle<T>,
+    pub meta: T::Meta,
+}
+//The compiler will wants T: Clone if we use derived clone method
+impl<T: AssetWithMeta> Clone for AssetEntry<T> {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle.clone(), // Handle<T> is always Clone
+            meta: self.meta.clone(),     // T::Meta is Clone per your trait bound
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct VelloAssetManager<T: AssetWithMeta> {
+    pub id_to_index: HashMap<AssetId<T>, usize>,
+    pub parts: Vec<AssetEntry<T>>,
+    pub load_state: Vec<bool>,
+}
+
+impl<T: AssetWithMeta> Default for VelloAssetManager<T> {
+    fn default() -> Self {
+        Self {
+            id_to_index: Default::default(),
+            parts: Default::default(),
+            load_state: Default::default(),
+        }
+    }
+}
+
+impl<T: AssetWithMeta> Clone for VelloAssetManager<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id_to_index: self.id_to_index.clone(),
+            parts: self.parts.clone(),
+            load_state: self.load_state.clone(),
+        }
+    }
+}
+
+impl<T: AssetWithMeta> VelloAssetManager<T> {
+    pub fn push(&mut self, handle: Handle<T>, meta: T::Meta) {
+        let index = self.parts.len();
+        let id = handle.id();
+        self.id_to_index.insert(id, index);
+        self.parts.push(AssetEntry { handle, meta });
+        self.load_state.push(false);
+    }
+
+    pub fn get_index<R: Into<usize>>(&self, index: R) -> Option<Handle<T>> {
+        let index = index.into();
+        if self.parts.len() > index && self.load_state[index] {
+            return Some(self.parts[index].clone().handle);
+        }
+        None
+    }
+
+    pub fn get_entry_at_index<R: Into<usize>>(&self, index: R) -> Option<AssetEntry<T>> {
+        let index = index.into();
+        if self.parts.len() > index && self.load_state[index] {
+            return Some(self.parts[index].clone());
+        }
+        None
+    }
+
+    pub fn mark_as_loaded(&mut self, id: &AssetId<T>) {
+        if let Some(index) = self.id_to_index.get(id) {
+            self.load_state[*index] = true;
+        }
+    }
+
+    pub fn all_loaded(&self) -> bool {
+        self.load_state.iter().all(|&loaded| loaded)
+    }
+}
+
+impl AssetWithMeta for VelloReplaySceneAsset {
+    type Meta = TankGameAssetsMetaData;
+}

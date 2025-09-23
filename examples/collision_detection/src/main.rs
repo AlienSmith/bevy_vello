@@ -19,7 +19,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     add_default_light,
-    integrations::HanabiIntegrationPlugin,
+    integrations::{HanabiIntegrationPlugin, TankGameAssetsMetaData},
     vello::{
         kurbo::{self, BezPath, Shape},
         peniko::{self, GlowColor},
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
         )
         .init_state::<GameState>()
-        .insert_resource(TankGameAssets::default())
+        .insert_resource(AssetManager::default())
         .insert_resource(UiState::default())
         .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(EguiPlugin)
@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_systems(Startup, setup_back_ground)
-        .add_systems(Startup, add_default_light)
+        .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
         .add_systems(
             Update,
@@ -194,8 +194,10 @@ fn make_static_scene(commands: &mut Commands) {
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
+    //aabb will only take the effect of position ignoring entity rotation and scale.
+    //in other words if your static collider contains rotation or scaling you need to account for that
     let make_short_rect = || {
-        let rect = kurbo::Rect::new(-560.0, -20.0, 560.0, 20.0);
+        let rect = kurbo::Rect::new(-20.0, -560.0, 20.0, 560.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
@@ -225,7 +227,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_collision_shape(
         commands,
-        Vec4::new(-960.0, 0.0, 90.0, 1.0),
+        Vec4::new(-960.0, 0.0, 0.0, 1.0),
         make_short_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -237,7 +239,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_collision_shape(
         commands,
-        Vec4::new(960.0, 0.0, 90.0, 1.0),
+        Vec4::new(960.0, 0.0, 0.0, 1.0),
         make_short_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -281,7 +283,7 @@ fn make_collision_shape(
 
 fn check_assets_loaded(
     mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
-    mut tank_parts: ResMut<TankGameAssets>,
+    mut tank_parts: ResMut<AssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for ev in ev_asset.read() {
@@ -297,7 +299,7 @@ fn check_assets_loaded(
     }
 }
 
-fn setup_resources(mut tank_parts: ResMut<TankGameAssets>, asset_server: Res<AssetServer>) {
+fn setup_resources(mut tank_parts: ResMut<AssetManager>, asset_server: Res<AssetServer>) {
     tank_parts.push(
         asset_server.load("scenes/blood.scene"),
         TankGameAssetsMetaData::default(),
@@ -305,3 +307,18 @@ fn setup_resources(mut tank_parts: ResMut<TankGameAssets>, asset_server: Res<Ass
 }
 
 //fn update_blood_instances()
+
+pub fn add_light(mut commands: Commands) {
+    let mut light_scene: VelloScene = VelloScene::default();
+    let light_radius = 800.0;
+    //let light_shape_ratio = 1.0 / 40.0;
+    light_scene.push_point_light(
+        kurbo::Affine::scale(light_radius * 2.0),
+        &[1.0, 1.0, 1.0],
+        200.0 / (light_radius as f32),
+    );
+    commands.spawn((VelloSceneBundle {
+        scene: light_scene,
+        ..Default::default()
+    },));
+}

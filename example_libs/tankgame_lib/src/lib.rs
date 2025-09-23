@@ -25,8 +25,9 @@ pub mod sprite_sheet;
 use avian2d::{prelude::PhysicsSet, PhysicsPlugins};
 use bevy::{asset::AssetMetaCheck, prelude::*};
 use bevy_vello::{
-    integrations::HanabiIntegrationPlugin, prelude::VelloReplaySceneAsset, VelloPlugin, VelloScene,
-    VelloSceneBundle,
+    integrations::{HanabiIntegrationPlugin, TankGameAssetsMetaData},
+    prelude::VelloReplaySceneAsset,
+    VelloPlugin, VelloScene, VelloSceneBundle,
 };
 pub use camera::edge_pan_camera::{update_edge_pan_camera, EdgePanCamera};
 use collision::remove_single_frame_colliders;
@@ -44,7 +45,7 @@ pub use tank::particles::{
 
 pub use decor::{spawn_stone_at, spawn_tree_at, update_tree};
 pub use sprite_sheet::{make_sprite_sheet_scene_from_vello_replay_scene, spawn_sprite_sheet_at};
-pub use tank_parts::TankGameAssets;
+pub use tank_parts::AssetManager;
 
 pub mod prelude {
     pub use crate::{
@@ -54,10 +55,10 @@ pub mod prelude {
         enemy::alien::{spawn_static_enemy_at, static_alien_control_system},
         spawn_one_time_sprite_sheet_at,
         sprite_sheet::{make_sprite_sheet_scene_from_vello_replay_scene, spawn_sprite_sheet_at},
-        tank_parts::TankGameAssets,
+        tank_parts::AssetManager,
         text::{pop_text_update, spawn_pop_text_at, PopTextAnim},
         zombie::{spawn_zombie_at, Zombie, ZombieInputComponent, ZombieInputEvent},
-        OneTimeEntity, StateAwarePlugin, TankGameAssetsMetaData, TankGameAssetsType,
+        OneTimeEntity, StateAwarePlugin, TankGameAssetsType,
     };
 }
 
@@ -85,7 +86,7 @@ pub struct OneTimeEntity {
 
 pub fn spawn_one_time_sprite_sheet_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     transform: Transform,
     start_time: f32,
@@ -94,7 +95,7 @@ pub fn spawn_one_time_sprite_sheet_at(
 ) -> Option<Entity> {
     let mut b_s = VelloScene::default();
     if let TankGameAssetsMetaData::SpriteSheet(frame) =
-        parts.get_part_at_index(part_type).unwrap().meta
+        parts.get_entry_at_index(part_type).unwrap().meta
     {
         let fps = frame as f32 / duration_in_seconds;
         make_sprite_sheet_scene_from_vello_replay_scene(
@@ -137,14 +138,6 @@ pub fn update_one_time_entity(
     }
 }
 
-#[derive(Clone, Default)]
-pub enum TankGameAssetsMetaData {
-    #[default]
-    PBR,
-    //we need the total frame counts
-    SpriteSheet(u32),
-}
-
 impl From<TankGameAssetsType> for usize {
     fn from(value: TankGameAssetsType) -> Self {
         value.0 as usize
@@ -175,7 +168,7 @@ impl<S: States> Plugin for StateAwarePlugin<S> {
         .add_plugins(VelloPlugin)
         .add_plugins(StateMachinePlugin)
         .insert_resource(ParticlesPlayer::default())
-        .insert_resource(TankGameAssets::default())
+        .insert_resource(AssetManager::default())
         .insert_resource(DefaultFonts::default())
         .add_systems(
             Update,

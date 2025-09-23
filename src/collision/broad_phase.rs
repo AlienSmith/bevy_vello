@@ -9,7 +9,7 @@ use parry2d::query::visitors::BoundingVolumeIntersectionsSimultaneousVisitor;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionWorld;
 use crate::VelloCollider;
-
+//aabb will only take the effect of position ignoring entity rotation and scale.
 pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &GlobalTransform) -> Aabb {
     let position = transform.translation();
     let bbox = collider.get_aabb();

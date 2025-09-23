@@ -2,14 +2,14 @@ use avian2d::prelude::*;
 use bevy::prelude::*;
 use bevy_vello::prelude::*;
 
-use crate::{ColliderFlags, ColliderResponds, Health, TankGameAssets, TankGameAssetsType};
+use crate::{AssetManager, ColliderFlags, ColliderResponds, Health, TankGameAssetsType};
 #[derive(Clone, Default, Component)]
 pub struct Tree {}
 
 pub fn make_scene_from_vello_replay_scene(
     scene: &mut VelloScene,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     part_type: TankGameAssetsType,
 ) {
     custom_assets
@@ -21,7 +21,7 @@ pub fn make_scene_from_vello_replay_scene(
 
 pub fn spawn_tree_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     translation: Vec3,
 ) {
@@ -47,7 +47,7 @@ pub fn spawn_tree_at(
 
 pub fn spawn_stone_at(
     commands: &mut Commands,
-    parts: &Res<TankGameAssets>,
+    parts: &Res<AssetManager>,
     custom_assets: &Res<Assets<VelloReplaySceneAsset>>,
     translation: Vec3,
 ) {
