@@ -19,7 +19,11 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     add_default_light,
-    integrations::{HanabiIntegrationPlugin, TankGameAssetsMetaData},
+    integrations::{
+        svg,
+        svg_collider::{SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData},
+        HanabiIntegrationPlugin, TankGameAssetsMetaData,
+    },
     vello::{
         kurbo::{self, BezPath, Shape},
         peniko::{self, GlowColor},
@@ -167,17 +171,28 @@ fn setup_back_ground(mut commands: Commands) {
     },));
 }
 
-fn setup_entity(mut commands: Commands) {
+fn setup_entity(
+    mut commands: Commands,
+    svg_colliders: Res<SvgColliderAssetManager>,
+    custom_assets: Res<Assets<SvgColliderAsset>>,
+) {
     let make_rect = || {
         let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
 
+    let make_collider = || {
+        let svg_collider = custom_assets
+            .get(&svg_colliders.get_index(0 as usize).unwrap())
+            .unwrap();
+        (svg_collider.shape.clone(), svg_collider.aabb.clone())
+    };
+
     make_collision_shape(
         &mut commands,
-        Vec4::new(0.0, 0.0, 45.0, 1.0),
-        make_rect,
+        Vec4::new(200.0, 0.0, 0.0, 0.3),
+        make_collider,
         GlowColor {
             color: peniko::Color::rgb(0.0, 1.0, 0.0),
             glow: 1.0,
@@ -185,6 +200,18 @@ fn setup_entity(mut commands: Commands) {
         Vec2::new(0.0, -50.0),
         1.0,
     );
+
+    // make_collision_shape(
+    //     &mut commands,
+    //     Vec4::new(0.0, 0.0, 45.0, 1.0),
+    //     make_rect,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(0.0, -50.0),
+    //     1.0,
+    // );
     make_static_scene(&mut commands);
 }
 
@@ -283,14 +310,28 @@ fn make_collision_shape(
 
 fn check_assets_loaded(
     mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
+    mut sc_asset: EventReader<AssetEvent<SvgColliderAsset>>,
     mut tank_parts: ResMut<AssetManager>,
+    mut colliders: ResMut<SvgColliderAssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for ev in ev_asset.read() {
         match ev {
             AssetEvent::LoadedWithDependencies { id } => {
                 tank_parts.mark_as_loaded(id);
-                if tank_parts.all_loaded() {
+                if tank_parts.all_loaded() && colliders.all_loaded() {
+                    next_state.set(GameState::Game);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for sc in sc_asset.read() {
+        match sc {
+            AssetEvent::LoadedWithDependencies { id } => {
+                colliders.mark_as_loaded(id);
+                if tank_parts.all_loaded() && colliders.all_loaded() {
                     next_state.set(GameState::Game);
                 }
             }
@@ -299,11 +340,19 @@ fn check_assets_loaded(
     }
 }
 
-fn setup_resources(mut tank_parts: ResMut<AssetManager>, asset_server: Res<AssetServer>) {
+fn setup_resources(
+    mut tank_parts: ResMut<AssetManager>,
+    mut colliders: ResMut<SvgColliderAssetManager>,
+    asset_server: Res<AssetServer>,
+) {
     tank_parts.push(
         asset_server.load("scenes/blood.scene"),
         TankGameAssetsMetaData::default(),
     );
+    colliders.push(
+        asset_server.load("colliders/star.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    )
 }
 
 //fn update_blood_instances()

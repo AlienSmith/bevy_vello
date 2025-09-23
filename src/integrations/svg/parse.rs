@@ -1,7 +1,11 @@
-use crate::{integrations::VectorLoaderError, VectorFile, VelloAsset};
+use crate::{
+    integrations::{error::ColliderLoaderError, VectorLoaderError},
+    VectorFile, VelloAsset,
+};
 use bevy::transform::components::Transform;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
+use vello::kurbo::BezPath;
 use vello_svg::usvg::{self, fontdb::Database};
 
 pub static FONT_DB: Lazy<Database> = Lazy::new(usvg::fontdb::Database::default);
@@ -33,6 +37,15 @@ pub fn load_svg_from_bytes(bytes: &[u8]) -> Result<VelloAsset, VectorLoaderError
     };
 
     Ok(vello_vector)
+}
+
+pub fn load_collider_svg_from_bytes(
+    bytes: &[u8],
+) -> Result<Option<(BezPath, f32, f32, f32, f32)>, ColliderLoaderError> {
+    let svg_str = std::str::from_utf8(bytes)?;
+
+    let usvg = usvg::Tree::from_str(svg_str, &usvg::Options::default(), &FONT_DB)?;
+    Ok(vello_svg::extract_first_shpae(&usvg))
 }
 
 /// Deserialize an SVG file from a string slice.

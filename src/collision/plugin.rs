@@ -14,6 +14,7 @@ use crate::collision::GpuDataChannel;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionScene;
 use crate::collision::VelloCollisionWorld;
+use crate::integrations::svg_collider::SvgColliderPlugin;
 pub struct VelloCollisionPlugin;
 
 impl Plugin for VelloCollisionPlugin {
@@ -25,7 +26,8 @@ impl Plugin for VelloCollisionPlugin {
         render_app
             .insert_resource(ExtractedVelloCollisionScene::default())
             .add_systems(ExtractSchedule, extract_collision_scene);
-        app.insert_resource(VelloCollisionWorld::default())
+        app.add_plugins(SvgColliderPlugin)
+            .insert_resource(VelloCollisionWorld::default())
             .insert_resource(VelloCollisionScene::default())
             .insert_resource(VelloCollisionBroadPhase::default())
             .insert_resource(GpuDataChannel::<Vec<CollisionResult>>::new(1))
