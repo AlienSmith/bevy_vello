@@ -39,14 +39,19 @@ enum GameState {
     Loading,
     Game,
 }
+
+#[derive(PartialEq, Clone, Default)]
+struct EntityConfig {
+    pos_x: f32,
+    pos_y: f32,
+    vec_x: f32,
+    vec_y: f32,
+}
+
 #[derive(Default, Resource)]
 
 struct UiState {
-    current: ParticleState,
-    previous: ParticleState,
-    respawn_on_modified: bool,
-    clear_on_respawn: bool,
-    just_clear: bool,
+    current: EntityConfig,
     just_spawn: bool,
 }
 
@@ -117,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             (
                 ui_example_system,
+                spawn_colliders_from_ui.after(ui_example_system),
                 update_edge_pan_camera,
                 //update_blood_particles.after(ui_example_system),
             )
@@ -133,7 +139,6 @@ fn ui_example_system(
     diagnostics: Res<DiagnosticsStore>,
 ) {
     egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
-        ui_state.just_clear = false;
         ui_state.just_spawn = false;
         // Get the FPS diagnostic path
         let fps_path = FrameTimeDiagnosticsPlugin::FPS;
@@ -147,15 +152,54 @@ fn ui_example_system(
                 ui.label(format!("Avg FPS: {:.1}", avg));
             }
         }
+        ui.add(egui::Slider::new(&mut ui_state.current.pos_x, -900.0..=900.0).text("pox_x"));
+        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -500.0..=500.0).text("pox_y"));
+        ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
+        ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
+        if ui.button("Spawn").clicked() {
+            ui_state.just_spawn = true;
+        }
         if ui.button("Quit").clicked() {
             std::process::exit(0);
         }
     });
 }
 
+fn spawn_colliders_from_ui(
+    ui_state: Res<UiState>,
+    mut commands: Commands,
+    _svg_colliders: Res<SvgColliderAssetManager>,
+    _custom_assets: Res<Assets<SvgColliderAsset>>,
+) {
+    let make_rect = || {
+        let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
+        let rect_path = rect.to_path(0.1);
+        (rect_path, rect)
+    };
+    if ui_state.just_spawn {
+        make_collision_shape(
+            &mut commands,
+            Vec4::new(ui_state.current.pos_x, ui_state.current.pos_y, 0.0, 1.0),
+            make_rect,
+            GlowColor {
+                color: peniko::Color::rgb(0.0, 0.0, 1.0),
+                glow: 1.0,
+            },
+            Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
+            1.0,
+        );
+    }
+}
+
 //make a white background
 fn setup_back_ground(mut commands: Commands) {
-    commands.spawn((Camera2dBundle::default(), EdgePanCamera::default()));
+    commands.spawn((
+        Camera2dBundle::default(),
+        EdgePanCamera {
+            edge_margin: -10.0,
+            ..Default::default()
+        },
+    ));
     let mut scene: VelloScene = VelloScene::default();
     scene.fill(
         peniko::Fill::NonZero,

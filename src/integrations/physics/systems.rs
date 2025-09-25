@@ -23,7 +23,7 @@ pub fn generate_soft_body_for_collider(
                 &mat4_to_affine(transform.compute_matrix()),
                 nalgebra::Vector2::<f32>::new(
                     collider.initial_velocity.x,
-                    collider.initial_velocity.y,
+                    -collider.initial_velocity.y,
                 ),
                 collider.inverse_mass,
                 entity,
@@ -66,8 +66,8 @@ pub fn make_collision_constraints(
         return;
     }
     //the following line would force a sync point between game thread and render thread.
-    //match collision_channel.receiver.recv() {
-    match collision_channel.receiver.try_recv() {
+    match collision_channel.receiver.recv() {
+        //match collision_channel.receiver.try_recv() {
         Ok(data) => {
             let len = data.len();
             let len_c = collision_world.collision_pairs.len();
