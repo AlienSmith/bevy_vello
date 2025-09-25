@@ -180,12 +180,12 @@ pub fn mat4_to_affine(raw_transform: Mat4) -> kurbo::Affine {
     // | b d f |
     // | 0 0 1 |
     let transform: [f64; 6] = [
-        transform[0] as f64,  // a
-        -transform[1] as f64, // b
-        -transform[4] as f64, // c
-        transform[5] as f64,  // d
-        transform[12] as f64, // e
-        transform[13] as f64, // f
+        transform[0] as f64,   // a
+        -transform[1] as f64,  // b
+        -transform[4] as f64,  // c
+        transform[5] as f64,   // d
+        transform[12] as f64,  // e
+        -transform[13] as f64, // f
     ];
 
     kurbo::Affine::new(transform)
@@ -214,7 +214,7 @@ pub fn affine_to_mat4(affine: kurbo::Affine) -> Mat4 {
         1.0,
         0.0, // column 2
         coeffs[4] as f32,
-        coeffs[5] as f32,
+        -coeffs[5] as f32,
         0.0,
         1.0, // column 3
     ])

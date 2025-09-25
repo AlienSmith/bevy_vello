@@ -197,7 +197,7 @@ fn setup_entity(
             color: peniko::Color::rgb(0.0, 1.0, 0.0),
             glow: 1.0,
         },
-        Vec2::new(0.0, -50.0),
+        Vec2::new(-200.0, 0.0),
         1.0,
     );
 

@@ -1,10 +1,10 @@
 use crate::{
-    affine_to_transform,
+    affine_to_mat4,
     collision::{GpuDataChannel, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO},
     integrations::physics::VelloConstraintWorld,
     mat4_to_affine, VelloCollider, VelloScene,
 };
-use bevy::prelude::*;
+use bevy::{ecs::entity, prelude::*};
 use nalgebra::Vector2;
 use vello::{
     kurbo::{self, Affine, BezPath, Shape, Stroke},
@@ -40,8 +40,15 @@ pub fn update_collider_from_soft_body(
         |index: Entity, path: BezPath, affine: Affine, rect: kurbo::Rect| {
             if let Ok((mut collider, mut transform)) = query.get_mut(index) {
                 let z = transform.translation.z;
-                let target_transform = affine_to_transform(affine, z);
-                *transform = target_transform;
+                let position = affine.translation();
+                let target_matrix = affine_to_mat4(affine);
+                info!(
+                    "Entity {} center: {}, {}",
+                    index.index(),
+                    position.x,
+                    position.y
+                );
+                *transform = Transform::from_matrix(target_matrix);
                 collider.shape = path;
                 collider.aabb = rect;
             }
@@ -55,6 +62,11 @@ pub fn make_collision_constraints(
     mut collision_world: ResMut<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
+    if collision_world.collision_pairs.is_empty() {
+        return;
+    }
+    //the following line would force a sync point between game thread and render thread.
+    //match collision_channel.receiver.recv() {
     match collision_channel.receiver.try_recv() {
         Ok(data) => {
             let len = data.len();
@@ -64,7 +76,6 @@ pub fn make_collision_constraints(
                 for (index, c) in data.iter().enumerate() {
                     //valid surface normal means valid results
                     if c.a_position_normal[2] != 0.0 || c.a_position_normal[3] != 0.0 {
-                        info!("{:?}", c);
                         let a_position = Vector2::<f32>::new(
                             c.a_position_normal[0] * scaling,
                             c.a_position_normal[1] * scaling,
@@ -75,10 +86,20 @@ pub fn make_collision_constraints(
                         );
                         let a_curve_index = c.b_position_normal[3] as u32;
                         let b_curve_index = c.b_position_normal[2] as u32;
+
                         let diff = a_position - b_position;
                         let a_normal =
                             Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
                         let b_normal = -a_normal;
+                        info!(
+                            "a_pos:{},{} b_pos:{},{} a_normal {},{}",
+                            a_position.x,
+                            a_position.y,
+                            b_position.x,
+                            b_position.y,
+                            a_normal.x,
+                            a_normal.y
+                        );
                         if diff.magnitude_squared() != 0.0 {
                             let (a_index, b_index) = collision_world.collision_pairs[index];
                             let mut collider_index = a_index;
