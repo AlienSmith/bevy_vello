@@ -168,19 +168,27 @@ fn ui_example_system(
 fn spawn_colliders_from_ui(
     ui_state: Res<UiState>,
     mut commands: Commands,
-    _svg_colliders: Res<SvgColliderAssetManager>,
-    _custom_assets: Res<Assets<SvgColliderAsset>>,
+    svg_colliders: Res<SvgColliderAssetManager>,
+    custom_assets: Res<Assets<SvgColliderAsset>>,
 ) {
     let make_rect = || {
         let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
+
+    let make_collider = || {
+        let svg_collider = custom_assets
+            .get(&svg_colliders.get_index(0 as usize).unwrap())
+            .unwrap();
+        (svg_collider.shape.clone(), svg_collider.aabb.clone())
+    };
+
     if ui_state.just_spawn {
         make_collision_shape(
             &mut commands,
             Vec4::new(ui_state.current.pos_x, ui_state.current.pos_y, 0.0, 1.0),
-            make_rect,
+            make_collider,
             GlowColor {
                 color: peniko::Color::rgb(0.0, 0.0, 1.0),
                 glow: 1.0,
@@ -244,18 +252,6 @@ fn setup_entity(
         Vec2::new(-200.0, 0.0),
         1.0,
     );
-
-    // make_collision_shape(
-    //     &mut commands,
-    //     Vec4::new(0.0, 0.0, 45.0, 1.0),
-    //     make_rect,
-    //     GlowColor {
-    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
-    //         glow: 1.0,
-    //     },
-    //     Vec2::new(0.0, -50.0),
-    //     1.0,
-    // );
     make_static_scene(&mut commands);
 }
 

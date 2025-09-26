@@ -1,7 +1,7 @@
 use super::extract::{ExtractedRenderAsset, ExtractedRenderText, SSRenderTarget};
 use super::plugin::simulate_graph::VelloSimulateGraph;
 use super::prepare::PreparedAffine;
-use crate::collision::ExtractedVelloCollisionScene;
+use crate::collision::{CollisionResults, ExtractedVelloCollisionScene};
 use crate::render::extract::ExtractedRenderScene;
 use crate::{CoordinateSpace, VelloCanvasMaterial, VelloFont};
 use bevy::ecs::system::lifetimeless::Read;
@@ -30,8 +30,9 @@ pub struct VelloRenderBatches {
     should_render_collision: bool,
     scene: vello::Scene,
     collision_scene: vello::CollisionScene,
+    pairs: Vec<(Entity, Entity)>,
     image: Option<Handle<Image>>,
-    sender: Option<Sender<Vec<CollisionResult>>>,
+    sender: Option<Sender<CollisionResults>>,
 }
 
 pub fn setup_image(images: &mut Assets<Image>, window: &WindowResolution) -> Handle<Image> {
@@ -89,6 +90,7 @@ pub fn prepare_scene(
         should_render_collision: false,
         scene: vello::Scene::default(),
         collision_scene: vello::CollisionScene::default(),
+        pairs: Default::default(),
         image: None,
         sender: None,
     };
@@ -254,6 +256,7 @@ pub fn prepare_scene(
             scene: scene_buffer,
             collision_scene: collision_scene.scene.clone(),
             image: Some(render_target_image.clone()),
+            pairs: collision_scene.pairs.clone(),
             sender: collision_scene.sender.clone(),
         };
     }
@@ -478,6 +481,10 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                 }
 
                 if batches.should_render_collision && batches.sender.is_some() {
+                    info!(
+                        "latest collision pair count {}",
+                        batches.collision_scene.get_collision_pair_count()
+                    );
                     if let Some(collision_result) = vello::util::block_on_wgpu(
                         device.wgpu_device(),
                         self.renderer.lock().unwrap().render_collision_async(
@@ -488,7 +495,17 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                     )
                     .unwrap()
                     {
-                        let _ = batches.sender.as_ref().unwrap().send(collision_result);
+                        //notice the pairs lenght could be inconsistent with results length due to alignment issue.
+                        assert!(
+                            batches.pairs.len() <= collision_result.len(),
+                            "pairs count {}, results count {}",
+                            batches.pairs.len(),
+                            collision_result.len()
+                        );
+                        let _ = batches.sender.as_ref().unwrap().send(CollisionResults {
+                            pairs: batches.pairs.clone(),
+                            results: collision_result,
+                        });
                     }
                 }
             }

@@ -10,9 +10,13 @@ pub fn make_collision_scene(
     mut r: ResMut<VelloCollisionWorld>,
     mut scene: ResMut<VelloCollisionScene>,
 ) {
-    scene.reset();
+    scene.scene.reset();
     // only inite a new collision test if the previous one has been consumed
-    if r.update_collision_pairs_if_previous_one_has_been_consumed() {
+    if r.update_collision_pairs_if_previous_one_has_been_consumed(&query) {
+        info!(
+            "last collision_pairs registered count {}",
+            r.collision_pairs.len()
+        );
         for (a, b) in &r.collision_pairs {
             let (c_a, t_a) = query.get(*a).unwrap();
             let affine_a =
@@ -20,7 +24,7 @@ pub fn make_collision_scene(
             let (c_b, t_b) = query.get(*b).unwrap();
             let affine_b =
                 mat4_to_affine(t_b.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
-            scene.encode_colliders(
+            scene.scene.encode_colliders(
                 (0.0, 1.0).into(),
                 &c_a.shape,
                 affine_a,
@@ -28,5 +32,11 @@ pub fn make_collision_scene(
                 affine_b,
             );
         }
+        scene.pair = r.collision_pairs.clone();
+        info!(
+            "last collision_pairs submited count {}",
+            scene.scene.get_collision_pair_count()
+        );
     }
+    r.collision_pairs_bvh.clear();
 }

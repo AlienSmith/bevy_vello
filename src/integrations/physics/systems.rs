@@ -1,6 +1,8 @@
 use crate::{
     affine_to_mat4,
-    collision::{GpuDataChannel, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO},
+    collision::{
+        CollisionResults, GpuDataChannel, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+    },
     integrations::physics::VelloConstraintWorld,
     mat4_to_affine, VelloCollider, VelloScene,
 };
@@ -39,15 +41,7 @@ pub fn update_collider_from_soft_body(
     constraint_world.data.get_colliders_from_soft_body(
         |index: Entity, path: BezPath, affine: Affine, rect: kurbo::Rect| {
             if let Ok((mut collider, mut transform)) = query.get_mut(index) {
-                let z = transform.translation.z;
-                let position = affine.translation();
                 let target_matrix = affine_to_mat4(affine);
-                info!(
-                    "Entity {} center: {}, {}",
-                    index.index(),
-                    position.x,
-                    position.y
-                );
                 *transform = Transform::from_matrix(target_matrix);
                 collider.shape = path;
                 collider.aabb = rect;
@@ -58,7 +52,7 @@ pub fn update_collider_from_soft_body(
 
 //consume the collision result togather with the collision pairs.
 pub fn make_collision_constraints(
-    collision_channel: Res<GpuDataChannel<Vec<CollisionResult>>>,
+    collision_channel: Res<GpuDataChannel<CollisionResults>>,
     mut collision_world: ResMut<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
@@ -69,62 +63,65 @@ pub fn make_collision_constraints(
     match collision_channel.receiver.recv() {
         //match collision_channel.receiver.try_recv() {
         Ok(data) => {
-            let len = data.len();
-            let len_c = collision_world.collision_pairs.len();
+            assert!(
+                data.pairs.len() == collision_world.collision_pairs.len(),
+                "pairs count {}, results count {}",
+                data.pairs.len(),
+                data.results.len()
+            );
             let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
-            if len == len_c {
-                for (index, c) in data.iter().enumerate() {
-                    //valid surface normal means valid results
-                    if c.a_position_normal[2] != 0.0 || c.a_position_normal[3] != 0.0 {
-                        let a_position = Vector2::<f32>::new(
-                            c.a_position_normal[0] * scaling,
-                            c.a_position_normal[1] * scaling,
-                        );
-                        let b_position = Vector2::<f32>::new(
-                            c.b_position_normal[0] * scaling,
-                            c.b_position_normal[1] * scaling,
-                        );
-                        let a_curve_index = c.b_position_normal[3] as u32;
-                        let b_curve_index = c.b_position_normal[2] as u32;
+            assert!(data.pairs.len() != 0);
+            for (index, (a_index, b_index)) in data.pairs.iter().enumerate() {
+                let c = data.results[index];
+                //valid surface normal means valid results
+                if c.a_position_normal[2] != 0.0 || c.a_position_normal[3] != 0.0 {
+                    let a_position = Vector2::<f32>::new(
+                        c.a_position_normal[0] * scaling,
+                        c.a_position_normal[1] * scaling,
+                    );
+                    let b_position = Vector2::<f32>::new(
+                        c.b_position_normal[0] * scaling,
+                        c.b_position_normal[1] * scaling,
+                    );
+                    let a_curve_index = c.b_position_normal[3] as u32;
+                    let b_curve_index = c.b_position_normal[2] as u32;
 
-                        let diff = a_position - b_position;
-                        let a_normal =
-                            Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
-                        let b_normal = -a_normal;
-                        info!(
-                            "a_pos:{},{} b_pos:{},{} a_normal {},{}",
-                            a_position.x,
-                            a_position.y,
-                            b_position.x,
-                            b_position.y,
-                            a_normal.x,
-                            a_normal.y
+                    let diff = a_position - b_position;
+                    let a_normal =
+                        Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
+                    let b_normal = -a_normal;
+                    info!(
+                        "a_pos:{},{} b_pos:{},{} a_normal {},{}",
+                        a_position.x,
+                        a_position.y,
+                        b_position.x,
+                        b_position.y,
+                        a_normal.x,
+                        a_normal.y
+                    );
+                    if diff.magnitude_squared() != 0.0 {
+                        let mut collider_index = a_index;
+                        let mut current_position = a_position;
+                        let target_position = b_position;
+                        let mut curve_index = a_curve_index;
+                        constraint_world.data.add_one_time_collision_constraint(
+                            *collider_index,
+                            curve_index as usize,
+                            current_position,
+                            target_position,
+                            b_normal,
                         );
-                        if diff.magnitude_squared() != 0.0 {
-                            let (a_index, b_index) = collision_world.collision_pairs[index];
-                            let mut collider_index = a_index;
-                            let mut current_position = a_position;
-                            let target_position = b_position;
-                            let mut curve_index = a_curve_index;
-                            constraint_world.data.add_one_time_collision_constraint(
-                                collider_index,
-                                curve_index as usize,
-                                current_position,
-                                target_position,
-                                b_normal,
-                            );
-                            collider_index = b_index;
-                            current_position = b_position;
-                            curve_index = b_curve_index;
-                            let target_position = a_position;
-                            constraint_world.data.add_one_time_collision_constraint(
-                                collider_index,
-                                curve_index as usize,
-                                current_position,
-                                target_position,
-                                a_normal,
-                            );
-                        }
+                        collider_index = b_index;
+                        current_position = b_position;
+                        curve_index = b_curve_index;
+                        let target_position = a_position;
+                        constraint_world.data.add_one_time_collision_constraint(
+                            *collider_index,
+                            curve_index as usize,
+                            current_position,
+                            target_position,
+                            a_normal,
+                        );
                     }
                 }
             }

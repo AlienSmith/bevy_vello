@@ -1,3 +1,4 @@
+use bevy::prelude::*;
 use bevy::{
     ecs::{component::Component, entity::Entity, schedule::SystemSet, system::Resource},
     math::{Vec2, Vec4},
@@ -19,26 +20,16 @@ pub const VELLO_COLLISION_WORLD_RATIO: f32 = 2.0;
 use broad_phase::BroadPhaseQbvh;
 
 #[derive(Default, Resource, Clone)]
-pub struct VelloCollisionScene(CollisionScene);
+pub struct VelloCollisionScene {
+    scene: CollisionScene,
+    pair: Vec<(Entity, Entity)>,
+}
 
 #[derive(Default, Resource, Clone)]
 pub struct ExtractedVelloCollisionScene {
     pub(crate) scene: CollisionScene,
-    pub(crate) sender: Option<Sender<Vec<CollisionResult>>>,
-}
-
-impl std::ops::Deref for VelloCollisionScene {
-    type Target = CollisionScene;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for VelloCollisionScene {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+    pub(crate) pairs: Vec<(Entity, Entity)>,
+    pub(crate) sender: Option<Sender<CollisionResults>>,
 }
 
 #[derive(Default, Resource, Clone)]
@@ -48,9 +39,20 @@ pub struct VelloCollisionWorld {
 }
 
 impl VelloCollisionWorld {
-    pub fn update_collision_pairs_if_previous_one_has_been_consumed(&mut self) -> bool {
+    pub fn update_collision_pairs_if_previous_one_has_been_consumed(
+        &mut self,
+        q: &Query<(&VelloCollider, &GlobalTransform)>,
+    ) -> bool {
         if self.collision_pairs.is_empty() {
-            self.collision_pairs.append(&mut self.collision_pairs_bvh);
+            let mut temp: Vec<(Entity, Entity)> = vec![];
+            for (e0, e1) in &self.collision_pairs_bvh {
+                let (c, _t) = q.get(*e0).unwrap();
+                let (c1, _t1) = q.get(*e1).unwrap();
+                if c.inverse_mass > 0.0 || c1.inverse_mass > 0.0 {
+                    temp.push((*e0, *e1));
+                }
+            }
+            self.collision_pairs = temp;
             return true;
         }
         return false;
@@ -118,4 +120,10 @@ impl<T: Send + 'static> GpuDataChannel<T> {
 pub enum CollisionSystems {
     Collision,         // Your first phase
     CollisionResponse, // Your second phase (runs after Phase1)
+}
+
+#[derive(Clone, Default)]
+pub struct CollisionResults {
+    pub pairs: Vec<(Entity, Entity)>,
+    pub results: Vec<CollisionResult>,
 }

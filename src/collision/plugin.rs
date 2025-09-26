@@ -8,6 +8,7 @@ use vello::CollisionResult;
 use crate::collision::broad_phase::update_broad_phase;
 use crate::collision::extract::extract_collision_scene;
 use crate::collision::systems::make_collision_scene;
+use crate::collision::CollisionResults;
 use crate::collision::CollisionSystems;
 use crate::collision::ExtractedVelloCollisionScene;
 use crate::collision::GpuDataChannel;
@@ -30,7 +31,7 @@ impl Plugin for VelloCollisionPlugin {
             .insert_resource(VelloCollisionWorld::default())
             .insert_resource(VelloCollisionScene::default())
             .insert_resource(VelloCollisionBroadPhase::default())
-            .insert_resource(GpuDataChannel::<Vec<CollisionResult>>::new(1))
+            .insert_resource(GpuDataChannel::<CollisionResults>::new(1))
             .configure_sets(
                 PostUpdate,
                 (
