@@ -33,10 +33,6 @@ pub fn make_collision_scene(
             );
         }
         scene.pair = r.collision_pairs.clone();
-        info!(
-            "last collision_pairs submited count {}",
-            scene.scene.get_collision_pair_count()
-        );
     }
     r.collision_pairs_bvh.clear();
 }

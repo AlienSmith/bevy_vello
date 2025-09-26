@@ -1,3 +1,5 @@
+use avian2d::prelude::collider;
+use bevy::ecs::entity;
 use bevy::prelude::*;
 use parry2d::bounding_volume::Aabb;
 use parry2d::math::Point;
@@ -6,8 +8,10 @@ use parry2d::partitioning::Qbvh;
 use parry2d::partitioning::QbvhUpdateWorkspace;
 use parry2d::query::visitors::BoundingVolumeIntersectionsSimultaneousVisitor;
 
+use crate::collision::SimpleBroadPhase;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionWorld;
+use crate::mat4_to_affine;
 use crate::VelloCollider;
 //aabb will only take the effect of position ignoring entity rotation and scale.
 pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &GlobalTransform) -> Aabb {
@@ -18,6 +22,24 @@ pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &GlobalTr
         Point::new(bbox.z + position.x, bbox.w + position.y),
     );
     result
+}
+
+pub fn compute_aabb(collider: &VelloCollider, transform: &GlobalTransform) -> Vec4 {
+    let pos = mat4_to_affine(transform.compute_matrix()).translation();
+    return Vec4::new(
+        (pos.x + collider.aabb.x0) as f32,
+        (pos.y + collider.aabb.y0) as f32,
+        (pos.x + collider.aabb.x1) as f32,
+        (pos.y + collider.aabb.y1) as f32,
+    );
+}
+
+pub fn check_overlaps(a: Vec4, b: Vec4) -> bool {
+    let x_min = a.x.max(b.x);
+    let y_min = a.y.max(b.y);
+    let x_max = a.z.min(b.z);
+    let y_max = a.w.min(b.w);
+    return x_min <= x_max && y_min <= y_max;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -134,4 +156,59 @@ pub fn update_broad_phase(
         &mut removed_collider,
         &mut collision_world,
     );
+}
+
+pub fn update_broad_phase_simple(
+    all_colliders: Query<(Entity, &VelloCollider, &GlobalTransform)>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
+    mut broad_phase: ResMut<SimpleBroadPhase>,
+) {
+    broad_phase
+        .broad_phase
+        .update(&all_colliders, &mut collision_world);
+}
+
+#[derive(Clone, Default)]
+pub struct BroadPhaseSimple;
+impl BroadPhaseSimple {
+    pub fn update(
+        &mut self,
+        all_colliders: &Query<(Entity, &VelloCollider, &GlobalTransform)>,
+        collision_world: &mut ResMut<VelloCollisionWorld>,
+    ) {
+        collision_world.collision_pairs_bvh.clear();
+        let mut static_colliders: Vec<Entity> = vec![];
+        let mut dynamic_colliders: Vec<Entity> = vec![];
+        for (item, collider, _) in all_colliders.iter() {
+            if collider.inverse_mass == 0.0 {
+                static_colliders.push(item);
+            } else {
+                dynamic_colliders.push(item);
+            }
+        }
+        // for i in 0..dynamic_colliders.len() {
+        //     let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
+        //     let aabb = compute_aabb(collider, transform);
+        //     for j in (i + 1)..dynamic_colliders.len() {
+        //         let (item1, collider1, transform1) =
+        //             all_colliders.get(dynamic_colliders[j]).unwrap();
+        //         let aabb1 = compute_aabb(collider1, transform1);
+        //         if check_overlaps(aabb, aabb1) {
+        //             collision_world.collision_pairs_bvh.push((item, item1));
+        //         }
+        //     }
+        // }
+        for i in 0..dynamic_colliders.len() {
+            let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
+            let aabb = compute_aabb(collider, transform);
+            for j in 0..static_colliders.len() {
+                let (item1, collider1, transform1) =
+                    all_colliders.get(static_colliders[j]).unwrap();
+                let aabb1 = compute_aabb(collider1, transform1);
+                if check_overlaps(aabb, aabb1) {
+                    collision_world.collision_pairs_bvh.push((item, item1));
+                }
+            }
+        }
+    }
 }

@@ -53,10 +53,11 @@ pub fn update_collider_from_soft_body(
 //consume the collision result togather with the collision pairs.
 pub fn make_collision_constraints(
     collision_channel: Res<GpuDataChannel<CollisionResults>>,
-    mut collision_world: ResMut<VelloCollisionWorld>,
+    collision_world: Res<VelloCollisionWorld>,
+    query: Query<&VelloCollider>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
-    if collision_world.collision_pairs.is_empty() {
+    if collision_world.collision_pairs.len() == 0 {
         return;
     }
     //the following line would force a sync point between game thread and render thread.
@@ -90,45 +91,39 @@ pub fn make_collision_constraints(
                     let a_normal =
                         Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
                     let b_normal = -a_normal;
-                    info!(
-                        "a_pos:{},{} b_pos:{},{} a_normal {},{}",
-                        a_position.x,
-                        a_position.y,
-                        b_position.x,
-                        b_position.y,
-                        a_normal.x,
-                        a_normal.y
-                    );
                     if diff.magnitude_squared() != 0.0 {
-                        let mut collider_index = a_index;
-                        let mut current_position = a_position;
-                        let target_position = b_position;
-                        let mut curve_index = a_curve_index;
-                        constraint_world.data.add_one_time_collision_constraint(
-                            *collider_index,
-                            curve_index as usize,
-                            current_position,
-                            target_position,
-                            b_normal,
-                        );
-                        collider_index = b_index;
-                        current_position = b_position;
-                        curve_index = b_curve_index;
-                        let target_position = a_position;
-                        constraint_world.data.add_one_time_collision_constraint(
-                            *collider_index,
-                            curve_index as usize,
-                            current_position,
-                            target_position,
-                            a_normal,
-                        );
+                        if query.get(*a_index).unwrap().inverse_mass != 0.0 {
+                            let collider_index = a_index;
+                            let current_position = a_position;
+                            let target_position = b_position;
+                            let curve_index = a_curve_index;
+                            constraint_world.data.add_one_time_collision_constraint(
+                                *collider_index,
+                                curve_index as usize,
+                                current_position,
+                                target_position,
+                                b_normal,
+                            );
+                        }
+                        if query.get(*b_index).unwrap().inverse_mass != 0.0 {
+                            let collider_index = b_index;
+                            let current_position = b_position;
+                            let curve_index = b_curve_index;
+                            let target_position = a_position;
+                            constraint_world.data.add_one_time_collision_constraint(
+                                *collider_index,
+                                curve_index as usize,
+                                current_position,
+                                target_position,
+                                a_normal,
+                            );
+                        }
                     }
                 }
             }
         }
         _ => {}
     }
-    collision_world.collision_pairs.clear();
 }
 
 pub fn update_constraint_world(

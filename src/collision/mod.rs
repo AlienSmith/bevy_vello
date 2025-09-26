@@ -43,25 +43,28 @@ impl VelloCollisionWorld {
         &mut self,
         q: &Query<(&VelloCollider, &GlobalTransform)>,
     ) -> bool {
-        if self.collision_pairs.is_empty() {
-            let mut temp: Vec<(Entity, Entity)> = vec![];
-            for (e0, e1) in &self.collision_pairs_bvh {
-                let (c, _t) = q.get(*e0).unwrap();
-                let (c1, _t1) = q.get(*e1).unwrap();
-                if c.inverse_mass > 0.0 || c1.inverse_mass > 0.0 {
-                    temp.push((*e0, *e1));
-                }
-            }
-            self.collision_pairs = temp;
-            return true;
-        }
-        return false;
+        self.collision_pairs.clear();
+        // let mut temp: Vec<(Entity, Entity)> = vec![];
+        // for (e0, e1) in &self.collision_pairs_bvh {
+        //     let (c, _t) = q.get(*e0).unwrap();
+        //     let (c1, _t1) = q.get(*e1).unwrap();
+        //     if c.inverse_mass > 0.0 || c1.inverse_mass > 0.0 {
+        //         temp.push((*e0, *e1));
+        //     }
+        // }
+        self.collision_pairs = self.collision_pairs_bvh.clone();
+        return true;
     }
 }
 
 #[derive(Default, Resource, Clone)]
 pub struct VelloCollisionBroadPhase {
     pub(crate) broad_phase: BroadPhaseQbvh,
+}
+
+#[derive(Default, Resource, Clone)]
+pub struct SimpleBroadPhase {
+    pub(crate) broad_phase: BroadPhaseSimple,
 }
 
 #[derive(Clone, Default, Component)]
@@ -101,6 +104,8 @@ impl VelloCollider {
 }
 
 use crossbeam_channel::{bounded, Receiver, Sender};
+
+use crate::collision::broad_phase::BroadPhaseSimple;
 
 // Thread-safe channel for GPU → Main thread communication
 #[derive(Resource)]

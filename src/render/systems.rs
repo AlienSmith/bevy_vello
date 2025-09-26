@@ -481,10 +481,6 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                 }
 
                 if batches.should_render_collision && batches.sender.is_some() {
-                    info!(
-                        "latest collision pair count {}",
-                        batches.collision_scene.get_collision_pair_count()
-                    );
                     if let Some(collision_result) = vello::util::block_on_wgpu(
                         device.wgpu_device(),
                         self.renderer.lock().unwrap().render_collision_async(
