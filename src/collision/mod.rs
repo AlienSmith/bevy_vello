@@ -44,15 +44,16 @@ impl VelloCollisionWorld {
         q: &Query<(&VelloCollider, &GlobalTransform)>,
     ) -> bool {
         self.collision_pairs.clear();
-        // let mut temp: Vec<(Entity, Entity)> = vec![];
-        // for (e0, e1) in &self.collision_pairs_bvh {
-        //     let (c, _t) = q.get(*e0).unwrap();
-        //     let (c1, _t1) = q.get(*e1).unwrap();
-        //     if c.inverse_mass > 0.0 || c1.inverse_mass > 0.0 {
-        //         temp.push((*e0, *e1));
-        //     }
-        // }
-        self.collision_pairs = self.collision_pairs_bvh.clone();
+        let mut temp: Vec<(Entity, Entity)> = vec![];
+        //we could have a more complicated filter here
+        for (e0, e1) in &self.collision_pairs_bvh {
+            let (c, _t) = q.get(*e0).unwrap();
+            let (c1, _t1) = q.get(*e1).unwrap();
+            if c.inverse_mass > 0.0 || c1.inverse_mass > 0.0 {
+                temp.push((*e0, *e1));
+            }
+        }
+        self.collision_pairs = temp;
         return true;
     }
 }

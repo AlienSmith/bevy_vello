@@ -93,6 +93,7 @@ impl BroadPhaseQbvh {
         removed_collider: &mut RemovedComponents<VelloCollider>,
         collision_world: &mut ResMut<VelloCollisionWorld>,
     ) {
+        collision_world.collision_pairs_bvh.clear();
         let margin = 0.01;
 
         if modified_colliders.iter().count() == 0 {
@@ -186,18 +187,18 @@ impl BroadPhaseSimple {
                 dynamic_colliders.push(item);
             }
         }
-        // for i in 0..dynamic_colliders.len() {
-        //     let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
-        //     let aabb = compute_aabb(collider, transform);
-        //     for j in (i + 1)..dynamic_colliders.len() {
-        //         let (item1, collider1, transform1) =
-        //             all_colliders.get(dynamic_colliders[j]).unwrap();
-        //         let aabb1 = compute_aabb(collider1, transform1);
-        //         if check_overlaps(aabb, aabb1) {
-        //             collision_world.collision_pairs_bvh.push((item, item1));
-        //         }
-        //     }
-        // }
+        for i in 0..dynamic_colliders.len() {
+            let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
+            let aabb = compute_aabb(collider, transform);
+            for j in (i + 1)..dynamic_colliders.len() {
+                let (item1, collider1, transform1) =
+                    all_colliders.get(dynamic_colliders[j]).unwrap();
+                let aabb1 = compute_aabb(collider1, transform1);
+                if check_overlaps(aabb, aabb1) {
+                    collision_world.collision_pairs_bvh.push((item, item1));
+                }
+            }
+        }
         for i in 0..dynamic_colliders.len() {
             let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
             let aabb = compute_aabb(collider, transform);

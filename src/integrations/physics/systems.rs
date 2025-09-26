@@ -61,8 +61,9 @@ pub fn make_collision_constraints(
         return;
     }
     //the following line would force a sync point between game thread and render thread.
-    match collision_channel.receiver.recv() {
-        //match collision_channel.receiver.try_recv() {
+    //match collision_channel.receiver.recv() {
+    //notice the default behavious of the channel would consume the collision results.
+    match collision_channel.receiver.try_recv() {
         Ok(data) => {
             assert!(
                 data.pairs.len() == collision_world.collision_pairs.len(),

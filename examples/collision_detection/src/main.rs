@@ -185,21 +185,17 @@ fn spawn_colliders_from_ui(
     };
 
     if ui_state.just_spawn {
-        for i in 0..20 {
-            let color = if i > 15 {
-                peniko::Color::rgba(0.0, 1.0, 0.0, 0.99)
-            } else {
-                peniko::Color::rgba(0.0, 0.0, 1.0, 0.99)
-            };
-            make_collision_shape(
-                &mut commands,
-                Vec4::new(ui_state.current.pos_x, ui_state.current.pos_y, 0.0, 1.0),
-                make_collider,
-                GlowColor { color, glow: 1.0 },
-                Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
-                1.0,
-            );
-        }
+        make_collision_shape(
+            &mut commands,
+            Vec4::new(ui_state.current.pos_x, ui_state.current.pos_y, 0.0, 1.0),
+            make_collider,
+            GlowColor {
+                color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.99),
+                glow: 1.0,
+            },
+            Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
+            1.0,
+        );
     }
 }
 
@@ -245,17 +241,17 @@ fn setup_entity(
         (svg_collider.shape.clone(), svg_collider.aabb.clone())
     };
 
-    make_collision_shape(
-        &mut commands,
-        Vec4::new(200.0, 0.0, 0.0, 0.3),
-        make_collider,
-        GlowColor {
-            color: peniko::Color::rgb(0.0, 1.0, 0.0),
-            glow: 1.0,
-        },
-        Vec2::new(-200.0, 0.0),
-        1.0,
-    );
+    // make_collision_shape(
+    //     &mut commands,
+    //     Vec4::new(200.0, 0.0, 0.0, 0.3),
+    //     make_collider,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(-200.0, 0.0),
+    //     1.0,
+    // );
     make_static_scene(&mut commands);
 }
 
