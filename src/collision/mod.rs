@@ -75,6 +75,7 @@ pub struct VelloCollider {
     pub(crate) initial_velocity: Vec2,
     pub(crate) inverse_mass: f32,
     pub(crate) debug_color: peniko::GlowColor,
+    pub(crate) complexity_modifier: i32,
 }
 
 impl VelloCollider {
@@ -84,6 +85,7 @@ impl VelloCollider {
         initial_velocity: Vec2,
         color: peniko::GlowColor,
         inverse_mass: f32,
+        complexity_modifier: i32,
     ) -> Self {
         Self {
             shape: path.clone(),
@@ -91,6 +93,7 @@ impl VelloCollider {
             initial_velocity,
             inverse_mass,
             debug_color: color,
+            complexity_modifier,
         }
     }
 

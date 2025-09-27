@@ -40,12 +40,27 @@ enum GameState {
     Game,
 }
 
-#[derive(PartialEq, Clone, Default)]
+#[derive(PartialEq, Clone)]
 struct EntityConfig {
     pos_x: f32,
     pos_y: f32,
     vec_x: f32,
     vec_y: f32,
+    rotation: f32,
+    scale: f32,
+}
+
+impl Default for EntityConfig {
+    fn default() -> Self {
+        EntityConfig {
+            scale: 1.0,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            vec_x: 0.0,
+            vec_y: 0.0,
+            rotation: 0.0,
+        }
+    }
 }
 
 #[derive(Default, Resource)]
@@ -156,6 +171,8 @@ fn ui_example_system(
         ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -500.0..=500.0).text("pox_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
+        ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
+        ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
         if ui.button("Spawn").clicked() {
             ui_state.just_spawn = true;
         }
@@ -187,8 +204,13 @@ fn spawn_colliders_from_ui(
     if ui_state.just_spawn {
         make_collision_shape(
             &mut commands,
-            Vec4::new(ui_state.current.pos_x, ui_state.current.pos_y, 0.0, 1.0),
-            make_collider,
+            Vec4::new(
+                ui_state.current.pos_x,
+                ui_state.current.pos_y,
+                ui_state.current.rotation,
+                ui_state.current.scale,
+            ),
+            make_rect,
             GlowColor {
                 color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.99),
                 glow: 1.0,
@@ -344,7 +366,7 @@ fn make_collision_shape(
             },
             ..Default::default()
         },
-        VelloCollider::new(&shape, &rect, velocity, color, inverse_mass),
+        VelloCollider::new(&shape, &rect, velocity, color, inverse_mass, 1),
     ));
 }
 

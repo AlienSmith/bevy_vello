@@ -29,6 +29,7 @@ pub fn generate_soft_body_for_collider(
                 ),
                 collider.inverse_mass,
                 entity,
+                collider.complexity_modifier,
             );
         }
     }
