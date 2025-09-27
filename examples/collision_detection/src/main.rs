@@ -19,20 +19,49 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     add_default_light,
+    collision::VelloCollisionWorld,
     integrations::{
+        physics::VelloConstraintWorld,
         svg,
         svg_collider::{SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData},
         HanabiIntegrationPlugin, TankGameAssetsMetaData,
     },
     vello::{
-        kurbo::{self, BezPath, Shape},
+        kurbo::{self, cubics_to_quadratic_splines, BezPath, Shape},
         peniko::{self, GlowColor},
     },
     VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
-use particles_lib::Explosion;
+use egui::ComboBox;
+
 use tankgame_lib::prelude::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[repr(u32)]
+enum ColliderType {
+    #[default]
+    Rect = 0,
+    Circle = 1,
+    Star = 2,
+    Heart = 3,
+    Key = 4,
+    Knife = 5,
+    Shield = 6,
+}
+
+fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
+    match collider {
+        ColliderType::Rect => (peniko::Color::GREEN, 1.0, 1),
+        ColliderType::Circle => (peniko::Color::WHITE, 1.0, 0),
+        ColliderType::Star => (peniko::Color::ORANGE, 0.3, 0),
+        ColliderType::Heart => (peniko::Color::RED, 0.5, 1),
+        ColliderType::Key => (peniko::Color::GREEN, 0.1, 0),
+        ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
+        ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum GameState {
     #[default]
@@ -48,6 +77,27 @@ struct EntityConfig {
     vec_y: f32,
     rotation: f32,
     scale: f32,
+    collider_type: ColliderType,
+}
+
+#[derive(PartialEq, Clone)]
+struct VelloConstraintWorldConfig {
+    gravity_x: f32,
+    gravity_y: f32,
+
+    pre_gravity_x: f32,
+    pre_gravity_y: f32,
+}
+
+impl Default for VelloConstraintWorldConfig {
+    fn default() -> Self {
+        Self {
+            gravity_x: 0.0,
+            gravity_y: -98.0,
+            pre_gravity_x: 0.0,
+            pre_gravity_y: -98.0,
+        }
+    }
 }
 
 impl Default for EntityConfig {
@@ -59,6 +109,7 @@ impl Default for EntityConfig {
             vec_x: 0.0,
             vec_y: 0.0,
             rotation: 0.0,
+            collider_type: Default::default(),
         }
     }
 }
@@ -68,6 +119,8 @@ impl Default for EntityConfig {
 struct UiState {
     current: EntityConfig,
     just_spawn: bool,
+    c_config: VelloConstraintWorldConfig,
+    just_modified: bool,
 }
 
 #[derive(PartialEq, Clone)]
@@ -137,7 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             (
                 ui_example_system,
-                spawn_colliders_from_ui.after(ui_example_system),
+                update_from_ui.after(ui_example_system),
                 update_edge_pan_camera,
                 //update_blood_particles.after(ui_example_system),
             )
@@ -155,6 +208,7 @@ fn ui_example_system(
 ) {
     egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
         ui_state.just_spawn = false;
+        ui_state.just_modified = false;
         // Get the FPS diagnostic path
         let fps_path = FrameTimeDiagnosticsPlugin::FPS;
 
@@ -167,57 +221,169 @@ fn ui_example_system(
                 ui.label(format!("Avg FPS: {:.1}", avg));
             }
         }
+        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_x, -100.0..=100.0).text("pox_x"));
+        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_y, -100.0..=100.0).text("pox_y"));
+
         ui.add(egui::Slider::new(&mut ui_state.current.pos_x, -900.0..=900.0).text("pox_x"));
         ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -500.0..=500.0).text("pox_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
         ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
+
+        egui::ComboBox::from_label("Collider Type")
+            .selected_text(format!("{:?}", ui_state.current.collider_type))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Rect,
+                    "Rect",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Circle,
+                    "Circle",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Star,
+                    "Star",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Heart,
+                    "Heart",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Key,
+                    "Key",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Knife,
+                    "Knife",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Shield,
+                    "Shield",
+                );
+            });
+
         if ui.button("Spawn").clicked() {
             ui_state.just_spawn = true;
         }
         if ui.button("Quit").clicked() {
             std::process::exit(0);
         }
+        if ui_state.c_config.gravity_x != ui_state.c_config.pre_gravity_x
+            || ui_state.c_config.gravity_y != ui_state.c_config.pre_gravity_y
+        {
+            ui_state.just_modified = true;
+            ui_state.c_config.pre_gravity_x = ui_state.c_config.gravity_x;
+            ui_state.c_config.pre_gravity_y = ui_state.c_config.gravity_y;
+        }
     });
 }
 
-fn spawn_colliders_from_ui(
+fn spawn_collider(
+    commands: &mut Commands,
+    ui_state: &Res<UiState>,
+    color: peniko::Color,
+    scale_modifier: f32,
+    f: impl Fn() -> (BezPath, kurbo::Rect),
+    complexity_modifier: i32,
+) {
+    make_collision_shape(
+        commands,
+        Vec4::new(
+            ui_state.current.pos_x,
+            ui_state.current.pos_y,
+            ui_state.current.rotation,
+            ui_state.current.scale * scale_modifier,
+        ),
+        f,
+        GlowColor { color, glow: 1.0 },
+        Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
+        1.0,
+        complexity_modifier,
+    );
+}
+
+fn update_from_ui(
     ui_state: Res<UiState>,
     mut commands: Commands,
     svg_colliders: Res<SvgColliderAssetManager>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
-    let make_rect = || {
-        let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
-        let rect_path = rect.to_path(0.1);
-        (rect_path, rect)
-    };
-
-    let make_collider = || {
-        let svg_collider = custom_assets
-            .get(&svg_colliders.get_index(0 as usize).unwrap())
-            .unwrap();
-        (svg_collider.shape.clone(), svg_collider.aabb.clone())
-    };
-
+    if ui_state.just_modified {
+        constraint_world.set_gravity(Vec2::new(
+            ui_state.c_config.gravity_x,
+            ui_state.c_config.gravity_y,
+        ));
+    }
     if ui_state.just_spawn {
-        make_collision_shape(
-            &mut commands,
-            Vec4::new(
-                ui_state.current.pos_x,
-                ui_state.current.pos_y,
-                ui_state.current.rotation,
-                ui_state.current.scale,
-            ),
-            make_rect,
-            GlowColor {
-                color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.99),
-                glow: 1.0,
-            },
-            Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
-            1.0,
-        );
+        let (color, scaler, complexity_modifier) =
+            get_default_parameters(ui_state.current.collider_type);
+        match ui_state.current.collider_type {
+            ColliderType::Rect => {
+                let make_rect = || {
+                    let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
+                    let rect_path = rect.to_path(0.1);
+                    (rect_path, rect)
+                };
+                spawn_collider(
+                    &mut commands,
+                    &ui_state,
+                    color,
+                    scaler,
+                    make_rect,
+                    complexity_modifier,
+                );
+            }
+            ColliderType::Circle => {
+                let make_circle = || {
+                    let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
+                    let circle = kurbo::Circle::new((0.0, 0.0), 20.0);
+                    let rect_path = circle.to_path(0.1);
+                    (rect_path, rect)
+                };
+                spawn_collider(
+                    &mut commands,
+                    &ui_state,
+                    color,
+                    scaler,
+                    make_circle,
+                    complexity_modifier,
+                );
+            }
+            _ => {
+                let make_collider = || {
+                    let svg_collider = custom_assets
+                        .get(
+                            &svg_colliders
+                                .get_index(
+                                    (ui_state.current.collider_type as u32
+                                        - ColliderType::Star as u32)
+                                        as usize,
+                                )
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    (svg_collider.shape.clone(), svg_collider.aabb.clone())
+                };
+                spawn_collider(
+                    &mut commands,
+                    &ui_state,
+                    color,
+                    scaler,
+                    make_collider,
+                    complexity_modifier,
+                );
+            }
+        };
     }
 }
 
@@ -300,6 +466,7 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(0.0, 0.0),
         0.0,
+        0,
     );
 
     make_collision_shape(
@@ -312,6 +479,7 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(0.0, 0.0),
         0.0,
+        0,
     );
 
     make_collision_shape(
@@ -324,6 +492,7 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(-0.0, 0.0),
         0.0,
+        0,
     );
 
     make_collision_shape(
@@ -336,6 +505,7 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(-0.0, 0.0),
         0.0,
+        0,
     );
 }
 
@@ -346,6 +516,7 @@ fn make_collision_shape(
     color: peniko::GlowColor,
     velocity: Vec2,
     inverse_mass: f32,
+    complexity_modifier: i32,
 ) {
     let mut scene: VelloScene = VelloScene::default();
     let (shape, rect) = f();
@@ -366,7 +537,14 @@ fn make_collision_shape(
             },
             ..Default::default()
         },
-        VelloCollider::new(&shape, &rect, velocity, color, inverse_mass, 1),
+        VelloCollider::new(
+            &shape,
+            &rect,
+            velocity,
+            color,
+            inverse_mass,
+            complexity_modifier,
+        ),
     ));
 }
 
@@ -414,7 +592,23 @@ fn setup_resources(
     colliders.push(
         asset_server.load("colliders/star.collider.svg"),
         VelloColliderAssetMetaData::default(),
-    )
+    );
+    colliders.push(
+        asset_server.load("colliders/heart.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    );
+    colliders.push(
+        asset_server.load("colliders/key.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    );
+    colliders.push(
+        asset_server.load("colliders/knife.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    );
+    colliders.push(
+        asset_server.load("colliders/shield.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    );
 }
 
 //fn update_blood_instances()
