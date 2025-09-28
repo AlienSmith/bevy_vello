@@ -17,15 +17,16 @@ impl VelloConstraintWorld {
     pub fn new(gravity: Vec2) -> Self {
         VelloConstraintWorld {
             data: ConstraintWorld {
-                particles: Default::default(),
-                constrains: Default::default(),
-                self_resolved_constraints: Default::default(),
                 softbodies: Default::default(),
                 collider_to_body: Default::default(),
                 body_to_collider: Default::default(),
                 gravity: nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y),
             },
         }
+    }
+    // vello coordinate is x right y down
+    pub fn set_gravity(&mut self, gravity: Vec2) {
+        self.data.gravity = nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y);
     }
 }
 

@@ -62,7 +62,7 @@ bevy = { workspace = true }
 vello = {path = "../study_vello", features = ["gpu_particles"]}
 vello_svg = {path = "../study_vello/integrations/vello_svg"}
 velato = {path = "../study_vello/integrations/velato"}
-vello_physics = {path = "../study_vello/integrations/vello_physics"}
+vello_physics = {path = "../study_vello/integrations/vello_physics", features = ["parallel"]}
 once_cell = "1.19.0"
 bevy_hanabi = {path = "../bevy_hanabi", features = ["2d"] }
 thiserror = "1.0.61"

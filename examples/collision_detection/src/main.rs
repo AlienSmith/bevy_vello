@@ -295,20 +295,22 @@ fn spawn_collider(
     f: impl Fn() -> (BezPath, kurbo::Rect),
     complexity_modifier: i32,
 ) {
-    make_collision_shape(
-        commands,
-        Vec4::new(
-            ui_state.current.pos_x,
-            ui_state.current.pos_y,
-            ui_state.current.rotation,
-            ui_state.current.scale * scale_modifier,
-        ),
-        f,
-        GlowColor { color, glow: 1.0 },
-        Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
-        1.0,
-        complexity_modifier,
-    );
+    for index in 0..10 {
+        make_collision_shape(
+            commands,
+            Vec4::new(
+                ui_state.current.pos_x + (50.0 * index as f32),
+                ui_state.current.pos_y,
+                ui_state.current.rotation,
+                ui_state.current.scale * scale_modifier,
+            ),
+            &f,
+            GlowColor { color, glow: 1.0 },
+            Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
+            1.0,
+            complexity_modifier,
+        );
+    }
 }
 
 fn update_from_ui(
