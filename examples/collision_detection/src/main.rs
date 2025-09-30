@@ -299,7 +299,7 @@ fn spawn_collider(
         make_collision_shape(
             commands,
             Vec4::new(
-                ui_state.current.pos_x + (50.0 * index as f32),
+                ui_state.current.pos_x + (100.0 * index as f32) - 500.0,
                 ui_state.current.pos_y,
                 ui_state.current.rotation,
                 ui_state.current.scale * scale_modifier,
