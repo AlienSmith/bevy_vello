@@ -1,5 +1,3 @@
-use avian2d::prelude::collider;
-use bevy::ecs::entity;
 use bevy::prelude::*;
 use parry2d::bounding_volume::Aabb;
 use parry2d::math::Point;
@@ -8,6 +6,7 @@ use parry2d::partitioning::Qbvh;
 use parry2d::partitioning::QbvhUpdateWorkspace;
 use parry2d::query::visitors::BoundingVolumeIntersectionsSimultaneousVisitor;
 
+use crate::collision::RemovedColliders;
 use crate::collision::SimpleBroadPhase;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionWorld;
@@ -90,7 +89,7 @@ impl BroadPhaseQbvh {
         &mut self,
         all_colliders: &Query<(Entity, &VelloCollider, &GlobalTransform)>,
         modified_colliders: &Query<(Entity, &VelloCollider), Changed<VelloCollider>>,
-        removed_collider: &mut RemovedComponents<VelloCollider>,
+        removed_collider: &Res<RemovedColliders>,
         collision_world: &mut ResMut<VelloCollisionWorld>,
     ) {
         collision_world.collision_pairs_bvh.clear();
@@ -127,8 +126,8 @@ impl BroadPhaseQbvh {
                 self.qbvh.pre_update_or_insert(ColliderHandle(entity));
             }
 
-            for entity in removed_collider.read() {
-                self.qbvh.remove(ColliderHandle(entity));
+            for entity in removed_collider.colliders.iter() {
+                self.qbvh.remove(ColliderHandle(*entity));
             }
 
             let _ = self.qbvh.refit(margin, &mut self.workspace, |handle| {
@@ -147,14 +146,14 @@ impl BroadPhaseQbvh {
 pub fn update_broad_phase(
     all_colliders: Query<(Entity, &VelloCollider, &GlobalTransform)>,
     modified_colliders: Query<(Entity, &VelloCollider), Changed<VelloCollider>>,
-    mut removed_collider: RemovedComponents<VelloCollider>,
+    removed_collider: Res<RemovedColliders>,
     mut collision_world: ResMut<VelloCollisionWorld>,
     mut broad_phase: ResMut<VelloCollisionBroadPhase>,
 ) {
     broad_phase.broad_phase.update(
         &all_colliders,
         &modified_colliders,
-        &mut removed_collider,
+        &removed_collider,
         &mut collision_world,
     );
 }

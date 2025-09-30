@@ -1,11 +1,13 @@
 use crate::collision::broad_phase::update_broad_phase;
 use crate::collision::broad_phase::update_broad_phase_simple;
 use crate::collision::extract::extract_collision_scene;
+use crate::collision::systems::collect_removed_colliders;
 use crate::collision::systems::make_collision_scene;
 use crate::collision::CollisionResults;
 use crate::collision::CollisionSystems;
 use crate::collision::ExtractedVelloCollisionScene;
 use crate::collision::GpuDataChannel;
+use crate::collision::RemovedColliders;
 use crate::collision::SimpleBroadPhase;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionScene;
@@ -29,6 +31,7 @@ impl Plugin for VelloCollisionPlugin {
             .add_systems(ExtractSchedule, extract_collision_scene);
         app.add_plugins(SvgColliderPlugin)
             .insert_resource(VelloCollisionWorld::default())
+            .insert_resource(RemovedColliders::default())
             .insert_resource(VelloCollisionScene::default())
             .insert_resource(VelloCollisionBroadPhase::default())
             //.insert_resource(SimpleBroadPhase::default())
@@ -36,11 +39,16 @@ impl Plugin for VelloCollisionPlugin {
             .configure_sets(
                 PostUpdate,
                 (
+                    CollisionSystems::CollectRemovedColliders,
                     CollisionSystems::CollisionResponse,
                     CollisionSystems::Collision,
                 )
                     .chain()
                     .after(TransformSystem::TransformPropagate),
+            )
+            .add_systems(
+                PostUpdate,
+                collect_removed_colliders.in_set(CollisionSystems::CollectRemovedColliders),
             )
             .add_systems(
                 PostUpdate,

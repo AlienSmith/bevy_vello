@@ -1,9 +1,18 @@
 use bevy::prelude::*;
 
 use crate::{
-    collision::{VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO},
+    collision::{
+        RemovedColliders, VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+    },
     mat4_to_affine, VelloCollider,
 };
+
+pub fn collect_removed_colliders(
+    mut removed: RemovedComponents<VelloCollider>,
+    mut collection: ResMut<RemovedColliders>,
+) {
+    collection.colliders = removed.read().collect();
+}
 
 pub fn make_collision_scene(
     query: Query<(&VelloCollider, &GlobalTransform)>,

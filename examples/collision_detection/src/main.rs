@@ -8,6 +8,7 @@ use std::f32::consts::PI;
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    ecs::query,
     prelude::*,
     window::WindowResolution,
 };
@@ -121,6 +122,7 @@ struct UiState {
     just_spawn: bool,
     c_config: VelloConstraintWorldConfig,
     just_modified: bool,
+    delete_all_dynamic: bool,
 }
 
 #[derive(PartialEq, Clone)]
@@ -209,6 +211,7 @@ fn ui_example_system(
     egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
         ui_state.just_spawn = false;
         ui_state.just_modified = false;
+        ui_state.delete_all_dynamic = false;
         // Get the FPS diagnostic path
         let fps_path = FrameTimeDiagnosticsPlugin::FPS;
 
@@ -274,6 +277,9 @@ fn ui_example_system(
         if ui.button("Spawn").clicked() {
             ui_state.just_spawn = true;
         }
+        if ui.button("Nuke").clicked() {
+            ui_state.delete_all_dynamic = true;
+        }
         if ui.button("Quit").clicked() {
             std::process::exit(0);
         }
@@ -319,7 +325,15 @@ fn update_from_ui(
     svg_colliders: Res<SvgColliderAssetManager>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
+    query: Query<(Entity, &VelloCollider)>,
 ) {
+    if ui_state.delete_all_dynamic {
+        for (entity, collider) in query.iter() {
+            if collider.is_soft_body() {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
     if ui_state.just_modified {
         constraint_world.set_gravity(Vec2::new(
             ui_state.c_config.gravity_x,

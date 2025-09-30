@@ -8,7 +8,7 @@ use crate::{
     collision::CollisionSystems,
     integrations::physics::{
         systems::{
-            generate_soft_body_for_collider, make_collision_constraints,
+            generate_soft_body_for_collider, make_collision_constraints, remove_soft_body,
             update_collider_from_soft_body, update_constraint_world, visualize_colliders,
         },
         VelloConstraintWorld,
@@ -25,6 +25,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                 (
                     generate_soft_body_for_collider,
                     make_collision_constraints,
+                    remove_soft_body,
                     update_constraint_world,
                     update_collider_from_soft_body,
                     visualize_colliders,

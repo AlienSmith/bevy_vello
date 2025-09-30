@@ -37,6 +37,11 @@ pub struct VelloCollisionWorld {
     pub(crate) collision_pairs: Vec<(Entity, Entity)>,
 }
 
+#[derive(Default, Resource, Clone)]
+pub struct RemovedColliders {
+    pub(crate) colliders: Vec<Entity>,
+}
+
 impl VelloCollisionWorld {
     pub fn update_collision_pairs_if_previous_one_has_been_consumed(
         &mut self,
@@ -78,6 +83,10 @@ pub struct VelloCollider {
 }
 
 impl VelloCollider {
+    pub fn is_soft_body(&self) -> bool {
+        self.inverse_mass > 0.0
+    }
+
     pub fn new(
         path: &BezPath,
         aabb: &kurbo::Rect,
@@ -126,6 +135,7 @@ impl<T: Send + 'static> GpuDataChannel<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 pub enum CollisionSystems {
+    CollectRemovedColliders,
     Collision,         // Your first phase
     CollisionResponse, // Your second phase (runs after Phase1)
 }
