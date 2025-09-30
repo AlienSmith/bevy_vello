@@ -12,7 +12,6 @@ use vello::{
 mod broad_phase;
 mod extract;
 mod plugin;
-mod prepare;
 mod systems;
 
 pub const VELLO_COLLISION_WORLD_RATIO: f32 = 2.0;
