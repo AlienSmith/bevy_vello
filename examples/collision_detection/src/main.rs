@@ -47,19 +47,19 @@ enum ColliderType {
     Star = 2,
     Heart = 3,
     Key = 4,
-    Knife = 5,
-    Shield = 6,
+    Shield = 5,
+    Knife = 6,
 }
 
 fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
     match collider {
         ColliderType::Rect => (peniko::Color::GREEN, 1.0, 1),
         ColliderType::Circle => (peniko::Color::WHITE, 1.0, 0),
-        ColliderType::Star => (peniko::Color::ORANGE, 0.3, 0),
+        ColliderType::Star => (peniko::Color::ORANGE, 0.3, 1),
         ColliderType::Heart => (peniko::Color::RED, 0.5, 1),
         ColliderType::Key => (peniko::Color::GREEN, 0.1, 0),
-        ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
         ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
+        ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
     }
 }
 
@@ -261,11 +261,6 @@ fn ui_example_system(
                     &mut ui_state.current.collider_type,
                     ColliderType::Key,
                     "Key",
-                );
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Knife,
-                    "Knife",
                 );
                 ui.selectable_value(
                     &mut ui_state.current.collider_type,
@@ -618,11 +613,11 @@ fn setup_resources(
         VelloColliderAssetMetaData::default(),
     );
     colliders.push(
-        asset_server.load("colliders/knife.collider.svg"),
+        asset_server.load("colliders/shield.collider.svg"),
         VelloColliderAssetMetaData::default(),
     );
     colliders.push(
-        asset_server.load("colliders/shield.collider.svg"),
+        asset_server.load("colliders/knife.collider.svg"),
         VelloColliderAssetMetaData::default(),
     );
 }
