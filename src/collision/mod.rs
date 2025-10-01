@@ -53,7 +53,7 @@ impl VelloCollisionWorld {
         for (e0, e1) in &self.collision_pairs_bvh {
             let (c, _t) = q.get(*e0).unwrap();
             let (c1, _t1) = q.get(*e1).unwrap();
-            if c.inverse_mass > 0.0 || c1.inverse_mass > 0.0 {
+            if c.is_soft_body() || c1.is_soft_body() {
                 temp.push((*e0, *e1));
             }
         }

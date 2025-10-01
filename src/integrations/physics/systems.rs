@@ -106,7 +106,8 @@ pub fn make_collision_constraints(
                     let a_normal =
                         Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
                     let b_normal = -a_normal;
-                    if diff.magnitude_squared() != 0.0 {
+                    //consistent with COLLISION_MARGIN
+                    if diff.magnitude() >= 0.5 {
                         if let Ok(item) = query.get(*a_index) {
                             if item.is_soft_body() {
                                 let collider_index = a_index;
