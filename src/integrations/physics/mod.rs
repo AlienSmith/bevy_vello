@@ -17,10 +17,8 @@ impl VelloConstraintWorld {
     pub fn new(gravity: Vec2) -> Self {
         VelloConstraintWorld {
             data: ConstraintWorld {
-                softbodies: Default::default(),
-                collider_to_body: Default::default(),
-                body_to_collider: Default::default(),
                 gravity: nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y),
+                ..Default::default()
             },
         }
     }

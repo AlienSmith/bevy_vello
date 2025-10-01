@@ -49,12 +49,15 @@ impl VelloCollisionWorld {
     ) -> bool {
         self.collision_pairs.clear();
         let mut temp: Vec<(Entity, Entity)> = vec![];
+        //TODO: Fix the removecompoents missing some entity problem
         //we could have a more complicated filter here
         for (e0, e1) in &self.collision_pairs_bvh {
-            let (c, _t) = q.get(*e0).unwrap();
-            let (c1, _t1) = q.get(*e1).unwrap();
-            if c.is_soft_body() || c1.is_soft_body() {
-                temp.push((*e0, *e1));
+            if let Ok((c, _t)) = q.get(*e0) {
+                if let Ok((c1, _t1)) = q.get(*e1) {
+                    if c.is_soft_body() || c1.is_soft_body() {
+                        temp.push((*e0, *e1));
+                    }
+                }
             }
         }
         self.collision_pairs = temp;

@@ -1,3 +1,5 @@
+use core::f32;
+
 use bevy::prelude::*;
 use parry2d::bounding_volume::Aabb;
 use parry2d::math::Point;
@@ -131,8 +133,15 @@ impl BroadPhaseQbvh {
             }
 
             let _ = self.qbvh.refit(margin, &mut self.workspace, |handle| {
-                let (_entity, collider, transform) = all_colliders.get(handle.0).unwrap();
-                compute_aabb_from_collider(collider, transform)
+                //TODO: Fix the removecompoents missing some entity problem
+                if let Ok((_entity, collider, transform)) = all_colliders.get(handle.0) {
+                    return compute_aabb_from_collider(collider, transform);
+                } else {
+                    Aabb::new(
+                        Point::new(f32::INFINITY, f32::INFINITY),
+                        Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
+                    )
+                }
             });
             // self.qbvh
             //     .traverse_bvtt_with_stack(&self.qbvh, &mut visitor, &mut self.stack);

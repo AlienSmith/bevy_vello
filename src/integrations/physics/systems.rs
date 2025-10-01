@@ -1,3 +1,5 @@
+use std::vec;
+
 use crate::{
     affine_to_mat4,
     collision::{
@@ -14,7 +16,7 @@ use vello::{
     peniko::{self, GlowColor},
     CollisionResult,
 };
-use vello_physics::utility::cubic_to_quad;
+use vello_physics::{utility::cubic_to_quad, CoupledConstraintBreaker};
 
 pub fn generate_soft_body_for_collider(
     query: Query<(Entity, &VelloCollider, &GlobalTransform), Added<VelloCollider>>,
@@ -108,19 +110,22 @@ pub fn make_collision_constraints(
                     let b_normal = -a_normal;
                     //consistent with COLLISION_MARGIN
                     if diff.magnitude() >= 0.5 {
+                        let mut constraints0 = None;
+                        let mut constraints1 = None;
                         if let Ok(item) = query.get(*a_index) {
                             if item.is_soft_body() {
                                 let collider_index = a_index;
                                 let current_position = a_position;
                                 let target_position = b_position;
                                 let curve_index = a_curve_index;
-                                constraint_world.data.add_one_time_collision_constraint(
-                                    *collider_index,
-                                    curve_index as usize,
-                                    current_position,
-                                    target_position,
-                                    b_normal,
-                                );
+                                constraints0 =
+                                    constraint_world.data.add_one_time_collision_constraint(
+                                        *collider_index,
+                                        curve_index as usize,
+                                        current_position,
+                                        target_position,
+                                        b_normal,
+                                    );
                             }
                         }
                         if let Ok(item) = query.get(*a_index) {
@@ -129,13 +134,23 @@ pub fn make_collision_constraints(
                                 let current_position = b_position;
                                 let curve_index = b_curve_index;
                                 let target_position = a_position;
-                                constraint_world.data.add_one_time_collision_constraint(
-                                    *collider_index,
-                                    curve_index as usize,
-                                    current_position,
-                                    target_position,
-                                    a_normal,
-                                );
+                                constraints1 =
+                                    constraint_world.data.add_one_time_collision_constraint(
+                                        *collider_index,
+                                        curve_index as usize,
+                                        current_position,
+                                        target_position,
+                                        a_normal,
+                                    );
+                            }
+                        }
+                        if let Some(c0) = constraints0.take() {
+                            if let Some(c1) = constraints1.take() {
+                                constraint_world.data.add_constraints_breakers(Box::new(
+                                    CoupledConstraintBreaker {
+                                        constraints: vec![c0, c1],
+                                    },
+                                ));
                             }
                         }
                     }

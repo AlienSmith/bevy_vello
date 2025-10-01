@@ -268,7 +268,10 @@ fn ui_example_system(
                     "Shield",
                 );
             });
-
+        if ui.button("StackSpawn").clicked() {
+            ui_state.current.pos_y += 40.0;
+            ui_state.just_spawn = true;
+        }
         if ui.button("Spawn").clicked() {
             ui_state.just_spawn = true;
         }
@@ -297,6 +300,7 @@ fn spawn_collider(
     complexity_modifier: i32,
 ) {
     for index in 0..10 {
+        let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         make_collision_shape(
             commands,
             Vec4::new(
@@ -307,7 +311,10 @@ fn spawn_collider(
             ),
             &f,
             GlowColor { color, glow: 1.0 },
-            Vec2::new(ui_state.current.vec_x, ui_state.current.vec_y),
+            Vec2::new(
+                reverse_velocity * ui_state.current.vec_x,
+                ui_state.current.vec_y,
+            ),
             1.0,
             complexity_modifier,
         );
