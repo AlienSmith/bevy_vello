@@ -109,9 +109,11 @@ pub fn make_collision_constraints(
                         Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
                     let b_normal = -a_normal;
                     //consistent with COLLISION_MARGIN
-                    if diff.magnitude() >= 0.5 {
+                    if diff.magnitude() > 0.5 {
                         let mut constraints0 = None;
+                        let mut is_soft_0 = false;
                         let mut constraints1 = None;
+                        let mut is_soft_1 = false;
                         if let Ok(item) = query.get(*a_index) {
                             if item.is_soft_body() {
                                 let collider_index = a_index;
@@ -126,9 +128,10 @@ pub fn make_collision_constraints(
                                         target_position,
                                         b_normal,
                                     );
+                                is_soft_0 = true;
                             }
                         }
-                        if let Ok(item) = query.get(*a_index) {
+                        if let Ok(item) = query.get(*b_index) {
                             if item.is_soft_body() {
                                 let collider_index = b_index;
                                 let current_position = b_position;
@@ -142,15 +145,28 @@ pub fn make_collision_constraints(
                                         target_position,
                                         a_normal,
                                     );
+                                is_soft_1 = true;
                             }
                         }
-                        if let Some(c0) = constraints0.take() {
-                            if let Some(c1) = constraints1.take() {
+
+                        //deal with coupled constraints
+                        if is_soft_0 && is_soft_1 {
+                            if constraints0.is_some() && constraints1.is_some() {
+                                let c0 = constraints0.take().unwrap();
+                                let c1 = constraints1.take().unwrap();
                                 constraint_world.data.add_constraints_breakers(Box::new(
                                     CoupledConstraintBreaker {
                                         constraints: vec![c0, c1],
                                     },
                                 ));
+                            } else {
+                                //you couple has been denied so are you.
+                                if let Some(c0) = constraints0.take() {
+                                    constraint_world.data.remove_collision_constraint(c0);
+                                }
+                                if let Some(c1) = constraints1.take() {
+                                    constraint_world.data.remove_collision_constraint(c1);
+                                }
                             }
                         }
                     }

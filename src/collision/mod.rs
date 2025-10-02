@@ -83,11 +83,12 @@ pub struct VelloCollider {
     pub(crate) inverse_mass: f32,
     pub(crate) debug_color: peniko::GlowColor,
     pub(crate) complexity_modifier: i32,
+    pub(crate) is_soft_body: bool,
 }
 
 impl VelloCollider {
     pub fn is_soft_body(&self) -> bool {
-        self.inverse_mass > 0.0
+        self.is_soft_body
     }
 
     pub fn new(
@@ -97,6 +98,7 @@ impl VelloCollider {
         color: peniko::GlowColor,
         inverse_mass: f32,
         complexity_modifier: i32,
+        is_soft_body: bool,
     ) -> Self {
         Self {
             shape: path.clone(),
@@ -105,6 +107,7 @@ impl VelloCollider {
             inverse_mass,
             debug_color: color,
             complexity_modifier,
+            is_soft_body,
         }
     }
 

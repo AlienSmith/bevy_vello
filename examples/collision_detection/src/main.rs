@@ -317,6 +317,7 @@ fn spawn_collider(
             ),
             1.0,
             complexity_modifier,
+            true,
         );
     }
 }
@@ -485,6 +486,7 @@ fn make_static_scene(commands: &mut Commands) {
         Vec2::new(0.0, 0.0),
         0.0,
         0,
+        false,
     );
 
     make_collision_shape(
@@ -498,6 +500,7 @@ fn make_static_scene(commands: &mut Commands) {
         Vec2::new(0.0, 0.0),
         0.0,
         0,
+        false,
     );
 
     make_collision_shape(
@@ -511,6 +514,7 @@ fn make_static_scene(commands: &mut Commands) {
         Vec2::new(-0.0, 0.0),
         0.0,
         0,
+        false,
     );
 
     make_collision_shape(
@@ -524,6 +528,7 @@ fn make_static_scene(commands: &mut Commands) {
         Vec2::new(-0.0, 0.0),
         0.0,
         0,
+        false,
     );
 }
 
@@ -535,6 +540,7 @@ fn make_collision_shape(
     velocity: Vec2,
     inverse_mass: f32,
     complexity_modifier: i32,
+    is_soft_body: bool,
 ) {
     let mut scene: VelloScene = VelloScene::default();
     let (shape, rect) = f();
@@ -562,6 +568,7 @@ fn make_collision_shape(
             color,
             inverse_mass,
             complexity_modifier,
+            is_soft_body,
         ),
     ));
 }

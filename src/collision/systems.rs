@@ -22,10 +22,10 @@ pub fn make_collision_scene(
     scene.scene.reset();
     // only inite a new collision test if the previous one has been consumed
     if r.update_collision_pairs_if_previous_one_has_been_consumed(&query) {
-        info!(
-            "last collision_pairs registered count {}",
-            r.collision_pairs.len()
-        );
+        // info!(
+        //     "last collision_pairs registered count {}",
+        //     r.collision_pairs.len()
+        // );
         for (a, b) in &r.collision_pairs {
             let (c_a, t_a) = query.get(*a).unwrap();
             let affine_a =
