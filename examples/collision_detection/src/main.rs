@@ -228,7 +228,7 @@ fn ui_example_system(
         ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_y, -100.0..=100.0).text("pox_y"));
 
         ui.add(egui::Slider::new(&mut ui_state.current.pos_x, -900.0..=900.0).text("pox_x"));
-        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -508.5..=500.0).text("pox_y"));
+        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -500.0..=500.0).text("pox_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
@@ -299,12 +299,12 @@ fn spawn_collider(
     f: impl Fn() -> (BezPath, kurbo::Rect),
     complexity_modifier: i32,
 ) {
-    for index in 0..1 {
+    for index in 0..10 {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         make_collision_shape(
             commands,
             Vec4::new(
-                ui_state.current.pos_x,
+                ui_state.current.pos_x + (100.0 * index as f32) - 500.0,
                 ui_state.current.pos_y,
                 ui_state.current.rotation,
                 ui_state.current.scale * scale_modifier,
