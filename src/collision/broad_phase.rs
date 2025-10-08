@@ -190,9 +190,9 @@ impl BroadPhaseSimple {
         let mut dynamic_colliders: Vec<Entity> = vec![];
         for (item, collider, _) in all_colliders.iter() {
             if collider.is_soft_body() {
-                static_colliders.push(item);
-            } else {
                 dynamic_colliders.push(item);
+            } else {
+                static_colliders.push(item);
             }
         }
         for i in 0..dynamic_colliders.len() {

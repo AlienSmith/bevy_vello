@@ -33,8 +33,8 @@ impl Plugin for VelloCollisionPlugin {
             .insert_resource(VelloCollisionWorld::default())
             .insert_resource(RemovedColliders::default())
             .insert_resource(VelloCollisionScene::default())
-            .insert_resource(VelloCollisionBroadPhase::default())
-            //.insert_resource(SimpleBroadPhase::default())
+            //.insert_resource(VelloCollisionBroadPhase::default())
+            .insert_resource(SimpleBroadPhase::default())
             .insert_resource(GpuDataChannel::<CollisionResults>::new(1))
             .configure_sets(
                 PostUpdate,
@@ -53,8 +53,8 @@ impl Plugin for VelloCollisionPlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    update_broad_phase,
-                    //update_broad_phase_simple,
+                    //update_broad_phase,
+                    update_broad_phase_simple,
                     make_collision_scene,
                     //print_collision_results,
                 )

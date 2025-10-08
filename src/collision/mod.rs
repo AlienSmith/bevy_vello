@@ -14,7 +14,7 @@ mod extract;
 mod plugin;
 mod systems;
 
-pub const VELLO_COLLISION_WORLD_RATIO: f32 = 2.0;
+pub const VELLO_COLLISION_WORLD_RATIO: f32 = 4.0;
 
 use broad_phase::BroadPhaseQbvh;
 
