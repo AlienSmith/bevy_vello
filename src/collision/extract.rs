@@ -9,7 +9,6 @@ pub fn extract_collision_scene(
     game_scene: Extract<Res<VelloCollisionScene>>,
     channel: Extract<Res<GpuDataChannel<CollisionResults>>>,
 ) {
-    render_scene.scene.reset();
     render_scene.scene = game_scene.scene.clone();
     render_scene.pairs = game_scene.pair.clone();
     if render_scene.sender.is_none() {

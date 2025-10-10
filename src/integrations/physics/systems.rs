@@ -69,9 +69,9 @@ pub fn update_collider_from_soft_body(
 //hence we don't need to add collision constraints to them anymore.
 pub fn make_collision_constraints(
     collision_channel: Res<GpuDataChannel<CollisionResults>>,
-    collision_world: Res<VelloCollisionWorld>,
     query: Query<&VelloCollider>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
 ) {
     if collision_world.collision_pairs.len() == 0 {
         return;
@@ -108,8 +108,16 @@ pub fn make_collision_constraints(
                     let a_normal =
                         Vector2::<f32>::new(c.a_position_normal[2], c.a_position_normal[3]);
                     let b_normal = -a_normal;
+
                     //consistent with COLLISION_MARGIN
-                    if diff.magnitude() > 0.5 {
+                    if diff.dot(&a_normal) > 0.5 {
+                        // if diff.magnitude() > 10.0 {
+                        //     info!("triggers");
+                        //     info!("{} wired {:?}", diff.magnitude(), c);
+                        //     collision_world.paused = true;
+                        // } else {
+                        //     info!("{:?}", c);
+                        // }
                         let mut constraints0 = None;
                         let mut is_soft_0 = false;
                         let mut constraints1 = None;
@@ -178,11 +186,14 @@ pub fn make_collision_constraints(
 }
 
 pub fn update_constraint_world(
+    collision_world: Res<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
     time: Res<Time>,
 ) {
-    let delta = time.delta_seconds();
-    constraint_world.data.step(delta);
+    if !collision_world.paused {
+        let delta = time.delta_seconds();
+        constraint_world.data.step(delta);
+    }
 }
 
 pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &GlobalTransform)>) {

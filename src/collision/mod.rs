@@ -35,6 +35,7 @@ pub struct ExtractedVelloCollisionScene {
 pub struct VelloCollisionWorld {
     pub(crate) collision_pairs_bvh: Vec<(Entity, Entity)>,
     pub(crate) collision_pairs: Vec<(Entity, Entity)>,
+    pub paused: bool,
 }
 
 #[derive(Default, Resource, Clone)]

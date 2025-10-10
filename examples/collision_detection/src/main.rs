@@ -207,6 +207,7 @@ fn ui_example_system(
     mut ui_state: ResMut<UiState>,
     mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
+    mut r: ResMut<VelloCollisionWorld>,
 ) {
     egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
         ui_state.just_spawn = false;
@@ -224,11 +225,11 @@ fn ui_example_system(
                 ui.label(format!("Avg FPS: {:.1}", avg));
             }
         }
-        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_x, -100.0..=100.0).text("pox_x"));
-        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_y, -100.0..=100.0).text("pox_y"));
+        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_x, -100.0..=100.0).text("gra_x"));
+        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_y, -100.0..=100.0).text("gra_y"));
 
         ui.add(egui::Slider::new(&mut ui_state.current.pos_x, -900.0..=900.0).text("pox_x"));
-        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -500.0..=500.0).text("pox_y"));
+        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -501.0..=500.0).text("pox_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
@@ -280,6 +281,9 @@ fn ui_example_system(
         }
         if ui.button("Quit").clicked() {
             std::process::exit(0);
+        }
+        if ui.button("Pause").clicked() {
+            r.paused = !r.paused;
         }
         if ui_state.c_config.gravity_x != ui_state.c_config.pre_gravity_x
             || ui_state.c_config.gravity_y != ui_state.c_config.pre_gravity_y
