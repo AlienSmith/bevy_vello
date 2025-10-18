@@ -614,10 +614,6 @@ fn setup_resources(
     mut colliders: ResMut<SvgColliderAssetManager>,
     asset_server: Res<AssetServer>,
 ) {
-    tank_parts.push(
-        asset_server.load("scenes/blood.scene"),
-        TankGameAssetsMetaData::default(),
-    );
     colliders.push(
         asset_server.load("colliders/star.collider.svg"),
         VelloColliderAssetMetaData::default(),

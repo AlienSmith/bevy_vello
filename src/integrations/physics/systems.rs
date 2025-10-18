@@ -16,7 +16,7 @@ use vello::{
     peniko::{self, GlowColor},
     CollisionResult,
 };
-use vello_physics::{utility::cubic_to_quad, CoupledConstraintBreaker};
+use vello_physics::{utility::path_to_ccw_quad_path, CoupledConstraintBreaker};
 
 pub fn generate_soft_body_for_collider(
     query: Query<(Entity, &VelloCollider, &GlobalTransform), Added<VelloCollider>>,
@@ -25,7 +25,7 @@ pub fn generate_soft_body_for_collider(
     for (entity, collider, transform) in query.iter() {
         if collider.inverse_mass != 0.0 {
             constraint_world.data.create_soft_body_from_path(
-                &cubic_to_quad(&collider.shape),
+                &path_to_ccw_quad_path(&collider.shape),
                 &mat4_to_affine(transform.compute_matrix()),
                 nalgebra::Vector2::<f32>::new(
                     collider.initial_velocity.x,
