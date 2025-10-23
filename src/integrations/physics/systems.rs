@@ -9,14 +9,13 @@ use crate::{
     integrations::physics::VelloConstraintWorld,
     mat4_to_affine, VelloCollider, VelloScene,
 };
-use bevy::{ecs::entity, prelude::*};
+use bevy::prelude::*;
 use nalgebra::Vector2;
 use vello::{
     kurbo::{self, Affine, BezPath, Shape, Stroke},
     peniko::{self, GlowColor},
-    CollisionResult,
 };
-use vello_physics::{utility::path_to_ccw_quad_path, CoupledConstraintBreaker};
+use vello_physics::{utility::path_to_ccw_quad_path, CoupledConstraintBreaker, SoftBodyInitConfig};
 
 pub fn generate_soft_body_for_collider(
     query: Query<(Entity, &VelloCollider, &GlobalTransform), Added<VelloCollider>>,
@@ -24,16 +23,19 @@ pub fn generate_soft_body_for_collider(
 ) {
     for (entity, collider, transform) in query.iter() {
         if collider.inverse_mass != 0.0 {
-            constraint_world.data.create_soft_body_from_path(
+            constraint_world.data.create_soft_body_from_path_with_frame(
                 &path_to_ccw_quad_path(&collider.shape),
                 &mat4_to_affine(transform.compute_matrix()),
                 nalgebra::Vector2::<f32>::new(
                     collider.initial_velocity.x,
                     -collider.initial_velocity.y,
                 ),
-                collider.inverse_mass,
                 entity,
-                collider.complexity_modifier,
+                collider.aabb.clone(),
+                SoftBodyInitConfig {
+                    total_inv_mass: collider.inverse_mass,
+                    ..Default::default()
+                },
             );
         }
     }
@@ -71,7 +73,7 @@ pub fn make_collision_constraints(
     collision_channel: Res<GpuDataChannel<CollisionResults>>,
     query: Query<&VelloCollider>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut collision_world: ResMut<VelloCollisionWorld>,
+    collision_world: Res<VelloCollisionWorld>,
 ) {
     if collision_world.collision_pairs.len() == 0 {
         return;
@@ -197,7 +199,7 @@ pub fn update_constraint_world(
 }
 
 pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &GlobalTransform)>) {
-    for (mut s, c, _transform) in q.iter_mut() {
+    for (mut s, c, transform) in q.iter_mut() {
         s.reset();
         s.fill_with_shadow(
             peniko::Fill::NonZero,
@@ -207,20 +209,19 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             &c.shape,
             true,
         );
-        //draw bbox
-        // {
-        //     let affine = mat4_to_affine(_transform.compute_matrix());
-        //     let transform = Affine::translate(affine.translation()) * affine.inverse();
-        //     s.stroke(
-        //         &Stroke::new(1.0),
-        //         transform,
-        //         GlowColor {
-        //             color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
-        //             glow: 5.0,
-        //         },
-        //         None,
-        //         &c.aabb.to_path(0.1),
-        //     );
-        // }
+        if c.is_selected {
+            let affine = mat4_to_affine(transform.compute_matrix());
+            let transform = Affine::translate(affine.translation()) * affine.inverse();
+            s.stroke(
+                &Stroke::new(1.0),
+                transform,
+                GlowColor {
+                    color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+                    glow: 5.0,
+                },
+                None,
+                &c.aabb.to_path(0.1),
+            );
+        }
     }
 }

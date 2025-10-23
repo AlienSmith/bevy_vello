@@ -189,7 +189,7 @@ const SPRITES: [&str; 5] = [
 ];
 #[test]
 fn export_sprit_sheet_effect() {
-    let i = SPRITES[3];
+    let i = SPRITES[4];
     // we want the character anim to inteact with the light and shadow.
     _export_default_sprite_sheet_scene_with_name(
         i,

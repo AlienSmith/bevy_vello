@@ -5,7 +5,7 @@ use crate::{
     collision::{
         RemovedColliders, VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
     },
-    mat4_to_affine, VelloCollider, VelloScene,
+    mat4_to_affine, VelloCollider,
 };
 
 pub fn collect_removed_colliders(

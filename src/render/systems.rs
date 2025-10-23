@@ -19,7 +19,7 @@ use bevy::render::view::{ExtractedView, NoFrustumCulling};
 use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
 use bevy::window::{WindowResized, WindowResolution};
 use vello::kurbo::Affine;
-use vello::{CollisionResult, RenderParams, RendererOptions, Scene};
+use vello::{RenderParams, RendererOptions, Scene};
 
 use crossbeam_channel::Sender;
 

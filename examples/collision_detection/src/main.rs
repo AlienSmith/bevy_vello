@@ -4,13 +4,11 @@
 //! tweaked at runtime via the egui inspector to move the 2D rendering layer of
 //! particle above or below the reference square.
 
-use std::f32::consts::PI;
+mod utility;
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    ecs::query,
     prelude::*,
-    window::WindowResolution,
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -19,24 +17,23 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
-    add_default_light,
-    collision::VelloCollisionWorld,
+    collision::{VelloCollisionBroadPhase, VelloCollisionWorld},
     integrations::{
         physics::VelloConstraintWorld,
-        svg,
         svg_collider::{SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData},
-        HanabiIntegrationPlugin, TankGameAssetsMetaData,
+        HanabiIntegrationPlugin,
     },
     vello::{
-        kurbo::{self, cubics_to_quadratic_splines, BezPath, Shape},
+        kurbo::{self, BezPath, Shape},
         peniko::{self, GlowColor},
     },
     VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
-use egui::ComboBox;
 
 use tankgame_lib::prelude::*;
+
+use crate::utility::MouseStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u32)]
@@ -178,7 +175,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
-    app.add_plugins(VelloPlugin)
+    app.insert_resource(utility::MouseStatus::default())
+        .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
@@ -191,9 +189,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(
             Update,
             (
+                utility::update_mouse_position,
                 ui_example_system,
                 update_from_ui.after(ui_example_system),
                 update_edge_pan_camera,
+                select_collider,
                 //update_blood_particles.after(ui_example_system),
             )
                 .run_if(in_state(GameState::Game)),
@@ -434,35 +434,7 @@ fn setup_back_ground(mut commands: Commands) {
     },));
 }
 
-fn setup_entity(
-    mut commands: Commands,
-    svg_colliders: Res<SvgColliderAssetManager>,
-    custom_assets: Res<Assets<SvgColliderAsset>>,
-) {
-    let make_rect = || {
-        let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
-        let rect_path = rect.to_path(0.1);
-        (rect_path, rect)
-    };
-
-    let make_collider = || {
-        let svg_collider = custom_assets
-            .get(&svg_colliders.get_index(0 as usize).unwrap())
-            .unwrap();
-        (svg_collider.shape.clone(), svg_collider.aabb.clone())
-    };
-
-    // make_collision_shape(
-    //     &mut commands,
-    //     Vec4::new(200.0, 0.0, 0.0, 0.3),
-    //     make_collider,
-    //     GlowColor {
-    //         color: peniko::Color::rgb(0.0, 1.0, 0.0),
-    //         glow: 1.0,
-    //     },
-    //     Vec2::new(-200.0, 0.0),
-    //     1.0,
-    // );
+fn setup_entity(mut commands: Commands) {
     make_static_scene(&mut commands);
 }
 
@@ -610,7 +582,7 @@ fn check_assets_loaded(
 }
 
 fn setup_resources(
-    mut tank_parts: ResMut<AssetManager>,
+    mut _tank_parts: ResMut<AssetManager>,
     mut colliders: ResMut<SvgColliderAssetManager>,
     asset_server: Res<AssetServer>,
 ) {
@@ -651,4 +623,20 @@ pub fn add_light(mut commands: Commands) {
         scene: light_scene,
         ..Default::default()
     },));
+}
+
+pub fn select_collider(
+    mut query: Query<&mut VelloCollider>,
+    broad_phase: Res<VelloCollisionBroadPhase>,
+    button: Res<ButtonInput<MouseButton>>,
+    mouse_position: Res<MouseStatus>,
+) {
+    info!("{}", mouse_position.world_pos);
+    if button.just_pressed(MouseButton::Left) {
+        if let Some(entity) = broad_phase.find_first_constains_point(mouse_position.world_pos) {
+            if let Ok(mut item) = query.get_mut(entity) {
+                item.is_selected = true;
+            }
+        }
+    };
 }

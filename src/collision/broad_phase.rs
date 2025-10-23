@@ -2,10 +2,16 @@ use core::f32;
 
 use bevy::prelude::*;
 use parry2d::bounding_volume::Aabb;
+use parry2d::bounding_volume::SimdAabb;
 use parry2d::math::Point;
+use parry2d::math::SimdReal;
+use parry2d::math::SIMD_WIDTH;
+use parry2d::na::SimdValue;
 use parry2d::partitioning::IndexedData;
 use parry2d::partitioning::Qbvh;
 use parry2d::partitioning::QbvhUpdateWorkspace;
+use parry2d::partitioning::SimdBestFirstVisitStatus;
+use parry2d::partitioning::SimdBestFirstVisitor;
 use parry2d::query::visitors::BoundingVolumeIntersectionsSimultaneousVisitor;
 
 use crate::collision::RemovedColliders;
@@ -87,6 +93,18 @@ impl BroadPhaseQbvh {
             workspace: QbvhUpdateWorkspace::default(),
         }
     }
+
+    pub fn find_first_constains_point(&self, x: f32, y: f32) -> Option<Entity> {
+        let mut visitor = FindFirstContainsPointVisitor {
+            point: Point::new(SimdReal::splat(x), SimdReal::splat(y)),
+        };
+        if let Some((_, result)) = self.qbvh.traverse_best_first(&mut visitor) {
+            Some(result.0)
+        } else {
+            None
+        }
+    }
+
     pub fn update(
         &mut self,
         all_colliders: &Query<(Entity, &VelloCollider, &GlobalTransform)>,
@@ -218,6 +236,37 @@ impl BroadPhaseSimple {
                     collision_world.collision_pairs_bvh.push((item, item1));
                 }
             }
+        }
+    }
+}
+
+pub struct FindFirstContainsPointVisitor {
+    point: Point<SimdReal>,
+}
+
+impl SimdBestFirstVisitor<ColliderHandle, SimdAabb> for FindFirstContainsPointVisitor {
+    type Result = ColliderHandle;
+
+    fn visit(
+        &mut self,
+        _best_cost_so_far: parry2d::math::Real,
+        bv: &SimdAabb,
+        value: Option<[Option<&ColliderHandle>; parry2d::math::SIMD_WIDTH]>,
+    ) -> parry2d::partitioning::SimdBestFirstVisitStatus<Self::Result> {
+        let contains_mask = bv.contains_local_point(&self.point); // Immutable borrow inside method
+        if let Some(leaves) = value {
+            for (i, &data) in leaves.iter().enumerate() {
+                if contains_mask.extract(i) {
+                    if let Some(leaf_idx) = data {
+                        return SimdBestFirstVisitStatus::ExitEarly(Some(*leaf_idx));
+                    }
+                }
+            }
+        }
+        SimdBestFirstVisitStatus::MaybeContinue {
+            weights: SimdReal::splat(0.0),
+            mask: contains_mask,
+            results: [None; SIMD_WIDTH],
         }
     }
 }

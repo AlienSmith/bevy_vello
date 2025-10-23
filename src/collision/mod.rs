@@ -71,6 +71,13 @@ pub struct VelloCollisionBroadPhase {
     pub(crate) broad_phase: BroadPhaseQbvh,
 }
 
+impl VelloCollisionBroadPhase {
+    pub fn find_first_constains_point(&self, world_position: Vec2) -> Option<Entity> {
+        self.broad_phase
+            .find_first_constains_point(world_position.x, world_position.y)
+    }
+}
+
 #[derive(Default, Resource, Clone)]
 pub struct SimpleBroadPhase {
     pub(crate) broad_phase: BroadPhaseSimple,
@@ -85,6 +92,7 @@ pub struct VelloCollider {
     pub(crate) debug_color: peniko::GlowColor,
     pub(crate) complexity_modifier: i32,
     pub(crate) is_soft_body: bool,
+    pub is_selected: bool,
 }
 
 impl VelloCollider {
@@ -109,6 +117,7 @@ impl VelloCollider {
             debug_color: color,
             complexity_modifier,
             is_soft_body,
+            is_selected: false,
         }
     }
 
