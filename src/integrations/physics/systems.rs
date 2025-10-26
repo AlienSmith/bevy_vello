@@ -6,9 +6,10 @@ use crate::{
         CollisionResults, GpuDataChannel, RemovedColliders, VelloCollisionWorld,
         VELLO_COLLISION_WORLD_RATIO,
     },
-    integrations::physics::VelloConstraintWorld,
+    integrations::physics::{ColliderExternalImpulseEvent, VelloConstraintWorld},
     mat4_to_affine, VelloCollider, VelloScene,
 };
+
 use bevy::prelude::*;
 use nalgebra::Vector2;
 use vello::{
@@ -64,6 +65,22 @@ pub fn update_collider_from_soft_body(
             }
         },
     );
+}
+
+pub fn apply_explicit_impulse_on_softbody(
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut events: EventReader<ColliderExternalImpulseEvent>,
+) {
+    for event in events.read() {
+        if let Some(particles) = constraint_world
+            .data
+            .get_all_frame_info(event.entity.clone())
+        {
+            for item in (event.filter)(particles, event.filter_data) {
+                constraint_world.data.add_external_force(event.entity, item);
+            }
+        }
+    }
 }
 
 //consume the collision result togather with the collision pairs.

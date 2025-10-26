@@ -1,8 +1,305 @@
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::{
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    prelude::*,
+    window::PrimaryWindow,
+};
+use bevy_egui::{egui, EguiContexts};
+use bevy_vello::{
+    collision::{VelloCollisionBroadPhase, VelloCollisionWorld},
+    integrations::physics::{
+        ColliderExternalImpulseEvent, ExternalForce, FilterData, ParticleInfo,
+    },
+    vello::{
+        kurbo::{self, Affine, Stroke},
+        peniko,
+    },
+    VelloCollider, VelloScene, VelloSceneBundle,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[repr(u32)]
+pub enum ColliderType {
+    #[default]
+    Rect = 0,
+    Circle = 1,
+    Star = 2,
+    Heart = 3,
+    Key = 4,
+    Shield = 5,
+    Knife = 6,
+}
+
+pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
+    match collider {
+        ColliderType::Rect => (peniko::Color::GREEN, 1.0, 1),
+        ColliderType::Circle => (peniko::Color::WHITE, 1.0, 0),
+        ColliderType::Star => (peniko::Color::ORANGE, 0.3, 1),
+        ColliderType::Heart => (peniko::Color::RED, 0.5, 1),
+        ColliderType::Key => (peniko::Color::GREEN, 0.1, 0),
+        ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
+        ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
+    }
+}
+
+#[derive(PartialEq, Clone)]
+pub(crate) struct ExternalImpulseConfig {
+    pub(crate) scale: f32,
+}
+
+#[derive(PartialEq, Clone)]
+pub(crate) struct EntityConfig {
+    pub(crate) pos_x: f32,
+    pub(crate) pos_y: f32,
+    pub(crate) vec_x: f32,
+    pub(crate) vec_y: f32,
+    pub(crate) rotation: f32,
+    pub(crate) scale: f32,
+    pub(crate) collider_type: ColliderType,
+}
+
+#[derive(PartialEq, Clone)]
+pub(crate) struct VelloConstraintWorldConfig {
+    pub(crate) gravity_x: f32,
+    pub(crate) gravity_y: f32,
+
+    pub(crate) pre_gravity_x: f32,
+    pub(crate) pre_gravity_y: f32,
+}
+
+impl Default for ExternalImpulseConfig {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
+
+impl Default for VelloConstraintWorldConfig {
+    fn default() -> Self {
+        Self {
+            gravity_x: 0.0,
+            gravity_y: -98.0,
+            pre_gravity_x: 0.0,
+            pre_gravity_y: -98.0,
+        }
+    }
+}
+
+impl Default for EntityConfig {
+    fn default() -> Self {
+        EntityConfig {
+            scale: 1.0,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            vec_x: 0.0,
+            vec_y: 0.0,
+            rotation: 0.0,
+            collider_type: Default::default(),
+        }
+    }
+}
+
+#[derive(Default, Resource)]
+
+pub(crate) struct UiState {
+    pub(crate) current: EntityConfig,
+    pub(crate) just_spawn: bool,
+    pub(crate) c_config: VelloConstraintWorldConfig,
+    pub(crate) just_modified: bool,
+    pub(crate) e_config: ExternalImpulseConfig,
+    pub(crate) delete_all_dynamic: bool,
+}
+
+pub fn ui_example_system(
+    mut ui_state: ResMut<UiState>,
+    mut contexts: EguiContexts,
+    diagnostics: Res<DiagnosticsStore>,
+    mut r: ResMut<VelloCollisionWorld>,
+) {
+    egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
+        ui_state.just_spawn = false;
+        ui_state.just_modified = false;
+        ui_state.delete_all_dynamic = false;
+        // Get the FPS diagnostic path
+        let fps_path = FrameTimeDiagnosticsPlugin::FPS;
+
+        // Fetch the FPS value
+        if let Some(fps) = diagnostics.get(&fps_path) {
+            if let Some(value) = fps.value() {
+                ui.label(format!("FPS: {:.1}", value));
+            }
+            if let Some(avg) = fps.average() {
+                ui.label(format!("Avg FPS: {:.1}", avg));
+            }
+        }
+        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_x, -100.0..=100.0).text("gra_x"));
+        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_y, -100.0..=100.0).text("gra_y"));
+
+        ui.add(egui::Slider::new(&mut ui_state.current.pos_x, -900.0..=900.0).text("pox_x"));
+        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -501.0..=500.0).text("pox_y"));
+        ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
+        ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
+        ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
+        ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
+
+        egui::ComboBox::from_label("Collider Type")
+            .selected_text(format!("{:?}", ui_state.current.collider_type))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Rect,
+                    "Rect",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Circle,
+                    "Circle",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Star,
+                    "Star",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Heart,
+                    "Heart",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Key,
+                    "Key",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Shield,
+                    "Shield",
+                );
+            });
+        if ui.button("StackSpawn").clicked() {
+            ui_state.current.pos_y += 40.0;
+            ui_state.just_spawn = true;
+        }
+        if ui.button("Spawn").clicked() {
+            ui_state.just_spawn = true;
+        }
+        if ui.button("Nuke").clicked() {
+            ui_state.delete_all_dynamic = true;
+        }
+
+        ui.add(egui::Slider::new(&mut ui_state.e_config.scale, 0.001..=1.0).text("impulse_scale"));
+
+        if ui.button("Quit").clicked() {
+            std::process::exit(0);
+        }
+        if ui.button("Pause").clicked() {
+            r.paused = !r.paused;
+        }
+
+        if ui_state.c_config.gravity_x != ui_state.c_config.pre_gravity_x
+            || ui_state.c_config.gravity_y != ui_state.c_config.pre_gravity_y
+        {
+            ui_state.just_modified = true;
+            ui_state.c_config.pre_gravity_x = ui_state.c_config.gravity_x;
+            ui_state.c_config.pre_gravity_y = ui_state.c_config.gravity_y;
+        }
+    });
+}
+
+#[derive(Resource, Default)]
+pub struct ColliderStatus {
+    pub selected: Option<Entity>,
+    pub to_unselect: Vec<Entity>,
+    pub applied_impulse: Vec2,
+    pub need_update: bool,
+}
+
+impl ColliderStatus {
+    pub fn select_entity(&mut self, entity: Entity) {
+        if let Some(old) = self.selected.take() {
+            if old != entity {
+                self.to_unselect.push(old);
+            }
+        }
+        self.selected = Some(entity);
+        self.need_update = true;
+    }
+
+    pub fn apply_impulse_to_selected_entity(&mut self, impulse: Vec2) {
+        self.applied_impulse = impulse;
+    }
+}
+
+pub fn drag_best_particle(particles: Vec<ParticleInfo>, data: FilterData) -> Vec<ExternalForce> {
+    let impulse = Vec2::new(data.impulse.x, -data.impulse.y);
+    let mut result = vec![];
+    let mut min_x: f32 = 0.0;
+    let mut min_y: f32 = 0.0;
+    let count = particles.len();
+    for item in &particles {
+        min_x += item.pos_x;
+        min_y += item.pos_y;
+    }
+    min_x /= count as f32;
+    min_y /= count as f32;
+    let center = Vec2::new(min_x, min_y);
+    let mut most_project = 0.0;
+    let mut target_index = -1;
+    let impulse_n = impulse.normalize();
+    for (index, item) in particles.iter().enumerate() {
+        let temp = Vec2::new(item.pos_x, item.pos_y);
+        let delta = (temp - center).dot(impulse_n);
+        if delta > most_project {
+            most_project = delta;
+            target_index = index as i32;
+        }
+    }
+    if target_index > 0 {
+        result.push(ExternalForce::Impulse(
+            particles[target_index as usize].index,
+            impulse.x,
+            impulse.y,
+        ));
+    }
+    result
+}
+
+pub fn update_collider_from_mouse(
+    mut query: Query<&mut VelloCollider>,
+    mut status: ResMut<ColliderStatus>,
+    mut my_events: EventWriter<ColliderExternalImpulseEvent>,
+    ui_state: Res<UiState>,
+) {
+    if status.need_update {
+        for item in status.to_unselect.drain(..) {
+            if let Ok(mut collider) = query.get_mut(item) {
+                collider.is_selected = false;
+            }
+        }
+        if let Some(entity) = &status.selected {
+            if let Ok(mut collider) = query.get_mut(*entity) {
+                collider.is_selected = true;
+            }
+        }
+        status.need_update = false;
+    }
+    if status.applied_impulse != Vec2::ZERO {
+        if let Some(entity) = &status.selected {
+            my_events.send(ColliderExternalImpulseEvent {
+                filter: drag_best_particle,
+                entity: *entity,
+                filter_data: FilterData {
+                    impulse: status.applied_impulse * ui_state.e_config.scale,
+                },
+            });
+            status.applied_impulse = Vec2::ZERO
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct MouseStatus {
     pub world_pos: Vec2,
-    pub screen_pos: Vec2,
+    pub last_pos: Vec2,
+    pub pressed: bool,
 }
 
 pub fn update_mouse_position(
@@ -17,8 +314,62 @@ pub fn update_mouse_position(
         .and_then(|window| window.cursor_position())
     {
         if let Some(world_pos) = camera.viewport_to_world_2d(camera_transform, mouse_position) {
-            p.screen_pos = mouse_position;
             p.world_pos = world_pos;
         }
     }
+}
+
+pub fn update_mouse(
+    mut commands: Commands,
+    mut q_indicator: Query<(Entity, &mut VelloScene), With<DragIndicator>>,
+    broad_phase: Res<VelloCollisionBroadPhase>,
+    button: Res<ButtonInput<MouseButton>>,
+    mut mouse_position: ResMut<MouseStatus>,
+    mut collider_status: ResMut<ColliderStatus>,
+) {
+    if button.just_pressed(MouseButton::Left) {
+        if let Some(entity) = broad_phase.find_first_constains_point(mouse_position.world_pos) {
+            collider_status.select_entity(entity);
+        }
+        mouse_position.last_pos = mouse_position.world_pos;
+        mouse_position.pressed = true;
+    };
+    if button.just_released(MouseButton::Left) {
+        collider_status
+            .apply_impulse_to_selected_entity(mouse_position.world_pos - mouse_position.last_pos);
+        mouse_position.pressed = false;
+        if let Ok((e, _)) = q_indicator.get_single() {
+            commands.entity(e).despawn();
+        }
+    }
+    if mouse_position.pressed {
+        let mut temp = VelloScene::default();
+        draw_drag_indicator(&mut temp, mouse_position.last_pos, mouse_position.world_pos);
+        if let Ok((_, mut scene)) = q_indicator.get_single_mut() {
+            *scene = temp;
+        } else {
+            commands.spawn((
+                VelloSceneBundle {
+                    scene: temp,
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 100.0)),
+                    ..Default::default()
+                },
+                DragIndicator,
+            ));
+        }
+    }
+}
+
+#[derive(Clone, Component)]
+pub struct DragIndicator;
+
+pub fn draw_drag_indicator(s: &mut VelloScene, start: Vec2, end: Vec2) {
+    let line = kurbo::Line::new((start.x, -start.y), (end.x, -end.y));
+    s.stroke(
+        &Stroke::new(8.0),
+        Affine::IDENTITY,
+        peniko::GlowColor::new(peniko::Color::rgba(1.0, 0.0, 1.0, 0.9), 1.0),
+        None,
+        &line,
+    );
 }

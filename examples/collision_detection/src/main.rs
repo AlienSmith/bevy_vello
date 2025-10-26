@@ -33,93 +33,16 @@ use bevy_vello::{prelude::*, VelloPlugin};
 
 use tankgame_lib::prelude::*;
 
-use crate::utility::MouseStatus;
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[repr(u32)]
-enum ColliderType {
-    #[default]
-    Rect = 0,
-    Circle = 1,
-    Star = 2,
-    Heart = 3,
-    Key = 4,
-    Shield = 5,
-    Knife = 6,
-}
-
-fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
-    match collider {
-        ColliderType::Rect => (peniko::Color::GREEN, 1.0, 1),
-        ColliderType::Circle => (peniko::Color::WHITE, 1.0, 0),
-        ColliderType::Star => (peniko::Color::ORANGE, 0.3, 1),
-        ColliderType::Heart => (peniko::Color::RED, 0.5, 1),
-        ColliderType::Key => (peniko::Color::GREEN, 0.1, 0),
-        ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
-        ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
-    }
-}
+use crate::utility::{
+    get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
+    update_mouse_position, ColliderType, UiState,
+};
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum GameState {
     #[default]
     Loading,
     Game,
-}
-
-#[derive(PartialEq, Clone)]
-struct EntityConfig {
-    pos_x: f32,
-    pos_y: f32,
-    vec_x: f32,
-    vec_y: f32,
-    rotation: f32,
-    scale: f32,
-    collider_type: ColliderType,
-}
-
-#[derive(PartialEq, Clone)]
-struct VelloConstraintWorldConfig {
-    gravity_x: f32,
-    gravity_y: f32,
-
-    pre_gravity_x: f32,
-    pre_gravity_y: f32,
-}
-
-impl Default for VelloConstraintWorldConfig {
-    fn default() -> Self {
-        Self {
-            gravity_x: 0.0,
-            gravity_y: -98.0,
-            pre_gravity_x: 0.0,
-            pre_gravity_y: -98.0,
-        }
-    }
-}
-
-impl Default for EntityConfig {
-    fn default() -> Self {
-        EntityConfig {
-            scale: 1.0,
-            pos_x: 0.0,
-            pos_y: 0.0,
-            vec_x: 0.0,
-            vec_y: 0.0,
-            rotation: 0.0,
-            collider_type: Default::default(),
-        }
-    }
-}
-
-#[derive(Default, Resource)]
-
-struct UiState {
-    current: EntityConfig,
-    just_spawn: bool,
-    c_config: VelloConstraintWorldConfig,
-    just_modified: bool,
-    delete_all_dynamic: bool,
 }
 
 #[derive(PartialEq, Clone)]
@@ -176,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
     app.insert_resource(utility::MouseStatus::default())
+        .insert_resource(utility::ColliderStatus::default())
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_systems(Startup, setup_back_ground)
@@ -193,106 +117,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui_example_system,
                 update_from_ui.after(ui_example_system),
                 update_edge_pan_camera,
-                select_collider,
-                //update_blood_particles.after(ui_example_system),
+                (update_mouse, update_collider_from_mouse).chain(), //update_blood_particles.after(ui_example_system),
             )
                 .run_if(in_state(GameState::Game)),
         )
         .run();
 
     Ok(())
-}
-
-fn ui_example_system(
-    mut ui_state: ResMut<UiState>,
-    mut contexts: EguiContexts,
-    diagnostics: Res<DiagnosticsStore>,
-    mut r: ResMut<VelloCollisionWorld>,
-) {
-    egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
-        ui_state.just_spawn = false;
-        ui_state.just_modified = false;
-        ui_state.delete_all_dynamic = false;
-        // Get the FPS diagnostic path
-        let fps_path = FrameTimeDiagnosticsPlugin::FPS;
-
-        // Fetch the FPS value
-        if let Some(fps) = diagnostics.get(&fps_path) {
-            if let Some(value) = fps.value() {
-                ui.label(format!("FPS: {:.1}", value));
-            }
-            if let Some(avg) = fps.average() {
-                ui.label(format!("Avg FPS: {:.1}", avg));
-            }
-        }
-        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_x, -100.0..=100.0).text("gra_x"));
-        ui.add(egui::Slider::new(&mut ui_state.c_config.gravity_y, -100.0..=100.0).text("gra_y"));
-
-        ui.add(egui::Slider::new(&mut ui_state.current.pos_x, -900.0..=900.0).text("pox_x"));
-        ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -501.0..=500.0).text("pox_y"));
-        ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
-        ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
-        ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
-        ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
-
-        egui::ComboBox::from_label("Collider Type")
-            .selected_text(format!("{:?}", ui_state.current.collider_type))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Rect,
-                    "Rect",
-                );
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Circle,
-                    "Circle",
-                );
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Star,
-                    "Star",
-                );
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Heart,
-                    "Heart",
-                );
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Key,
-                    "Key",
-                );
-                ui.selectable_value(
-                    &mut ui_state.current.collider_type,
-                    ColliderType::Shield,
-                    "Shield",
-                );
-            });
-        if ui.button("StackSpawn").clicked() {
-            ui_state.current.pos_y += 40.0;
-            ui_state.just_spawn = true;
-        }
-        if ui.button("Spawn").clicked() {
-            ui_state.just_spawn = true;
-        }
-        if ui.button("Nuke").clicked() {
-            ui_state.delete_all_dynamic = true;
-        }
-        if ui.button("Quit").clicked() {
-            std::process::exit(0);
-        }
-        if ui.button("Pause").clicked() {
-            r.paused = !r.paused;
-        }
-        if ui_state.c_config.gravity_x != ui_state.c_config.pre_gravity_x
-            || ui_state.c_config.gravity_y != ui_state.c_config.pre_gravity_y
-        {
-            ui_state.just_modified = true;
-            ui_state.c_config.pre_gravity_x = ui_state.c_config.gravity_x;
-            ui_state.c_config.pre_gravity_y = ui_state.c_config.gravity_y;
-        }
-    });
 }
 
 fn spawn_collider(
@@ -623,20 +454,4 @@ pub fn add_light(mut commands: Commands) {
         scene: light_scene,
         ..Default::default()
     },));
-}
-
-pub fn select_collider(
-    mut query: Query<&mut VelloCollider>,
-    broad_phase: Res<VelloCollisionBroadPhase>,
-    button: Res<ButtonInput<MouseButton>>,
-    mouse_position: Res<MouseStatus>,
-) {
-    info!("{}", mouse_position.world_pos);
-    if button.just_pressed(MouseButton::Left) {
-        if let Some(entity) = broad_phase.find_first_constains_point(mouse_position.world_pos) {
-            if let Ok(mut item) = query.get_mut(entity) {
-                item.is_selected = true;
-            }
-        }
-    };
 }

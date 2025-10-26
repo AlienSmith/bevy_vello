@@ -1,12 +1,11 @@
 mod plugin;
 mod systems;
 
+use avian2d::prelude::ExternalImpulse;
 use bevy::{
-    ecs::{entity::Entity, system::Resource},
+    ecs::{entity::Entity, event::Event, system::Resource},
     math::Vec2,
 };
-
-use vello_physics::*;
 
 #[derive(Resource)]
 pub struct VelloConstraintWorld {
@@ -28,4 +27,25 @@ impl VelloConstraintWorld {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct FilterData {
+    pub impulse: Vec2,
+}
+
 pub use plugin::VelloCollisionResponsePlugin;
+pub use vello_physics::soft_body::ExternalForce;
+pub use vello_physics::soft_body::ParticleInfo;
+use vello_physics::ConstraintWorld;
+
+// #[derive(Event)]
+// pub struct ColliderExternalImpulseEvent {
+//     pub entity: Entity,
+//     pub impulse: Vec2,
+// }
+
+#[derive(Event)]
+pub struct ColliderExternalImpulseEvent {
+    pub filter: fn(Vec<ParticleInfo>, FilterData) -> Vec<vello_physics::soft_body::ExternalForce>,
+    pub entity: Entity,
+    pub filter_data: FilterData,
+}
