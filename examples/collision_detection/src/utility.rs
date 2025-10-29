@@ -29,6 +29,14 @@ pub enum ColliderType {
     Knife = 6,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[repr(u32)]
+pub enum DragType {
+    #[default]
+    All = 0,
+    One = 1,
+}
+
 pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
     match collider {
         ColliderType::Rect => (peniko::Color::GREEN, 1.0, 1),
@@ -44,6 +52,7 @@ pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i3
 #[derive(PartialEq, Clone)]
 pub(crate) struct ExternalImpulseConfig {
     pub(crate) scale: f32,
+    pub(crate) drag_type: DragType,
 }
 
 #[derive(PartialEq, Clone)]
@@ -68,7 +77,10 @@ pub(crate) struct VelloConstraintWorldConfig {
 
 impl Default for ExternalImpulseConfig {
     fn default() -> Self {
-        Self { scale: 1.0 }
+        Self {
+            scale: 1.0,
+            drag_type: DragType::One,
+        }
     }
 }
 
@@ -186,6 +198,12 @@ pub fn ui_example_system(
         }
 
         ui.add(egui::Slider::new(&mut ui_state.e_config.scale, 0.001..=1.0).text("impulse_scale"));
+        egui::ComboBox::from_label("drag Type")
+            .selected_text(format!("{:?}", ui_state.e_config.drag_type))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut ui_state.e_config.drag_type, DragType::All, "All");
+                ui.selectable_value(&mut ui_state.e_config.drag_type, DragType::One, "One");
+            });
 
         if ui.button("Quit").clicked() {
             std::process::exit(0);
@@ -228,6 +246,15 @@ impl ColliderStatus {
     }
 }
 
+pub fn drag_all_particles(particles: Vec<ParticleInfo>, data: FilterData) -> Vec<ExternalForce> {
+    let impulse = Vec2::new(data.impulse.x, -data.impulse.y) * 0.25;
+    let mut result = vec![];
+    for item in particles {
+        result.push(ExternalForce::Impulse(item.index, impulse.x, impulse.y));
+    }
+    result
+}
+
 pub fn drag_best_particle(particles: Vec<ParticleInfo>, data: FilterData) -> Vec<ExternalForce> {
     let impulse = Vec2::new(data.impulse.x, -data.impulse.y);
     let mut result = vec![];
@@ -268,6 +295,10 @@ pub fn update_collider_from_mouse(
     mut my_events: EventWriter<ColliderExternalImpulseEvent>,
     ui_state: Res<UiState>,
 ) {
+    let drag_filter = match ui_state.e_config.drag_type {
+        DragType::All => drag_all_particles,
+        DragType::One => drag_best_particle,
+    };
     if status.need_update {
         for item in status.to_unselect.drain(..) {
             if let Ok(mut collider) = query.get_mut(item) {
@@ -284,7 +315,7 @@ pub fn update_collider_from_mouse(
     if status.applied_impulse != Vec2::ZERO {
         if let Some(entity) = &status.selected {
             my_events.send(ColliderExternalImpulseEvent {
-                filter: drag_best_particle,
+                filter: drag_filter,
                 entity: *entity,
                 filter_data: FilterData {
                     impulse: status.applied_impulse * ui_state.e_config.scale,
