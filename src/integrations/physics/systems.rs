@@ -16,7 +16,7 @@ use vello::{
     kurbo::{self, Affine, BezPath, Shape, Stroke},
     peniko::{self, GlowColor},
 };
-use vello_physics::{utility::path_to_ccw_quad_path, CoupledConstraintBreaker, SoftBodyInitConfig};
+use vello_physics::{CoupledConstraintBreaker, SoftBodyInitConfig};
 
 pub fn generate_soft_body_for_collider(
     query: Query<(Entity, &VelloCollider, &GlobalTransform), Added<VelloCollider>>,
@@ -25,7 +25,7 @@ pub fn generate_soft_body_for_collider(
     for (entity, collider, transform) in query.iter() {
         if collider.inverse_mass != 0.0 {
             constraint_world.data.create_soft_body_from_path_with_frame(
-                &path_to_ccw_quad_path(&collider.shape),
+                &collider.shape,
                 &mat4_to_affine(transform.compute_matrix()),
                 nalgebra::Vector2::<f32>::new(
                     collider.initial_velocity.x,
@@ -218,11 +218,12 @@ pub fn update_constraint_world(
 pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &GlobalTransform)>) {
     for (mut s, c, transform) in q.iter_mut() {
         s.reset();
-        s.fill_with_shadow(
+        s.fill_with_shadow_impl(
             peniko::Fill::NonZero,
             Affine::IDENTITY,
-            c.debug_color,
+            &c.debug_color,
             None,
+            c.uvs.clone(),
             &c.shape,
             true,
         );

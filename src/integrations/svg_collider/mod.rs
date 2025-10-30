@@ -1,5 +1,8 @@
 use bevy::prelude::*;
-use vello::kurbo::{self, BezPath};
+use vello::{
+    kurbo::{self, BezPath},
+    peniko::Image,
+};
 
 mod asset_loader;
 
@@ -23,3 +26,17 @@ impl AssetWithMeta for SvgColliderAsset {
 }
 
 pub type SvgColliderAssetManager = VelloAssetManager<SvgColliderAsset>;
+
+#[derive(Asset, TypePath, Clone)]
+pub struct VelloImageAsset {
+    pub image: Image,
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct VelloImageAssetMetaData;
+
+impl AssetWithMeta for VelloImageAsset {
+    type Meta = VelloImageAssetMetaData;
+}
+
+pub type VelloImageAssetManager = VelloAssetManager<VelloImageAsset>;

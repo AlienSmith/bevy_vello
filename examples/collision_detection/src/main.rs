@@ -17,10 +17,15 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
-    collision::{VelloCollisionBroadPhase, VelloCollisionWorld},
+    collision::{
+        generate_uvs, path_to_ccw_quad_path, VelloCollisionBroadPhase, VelloCollisionWorld,
+    },
     integrations::{
         physics::VelloConstraintWorld,
-        svg_collider::{SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData},
+        svg_collider::{
+            SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
+            VelloImageAssetManager, VelloImageAssetMetaData,
+        },
         HanabiIntegrationPlugin,
     },
     vello::{
@@ -129,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn spawn_collider(
     commands: &mut Commands,
     ui_state: &Res<UiState>,
-    color: peniko::Color,
+    color: peniko::Brush,
     scale_modifier: f32,
     f: impl Fn() -> (BezPath, kurbo::Rect),
     complexity_modifier: i32,
@@ -145,7 +150,7 @@ fn spawn_collider(
                 ui_state.current.scale * scale_modifier,
             ),
             &f,
-            GlowColor { color, glow: 1.0 },
+            color.clone(),
             Vec2::new(
                 reverse_velocity * ui_state.current.vec_x,
                 ui_state.current.vec_y,
@@ -161,6 +166,8 @@ fn update_from_ui(
     ui_state: Res<UiState>,
     mut commands: Commands,
     svg_colliders: Res<SvgColliderAssetManager>,
+    images: Res<VelloImageAssetManager>,
+    image_assets: Res<Assets<VelloImageAsset>>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
     query: Query<(Entity, &VelloCollider)>,
@@ -191,7 +198,7 @@ fn update_from_ui(
                 spawn_collider(
                     &mut commands,
                     &ui_state,
-                    color,
+                    bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor { color, glow: 1.0 }),
                     scaler,
                     make_rect,
                     complexity_modifier,
@@ -207,9 +214,56 @@ fn update_from_ui(
                 spawn_collider(
                     &mut commands,
                     &ui_state,
-                    color,
+                    bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor { color, glow: 1.0 }),
                     scaler,
                     make_circle,
+                    complexity_modifier,
+                );
+            }
+            ColliderType::Ammo => {
+                let make_collider = || {
+                    let svg_collider = custom_assets
+                        .get(
+                            &svg_colliders
+                                .get_index(
+                                    (ui_state.current.collider_type as u32
+                                        - ColliderType::Star as u32)
+                                        as usize,
+                                )
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    (svg_collider.shape.clone(), svg_collider.aabb.clone())
+                };
+                let albedo = image_assets
+                    .get(&images.get_index(0 as usize).unwrap())
+                    .unwrap()
+                    .image
+                    .clone()
+                    .with_usage(peniko::ImageUsageType::MASKED);
+                let normals = image_assets
+                    .get(&images.get_index(1 as usize).unwrap())
+                    .unwrap()
+                    .image
+                    .clone()
+                    .with_usage(peniko::ImageUsageType::NORMAL);
+                let brush = bevy_vello::prelude::peniko::Brush::PBRImage(peniko::PBRImages::new(
+                    albedo, normals, 0.9, 0.2,
+                ));
+                // let image = image_assets
+                //     .get(&images.get_index(2 as usize).unwrap())
+                //     .unwrap()
+                //     .image
+                //     .clone()
+                //     .with_usage(peniko::ImageUsageType::TRANSPARENT);
+                // let brush = bevy_vello::prelude::peniko::Brush::Image(image);
+
+                spawn_collider(
+                    &mut commands,
+                    &ui_state,
+                    brush,
+                    scaler,
+                    make_collider,
                     complexity_modifier,
                 );
             }
@@ -228,10 +282,11 @@ fn update_from_ui(
                         .unwrap();
                     (svg_collider.shape.clone(), svg_collider.aabb.clone())
                 };
+
                 spawn_collider(
                     &mut commands,
                     &ui_state,
-                    color,
+                    bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor { color, glow: 1.0 }),
                     scaler,
                     make_collider,
                     complexity_modifier,
@@ -282,7 +337,7 @@ fn make_static_scene(commands: &mut Commands) {
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
-    make_collision_shape(
+    make_collision_shape_from_color(
         commands,
         Vec4::new(0.0, 540.0, 0.0, 1.0),
         make_long_rect,
@@ -296,7 +351,7 @@ fn make_static_scene(commands: &mut Commands) {
         false,
     );
 
-    make_collision_shape(
+    make_collision_shape_from_color(
         commands,
         Vec4::new(0.0, -540.0, 0.0, 1.0),
         make_long_rect,
@@ -310,7 +365,7 @@ fn make_static_scene(commands: &mut Commands) {
         false,
     );
 
-    make_collision_shape(
+    make_collision_shape_from_color(
         commands,
         Vec4::new(-960.0, 0.0, 0.0, 1.0),
         make_short_rect,
@@ -324,7 +379,7 @@ fn make_static_scene(commands: &mut Commands) {
         false,
     );
 
-    make_collision_shape(
+    make_collision_shape_from_color(
         commands,
         Vec4::new(960.0, 0.0, 0.0, 1.0),
         make_short_rect,
@@ -343,14 +398,15 @@ fn make_collision_shape(
     commands: &mut Commands,
     transform: Vec4,
     f: impl Fn() -> (BezPath, kurbo::Rect),
-    color: peniko::GlowColor,
+    color: peniko::Brush,
     velocity: Vec2,
     inverse_mass: f32,
     complexity_modifier: i32,
     is_soft_body: bool,
 ) {
     let mut scene: VelloScene = VelloScene::default();
-    let (shape, rect) = f();
+    let (s, rect) = f();
+    let shape = path_to_ccw_quad_path(&s);
     scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::default(),
@@ -358,6 +414,10 @@ fn make_collision_shape(
         None,
         &shape,
     );
+    let uvs = match &color {
+        peniko::Brush::Image(_) | peniko::Brush::PBRImage(_) => Some(generate_uvs(&shape, &rect)),
+        _ => None,
+    };
     commands.spawn((
         VelloSceneBundle {
             scene,
@@ -376,24 +436,46 @@ fn make_collision_shape(
             inverse_mass,
             complexity_modifier,
             is_soft_body,
+            uvs,
         ),
     ));
+}
+
+fn make_collision_shape_from_color(
+    commands: &mut Commands,
+    transform: Vec4,
+    f: impl Fn() -> (BezPath, kurbo::Rect),
+    color: peniko::GlowColor,
+    velocity: Vec2,
+    inverse_mass: f32,
+    complexity_modifier: i32,
+    is_soft_body: bool,
+) {
+    make_collision_shape(
+        commands,
+        transform,
+        f,
+        peniko::Brush::SolidGlow(color),
+        velocity,
+        inverse_mass,
+        complexity_modifier,
+        is_soft_body,
+    );
 }
 
 fn check_assets_loaded(
     mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
     mut sc_asset: EventReader<AssetEvent<SvgColliderAsset>>,
+    mut im_asset: EventReader<AssetEvent<VelloImageAsset>>,
     mut tank_parts: ResMut<AssetManager>,
     mut colliders: ResMut<SvgColliderAssetManager>,
+    mut images: ResMut<VelloImageAssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     for ev in ev_asset.read() {
         match ev {
             AssetEvent::LoadedWithDependencies { id } => {
                 tank_parts.mark_as_loaded(id);
-                if tank_parts.all_loaded() && colliders.all_loaded() {
-                    next_state.set(GameState::Game);
-                }
             }
             _ => {}
         }
@@ -403,18 +485,29 @@ fn check_assets_loaded(
         match sc {
             AssetEvent::LoadedWithDependencies { id } => {
                 colliders.mark_as_loaded(id);
-                if tank_parts.all_loaded() && colliders.all_loaded() {
-                    next_state.set(GameState::Game);
-                }
             }
             _ => {}
         }
+    }
+
+    for im in im_asset.read() {
+        match im {
+            AssetEvent::LoadedWithDependencies { id } => {
+                images.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    if tank_parts.all_loaded() && colliders.all_loaded() && images.all_loaded() {
+        next_state.set(GameState::Game);
     }
 }
 
 fn setup_resources(
     mut _tank_parts: ResMut<AssetManager>,
     mut colliders: ResMut<SvgColliderAssetManager>,
+    mut images: ResMut<VelloImageAssetManager>,
     asset_server: Res<AssetServer>,
 ) {
     colliders.push(
@@ -436,6 +529,22 @@ fn setup_resources(
     colliders.push(
         asset_server.load("colliders/knife.collider.svg"),
         VelloColliderAssetMetaData::default(),
+    );
+    colliders.push(
+        asset_server.load("colliders/ammo.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    );
+    images.push(
+        asset_server.load("image/ammo_albedo.png"),
+        VelloImageAssetMetaData::default(),
+    );
+    images.push(
+        asset_server.load("image/ammo_normal.png"),
+        VelloImageAssetMetaData::default(),
+    );
+    images.push(
+        asset_server.load("image/test.png"),
+        VelloImageAssetMetaData::default(),
     );
 }
 

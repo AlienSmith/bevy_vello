@@ -89,9 +89,10 @@ pub struct VelloCollider {
     pub(crate) aabb: kurbo::Rect, //aabb will only take the effect of position ignoring entity rotation and scale.
     pub(crate) initial_velocity: Vec2,
     pub(crate) inverse_mass: f32,
-    pub(crate) debug_color: peniko::GlowColor,
+    pub(crate) debug_color: peniko::Brush,
     pub(crate) complexity_modifier: i32,
     pub(crate) is_soft_body: bool,
+    pub(crate) uvs: Option<Vec<f32>>,
     pub is_selected: bool,
 }
 
@@ -104,10 +105,11 @@ impl VelloCollider {
         path: &BezPath,
         aabb: &kurbo::Rect,
         initial_velocity: Vec2,
-        color: peniko::GlowColor,
+        color: peniko::Brush,
         inverse_mass: f32,
         complexity_modifier: i32,
         is_soft_body: bool,
+        uvs: Option<Vec<f32>>,
     ) -> Self {
         Self {
             shape: path.clone(),
@@ -117,6 +119,7 @@ impl VelloCollider {
             debug_color: color,
             complexity_modifier,
             is_soft_body,
+            uvs,
             is_selected: false,
         }
     }
@@ -161,3 +164,6 @@ pub struct CollisionResults {
     pub pairs: Vec<(Entity, Entity)>,
     pub results: Vec<CollisionResult>,
 }
+
+pub use vello_physics::utility::generate_uvs;
+pub use vello_physics::utility::path_to_ccw_quad_path;

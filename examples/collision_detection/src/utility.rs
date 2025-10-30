@@ -27,6 +27,7 @@ pub enum ColliderType {
     Key = 4,
     Shield = 5,
     Knife = 6,
+    Ammo = 7,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -46,6 +47,7 @@ pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i3
         ColliderType::Key => (peniko::Color::GREEN, 0.1, 0),
         ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
         ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
+        ColliderType::Ammo => (peniko::Color::GREEN, 0.1, 1),
     }
 }
 
@@ -184,6 +186,11 @@ pub fn ui_example_system(
                     &mut ui_state.current.collider_type,
                     ColliderType::Shield,
                     "Shield",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Ammo,
+                    "Ammo",
                 );
             });
         if ui.button("StackSpawn").clicked() {

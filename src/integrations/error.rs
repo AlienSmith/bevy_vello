@@ -31,3 +31,13 @@ pub enum ColliderLoaderError {
     #[error("The Svg Contains more that one shape")]
     WrongSvgContent,
 }
+
+#[derive(Debug, Error)]
+pub enum ImageLoaderError {
+    #[error("Could not load file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Could not parse utf-8: {0}")]
+    FromStrUtf8(#[from] std::str::Utf8Error),
+    #[error("The Svg Contains more that one shape")]
+    CouldNotLoadImage,
+}

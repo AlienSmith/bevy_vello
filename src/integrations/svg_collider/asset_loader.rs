@@ -1,5 +1,7 @@
 use crate::integrations::{
-    error::ColliderLoaderError, svg::load_collider_svg_from_bytes, svg_collider::SvgColliderAsset,
+    error::{ColliderLoaderError, ImageLoaderError},
+    svg::load_collider_svg_from_bytes,
+    svg_collider::{SvgColliderAsset, VelloImageAsset},
 };
 use bevy::{
     asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
@@ -7,6 +9,55 @@ use bevy::{
     utils::ConditionalSendFuture,
 };
 use vello::kurbo;
+
+#[derive(Default)]
+pub struct VelloImageAssetLoader;
+impl AssetLoader for VelloImageAssetLoader {
+    type Asset = VelloImageAsset;
+
+    type Settings = ();
+
+    type Error = ImageLoaderError;
+
+    fn load<'a>(
+        &'a self,
+        reader: &'a mut Reader,
+        _settings: &'a Self::Settings,
+        load_context: &'a mut LoadContext,
+    ) -> impl ConditionalSendFuture<Output = Result<Self::Asset, Self::Error>> {
+        Box::pin(async move {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await?;
+            let path = load_context.path().to_owned();
+            let ext =
+                path.extension()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or(ImageLoaderError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid file extension",
+                    )))?;
+
+            debug!("parsing {}...", load_context.path().display());
+            match ext {
+                "png" => {
+                    if let Ok(r) = vello::decode_image(&bytes) {
+                        Ok(VelloImageAsset { image: r })
+                    } else {
+                        Err(ImageLoaderError::CouldNotLoadImage)
+                    }
+                }
+                ext => Err(ImageLoaderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid file extension: '{ext}'"),
+                ))),
+            }
+        })
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["png"]
+    }
+}
 
 #[derive(Default)]
 pub struct VelloColliderSvgLoader;
