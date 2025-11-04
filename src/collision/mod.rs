@@ -1,3 +1,4 @@
+use avian2d::collision;
 use bevy::prelude::*;
 use bevy::{
     ecs::{component::Component, entity::Entity, schedule::SystemSet, system::Resource},
@@ -90,9 +91,10 @@ pub struct VelloCollider {
     pub(crate) initial_velocity: Vec2,
     pub(crate) inverse_mass: f32,
     pub(crate) debug_color: peniko::Brush,
-    pub(crate) complexity_modifier: i32,
     pub(crate) is_soft_body: bool,
     pub(crate) uvs: Option<Vec<f32>>,
+    pub(crate) soft_body_config: Option<SoftBodyInitConfig>,
+    pub(crate) collision_config: Option<CollisionConstraintConfig>,
     pub is_selected: bool,
 }
 
@@ -107,9 +109,10 @@ impl VelloCollider {
         initial_velocity: Vec2,
         color: peniko::Brush,
         inverse_mass: f32,
-        complexity_modifier: i32,
         is_soft_body: bool,
         uvs: Option<Vec<f32>>,
+        soft_body_init_config: Option<SoftBodyInitConfig>,
+        collision_constraint_config: Option<CollisionConstraintConfig>,
     ) -> Self {
         Self {
             shape: path.clone(),
@@ -117,10 +120,11 @@ impl VelloCollider {
             initial_velocity,
             inverse_mass,
             debug_color: color,
-            complexity_modifier,
             is_soft_body,
             uvs,
             is_selected: false,
+            soft_body_config: soft_body_init_config,
+            collision_config: collision_constraint_config,
         }
     }
 
@@ -135,6 +139,8 @@ impl VelloCollider {
 }
 
 use crossbeam_channel::{bounded, Receiver, Sender};
+pub use vello_physics::CollisionConstraintConfig;
+pub use vello_physics::SoftBodyInitConfig;
 
 use crate::collision::broad_phase::BroadPhaseSimple;
 

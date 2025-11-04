@@ -16,14 +16,14 @@ use vello::{
     kurbo::{self, Affine, BezPath, Shape, Stroke},
     peniko::{self, GlowColor},
 };
-use vello_physics::{CoupledConstraintBreaker, SoftBodyInitConfig};
+use vello_physics::CoupledConstraintBreaker;
 
 pub fn generate_soft_body_for_collider(
     query: Query<(Entity, &VelloCollider, &GlobalTransform), Added<VelloCollider>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
     for (entity, collider, transform) in query.iter() {
-        if collider.inverse_mass != 0.0 {
+        if collider.is_soft_body {
             constraint_world.data.create_soft_body_from_path_with_frame(
                 &collider.shape,
                 &mat4_to_affine(transform.compute_matrix()),
@@ -33,10 +33,7 @@ pub fn generate_soft_body_for_collider(
                 ),
                 entity,
                 collider.aabb.clone(),
-                SoftBodyInitConfig {
-                    total_inv_mass: collider.inverse_mass,
-                    ..Default::default()
-                },
+                collider.soft_body_config.clone().unwrap(),
             );
         }
     }
@@ -147,6 +144,7 @@ pub fn make_collision_constraints(
                                 let current_position = a_position;
                                 let target_position = b_position;
                                 let curve_index = a_curve_index;
+                                let collision_config = item.collision_config.unwrap();
                                 constraints0 =
                                     constraint_world.data.add_one_time_collision_constraint(
                                         *collider_index,
@@ -154,6 +152,7 @@ pub fn make_collision_constraints(
                                         current_position,
                                         target_position,
                                         b_normal,
+                                        collision_config,
                                     );
                                 is_soft_0 = true;
                             }
@@ -164,6 +163,7 @@ pub fn make_collision_constraints(
                                 let current_position = b_position;
                                 let curve_index = b_curve_index;
                                 let target_position = a_position;
+                                let collision_config = item.collision_config.unwrap();
                                 constraints1 =
                                     constraint_world.data.add_one_time_collision_constraint(
                                         *collider_index,
@@ -171,6 +171,7 @@ pub fn make_collision_constraints(
                                         current_position,
                                         target_position,
                                         a_normal,
+                                        collision_config,
                                     );
                                 is_soft_1 = true;
                             }

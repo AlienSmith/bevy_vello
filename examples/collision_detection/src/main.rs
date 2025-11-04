@@ -9,6 +9,7 @@ mod utility;
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
+    text::FontAtlasSet,
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -18,7 +19,8 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     collision::{
-        generate_uvs, path_to_ccw_quad_path, VelloCollisionBroadPhase, VelloCollisionWorld,
+        generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, SoftBodyInitConfig,
+        VelloCollisionBroadPhase, VelloCollisionWorld,
     },
     integrations::{
         physics::VelloConstraintWorld,
@@ -137,7 +139,8 @@ fn spawn_collider(
     color: peniko::Brush,
     scale_modifier: f32,
     f: impl Fn() -> (BezPath, kurbo::Rect),
-    complexity_modifier: i32,
+    soft_body_config: SoftBodyInitConfig,
+    collision_config: CollisionConstraintConfig,
 ) {
     for index in 0..10 {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
@@ -155,9 +158,10 @@ fn spawn_collider(
                 reverse_velocity * ui_state.current.vec_x,
                 ui_state.current.vec_y,
             ),
-            1.0,
-            complexity_modifier,
+            soft_body_config.total_inv_mass,
             true,
+            Some(soft_body_config),
+            Some(collision_config),
         );
     }
 }
@@ -186,8 +190,10 @@ fn update_from_ui(
         ));
     }
     if ui_state.just_spawn {
+        let config = ui_state.soft_body_config;
         let (color, scaler, complexity_modifier) =
             get_default_parameters(ui_state.current.collider_type);
+        let collision_config = ui_state.collision_config;
         match ui_state.current.collider_type {
             ColliderType::Rect => {
                 let make_rect = || {
@@ -201,7 +207,8 @@ fn update_from_ui(
                     bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor { color, glow: 1.0 }),
                     scaler,
                     make_rect,
-                    complexity_modifier,
+                    config,
+                    collision_config,
                 );
             }
             ColliderType::Circle => {
@@ -217,7 +224,8 @@ fn update_from_ui(
                     bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor { color, glow: 1.0 }),
                     scaler,
                     make_circle,
-                    complexity_modifier,
+                    config,
+                    collision_config,
                 );
             }
             ColliderType::Ammo => {
@@ -264,7 +272,8 @@ fn update_from_ui(
                     brush,
                     scaler,
                     make_collider,
-                    complexity_modifier,
+                    config,
+                    collision_config,
                 );
             }
             _ => {
@@ -289,7 +298,8 @@ fn update_from_ui(
                     bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor { color, glow: 1.0 }),
                     scaler,
                     make_collider,
-                    complexity_modifier,
+                    config,
+                    collision_config,
                 );
             }
         };
@@ -337,7 +347,7 @@ fn make_static_scene(commands: &mut Commands) {
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
-    make_collision_shape_from_color(
+    make_static_collision_shape(
         commands,
         Vec4::new(0.0, 540.0, 0.0, 1.0),
         make_long_rect,
@@ -347,11 +357,10 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(0.0, 0.0),
         0.0,
-        0,
         false,
     );
 
-    make_collision_shape_from_color(
+    make_static_collision_shape(
         commands,
         Vec4::new(0.0, -540.0, 0.0, 1.0),
         make_long_rect,
@@ -361,11 +370,10 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(0.0, 0.0),
         0.0,
-        0,
         false,
     );
 
-    make_collision_shape_from_color(
+    make_static_collision_shape(
         commands,
         Vec4::new(-960.0, 0.0, 0.0, 1.0),
         make_short_rect,
@@ -375,11 +383,10 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(-0.0, 0.0),
         0.0,
-        0,
         false,
     );
 
-    make_collision_shape_from_color(
+    make_static_collision_shape(
         commands,
         Vec4::new(960.0, 0.0, 0.0, 1.0),
         make_short_rect,
@@ -389,7 +396,6 @@ fn make_static_scene(commands: &mut Commands) {
         },
         Vec2::new(-0.0, 0.0),
         0.0,
-        0,
         false,
     );
 }
@@ -401,8 +407,9 @@ fn make_collision_shape(
     color: peniko::Brush,
     velocity: Vec2,
     inverse_mass: f32,
-    complexity_modifier: i32,
     is_soft_body: bool,
+    soft_body_init_config: Option<SoftBodyInitConfig>,
+    collision_config: Option<CollisionConstraintConfig>,
 ) {
     let mut scene: VelloScene = VelloScene::default();
     let (s, rect) = f();
@@ -434,22 +441,22 @@ fn make_collision_shape(
             velocity,
             color,
             inverse_mass,
-            complexity_modifier,
             is_soft_body,
             uvs,
+            soft_body_init_config,
+            collision_config,
         ),
     ));
 }
 
-fn make_collision_shape_from_color(
+fn make_static_collision_shape(
     commands: &mut Commands,
     transform: Vec4,
     f: impl Fn() -> (BezPath, kurbo::Rect),
     color: peniko::GlowColor,
     velocity: Vec2,
     inverse_mass: f32,
-    complexity_modifier: i32,
-    is_soft_body: bool,
+    _is_soft_body: bool,
 ) {
     make_collision_shape(
         commands,
@@ -458,8 +465,9 @@ fn make_collision_shape_from_color(
         peniko::Brush::SolidGlow(color),
         velocity,
         inverse_mass,
-        complexity_modifier,
-        is_soft_body,
+        false,
+        None,
+        None,
     );
 }
 

@@ -5,7 +5,10 @@ use bevy::{
 };
 use bevy_egui::{egui, EguiContexts};
 use bevy_vello::{
-    collision::{VelloCollisionBroadPhase, VelloCollisionWorld},
+    collision::{
+        CollisionConstraintConfig, SoftBodyInitConfig, VelloCollisionBroadPhase,
+        VelloCollisionWorld,
+    },
     integrations::physics::{
         ColliderExternalImpulseEvent, ExternalForce, FilterData, ParticleInfo,
     },
@@ -119,6 +122,8 @@ pub(crate) struct UiState {
     pub(crate) c_config: VelloConstraintWorldConfig,
     pub(crate) just_modified: bool,
     pub(crate) e_config: ExternalImpulseConfig,
+    pub(crate) soft_body_config: SoftBodyInitConfig,
+    pub(crate) collision_config: CollisionConstraintConfig,
     pub(crate) delete_all_dynamic: bool,
 }
 
@@ -128,7 +133,83 @@ pub fn ui_example_system(
     diagnostics: Res<DiagnosticsStore>,
     mut r: ResMut<VelloCollisionWorld>,
 ) {
-    egui::Window::new("Hello").show(contexts.ctx_mut(), |ui| {
+    egui::Window::new("SoftBodyConfig").show(contexts.ctx_mut(), |ui| {
+        ui.add(
+            egui::Slider::new(&mut ui_state.soft_body_config.max_complexity, 0..=10)
+                .text("max_complexity"),
+        );
+        ui.add(
+            egui::Slider::new(&mut ui_state.soft_body_config.resititution, 0.1..=1.0)
+                .text("resititution"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state
+                    .soft_body_config
+                    .velocity_against_nromal_damping_threhold,
+                1.0..=100.0,
+            )
+            .text("velocity_threhold"),
+        );
+        ui.add(
+            egui::Slider::new(&mut ui_state.soft_body_config.total_inv_mass, 0.1..=1.0)
+                .text("total_inv_mass"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.soft_body_config.inner_constraints_scaler,
+                1e-3..=1e3,
+            )
+            .text("inner_c"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.soft_body_config.frame_constraints_scaler,
+                1e-3..=1e3,
+            )
+            .text("frame_c"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.soft_body_config.connect_constraints_scaler,
+                1e-3..=1e3,
+            )
+            .text("connect_c"),
+        );
+    });
+
+    egui::Window::new("CollisionConstraintConfig").show(contexts.ctx_mut(), |ui| {
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.collision_config.push_compliance_penetration_scaler,
+                1e-3..=1e3,
+            )
+            .text("push_c"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.collision_config.pull_compliance_scaler,
+                1e-3..=1e3,
+            )
+            .text("pull_c"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.collision_config.friction_compliance_scaler,
+                1e-3..=1e3,
+            )
+            .text("friction_c"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.collision_config.shallow_range_sacler,
+                1e-3..=1e3,
+            )
+            .text("shallow_extend_c"),
+        );
+    });
+
+    egui::Window::new("General").show(contexts.ctx_mut(), |ui| {
         ui_state.just_spawn = false;
         ui_state.just_modified = false;
         ui_state.delete_all_dynamic = false;
@@ -151,7 +232,9 @@ pub fn ui_example_system(
         ui.add(egui::Slider::new(&mut ui_state.current.pos_y, -501.0..=500.0).text("pox_y"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_x, -500.0..=500.0).text("vec_x"));
         ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
-        ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
+
+        //TODO: Fix the rotation problem probably with obb.
+        //ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
         ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
 
         egui::ComboBox::from_label("Collider Type")
