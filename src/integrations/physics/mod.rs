@@ -1,7 +1,6 @@
 mod plugin;
 mod systems;
 
-use avian2d::prelude::ExternalImpulse;
 use bevy::{
     ecs::{entity::Entity, event::Event, system::Resource},
     math::Vec2,

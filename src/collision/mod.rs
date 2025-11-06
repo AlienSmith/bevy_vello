@@ -160,9 +160,11 @@ impl<T: Send + 'static> GpuDataChannel<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 pub enum CollisionSystems {
-    CollectRemovedColliders,
-    Collision,         // Your first phase
-    CollisionResponse, // Your second phase (runs after Phase1)
+    CollectRemovedColliders,  //collect removed colliders
+    SendCollisionEvent,       //send collision event
+    CollisionResponsePhysics, // response to collsion event physics logic
+    CollisionResponseGame,    // response to collision event game logic
+    MakeCollisionScene, // this would collect collision paires from broad phase and prepare it for collision on gpu.
 }
 
 #[derive(Clone, Default)]
@@ -173,3 +175,15 @@ pub struct CollisionResults {
 
 pub use vello_physics::utility::generate_uvs;
 pub use vello_physics::utility::path_to_ccw_quad_path;
+
+#[derive(Event, Debug)]
+pub struct VelloCollisionEvent {
+    pub entity_a: Entity,
+    pub entity_b: Entity,
+    pub collision_point_a: Vec2,
+    pub collision_point_b: Vec2,
+    pub collision_normal_a: Vec2,
+    pub collision_normal_b: Vec2,
+    pub curve_index_a: u32,
+    pub curve_index_b: u32,
+}

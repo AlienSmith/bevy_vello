@@ -19,8 +19,8 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     collision::{
-        generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, SoftBodyInitConfig,
-        VelloCollisionBroadPhase, VelloCollisionWorld,
+        generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
+        SoftBodyInitConfig, VelloCollisionBroadPhase, VelloCollisionEvent, VelloCollisionWorld,
     },
     integrations::{
         physics::VelloConstraintWorld,
@@ -128,6 +128,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
                 .run_if(in_state(GameState::Game)),
         )
+        .add_systems(
+            PostUpdate,
+            collision_response.in_set(CollisionSystems::CollisionResponseGame),
+        )
         .run();
 
     Ok(())
@@ -142,7 +146,7 @@ fn spawn_collider(
     soft_body_config: SoftBodyInitConfig,
     collision_config: CollisionConstraintConfig,
 ) {
-    for index in 0..10 {
+    for index in 0..1 {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         make_collision_shape(
             commands,
@@ -571,4 +575,10 @@ pub fn add_light(mut commands: Commands) {
         scene: light_scene,
         ..Default::default()
     },));
+}
+
+pub fn collision_response(mut reader: EventReader<VelloCollisionEvent>) {
+    for item in reader.read() {
+        info!("{:?}", item);
+    }
 }

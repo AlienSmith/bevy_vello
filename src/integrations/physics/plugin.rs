@@ -34,7 +34,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                     visualize_colliders,
                 )
                     .chain()
-                    .in_set(CollisionSystems::CollisionResponse),
+                    .in_set(CollisionSystems::CollisionResponsePhysics),
             );
     }
 }

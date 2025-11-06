@@ -1,9 +1,10 @@
 use bevy::prelude::*;
-use vello::CollisionScene;
+use vello::{CollisionResult, CollisionScene};
 
 use crate::{
     collision::{
-        RemovedColliders, VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+        CollisionResults, GpuDataChannel, RemovedColliders, VelloCollisionEvent,
+        VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -49,4 +50,56 @@ pub fn make_collision_scene(
         scene.pair = r.collision_pairs.clone();
     }
     r.collision_pairs_bvh.clear();
+}
+
+fn make_collision_event(
+    entity_a: &Entity,
+    entity_b: &Entity,
+    result: &CollisionResult,
+    scaling: f32,
+) -> VelloCollisionEvent {
+    VelloCollisionEvent {
+        entity_a: *entity_a,
+        entity_b: *entity_b,
+        collision_point_a: Vec2::new(
+            result.a_position_normal[0] * scaling,
+            result.a_position_normal[1] * -scaling,
+        ),
+        collision_point_b: Vec2::new(
+            result.b_position_normal[0] * scaling,
+            result.b_position_normal[1] * -scaling,
+        ),
+        collision_normal_a: Vec2::new(result.a_position_normal[2], -result.a_position_normal[3]),
+        collision_normal_b: Vec2::new(-result.a_position_normal[2], result.a_position_normal[3]),
+        curve_index_a: result.b_position_normal[3] as u32,
+        curve_index_b: result.b_position_normal[2] as u32,
+    }
+}
+
+pub fn collision_event_dispatch(
+    collision_channel: Res<GpuDataChannel<CollisionResults>>,
+    mut writer: EventWriter<VelloCollisionEvent>,
+    collision_world: Res<VelloCollisionWorld>,
+) {
+    if collision_world.collision_pairs.len() == 0 {
+        return;
+    }
+    //the following line would force a sync point between game thread and render thread.
+    //match collision_channel.receiver.recv() {
+    //notice the default behavious of the channel would consume the collision results.
+    match collision_channel.receiver.try_recv() {
+        Ok(data) => {
+            assert!(
+                data.pairs.len() == collision_world.collision_pairs.len(),
+                "pairs count {}, results count {}",
+                data.pairs.len(),
+                data.results.len()
+            );
+            let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
+            for ((entity_a, entity_b), result) in data.pairs.iter().zip(data.results.iter()) {
+                writer.send(make_collision_event(entity_a, entity_b, result, scaling));
+            }
+        }
+        _ => {}
+    }
 }
