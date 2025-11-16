@@ -42,7 +42,6 @@ impl Plugin for VelloCollisionPlugin {
                 (
                     CollisionSystems::CollectRemovedColliders,
                     CollisionSystems::SendCollisionEvent,
-                    CollisionSystems::CollisionResponseGame,
                     CollisionSystems::CollisionResponsePhysics,
                     CollisionSystems::MakeCollisionScene,
                 )

@@ -6,11 +6,7 @@
 
 mod utility;
 
-use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    prelude::*,
-    text::FontAtlasSet,
-};
+use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, utils::HashMap};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
@@ -38,7 +34,7 @@ use bevy_vello::{
 };
 use bevy_vello::{prelude::*, VelloPlugin};
 
-use tankgame_lib::prelude::*;
+use tankgame_lib::{init_particles_player, prelude::*, spawn_particle_at, ParticlesPlayer};
 
 use crate::utility::{
     get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
@@ -61,6 +57,47 @@ struct ParticleState {
     speed: f32,
     size: f32,
     is_trace: bool,
+}
+
+#[derive(Resource, Default)]
+struct CollisionEventTracker {
+    data: HashMap<(Entity, Entity), f32>,
+    last_perge_time: f32,
+    time_threshold: f32,
+    filtered_events: Vec<VelloCollisionEvent>,
+}
+
+impl CollisionEventTracker {
+    pub fn new(time_threhold: f32) -> Self {
+        Self {
+            time_threshold: time_threhold,
+            ..default()
+        }
+    }
+
+    pub fn insert(&mut self, event: VelloCollisionEvent, time: f32) {
+        let a = event.entity_a;
+        let b = event.entity_b;
+        let pair = if a < b { (a, b) } else { (b, a) };
+        if let Some(last_time) = self.data.get_mut(&pair) {
+            let diff = time - *last_time;
+            (*last_time) = time;
+            if diff < self.time_threshold {
+                return;
+            }
+        } else {
+            self.data.insert(pair, time);
+        }
+        self.filtered_events.push(event);
+    }
+
+    pub fn try_purge(&mut self, time: f32) {
+        if time - self.last_perge_time > 10.0 * self.time_threshold + 5.0 {
+            self.data
+                .retain(|_, &mut last_frame| time - last_frame < 10.0 * self.time_threshold + 5.0);
+            self.last_perge_time = time;
+        }
+    }
 }
 
 impl Default for ParticleState {
@@ -97,6 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init_state::<GameState>()
         .insert_resource(AssetManager::default())
         .insert_resource(UiState::default())
+        .insert_resource(ParticlesPlayer::default())
+        .insert_resource(CollisionEventTracker::new(0.5))
         .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(EguiPlugin)
         .add_plugins(FrameTimeDiagnosticsPlugin::default());
@@ -112,6 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
+        .add_systems(Startup, init_particles_player)
         .add_systems(
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),
@@ -125,12 +165,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_from_ui.after(ui_example_system),
                 update_edge_pan_camera,
                 (update_mouse, update_collider_from_mouse).chain(), //update_blood_particles.after(ui_example_system),
+                collision_response,
             )
                 .run_if(in_state(GameState::Game)),
         )
         .add_systems(
             PostUpdate,
-            collision_response.in_set(CollisionSystems::CollisionResponseGame),
+            filter_collision_event
+                .in_set(CollisionSystems::CollisionResponsePhysics)
+                .run_if(in_state(GameState::Game)),
         )
         .run();
 
@@ -146,7 +189,7 @@ fn spawn_collider(
     soft_body_config: SoftBodyInitConfig,
     collision_config: CollisionConstraintConfig,
 ) {
-    for index in 0..1 {
+    for index in 0..10 {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         make_collision_shape(
             commands,
@@ -577,8 +620,30 @@ pub fn add_light(mut commands: Commands) {
     },));
 }
 
-pub fn collision_response(mut reader: EventReader<VelloCollisionEvent>) {
+fn filter_collision_event(
+    mut reader: EventReader<VelloCollisionEvent>,
+    mut c: ResMut<CollisionEventTracker>,
+    time: Res<Time>,
+) {
+    let t = time.elapsed_seconds();
+    // notice you might recieved events from previous frame and this frame.
     for item in reader.read() {
-        info!("{:?}", item);
+        c.insert(item.clone(), t);
+    }
+    c.try_purge(t);
+}
+
+fn collision_response(
+    mut commands: Commands,
+    player: Res<ParticlesPlayer>,
+    mut c: ResMut<CollisionEventTracker>,
+) {
+    for item in c.filtered_events.drain(..) {
+        let pos = 0.5 * (item.collision_point_a + item.collision_point_b);
+        spawn_particle_at(&mut commands, &player, pos.extend(0.0));
+        info!(
+            "spawn particles at {:?}, {:?}",
+            item.collision_point_a, item.collision_point_b
+        );
     }
 }

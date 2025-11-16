@@ -97,7 +97,11 @@ pub fn collision_event_dispatch(
             );
             let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
             for ((entity_a, entity_b), result) in data.pairs.iter().zip(data.results.iter()) {
-                writer.send(make_collision_event(entity_a, entity_b, result, scaling));
+                //valid surface normal means valid results other wise there are no collision.
+                //the normal would be invalid if broad phase detects overlaps but narrow phase does not.
+                if result.a_position_normal[2] != 0.0 || result.a_position_normal[3] != 0.0 {
+                    writer.send(make_collision_event(entity_a, entity_b, result, scaling));
+                }
             }
         }
         _ => {}

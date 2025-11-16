@@ -163,7 +163,6 @@ pub enum CollisionSystems {
     CollectRemovedColliders,  //collect removed colliders
     SendCollisionEvent,       //send collision event
     CollisionResponsePhysics, // response to collsion event physics logic
-    CollisionResponseGame,    // response to collision event game logic
     MakeCollisionScene, // this would collect collision paires from broad phase and prepare it for collision on gpu.
 }
 
@@ -176,7 +175,7 @@ pub struct CollisionResults {
 pub use vello_physics::utility::generate_uvs;
 pub use vello_physics::utility::path_to_ccw_quad_path;
 
-#[derive(Event, Debug)]
+#[derive(Event, Debug, Clone)]
 pub struct VelloCollisionEvent {
     pub entity_a: Entity,
     pub entity_b: Entity,

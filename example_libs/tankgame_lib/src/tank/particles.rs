@@ -91,7 +91,7 @@ pub fn update_particle_scene(
 }
 
 pub fn spawn_particle_at(commands: &mut Commands, player: &Res<ParticlesPlayer>, translate: Vec3) {
-    info!("spawn particles");
+    //info!("spawn particles");
     let effect = player.explosion.clone().unwrap();
     let anim = ParticleSceneAnim {
         timer: Timer::from_seconds(2.0, TimerMode::Once),
