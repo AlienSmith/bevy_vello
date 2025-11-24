@@ -1,0 +1,210 @@
+mod plugin;
+mod systems;
+
+use bevy::prelude::*;
+use rand::Rng;
+use thunderdome::Arena;
+
+pub use plugin::VelloPartclePlugin;
+use vello::kurbo;
+
+// ───── Shared Types ───────────────────────────────────────
+
+#[derive(Clone, Copy, Debug)]
+pub struct SpawnParams {
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub lifetime: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct InstanceData {
+    pub position: [f32; 2],
+    pub scale: f32,
+    pub rotation: f32,
+    pub custom: [f32; 2],
+}
+
+// ───── Traits ─────────────────────────────────────────────
+
+pub trait Particle: Clone + Send + Sync + 'static {
+    type Config: Clone + Send + Sync + 'static;
+
+    fn spawn(params: SpawnParams, config: &Self::Config) -> Self;
+    fn tick(&mut self, delta: f32, config: &Self::Config);
+    fn is_alive(&self, config: &Self::Config) -> bool;
+    fn as_instance(&self) -> kurbo::Affine;
+}
+
+pub trait Emitter<P: Particle>: Clone + Send + Sync + 'static {
+    type Config: Clone + Send + Sync + 'static;
+
+    fn emit(&mut self, config: &Self::Config, rng: &mut impl Rng) -> Option<SpawnParams>;
+    fn is_active(&self, config: &Self::Config) -> bool;
+    fn from_config(config: &Self::Config) -> Self;
+}
+
+// ───── Concrete Particle: GravityParticle ──────────────────
+
+#[derive(Clone)]
+pub struct GravityParticle {
+    pos: Vec2,
+    vel: Vec2,
+    age: f32,
+    lifetime: f32,
+}
+
+#[derive(Clone)]
+pub struct GravityParticleConfig {
+    pub gravity: Vec2,
+    pub drag: f32,
+}
+
+impl Particle for GravityParticle {
+    type Config = GravityParticleConfig;
+
+    fn spawn(params: SpawnParams, _config: &Self::Config) -> Self {
+        Self {
+            pos: params.position,
+            vel: params.velocity,
+            age: 0.0,
+            lifetime: params.lifetime,
+        }
+    }
+
+    fn tick(&mut self, delta: f32, config: &Self::Config) {
+        self.age += delta;
+        self.vel += config.gravity * delta;
+        self.vel *= 1.0 - config.drag * delta;
+        self.pos += self.vel * delta;
+    }
+
+    fn is_alive(&self, _config: &Self::Config) -> bool {
+        self.age < self.lifetime
+    }
+
+    fn as_instance(&self) -> kurbo::Affine {
+        kurbo::Affine::translate((self.pos.x as f64, self.pos.y as f64))
+    }
+}
+
+// ───── Concrete Emitter: BurstEmitter ──────────────────────
+
+#[derive(Clone, Copy, Default)]
+pub struct BurstEmitter {
+    spawned: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct BurstEmitterConfig {
+    pub count: u32,
+    pub speed_range: (f32, f32),
+    pub lifetime_range: (f32, f32),
+    pub origin: Vec2,
+}
+
+impl<P: Particle> Emitter<P> for BurstEmitter {
+    type Config = BurstEmitterConfig;
+
+    fn emit(&mut self, config: &Self::Config, rng: &mut impl Rng) -> Option<SpawnParams> {
+        if self.spawned >= config.count {
+            return None;
+        }
+        self.spawned += 1;
+
+        let speed = rng.gen_range(config.speed_range.0..=config.speed_range.1);
+        let angle = rng.gen_range(0.0..std::f32::consts::TAU);
+        let vel = Vec2::new(angle.cos(), angle.sin()) * speed;
+        let lifetime = rng.gen_range(config.lifetime_range.0..=config.lifetime_range.1);
+
+        Some(SpawnParams {
+            position: config.origin,
+            velocity: vel,
+            lifetime,
+        })
+    }
+
+    fn is_active(&self, config: &Self::Config) -> bool {
+        self.spawned < config.count
+    }
+
+    fn from_config(_config: &Self::Config) -> Self {
+        Self { spawned: 0 }
+    }
+}
+
+// ───── Generic Particle Group ─────────────────────────────
+
+pub struct ParticleGroup<P: Particle, E: Emitter<P>> {
+    pub particle_config: P::Config,
+    pub emitter_config: E::Config,
+    pub emitter: E,
+    pub particles: Arena<P>,
+    pub active: bool,
+}
+
+impl<P: Particle, E: Emitter<P>> ParticleGroup<P, E> {
+    pub fn new(particle_config: P::Config, emitter_config: E::Config) -> Self {
+        Self {
+            emitter: E::from_config(&emitter_config),
+            particle_config,
+            emitter_config,
+            particles: Arena::new(),
+            active: true,
+        }
+    }
+
+    pub fn update(&mut self, delta: f32, rng: &mut impl Rng) {
+        // Spawn
+        while let Some(params) = self.emitter.emit(&self.emitter_config, rng) {
+            let particle = P::spawn(params, &self.particle_config);
+            self.particles.insert(particle);
+        }
+
+        // Update & cull
+        let mut dead = Vec::new();
+        for (idx, particle) in &mut self.particles {
+            particle.tick(delta, &self.particle_config);
+            if !particle.is_alive(&self.particle_config) {
+                dead.push(idx);
+            }
+        }
+        for idx in dead {
+            self.particles.remove(idx);
+        }
+
+        self.active = self.emitter.is_active(&self.emitter_config) || !self.particles.is_empty();
+    }
+
+    pub fn collect_instances(&self) -> Vec<kurbo::Affine> {
+        self.particles
+            .iter()
+            .map(|(_, p)| p.as_instance())
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.particles.is_empty()
+    }
+}
+
+#[macro_export]
+macro_rules! define_particle_effect {
+    ($vis:vis $name:ident, $particle:ty, $emitter:ty) => {
+        #[derive(bevy::prelude::Component)]
+        $vis struct $name(pub ParticleGroup<$particle, $emitter>);
+
+        impl $name {
+            pub fn new(
+                pc: <$particle as Particle>::Config,
+                ec: <$emitter as Emitter<$particle>>::Config,
+            ) -> Self {
+                Self(ParticleGroup::new(pc, ec))
+            }
+        }
+    };
+}
+
+// Now use it in the same crate!
+define_particle_effect!(pub ExplosionEffect, GravityParticle, BurstEmitter);

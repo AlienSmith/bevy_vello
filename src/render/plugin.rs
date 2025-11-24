@@ -144,8 +144,10 @@ impl Plugin for VelloRenderPlugin {
         // runs before the camera driver, since rendering needs to access simulated
         // particles.
         graph.add_node(main_graph::node::VelloDriverNode, VelloRenderDriverNode {});
+
         #[cfg(feature = "particles")]
         graph.add_node_edge(HanabiDriverNode, main_graph::node::VelloDriverNode);
+
         graph.add_node_edge(
             main_graph::node::VelloDriverNode,
             bevy::render::graph::CameraDriverLabel,

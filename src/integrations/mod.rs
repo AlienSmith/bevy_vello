@@ -30,6 +30,8 @@ pub use asset::{
 
 pub mod physics;
 
+pub mod particles;
+
 #[derive(Clone)]
 pub enum VectorFile {
     #[cfg(feature = "svg")]
