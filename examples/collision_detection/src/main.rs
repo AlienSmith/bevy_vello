@@ -64,13 +64,15 @@ struct CollisionEventTracker {
     data: HashMap<(Entity, Entity), f32>,
     last_perge_time: f32,
     time_threshold: f32,
+    distance_threshold_squre: f32,
     filtered_events: Vec<VelloCollisionEvent>,
 }
 
 impl CollisionEventTracker {
-    pub fn new(time_threhold: f32) -> Self {
+    pub fn new(time_threshold: f32, distance_threshold: f32) -> Self {
         Self {
-            time_threshold: time_threhold,
+            time_threshold,
+            distance_threshold_squre: distance_threshold * distance_threshold,
             ..default()
         }
     }
@@ -79,10 +81,15 @@ impl CollisionEventTracker {
         let a = event.entity_a;
         let b = event.entity_b;
         let pair = if a < b { (a, b) } else { (b, a) };
+        let diff = event.collision_point_a - event.collision_point_b;
+        let dis_squre = diff.dot(diff);
+        if dis_squre < self.distance_threshold_squre {
+            return;
+        }
         if let Some(last_time) = self.data.get_mut(&pair) {
-            let diff = time - *last_time;
+            let time_diff = time - *last_time;
             (*last_time) = time;
-            if diff < self.time_threshold {
+            if time_diff < self.time_threshold {
                 return;
             }
         } else {
@@ -135,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(AssetManager::default())
         .insert_resource(UiState::default())
         .insert_resource(ParticlesPlayer::default())
-        .insert_resource(CollisionEventTracker::new(0.5))
+        .insert_resource(CollisionEventTracker::new(0.5, 1.1))
         .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(EguiPlugin)
         .add_plugins(FrameTimeDiagnosticsPlugin::default());
