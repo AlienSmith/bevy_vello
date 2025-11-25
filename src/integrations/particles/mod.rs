@@ -1,12 +1,48 @@
 mod plugin;
 mod systems;
 
+use crate::VelloScene;
 use bevy::prelude::*;
 use rand::Rng;
 use thunderdome::Arena;
-
-pub use plugin::VelloPartclePlugin;
 use vello::kurbo;
+
+struct PersistentBuffer {
+    data: Vec<kurbo::Affine>,
+    write_index: usize,
+}
+
+impl PersistentBuffer {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(capacity),
+            write_index: 0,
+        }
+    }
+
+    fn push(&mut self, affine: kurbo::Affine) {
+        if self.data.len() < self.data.capacity() {
+            self.data.push(affine);
+        } else {
+            self.data[self.write_index] = affine;
+            self.write_index = (self.write_index + 1) % self.data.capacity();
+        }
+    }
+
+    fn append_to(&self, output: &mut Vec<kurbo::Affine>) {
+        output.extend_from_slice(&self.data);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
+pub enum ParticleSystemState {
+    UpdateParticleScene,
+    UpdateParticleInstances,
+}
 
 // ───── Shared Types ───────────────────────────────────────
 
@@ -34,6 +70,8 @@ pub trait Particle: Clone + Send + Sync + 'static {
     fn spawn(params: SpawnParams, config: &Self::Config) -> Self;
     fn tick(&mut self, delta: f32, config: &Self::Config);
     fn is_alive(&self, config: &Self::Config) -> bool;
+    fn is_persistent(&self, config: &Self::Config) -> bool;
+    // notice vello is y down hence you want to do -y and -rotation.
     fn as_instance(&self) -> kurbo::Affine;
 }
 
@@ -85,7 +123,11 @@ impl Particle for GravityParticle {
     }
 
     fn as_instance(&self) -> kurbo::Affine {
-        kurbo::Affine::translate((self.pos.x as f64, self.pos.y as f64))
+        kurbo::Affine::translate((self.pos.x as f64, -self.pos.y as f64))
+    }
+
+    fn is_persistent(&self, _config: &Self::Config) -> bool {
+        true
     }
 }
 
@@ -142,16 +184,22 @@ pub struct ParticleGroup<P: Particle, E: Emitter<P>> {
     pub emitter: E,
     pub particles: Arena<P>,
     pub active: bool,
+    persistents: PersistentBuffer,
 }
 
 impl<P: Particle, E: Emitter<P>> ParticleGroup<P, E> {
-    pub fn new(particle_config: P::Config, emitter_config: E::Config) -> Self {
+    pub fn new(
+        particle_config: P::Config,
+        emitter_config: E::Config,
+        persistent_capacity: usize,
+    ) -> Self {
         Self {
             emitter: E::from_config(&emitter_config),
             particle_config,
             emitter_config,
             particles: Arena::new(),
             active: true,
+            persistents: PersistentBuffer::with_capacity(persistent_capacity),
         }
     }
 
@@ -167,6 +215,9 @@ impl<P: Particle, E: Emitter<P>> ParticleGroup<P, E> {
         for (idx, particle) in &mut self.particles {
             particle.tick(delta, &self.particle_config);
             if !particle.is_alive(&self.particle_config) {
+                if particle.is_persistent(&self.particle_config) {
+                    self.persistents.push(particle.as_instance());
+                }
                 dead.push(idx);
             }
         }
@@ -178,14 +229,17 @@ impl<P: Particle, E: Emitter<P>> ParticleGroup<P, E> {
     }
 
     pub fn collect_instances(&self) -> Vec<kurbo::Affine> {
-        self.particles
+        let mut alive = self
+            .particles
             .iter()
             .map(|(_, p)| p.as_instance())
-            .collect()
+            .collect();
+        self.persistents.append_to(&mut alive);
+        alive
     }
 
     pub fn is_empty(&self) -> bool {
-        self.particles.is_empty()
+        self.particles.is_empty() && self.persistents.is_empty()
     }
 }
 
@@ -199,12 +253,57 @@ macro_rules! define_particle_effect {
             pub fn new(
                 pc: <$particle as Particle>::Config,
                 ec: <$emitter as Emitter<$particle>>::Config,
+                persistent_capacity: usize,
             ) -> Self {
-                Self(ParticleGroup::new(pc, ec))
+                Self(ParticleGroup::new(pc, ec, persistent_capacity))
             }
+
+            pub fn update_system(
+                mut commands: Commands,
+                mut query: Query<(Entity, &mut $name)>,
+                time: Res<Time>
+            ){
+                let delta = time.delta_seconds();
+                let mut rng = rand::thread_rng();
+                for (entity, mut effect) in query.iter_mut() {
+                    effect.0.update(delta, &mut rng);
+                    if !effect.0.active && effect.0.is_empty() {
+                        commands.entity(entity).despawn();
+                    }
+                }
+            }
+
+            pub fn update_particle_instances(mut query: Query<(&mut VelloScene, & $name)>){
+                for (mut scene, particle) in query.iter_mut(){
+                    let affines = particle.0.collect_instances();
+                    scene.update_instance_data_only(&affines);
+                }
+            }
+
+
+            pub fn register(app: &mut App) {
+                app.add_systems(Update, Self::update_system);
+                app.add_systems(Update, Self::update_particle_instances.in_set(ParticleSystemState::UpdateParticleInstances));
+            }
+
         }
     };
 }
 
 // Now use it in the same crate!
 define_particle_effect!(pub ExplosionEffect, GravityParticle, BurstEmitter);
+
+pub struct VelloPartclePlugin;
+impl Plugin for VelloPartclePlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        app.configure_sets(
+            Update,
+            (
+                ParticleSystemState::UpdateParticleScene,
+                ParticleSystemState::UpdateParticleInstances,
+            )
+                .chain(),
+        );
+        ExplosionEffect::register(app);
+    }
+}

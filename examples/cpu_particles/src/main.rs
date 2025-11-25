@@ -79,12 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(particles::VelloPartclePlugin)
         .add_plugins(EguiPlugin)
         .insert_resource(UiState::default())
-        .insert_resource(ClickSpawner::new(1.0))
+        .insert_resource(ClickSpawner::new(0.1))
         .add_systems(Startup, (setup_back_ground, add_default_light))
-        .add_systems(
-            Update,
-            (ui_example_system, spawn_particles, update_particles),
-        )
+        .add_systems(Update, (ui_example_system, spawn_particles))
         .run();
 
     Ok(())
@@ -130,17 +127,17 @@ fn spawn_particles(
     let current = time.elapsed_seconds();
     if current - spawner.last_spawn_time > spawner.time_threhold && ui.just_spawn {
         spawner.last_spawn_time = current;
-        let mut scene: VelloScene = VelloScene::default();
+
+        let mut scene = VelloScene::default();
+        scene.push_instance_with_transforms(&[]);
         scene.fill(
             peniko::Fill::NonZero,
             kurbo::Affine::default(),
-            peniko::Color::rgb(1.0, 0.0, 0.0),
+            peniko::Color::rgba(1.0, 0.0, 0.0, 0.5),
             None,
             &kurbo::Circle::new((0.0, 0.0), 20.0),
         );
-        // scene.push_instance_with_transforms(&transforms1);
-
-        // scene.pop_instance();
+        scene.pop_instance();
 
         commands.spawn((
             VelloSceneBundle {
@@ -153,29 +150,13 @@ fn spawn_particles(
                     drag: 0.0,
                 },
                 particles::BurstEmitterConfig {
-                    count: 10,
+                    count: 100,
                     speed_range: (10.0, 100.0),
                     lifetime_range: (1.0, 1.2),
                     origin: Vec2::new(0.0, 0.0),
                 },
+                500,
             ),
         ));
-    }
-}
-
-fn update_particles(mut query: Query<(&ExplosionEffect, &mut VelloScene)>) {
-    for (particles, mut scene) in query.iter_mut() {
-        let affines = particles.0.collect_instances();
-        let mut sb = VelloScene::default();
-        sb.push_instance_with_transforms(&affines);
-        sb.fill(
-            peniko::Fill::NonZero,
-            kurbo::Affine::default(),
-            peniko::Color::rgba(1.0, 0.0, 0.0, 0.5),
-            None,
-            &kurbo::Circle::new((0.0, 0.0), 20.0),
-        );
-        sb.pop_instance();
-        *scene = sb;
     }
 }
