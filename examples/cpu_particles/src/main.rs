@@ -148,6 +148,7 @@ fn spawn_particles(
                 particles::GravityParticleConfig {
                     gravity: Vec2::new(0.0, -98.0),
                     drag: 0.0,
+                    persistent: false,
                 },
                 particles::BurstEmitterConfig {
                     count: 100,

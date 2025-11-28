@@ -8,12 +8,9 @@ publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-bevy_hanabi = { path = "../../../bevy_hanabi", features = ["2d"] }
 ron = "0.8"
 #particle won't work with multi-threaded
 bevy = { workspace = true}
 
-bevy_vello = { path = "../../", features = ["particles"]}
-tankgame_lib = {path = "../../example_libs/tankgame_lib"}
-particles_lib = {path = "../../example_libs/particles_lib"}
+bevy_vello = { path = "../../"}
 bevy_egui = "0.30.1"

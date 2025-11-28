@@ -4,8 +4,8 @@
 //! tweaked at runtime via the egui inspector to move the 2D rendering layer of
 //! particle above or below the reference square.
 
+mod edge_pan_camera;
 mod utility;
-
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, utils::HashMap};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -19,6 +19,7 @@ use bevy_vello::{
         SoftBodyInitConfig, VelloCollisionBroadPhase, VelloCollisionEvent, VelloCollisionWorld,
     },
     integrations::{
+        particles::{self, ExplosionEffect},
         physics::VelloConstraintWorld,
         svg_collider::{
             SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
@@ -33,8 +34,6 @@ use bevy_vello::{
     VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
-
-use tankgame_lib::{init_particles_player, prelude::*, spawn_particle_at, ParticlesPlayer};
 
 use crate::utility::{
     get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
@@ -139,11 +138,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
         )
         .init_state::<GameState>()
-        .insert_resource(AssetManager::default())
         .insert_resource(UiState::default())
-        .insert_resource(ParticlesPlayer::default())
         .insert_resource(CollisionEventTracker::new(0.5, 1.1))
-        .add_plugins(HanabiIntegrationPlugin)
         .add_plugins(EguiPlugin)
         .add_plugins(FrameTimeDiagnosticsPlugin::default());
     // Systems that create Egui widgets should be run during the `CoreSet::Update` set,
@@ -155,10 +151,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(utility::ColliderStatus::default())
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
+        .add_plugins(particles::VelloPartclePlugin)
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
-        .add_systems(Startup, init_particles_player)
         .add_systems(
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),
@@ -170,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 utility::update_mouse_position,
                 ui_example_system,
                 update_from_ui.after(ui_example_system),
-                update_edge_pan_camera,
+                edge_pan_camera::update_edge_pan_camera,
                 (update_mouse, update_collider_from_mouse).chain(), //update_blood_particles.after(ui_example_system),
                 collision_response,
             )
@@ -364,7 +360,7 @@ fn update_from_ui(
 fn setup_back_ground(mut commands: Commands) {
     commands.spawn((
         Camera2dBundle::default(),
-        EdgePanCamera {
+        edge_pan_camera::EdgePanCamera {
             edge_margin: -10.0,
             ..Default::default()
         },
@@ -529,20 +525,10 @@ fn check_assets_loaded(
     mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
     mut sc_asset: EventReader<AssetEvent<SvgColliderAsset>>,
     mut im_asset: EventReader<AssetEvent<VelloImageAsset>>,
-    mut tank_parts: ResMut<AssetManager>,
     mut colliders: ResMut<SvgColliderAssetManager>,
     mut images: ResMut<VelloImageAssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    for ev in ev_asset.read() {
-        match ev {
-            AssetEvent::LoadedWithDependencies { id } => {
-                tank_parts.mark_as_loaded(id);
-            }
-            _ => {}
-        }
-    }
-
     for sc in sc_asset.read() {
         match sc {
             AssetEvent::LoadedWithDependencies { id } => {
@@ -561,13 +547,12 @@ fn check_assets_loaded(
         }
     }
 
-    if tank_parts.all_loaded() && colliders.all_loaded() && images.all_loaded() {
+    if colliders.all_loaded() && images.all_loaded() {
         next_state.set(GameState::Game);
     }
 }
 
 fn setup_resources(
-    mut _tank_parts: ResMut<AssetManager>,
     mut colliders: ResMut<SvgColliderAssetManager>,
     mut images: ResMut<VelloImageAssetManager>,
     asset_server: Res<AssetServer>,
@@ -642,15 +627,48 @@ fn filter_collision_event(
 
 fn collision_response(
     mut commands: Commands,
-    player: Res<ParticlesPlayer>,
     mut c: ResMut<CollisionEventTracker>,
+    ui_state: Res<UiState>,
 ) {
-    for item in c.filtered_events.drain(..) {
-        let pos = 0.5 * (item.collision_point_a + item.collision_point_b);
-        spawn_particle_at(&mut commands, &player, pos.extend(0.0));
-        info!(
-            "spawn particles at {:?}, {:?}",
-            item.collision_point_a, item.collision_point_b
-        );
+    if ui_state.spawn_particles {
+        for item in c.filtered_events.drain(..) {
+            let pos = 0.5 * (item.collision_point_a + item.collision_point_b);
+            let mut scene = VelloScene::default();
+            scene.push_instance_with_transforms(&[]);
+            scene.fill(
+                peniko::Fill::NonZero,
+                kurbo::Affine::default(),
+                peniko::Color::rgba(1.0, 0.0, 0.0, 0.5),
+                None,
+                &kurbo::Circle::new((0.0, 0.0), 20.0),
+            );
+            scene.pop_instance();
+
+            commands.spawn((
+                VelloSceneBundle {
+                    scene,
+                    transform: Transform::from_translation(pos.extend(100.0)),
+                    ..Default::default()
+                },
+                ExplosionEffect::new(
+                    particles::GravityParticleConfig {
+                        gravity: Vec2::new(0.0, -98.0),
+                        drag: 0.0,
+                        persistent: false,
+                    },
+                    particles::BurstEmitterConfig {
+                        count: 100,
+                        speed_range: (10.0, 100.0),
+                        lifetime_range: (1.0, 1.2),
+                        origin: Vec2::new(0.0, 0.0),
+                    },
+                    500,
+                ),
+            ));
+            info!(
+                "spawn particles at {:?}, {:?}",
+                item.collision_point_a, item.collision_point_b
+            );
+        }
     }
 }

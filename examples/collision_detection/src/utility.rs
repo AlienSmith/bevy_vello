@@ -125,6 +125,7 @@ pub(crate) struct UiState {
     pub(crate) soft_body_config: SoftBodyInitConfig,
     pub(crate) collision_config: CollisionConstraintConfig,
     pub(crate) delete_all_dynamic: bool,
+    pub(crate) spawn_particles: bool,
 }
 
 pub fn ui_example_system(
@@ -276,6 +277,7 @@ pub fn ui_example_system(
                     "Ammo",
                 );
             });
+        ui.checkbox(&mut ui_state.spawn_particles, "Spawn Particles");
         if ui.button("StackSpawn").clicked() {
             ui_state.current.pos_y += 40.0;
             ui_state.just_spawn = true;

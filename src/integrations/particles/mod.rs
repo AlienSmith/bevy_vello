@@ -97,6 +97,7 @@ pub struct GravityParticle {
 pub struct GravityParticleConfig {
     pub gravity: Vec2,
     pub drag: f32,
+    pub persistent: bool,
 }
 
 impl Particle for GravityParticle {
@@ -126,8 +127,8 @@ impl Particle for GravityParticle {
         kurbo::Affine::translate((self.pos.x as f64, -self.pos.y as f64))
     }
 
-    fn is_persistent(&self, _config: &Self::Config) -> bool {
-        true
+    fn is_persistent(&self, config: &Self::Config) -> bool {
+        config.persistent
     }
 }
 
