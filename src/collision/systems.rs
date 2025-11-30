@@ -3,8 +3,8 @@ use vello::{CollisionResult, CollisionScene};
 
 use crate::{
     collision::{
-        CollisionResults, GpuDataChannel, RemovedColliders, VelloCollisionEvent,
-        VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+        CollisionResults, CollisionSceneState, GpuDataChannel, RemovedColliders,
+        VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -21,7 +21,10 @@ pub fn make_collision_scene(
     mut r: ResMut<VelloCollisionWorld>,
     mut scene: ResMut<VelloCollisionScene>,
 ) {
-    if r.paused {
+    if r.paused || scene.state == CollisionSceneState::Extracted {
+        scene.scene.reset();
+        scene.pair.clear();
+        scene.state = super::CollisionSceneState::Extracted;
         return;
     }
     // only inite a new collision test if the previous one has been consumed
@@ -33,9 +36,10 @@ pub fn make_collision_scene(
         let mut temp = CollisionScene::default();
         for (a, b) in &r.collision_pairs {
             let (c_a, t_a) = query.get(*a).unwrap();
+            let (c_b, t_b) = query.get(*b).unwrap();
+            //at this point all none soft body objects are static.
             let affine_a =
                 mat4_to_affine(t_a.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
-            let (c_b, t_b) = query.get(*b).unwrap();
             let affine_b =
                 mat4_to_affine(t_b.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
             temp.encode_colliders(
@@ -45,9 +49,17 @@ pub fn make_collision_scene(
                 &c_b.shape,
                 affine_b,
             );
+            info!("collision scene {} {}", a, b);
         }
-        scene.scene = temp;
-        scene.pair = r.collision_pairs.clone();
+        if !r.collision_pairs.is_empty() {
+            scene.scene = temp;
+            scene.pair = r.collision_pairs.clone();
+            scene.state = super::CollisionSceneState::NeedExtract;
+        } else {
+            scene.scene.reset();
+            scene.pair.clear();
+            scene.state = super::CollisionSceneState::Extracted;
+        }
     }
     r.collision_pairs_bvh.clear();
 }
@@ -87,6 +99,7 @@ pub fn collision_event_dispatch(
     //the following line would force a sync point between game thread and render thread.
     //match collision_channel.receiver.recv() {
     //notice the default behavious of the channel would consume the collision results.
+    // Assumption is frame rate slower that fixed update we might not get a result, which is okay.
     match collision_channel.receiver.try_recv() {
         Ok(data) => {
             assert!(
@@ -95,6 +108,7 @@ pub fn collision_event_dispatch(
                 data.pairs.len(),
                 data.results.len()
             );
+            info!("Recieved Something");
             let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
             for ((entity_a, entity_b), result) in data.pairs.iter().zip(data.results.iter()) {
                 //valid surface normal means valid results other wise there are no collision.

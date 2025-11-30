@@ -2,7 +2,7 @@ use std::vec;
 
 use crate::{
     affine_to_mat4,
-    collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionWorld},
+    collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{ColliderExternalImpulseEvent, VelloConstraintWorld},
     mat4_to_affine, VelloCollider, VelloScene,
 };
@@ -168,6 +168,7 @@ pub fn make_collision_constraints(
 }
 
 pub fn update_constraint_world(
+    mut collision_scene: ResMut<VelloCollisionScene>,
     collision_world: Res<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
     time: Res<Time>,
@@ -175,6 +176,7 @@ pub fn update_constraint_world(
     if !collision_world.paused {
         let delta = time.delta_seconds();
         constraint_world.data.step(delta);
+        collision_scene.state = crate::collision::CollisionSceneState::Created;
     }
 }
 

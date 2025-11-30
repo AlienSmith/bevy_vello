@@ -10,13 +10,13 @@ use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, utils::HashMap};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::EguiPlugin;
 
 use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     collision::{
         generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
-        SoftBodyInitConfig, VelloCollisionBroadPhase, VelloCollisionEvent, VelloCollisionWorld,
+        SoftBodyInitConfig, VelloCollisionEvent,
     },
     integrations::{
         particles::{self, ExplosionEffect},
@@ -25,7 +25,6 @@ use bevy_vello::{
             SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
             VelloImageAssetManager, VelloImageAssetMetaData,
         },
-        HanabiIntegrationPlugin,
     },
     vello::{
         kurbo::{self, BezPath, Shape},
@@ -37,7 +36,7 @@ use bevy_vello::{prelude::*, VelloPlugin};
 
 use crate::utility::{
     get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
-    update_mouse_position, ColliderType, UiState,
+    ColliderType, UiState,
 };
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
@@ -173,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .run_if(in_state(GameState::Game)),
         )
         .add_systems(
-            PostUpdate,
+            FixedUpdate,
             filter_collision_event
                 .in_set(CollisionSystems::CollisionResponsePhysics)
                 .run_if(in_state(GameState::Game)),
@@ -194,7 +193,7 @@ fn spawn_collider(
 ) {
     for index in 0..10 {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
-        make_collision_shape(
+        let temp = make_collision_shape(
             commands,
             Vec4::new(
                 ui_state.current.pos_x + (100.0 * index as f32) - 500.0,
@@ -213,6 +212,7 @@ fn spawn_collider(
             Some(soft_body_config),
             Some(collision_config),
         );
+        println!("dynamic {:?}", temp);
     }
 }
 
@@ -241,7 +241,7 @@ fn update_from_ui(
     }
     if ui_state.just_spawn {
         let config = ui_state.soft_body_config;
-        let (color, scaler, complexity_modifier) =
+        let (color, scaler, _complexity_modifier) =
             get_default_parameters(ui_state.current.collider_type);
         let collision_config = ui_state.collision_config;
         match ui_state.current.collider_type {
@@ -460,7 +460,7 @@ fn make_collision_shape(
     is_soft_body: bool,
     soft_body_init_config: Option<SoftBodyInitConfig>,
     collision_config: Option<CollisionConstraintConfig>,
-) {
+) -> Entity {
     let mut scene: VelloScene = VelloScene::default();
     let (s, rect) = f();
     let shape = path_to_ccw_quad_path(&s);
@@ -475,28 +475,30 @@ fn make_collision_shape(
         peniko::Brush::Image(_) | peniko::Brush::PBRImage(_) => Some(generate_uvs(&shape, &rect)),
         _ => None,
     };
-    commands.spawn((
-        VelloSceneBundle {
-            scene,
-            transform: Transform {
-                translation: Vec3::new(transform.x, transform.y, 0.0),
-                rotation: Quat::from_rotation_z(transform.z.to_radians()),
-                scale: Vec3::new(transform.w, transform.w, 1.0),
+    commands
+        .spawn((
+            VelloSceneBundle {
+                scene,
+                transform: Transform {
+                    translation: Vec3::new(transform.x, transform.y, 0.0),
+                    rotation: Quat::from_rotation_z(transform.z.to_radians()),
+                    scale: Vec3::new(transform.w, transform.w, 1.0),
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        },
-        VelloCollider::new(
-            &shape,
-            &rect,
-            velocity,
-            color,
-            inverse_mass,
-            is_soft_body,
-            uvs,
-            soft_body_init_config,
-            collision_config,
-        ),
-    ));
+            VelloCollider::new(
+                &shape,
+                &rect,
+                velocity,
+                color,
+                inverse_mass,
+                is_soft_body,
+                uvs,
+                soft_body_init_config,
+                collision_config,
+            ),
+        ))
+        .id()
 }
 
 fn make_static_collision_shape(
@@ -508,7 +510,7 @@ fn make_static_collision_shape(
     inverse_mass: f32,
     _is_soft_body: bool,
 ) {
-    make_collision_shape(
+    let entity = make_collision_shape(
         commands,
         transform,
         f,
@@ -519,10 +521,10 @@ fn make_static_collision_shape(
         None,
         None,
     );
+    info!("static_entity: {:?}", entity);
 }
 
 fn check_assets_loaded(
-    mut ev_asset: EventReader<AssetEvent<VelloReplaySceneAsset>>,
     mut sc_asset: EventReader<AssetEvent<SvgColliderAsset>>,
     mut im_asset: EventReader<AssetEvent<VelloImageAsset>>,
     mut colliders: ResMut<SvgColliderAssetManager>,

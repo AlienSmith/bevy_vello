@@ -1,4 +1,3 @@
-use avian2d::collision;
 use bevy::prelude::*;
 use bevy::{
     ecs::{component::Component, entity::Entity, schedule::SystemSet, system::Resource},
@@ -23,6 +22,17 @@ use broad_phase::BroadPhaseQbvh;
 pub struct VelloCollisionScene {
     scene: CollisionScene,
     pair: Vec<(Entity, Entity)>,
+    pub state: CollisionSceneState,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+// our gpu collision logic which running in the render world of bevy runs at a different frequency with our phycis system.
+// we use this state to avoid duplucated collision test(which would cause the programe to stuck since we used bounded channel to send collision result back)
+pub enum CollisionSceneState {
+    Created,
+    NeedExtract,
+    #[default]
+    Extracted, // if it is extracted don't extract it again.
 }
 
 #[derive(Default, Resource, Clone)]
@@ -84,12 +94,14 @@ pub struct SimpleBroadPhase {
     pub(crate) broad_phase: BroadPhaseSimple,
 }
 
+//TODO: remvoe this component from entity could cause memory leak in the xpbd softbody system and qbvh broad phase of collision detection
+// make this component private by hide it in a bundle, do not expose it to user.
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
     pub(crate) aabb: kurbo::Rect, //aabb will only take the effect of position ignoring entity rotation and scale.
     pub(crate) initial_velocity: Vec2,
-    pub(crate) inverse_mass: f32,
+    pub(crate) _inverse_mass: f32,
     pub(crate) debug_color: peniko::Brush,
     pub(crate) is_soft_body: bool,
     pub(crate) uvs: Option<Vec<f32>>,
@@ -118,7 +130,7 @@ impl VelloCollider {
             shape: path.clone(),
             aabb: *aabb,
             initial_velocity,
-            inverse_mass,
+            _inverse_mass: inverse_mass,
             debug_color: color,
             is_soft_body,
             uvs,
