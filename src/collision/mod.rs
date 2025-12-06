@@ -47,6 +47,7 @@ pub struct VelloCollisionWorld {
     pub(crate) collision_pairs_bvh: Vec<(Entity, Entity)>,
     pub(crate) collision_pairs: Vec<(Entity, Entity)>,
     pub paused: bool,
+    pub substeps: u32,
 }
 
 #[derive(Default, Resource, Clone)]

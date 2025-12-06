@@ -49,7 +49,6 @@ pub fn make_collision_scene(
                 &c_b.shape,
                 affine_b,
             );
-            info!("collision scene {} {}", a, b);
         }
         if !r.collision_pairs.is_empty() {
             scene.scene = temp;
@@ -102,13 +101,6 @@ pub fn collision_event_dispatch(
     // Assumption is frame rate slower that fixed update we might not get a result, which is okay.
     match collision_channel.receiver.try_recv() {
         Ok(data) => {
-            assert!(
-                data.pairs.len() == collision_world.collision_pairs.len(),
-                "pairs count {}, results count {}",
-                data.pairs.len(),
-                data.results.len()
-            );
-            info!("Recieved Something");
             let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
             for ((entity_a, entity_b), result) in data.pairs.iter().zip(data.results.iter()) {
                 //valid surface normal means valid results other wise there are no collision.

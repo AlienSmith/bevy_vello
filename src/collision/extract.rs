@@ -11,7 +11,6 @@ pub fn extract_collision_scene(
     channel: Extract<Res<GpuDataChannel<CollisionResults>>>,
 ) {
     if game_scene.state == CollisionSceneState::NeedExtract {
-        info!("Extract Some Scene");
         render_scene.scene = game_scene.scene.clone();
         render_scene.pairs = game_scene.pair.clone();
         if render_scene.sender.is_none() {

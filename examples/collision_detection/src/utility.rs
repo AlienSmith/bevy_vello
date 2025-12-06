@@ -140,7 +140,7 @@ pub fn ui_example_system(
                 .text("max_complexity"),
         );
         ui.add(
-            egui::Slider::new(&mut ui_state.soft_body_config.resititution, 0.1..=1.0)
+            egui::Slider::new(&mut ui_state.soft_body_config.resititution, 0.01..=1.0)
                 .text("resititution"),
         );
         ui.add(
@@ -177,27 +177,30 @@ pub fn ui_example_system(
             )
             .text("connect_c"),
         );
+        ui.add(egui::Slider::new(&mut ui_state.soft_body_config.substeps, 1..=10).text("substeps"))
     });
+
+    r.substeps = ui_state.soft_body_config.substeps;
 
     egui::Window::new("CollisionConstraintConfig").show(contexts.ctx_mut(), |ui| {
         ui.add(
             egui::Slider::new(
                 &mut ui_state.collision_config.push_compliance_penetration_scaler,
-                1e-3..=1e3,
+                0.0001..=1.0,
             )
             .text("push_c"),
         );
         ui.add(
             egui::Slider::new(
                 &mut ui_state.collision_config.pull_compliance_scaler,
-                1e-3..=1e3,
+                0.0001..=1.0,
             )
             .text("pull_c"),
         );
         ui.add(
             egui::Slider::new(
                 &mut ui_state.collision_config.friction_compliance_scaler,
-                1e-3..=1e3,
+                0.0001..=1.0,
             )
             .text("friction_c"),
         );

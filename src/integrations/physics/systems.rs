@@ -1,4 +1,4 @@
-use std::vec;
+use std::{cmp::max, vec};
 
 use crate::{
     affine_to_mat4,
@@ -101,7 +101,7 @@ pub fn make_collision_constraints(
         let b_normal = vec2_to_vector2_inverse_y(&item.collision_normal_b);
         let diff = a_position - b_position;
         //consistent with COLLISION_MARGIN
-        if diff.dot(&a_normal) > 0.5 {
+        if diff.dot(&a_normal) > 0.0 {
             let mut constraints0 = None;
             let mut is_soft_0 = false;
             let mut constraints1 = None;
@@ -175,7 +175,8 @@ pub fn update_constraint_world(
 ) {
     if !collision_world.paused {
         let delta = time.delta_seconds();
-        constraint_world.data.step(delta);
+        let substep = max(collision_world.substeps, 1);
+        constraint_world.data.step(delta, substep);
         collision_scene.state = crate::collision::CollisionSceneState::Created;
     }
 }
