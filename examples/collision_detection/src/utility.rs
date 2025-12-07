@@ -177,7 +177,21 @@ pub fn ui_example_system(
             )
             .text("connect_c"),
         );
-        ui.add(egui::Slider::new(&mut ui_state.soft_body_config.substeps, 1..=10).text("substeps"))
+        ui.add(egui::Slider::new(&mut ui_state.soft_body_config.substeps, 1..=10).text("substeps"));
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.soft_body_config.self_collision_complaince,
+                0.0..=1.0,
+            )
+            .text("selfc_c"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.soft_body_config.self_collision_distance_threhold,
+                0.1..=10.0,
+            )
+            .text("selfc_distance"),
+        );
     });
 
     r.substeps = ui_state.soft_body_config.substeps;
