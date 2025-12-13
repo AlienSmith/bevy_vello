@@ -100,6 +100,7 @@ pub struct SimpleBroadPhase {
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
+    pub(crate) shape_frame: BezPath,
     pub(crate) aabb: kurbo::Rect, //aabb will only take the effect of position ignoring entity rotation and scale.
     pub(crate) initial_velocity: Vec2,
     pub(crate) _inverse_mass: f32,
@@ -118,6 +119,7 @@ impl VelloCollider {
 
     pub fn new(
         path: &BezPath,
+        frame_path: &BezPath,
         aabb: &kurbo::Rect,
         initial_velocity: Vec2,
         color: peniko::Brush,
@@ -129,6 +131,7 @@ impl VelloCollider {
     ) -> Self {
         Self {
             shape: path.clone(),
+            shape_frame: frame_path.clone(),
             aabb: *aabb,
             initial_velocity,
             _inverse_mass: inverse_mass,

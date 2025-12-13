@@ -475,6 +475,7 @@ fn make_collision_shape(
         peniko::Brush::Image(_) | peniko::Brush::PBRImage(_) => Some(generate_uvs(&shape, &rect)),
         _ => None,
     };
+    let frame_path = rect.to_path(0.1);
     commands
         .spawn((
             VelloSceneBundle {
@@ -488,6 +489,7 @@ fn make_collision_shape(
             },
             VelloCollider::new(
                 &shape,
+                &frame_path,
                 &rect,
                 velocity,
                 color,

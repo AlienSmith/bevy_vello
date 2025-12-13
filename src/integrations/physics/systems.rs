@@ -54,12 +54,13 @@ pub fn update_collider_from_soft_body(
     constraint_world: Res<VelloConstraintWorld>,
 ) {
     constraint_world.data.get_colliders_from_soft_body(
-        |index: Entity, path: BezPath, affine: Affine, rect: kurbo::Rect| {
+        |index: Entity, path: BezPath, affine: Affine, rect: kurbo::Rect, frame: BezPath| {
             if let Ok((mut collider, mut transform)) = query.get_mut(index) {
                 let target_matrix = affine_to_mat4(affine);
                 *transform = Transform::from_matrix(target_matrix);
                 collider.shape = path;
                 collider.aabb = rect;
+                collider.shape_frame = frame;
             }
         },
     );
@@ -193,6 +194,18 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             &c.shape,
             true,
         );
+
+        s.stroke(
+            &Stroke::new(1.0),
+            Affine::IDENTITY,
+            GlowColor {
+                color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.9),
+                glow: 5.0,
+            },
+            None,
+            &c.shape_frame.to_path(0.1),
+        );
+
         if c.is_selected {
             let affine = mat4_to_affine(transform.compute_matrix());
             let transform = Affine::translate(affine.translation()) * affine.inverse();
