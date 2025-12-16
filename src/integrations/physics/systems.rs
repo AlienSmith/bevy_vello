@@ -101,8 +101,27 @@ pub fn make_collision_constraints(
         let a_normal = vec2_to_vector2_inverse_y(&item.collision_normal_a);
         let b_normal = vec2_to_vector2_inverse_y(&item.collision_normal_b);
         let diff = a_position - b_position;
+
+        let get_info = |entity: Entity| -> (f32, Vector2<f32>) {
+            let mut inv_mass = 0.0;
+            let mut velocity = Vector2::new(0.0, 0.0);
+            if let Ok(item) = query.get(entity) {
+                inv_mass = item._inverse_mass;
+                if item.is_soft_body() {
+                    velocity = constraint_world
+                        .data
+                        .get_velocity_of_softbody(entity)
+                        .unwrap();
+                }
+            }
+            return (inv_mass, velocity);
+        };
+
         //consistent with COLLISION_MARGIN
         if diff.dot(&a_normal) > 0.0 {
+            let (inv_mass_a, vel_a) = get_info(a_index);
+            let (inv_mass_b, vel_b) = get_info(b_index);
+
             let mut constraints0 = None;
             let mut is_soft_0 = false;
             let mut constraints1 = None;
@@ -120,6 +139,8 @@ pub fn make_collision_constraints(
                         current_position,
                         target_position,
                         b_normal,
+                        vel_b,
+                        inv_mass_b,
                         collision_config,
                     );
                     is_soft_0 = true;
@@ -138,6 +159,8 @@ pub fn make_collision_constraints(
                         current_position,
                         target_position,
                         a_normal,
+                        vel_a,
+                        inv_mass_a,
                         collision_config,
                     );
                     is_soft_1 = true;
@@ -206,19 +229,19 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             &c.shape_frame.to_path(0.1),
         );
 
-        if c.is_selected {
-            let affine = mat4_to_affine(transform.compute_matrix());
-            let transform = Affine::translate(affine.translation()) * affine.inverse();
-            s.stroke(
-                &Stroke::new(1.0),
-                transform,
-                GlowColor {
-                    color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
-                    glow: 5.0,
-                },
-                None,
-                &c.aabb.to_path(0.1),
-            );
-        }
+        // if c.is_selected {
+        //     let affine = mat4_to_affine(transform.compute_matrix());
+        //     let transform = Affine::translate(affine.translation()) * affine.inverse();
+        //     s.stroke(
+        //         &Stroke::new(1.0),
+        //         transform,
+        //         GlowColor {
+        //             color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+        //             glow: 5.0,
+        //         },
+        //         None,
+        //         &c.aabb.to_path(0.1),
+        //     );
+        // }
     }
 }
