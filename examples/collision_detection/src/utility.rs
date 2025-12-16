@@ -170,13 +170,6 @@ pub fn ui_example_system(
             )
             .text("frame_c"),
         );
-        ui.add(
-            egui::Slider::new(
-                &mut ui_state.soft_body_config.connect_constraints_scaler,
-                1e-3..=1e3,
-            )
-            .text("connect_c"),
-        );
         ui.add(egui::Slider::new(&mut ui_state.soft_body_config.substeps, 1..=10).text("substeps"));
         ui.add(
             egui::Slider::new(
@@ -202,21 +195,21 @@ pub fn ui_example_system(
                 &mut ui_state.collision_config.push_compliance_penetration_scaler,
                 0.0001..=1.0,
             )
-            .text("push_c"),
-        );
-        ui.add(
-            egui::Slider::new(
-                &mut ui_state.collision_config.pull_compliance_scaler,
-                0.0001..=1.0,
-            )
-            .text("pull_c"),
+            .text("resititution"),
         );
         ui.add(
             egui::Slider::new(
                 &mut ui_state.collision_config.friction_compliance_scaler,
                 0.0001..=1.0,
             )
-            .text("friction_c"),
+            .text("friction"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut ui_state.collision_config.pull_compliance_scaler,
+                0.0001..=1.0,
+            )
+            .text("anti_rotate"),
         );
         ui.add(
             egui::Slider::new(
