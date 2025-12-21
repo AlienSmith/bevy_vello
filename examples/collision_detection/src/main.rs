@@ -191,7 +191,7 @@ fn spawn_collider(
     soft_body_config: SoftBodyInitConfig,
     collision_config: CollisionConstraintConfig,
 ) {
-    for index in 0..10 {
+    for index in 0..1 {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         let temp = make_collision_shape(
             commands,
@@ -212,7 +212,6 @@ fn spawn_collider(
             Some(soft_body_config),
             Some(collision_config),
         );
-        println!("dynamic {:?}", temp);
     }
 }
 

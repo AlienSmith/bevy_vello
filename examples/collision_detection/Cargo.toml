@@ -14,3 +14,4 @@ bevy = { workspace = true}
 
 bevy_vello = { path = "../../"}
 bevy_egui = "0.30.1"
+nalgebra = "0.33.0"

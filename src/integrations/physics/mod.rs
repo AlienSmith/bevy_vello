@@ -2,7 +2,11 @@ mod plugin;
 mod systems;
 
 use bevy::{
-    ecs::{entity::Entity, event::Event, system::Resource},
+    ecs::{
+        entity::Entity,
+        event::{Event, EventWriter},
+        system::{In, ResMut, Resource},
+    },
     math::Vec2,
 };
 
@@ -32,8 +36,11 @@ pub struct FilterData {
 }
 
 pub use plugin::VelloCollisionResponsePlugin;
+use thunderdome::Index;
+pub use vello_physics::collision_response::Particle as VelloParticle;
 pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
+pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 use vello_physics::ConstraintWorld;
 
 // #[derive(Event)]
@@ -47,4 +54,64 @@ pub struct ColliderExternalImpulseEvent {
     pub filter: fn(Vec<ParticleInfo>, FilterData) -> Vec<vello_physics::soft_body::ExternalForce>,
     pub entity: Entity,
     pub filter_data: FilterData,
+}
+
+#[derive(Event)]
+pub struct JointExternalForceEvent {
+    pub filter: fn(Vec<ParticleInfo>, FilterData) -> Vec<vello_physics::soft_body::ExternalForce>,
+    pub connection_index: Index,
+    pub filter_data: FilterData,
+}
+
+#[derive(Event)]
+pub struct AddBodyConnectionEvent {
+    pub connection_config: ConnectionInitConfig,
+    pub entity_a: Entity,
+    pub entity_b: Entity,
+    pub connection_handle: Index,
+}
+
+#[derive(Copy, Clone)]
+pub struct ConnectionHandle {
+    connection: Index,
+    initialized: bool,
+}
+
+impl Default for ConnectionHandle {
+    fn default() -> Self {
+        Self {
+            connection: Index::DANGLING,
+            initialized: false,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct SoftBodyConnections {
+    pub(crate) connections: thunderdome::Arena<ConnectionHandle>,
+}
+
+impl SoftBodyConnections {
+    pub fn get_one(&mut self) -> Index {
+        let index = self.connections.insert(ConnectionHandle::default());
+
+        index
+    }
+}
+
+pub fn add_soft_body_connections(
+    connections: &mut ResMut<SoftBodyConnections>,
+    add_connection_events: &mut EventWriter<AddBodyConnectionEvent>,
+    connection_config: ConnectionInitConfig,
+    entity_a: Entity,
+    entity_b: Entity,
+) -> Index {
+    let index = connections.get_one();
+    add_connection_events.send(AddBodyConnectionEvent {
+        connection_config,
+        entity_a,
+        entity_b,
+        connection_handle: index.clone(),
+    });
+    return index;
 }

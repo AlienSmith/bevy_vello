@@ -9,11 +9,13 @@ use crate::{
     collision::CollisionSystems,
     integrations::physics::{
         systems::{
+            add_connection_on_softbody, apply_explicit_impulse_on_joint,
             apply_explicit_impulse_on_softbody, generate_soft_body_for_collider,
             make_collision_constraints, remove_soft_body, update_collider_from_soft_body,
             update_constraint_world, visualize_colliders,
         },
-        ColliderExternalImpulseEvent, VelloConstraintWorld,
+        AddBodyConnectionEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
+        SoftBodyConnections, VelloConstraintWorld,
     },
 };
 
@@ -23,13 +25,18 @@ impl Plugin for VelloCollisionResponsePlugin {
     fn build(&self, app: &mut bevy::app::App) {
         app.insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, -98.0)))
             .insert_resource(Time::<Fixed>::from_hz(90.0))
+            .insert_resource(SoftBodyConnections::default())
             .add_event::<ColliderExternalImpulseEvent>()
+            .add_event::<JointExternalForceEvent>()
+            .add_event::<AddBodyConnectionEvent>()
             .add_systems(FixedUpdate, update_constraint_world)
             .add_systems(
                 PostUpdate,
                 (
                     generate_soft_body_for_collider,
                     apply_explicit_impulse_on_softbody,
+                    add_connection_on_softbody,
+                    apply_explicit_impulse_on_joint,
                     make_collision_constraints,
                     remove_soft_body,
                     update_collider_from_soft_body,

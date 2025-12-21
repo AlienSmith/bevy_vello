@@ -1,5 +1,6 @@
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    math::VectorSpace,
     prelude::*,
     window::PrimaryWindow,
 };
@@ -9,8 +10,13 @@ use bevy_vello::{
         CollisionConstraintConfig, SoftBodyInitConfig, VelloCollisionBroadPhase,
         VelloCollisionWorld,
     },
-    integrations::physics::{
-        ColliderExternalImpulseEvent, ExternalForce, FilterData, ParticleInfo,
+    integrations::{
+        particles::Particle,
+        physics::{
+            add_soft_body_connections, AddBodyConnectionEvent, ColliderExternalImpulseEvent,
+            ConnectionInitConfig, ExternalForce, FilterData, JointExternalForceEvent, ParticleInfo,
+            SoftBodyConnections, VelloParticle,
+        },
     },
     vello::{
         kurbo::{self, Affine, Stroke},
@@ -18,6 +24,7 @@ use bevy_vello::{
     },
     VelloCollider, VelloScene, VelloSceneBundle,
 };
+use nalgebra::Vector2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u32)]
@@ -35,10 +42,11 @@ pub enum ColliderType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u32)]
-pub enum DragType {
+pub enum ExteralEffectType {
     #[default]
-    All = 0,
-    One = 1,
+    DragFrameAll = 0,
+    DragFrameOne = 1,
+    AddPin = 2,
 }
 
 pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
@@ -57,7 +65,7 @@ pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i3
 #[derive(PartialEq, Clone)]
 pub(crate) struct ExternalImpulseConfig {
     pub(crate) scale: f32,
-    pub(crate) drag_type: DragType,
+    pub(crate) drag_type: ExteralEffectType,
 }
 
 #[derive(PartialEq, Clone)]
@@ -84,7 +92,7 @@ impl Default for ExternalImpulseConfig {
     fn default() -> Self {
         Self {
             scale: 1.0,
-            drag_type: DragType::One,
+            drag_type: ExteralEffectType::DragFrameOne,
         }
     }
 }
@@ -303,8 +311,21 @@ pub fn ui_example_system(
         egui::ComboBox::from_label("drag Type")
             .selected_text(format!("{:?}", ui_state.e_config.drag_type))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut ui_state.e_config.drag_type, DragType::All, "All");
-                ui.selectable_value(&mut ui_state.e_config.drag_type, DragType::One, "One");
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::DragFrameAll,
+                    "DragFrameAll",
+                );
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::DragFrameOne,
+                    "DragFrameOne",
+                );
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::AddPin,
+                    "AddPin",
+                );
             });
 
         if ui.button("Quit").clicked() {
@@ -394,13 +415,60 @@ pub fn drag_best_particle(particles: Vec<ParticleInfo>, data: FilterData) -> Vec
 pub fn update_collider_from_mouse(
     mut query: Query<&mut VelloCollider>,
     mut status: ResMut<ColliderStatus>,
-    mut my_events: EventWriter<ColliderExternalImpulseEvent>,
+    mut force_on_frame_events: EventWriter<ColliderExternalImpulseEvent>,
+    mut add_connection_events: EventWriter<AddBodyConnectionEvent>,
+    mut force_on_joint_events: EventWriter<JointExternalForceEvent>,
+    mut connections: ResMut<SoftBodyConnections>,
+    mouse_position: Res<MouseStatus>,
     ui_state: Res<UiState>,
 ) {
-    let drag_filter = match ui_state.e_config.drag_type {
-        DragType::All => drag_all_particles,
-        DragType::One => drag_best_particle,
-    };
+    let effect = ui_state.e_config.drag_type;
+    if status.applied_impulse != Vec2::ZERO {
+        match effect {
+            ExteralEffectType::DragFrameAll | ExteralEffectType::DragFrameOne => {
+                let drag_filter = if let ExteralEffectType::DragFrameAll = effect {
+                    drag_all_particles
+                } else {
+                    drag_best_particle
+                };
+
+                if let Some(entity) = &status.selected {
+                    force_on_frame_events.send(ColliderExternalImpulseEvent {
+                        filter: drag_filter,
+                        entity: *entity,
+                        filter_data: FilterData {
+                            impulse: status.applied_impulse * ui_state.e_config.scale,
+                        },
+                    });
+                    status.applied_impulse = Vec2::ZERO
+                }
+            }
+            ExteralEffectType::AddPin => {
+                let position = mouse_position.world_pos;
+                let pos = Vector2::new(position.x, position.y);
+                if let Some(entity) = &status.selected {
+                    add_soft_body_connections(
+                        &mut connections,
+                        &mut add_connection_events,
+                        ConnectionInitConfig::SinglePivot((
+                            VelloParticle {
+                                previous_pos: pos,
+                                pos,
+                                velocity: Vector2::new(0.0, 0.0),
+                                inv_mass: 0.001,
+                            },
+                            0.01,
+                        )),
+                        *entity,
+                        *entity,
+                    );
+                    info!("add pin start");
+                }
+                status.applied_impulse = Vec2::ZERO;
+            }
+        }
+    }
+
     if status.need_update {
         for item in status.to_unselect.drain(..) {
             if let Ok(mut collider) = query.get_mut(item) {
@@ -413,18 +481,6 @@ pub fn update_collider_from_mouse(
             }
         }
         status.need_update = false;
-    }
-    if status.applied_impulse != Vec2::ZERO {
-        if let Some(entity) = &status.selected {
-            my_events.send(ColliderExternalImpulseEvent {
-                filter: drag_filter,
-                entity: *entity,
-                filter_data: FilterData {
-                    impulse: status.applied_impulse * ui_state.e_config.scale,
-                },
-            });
-            status.applied_impulse = Vec2::ZERO
-        }
     }
 }
 

@@ -3,10 +3,14 @@ use std::{cmp::max, vec};
 use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
-    integrations::physics::{ColliderExternalImpulseEvent, VelloConstraintWorld},
+    integrations::physics::{
+        AddBodyConnectionEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
+        SoftBodyConnections, VelloConstraintWorld,
+    },
     mat4_to_affine, VelloCollider, VelloScene,
 };
 
+use avian2d::parry::na::constraint;
 use bevy::prelude::*;
 use nalgebra::Vector2;
 use vello::{
@@ -79,6 +83,59 @@ pub fn apply_explicit_impulse_on_softbody(
                 constraint_world.data.add_external_force(event.entity, item);
             }
         }
+    }
+}
+
+pub fn apply_explicit_impulse_on_joint(
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut events: EventReader<JointExternalForceEvent>,
+    connections: Res<SoftBodyConnections>,
+) {
+    for event in events.read() {
+        if let Some(particles) = constraint_world
+            .data
+            .softbody_connection
+            .get_particles_info_of_connection(event.connection_index)
+        {
+            if let Some(handle) = connections.connections.get(event.connection_index) {
+                if !handle.initialized {
+                    panic!("try to add an external force to a connectioin not existing");
+                }
+                for item in (event.filter)(particles, event.filter_data) {
+                    constraint_world
+                        .data
+                        .softbody_connection
+                        .add_external_force(item, handle.connection);
+                }
+            }
+        }
+    }
+}
+
+pub fn add_connection_on_softbody(
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut events: EventReader<AddBodyConnectionEvent>,
+    mut connections: ResMut<SoftBodyConnections>,
+) {
+    for event in events.read() {
+        let index_a = constraint_world
+            .data
+            .get_softbody_from_collider(event.entity_a)
+            .unwrap();
+        let index_b = constraint_world
+            .data
+            .get_softbody_from_collider(event.entity_b)
+            .unwrap();
+        let index = constraint_world
+            .data
+            .add_connection(&event.connection_config, (index_a, index_b));
+        let temp = connections
+            .connections
+            .get_mut(event.connection_handle)
+            .unwrap();
+        temp.connection = index;
+        temp.initialized = true;
+        info!("add pin");
     }
 }
 
@@ -218,30 +275,30 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             true,
         );
 
-        s.stroke(
-            &Stroke::new(1.0),
-            Affine::IDENTITY,
-            GlowColor {
-                color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.9),
-                glow: 5.0,
-            },
-            None,
-            &c.shape_frame.to_path(0.1),
-        );
+        // s.stroke(
+        //     &Stroke::new(1.0),
+        //     Affine::IDENTITY,
+        //     GlowColor {
+        //         color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.9),
+        //         glow: 5.0,
+        //     },
+        //     None,
+        //     &c.shape_frame.to_path(0.1),
+        // );
 
-        // if c.is_selected {
-        //     let affine = mat4_to_affine(transform.compute_matrix());
-        //     let transform = Affine::translate(affine.translation()) * affine.inverse();
-        //     s.stroke(
-        //         &Stroke::new(1.0),
-        //         transform,
-        //         GlowColor {
-        //             color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
-        //             glow: 5.0,
-        //         },
-        //         None,
-        //         &c.aabb.to_path(0.1),
-        //     );
-        // }
+        if c.is_selected {
+            let affine = mat4_to_affine(transform.compute_matrix());
+            let transform = Affine::translate(affine.translation()) * affine.inverse();
+            s.stroke(
+                &Stroke::new(1.0),
+                transform,
+                GlowColor {
+                    color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+                    glow: 5.0,
+                },
+                None,
+                &c.aabb.to_path(0.1),
+            );
+        }
     }
 }
