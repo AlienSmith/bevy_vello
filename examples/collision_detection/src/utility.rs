@@ -2,6 +2,7 @@ use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     math::VectorSpace,
     prelude::*,
+    utils::HashMap,
     window::PrimaryWindow,
 };
 use bevy_egui::{egui, EguiContexts};
@@ -26,6 +27,8 @@ use bevy_vello::{
 };
 use nalgebra::Vector2;
 
+use crate::connections::ConnectionStatus;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u32)]
 pub enum ColliderType {
@@ -47,6 +50,7 @@ pub enum ExteralEffectType {
     DragFrameAll = 0,
     DragFrameOne = 1,
     AddPin = 2,
+    DragJoint = 3,
 }
 
 pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
@@ -326,6 +330,11 @@ pub fn ui_example_system(
                     ExteralEffectType::AddPin,
                     "AddPin",
                 );
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::DragJoint,
+                    "DragJoint",
+                );
             });
 
         if ui.button("Quit").clicked() {
@@ -420,6 +429,7 @@ pub fn update_collider_from_mouse(
     mut force_on_joint_events: EventWriter<JointExternalForceEvent>,
     mut connections: ResMut<SoftBodyConnections>,
     mouse_position: Res<MouseStatus>,
+    mut connection_status: ResMut<ConnectionStatus>,
     ui_state: Res<UiState>,
 ) {
     let effect = ui_state.e_config.drag_type;
@@ -447,7 +457,7 @@ pub fn update_collider_from_mouse(
                 let position = mouse_position.world_pos;
                 let pos = Vector2::new(position.x, position.y);
                 if let Some(entity) = &status.selected {
-                    add_soft_body_connections(
+                    connection_status.last_connection = Some(add_soft_body_connections(
                         &mut connections,
                         &mut add_connection_events,
                         ConnectionInitConfig::SinglePivot((
@@ -455,16 +465,31 @@ pub fn update_collider_from_mouse(
                                 previous_pos: pos,
                                 pos,
                                 velocity: Vector2::new(0.0, 0.0),
-                                inv_mass: 0.001,
+                                inv_mass: 1.0,
                             },
                             0.01,
                         )),
                         *entity,
                         *entity,
-                    );
+                    ));
                     info!("add pin start");
                 }
                 status.applied_impulse = Vec2::ZERO;
+            }
+            ExteralEffectType::DragJoint => {
+                if let Some(handle) = &connection_status.last_connection {
+                    if let Some(index) = connections.get(handle) {
+                        force_on_joint_events.send(JointExternalForceEvent {
+                            filter: drag_all_particles,
+                            connection_index: index,
+                            filter_data: FilterData {
+                                impulse: status.applied_impulse * ui_state.e_config.scale * 16.0,
+                            },
+                        });
+                        info!("add drag joint");
+                    }
+                }
+                status.applied_impulse = Vec2::ZERO
             }
         }
     }

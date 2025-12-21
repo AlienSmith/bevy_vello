@@ -36,7 +36,7 @@ pub struct FilterData {
 }
 
 pub use plugin::VelloCollisionResponsePlugin;
-use thunderdome::Index;
+pub use thunderdome::Index;
 pub use vello_physics::collision_response::Particle as VelloParticle;
 pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
@@ -96,6 +96,15 @@ impl SoftBodyConnections {
         let index = self.connections.insert(ConnectionHandle::default());
 
         index
+    }
+
+    pub fn get(&self, index: &Index) -> Option<Index> {
+        if let Some(item) = self.connections.get(*index) {
+            if item.initialized {
+                return Some(item.connection.clone());
+            }
+        }
+        return None;
     }
 }
 

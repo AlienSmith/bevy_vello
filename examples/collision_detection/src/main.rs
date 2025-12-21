@@ -4,6 +4,7 @@
 //! tweaked at runtime via the egui inspector to move the 2D rendering layer of
 //! particle above or below the reference square.
 
+mod connections;
 mod edge_pan_camera;
 mod utility;
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, utils::HashMap};
@@ -148,6 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // app.add_plugins(WorldInspectorPlugin::default());
     app.insert_resource(utility::MouseStatus::default())
         .insert_resource(utility::ColliderStatus::default())
+        .insert_resource(connections::ConnectionStatus::default())
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_plugins(particles::VelloPartclePlugin)
