@@ -47,10 +47,12 @@ pub enum ColliderType {
 #[repr(u32)]
 pub enum ExteralEffectType {
     #[default]
-    DragFrameAll = 0,
-    DragFrameOne = 1,
-    AddPin = 2,
-    DragJoint = 3,
+    Selection = 0,
+    DragFrameAll = 1,
+    DragFrameOne = 2,
+    AddPin = 3, //Add a Pivot to a single entity
+    DragJoint = 4,
+    AddPinJoint = 5, //Add a Single Point Joint to two Entity
 }
 
 pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
@@ -317,6 +319,11 @@ pub fn ui_example_system(
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::Selection,
+                    "Selection",
+                );
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
                     ExteralEffectType::DragFrameAll,
                     "DragFrameAll",
                 );
@@ -329,6 +336,11 @@ pub fn ui_example_system(
                     &mut ui_state.e_config.drag_type,
                     ExteralEffectType::AddPin,
                     "AddPin",
+                );
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::AddPinJoint,
+                    "AddJoint",
                 );
                 ui.selectable_value(
                     &mut ui_state.e_config.drag_type,
@@ -357,6 +369,7 @@ pub fn ui_example_system(
 #[derive(Resource, Default)]
 pub struct ColliderStatus {
     pub selected: Option<Entity>,
+    pub secondary_selected: Option<Entity>,
     pub to_unselect: Vec<Entity>,
     pub applied_impulse: Vec2,
     pub need_update: bool,
@@ -364,12 +377,23 @@ pub struct ColliderStatus {
 
 impl ColliderStatus {
     pub fn select_entity(&mut self, entity: Entity) {
-        if let Some(old) = self.selected.take() {
+        if let Some(old) = self.secondary_selected.take() {
             if old != entity {
                 self.to_unselect.push(old);
             }
         }
+        self.secondary_selected = self.selected.take();
         self.selected = Some(entity);
+        self.need_update = true;
+    }
+
+    pub fn select_nothing(&mut self) {
+        if let Some(old) = self.secondary_selected.take() {
+            self.to_unselect.push(old);
+        }
+        if let Some(old) = self.selected.take() {
+            self.to_unselect.push(old);
+        }
         self.need_update = true;
     }
 
@@ -453,26 +477,34 @@ pub fn update_collider_from_mouse(
                     status.applied_impulse = Vec2::ZERO
                 }
             }
-            ExteralEffectType::AddPin => {
+            ExteralEffectType::AddPinJoint => {
                 let position = mouse_position.world_pos;
                 let pos = Vector2::new(position.x, position.y);
-                if let Some(entity) = &status.selected {
-                    connection_status.last_connection = Some(add_soft_body_connections(
-                        &mut connections,
-                        &mut add_connection_events,
-                        ConnectionInitConfig::SinglePivot((
-                            VelloParticle {
-                                previous_pos: pos,
-                                pos,
-                                velocity: Vector2::new(0.0, 0.0),
-                                inv_mass: 1.0,
-                            },
-                            0.01,
-                        )),
-                        *entity,
-                        *entity,
-                    ));
-                    info!("add pin start");
+                if status.selected.is_some() && status.secondary_selected.is_some() {
+                    let e1 = status.selected.clone().unwrap();
+                    let e2 = status.secondary_selected.clone().unwrap();
+
+                    if e1 != e2 {
+                        let temp = add_soft_body_connections(
+                            &mut connections,
+                            &mut add_connection_events,
+                            ConnectionInitConfig::SingleJoint((
+                                VelloParticle {
+                                    previous_pos: pos,
+                                    pos,
+                                    velocity: Vector2::new(0.0, 0.0),
+                                    inv_mass: 1.0,
+                                },
+                                0.01,
+                            )),
+                            e1,
+                            e2,
+                        );
+                        connection_status.push(temp);
+                        info!("add joint start");
+                    } else {
+                        info!("can not add joint to the same entity");
+                    }
                 }
                 status.applied_impulse = Vec2::ZERO;
             }
@@ -490,6 +522,33 @@ pub fn update_collider_from_mouse(
                     }
                 }
                 status.applied_impulse = Vec2::ZERO
+            }
+            ExteralEffectType::AddPin => {
+                let position = mouse_position.world_pos;
+                let pos = Vector2::new(position.x, position.y);
+                if let Some(entity) = &status.selected {
+                    let temp = add_soft_body_connections(
+                        &mut connections,
+                        &mut add_connection_events,
+                        ConnectionInitConfig::SinglePivot((
+                            VelloParticle {
+                                previous_pos: pos,
+                                pos,
+                                velocity: Vector2::new(0.0, 0.0),
+                                inv_mass: 1.0,
+                            },
+                            0.01,
+                        )),
+                        *entity,
+                        *entity,
+                    );
+                    connection_status.push(temp);
+                    info!("add pin start");
+                }
+                status.applied_impulse = Vec2::ZERO;
+            }
+            ExteralEffectType::Selection => {
+                status.applied_impulse = Vec2::ZERO;
             }
         }
     }
@@ -540,14 +599,22 @@ pub fn update_mouse(
     button: Res<ButtonInput<MouseButton>>,
     mut mouse_position: ResMut<MouseStatus>,
     mut collider_status: ResMut<ColliderStatus>,
+    ui_state: Res<UiState>,
 ) {
     if button.just_pressed(MouseButton::Left) {
-        if let Some(entity) = broad_phase.find_first_constains_point(mouse_position.world_pos) {
-            collider_status.select_entity(entity);
+        if ui_state.e_config.drag_type == ExteralEffectType::Selection {
+            if let Some(entity) = broad_phase.find_first_constains_point(mouse_position.world_pos) {
+                collider_status.select_entity(entity);
+            }
         }
         mouse_position.last_pos = mouse_position.world_pos;
         mouse_position.pressed = true;
     };
+    if button.just_pressed(MouseButton::Right) {
+        if ui_state.e_config.drag_type == ExteralEffectType::Selection {
+            collider_status.select_nothing();
+        }
+    }
     if button.just_released(MouseButton::Left) {
         collider_status
             .apply_impulse_to_selected_entity(mouse_position.world_pos - mouse_position.last_pos);

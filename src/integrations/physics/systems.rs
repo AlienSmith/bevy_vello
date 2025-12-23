@@ -10,14 +10,12 @@ use crate::{
     mat4_to_affine, VelloCollider, VelloScene,
 };
 
-use avian2d::parry::na::constraint;
 use bevy::prelude::*;
 use nalgebra::Vector2;
 use vello::{
     kurbo::{self, Affine, BezPath, Shape, Stroke},
     peniko::{self, GlowColor},
 };
-use vello_physics::CoupledConstraintBreaker;
 #[inline]
 fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vector2<f32> {
     Vector2::<f32>::new(v.x, -v.y)
@@ -223,27 +221,6 @@ pub fn make_collision_constraints(
                     is_soft_1 = true;
                 }
             }
-
-            //deal with coupled constraints
-            if is_soft_0 && is_soft_1 {
-                if constraints0.is_some() && constraints1.is_some() {
-                    let c0 = constraints0.take().unwrap();
-                    let c1 = constraints1.take().unwrap();
-                    constraint_world.data.add_constraints_breakers(Box::new(
-                        CoupledConstraintBreaker {
-                            constraints: vec![c0, c1],
-                        },
-                    ));
-                } else {
-                    //you couple has been denied so are you.
-                    if let Some(c0) = constraints0.take() {
-                        constraint_world.data.remove_collision_constraint(c0);
-                    }
-                    if let Some(c1) = constraints1.take() {
-                        constraint_world.data.remove_collision_constraint(c1);
-                    }
-                }
-            }
         }
     }
 }
@@ -273,6 +250,15 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             c.uvs.clone(),
             &c.shape,
             true,
+        );
+
+        //draw a outline to make the body parts more obvious
+        s.stroke(
+            &Stroke::new(2.0),
+            Affine::IDENTITY,
+            peniko::GlowColor::new(peniko::Color::rgba(1.0, 0.0, 1.0, 0.9), 1.0),
+            None,
+            &c.shape,
         );
 
         // s.stroke(

@@ -28,6 +28,10 @@ impl VelloConstraintWorld {
     pub fn set_gravity(&mut self, gravity: Vec2) {
         self.data.gravity = nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y);
     }
+
+    pub fn remove_connection(&mut self, connection: Index) {
+        self.data.softbody_connection.remove_connection(connection);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +106,15 @@ impl SoftBodyConnections {
         if let Some(item) = self.connections.get(*index) {
             if item.initialized {
                 return Some(item.connection.clone());
+            }
+        }
+        return None;
+    }
+
+    pub fn remove(&mut self, index: Index) -> Option<Index> {
+        if let Some(item) = self.connections.remove(index) {
+            if item.initialized {
+                return Some(item.connection);
             }
         }
         return None;

@@ -21,7 +21,7 @@ use bevy_vello::{
     },
     integrations::{
         particles::{self, ExplosionEffect},
-        physics::VelloConstraintWorld,
+        physics::{ConnectionHandle, SoftBodyConnections, VelloConstraintWorld},
         svg_collider::{
             SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
             VelloImageAssetManager, VelloImageAssetMetaData,
@@ -35,9 +35,12 @@ use bevy_vello::{
 };
 use bevy_vello::{prelude::*, VelloPlugin};
 
-use crate::utility::{
-    get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
-    ColliderType, UiState,
+use crate::{
+    connections::ConnectionStatus,
+    utility::{
+        get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
+        ColliderType, UiState,
+    },
 };
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
@@ -213,6 +216,7 @@ fn spawn_collider(
             true,
             Some(soft_body_config),
             Some(collision_config),
+            1,
         );
     }
 }
@@ -225,12 +229,19 @@ fn update_from_ui(
     image_assets: Res<Assets<VelloImageAsset>>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut connections: ResMut<ConnectionStatus>,
+    mut connection_handles: ResMut<SoftBodyConnections>,
     query: Query<(Entity, &VelloCollider)>,
 ) {
     if ui_state.delete_all_dynamic {
         for (entity, collider) in query.iter() {
             if collider.is_soft_body() {
                 commands.entity(entity).despawn();
+            }
+        }
+        for item in connections.reset().drain(..) {
+            if let Some(index) = connection_handles.remove(item) {
+                constraint_world.remove_connection(index);
             }
         }
     }
@@ -461,6 +472,7 @@ fn make_collision_shape(
     is_soft_body: bool,
     soft_body_init_config: Option<SoftBodyInitConfig>,
     collision_config: Option<CollisionConstraintConfig>,
+    collision_group: u32,
 ) -> Entity {
     let mut scene: VelloScene = VelloScene::default();
     let (s, rect) = f();
@@ -499,6 +511,7 @@ fn make_collision_shape(
                 uvs,
                 soft_body_init_config,
                 collision_config,
+                collision_group,
             ),
         ))
         .id()
@@ -523,6 +536,7 @@ fn make_static_collision_shape(
         false,
         None,
         None,
+        0,
     );
     info!("static_entity: {:?}", entity);
 }
