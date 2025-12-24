@@ -185,19 +185,26 @@ pub fn ui_example_system(
             .text("frame_c"),
         );
         ui.add(egui::Slider::new(&mut ui_state.soft_body_config.substeps, 1..=10).text("substeps"));
+        // ui.add(
+        //     egui::Slider::new(
+        //         &mut ui_state.soft_body_config.self_collision_complaince,
+        //         0.0..=1.0,
+        //     )
+        //     .text("selfc_c"),
+        // );
+        // ui.add(
+        //     egui::Slider::new(
+        //         &mut ui_state.soft_body_config.self_collision_distance_threhold,
+        //         0.1..=10.0,
+        //     )
+        //     .text("selfc_distance"),
+        // );
         ui.add(
             egui::Slider::new(
-                &mut ui_state.soft_body_config.self_collision_complaince,
-                0.0..=1.0,
+                &mut ui_state.soft_body_config.shape_matching_damping,
+                0.01..=1.0,
             )
-            .text("selfc_c"),
-        );
-        ui.add(
-            egui::Slider::new(
-                &mut ui_state.soft_body_config.self_collision_distance_threhold,
-                0.1..=10.0,
-            )
-            .text("selfc_distance"),
+            .text("sm_damping"),
         );
     });
 
@@ -224,13 +231,6 @@ pub fn ui_example_system(
                 0.0001..=1.0,
             )
             .text("anti_rotate"),
-        );
-        ui.add(
-            egui::Slider::new(
-                &mut ui_state.collision_config.shallow_range_sacler,
-                1e-3..=1e3,
-            )
-            .text("shallow_extend_c"),
         );
     });
 
