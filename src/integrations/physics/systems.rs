@@ -5,15 +5,15 @@ use crate::{
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
         AddBodyConnectionEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
-        SoftBodyConnections, VelloConstraintWorld,
+        PivotVisualizer, SoftBodyConnections, VelloConstraintWorld,
     },
-    mat4_to_affine, VelloCollider, VelloScene,
+    mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
 
 use bevy::prelude::*;
 use nalgebra::Vector2;
 use vello::{
-    kurbo::{self, Affine, BezPath, Shape, Stroke},
+    kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
 #[inline]
@@ -285,6 +285,41 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
                 None,
                 &c.aabb.to_path(0.1),
             );
+        }
+    }
+}
+
+pub fn create_update_pivot_visualizer(
+    mut commands: Commands,
+    mut q: Query<&mut VelloScene, With<PivotVisualizer>>,
+    constraint_world: Res<VelloConstraintWorld>,
+) {
+    let mut pos = constraint_world.data.get_pivots_position();
+    let mut path = BezPath::new();
+    for item in pos.drain(..) {
+        path.push(PathEl::MoveTo((item.0, item.1).into()));
+        path.push(PathEl::LineTo((item.0 + 0.01, item.1).into()));
+    }
+    let mut scene = VelloScene::default();
+    scene.stroke(
+        &Stroke::new(8.0),
+        Affine::IDENTITY,
+        peniko::GlowColor::new(peniko::Color::rgba(0.0, 0.0, 1.0, 0.9), 1.0),
+        None,
+        &path,
+    );
+    if q.is_empty() {
+        commands.spawn((
+            VelloSceneBundle {
+                scene,
+                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 1000.0)),
+                ..Default::default()
+            },
+            PivotVisualizer,
+        ));
+    } else {
+        if let Ok(mut data) = q.get_single_mut() {
+            *data = scene;
         }
     }
 }

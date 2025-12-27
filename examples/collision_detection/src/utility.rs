@@ -49,10 +49,10 @@ pub enum ExteralEffectType {
     #[default]
     Selection = 0,
     DragFrameAll = 1,
-    DragFrameOne = 2,
-    AddPin = 3, //Add a Pivot to a single entity
-    DragJoint = 4,
-    AddPinJoint = 5, //Add a Single Point Joint to two Entity
+    AddPin = 2, //Add a Pivot to a single entity
+    DragJoint = 3,
+    AddPinJoint = 4, //Add a Single Point Joint to two Entity
+    SnapJointToMouse = 5,
 }
 
 pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i32) {
@@ -98,7 +98,7 @@ impl Default for ExternalImpulseConfig {
     fn default() -> Self {
         Self {
             scale: 1.0,
-            drag_type: ExteralEffectType::DragFrameOne,
+            drag_type: ExteralEffectType::Selection,
         }
     }
 }
@@ -329,11 +329,6 @@ pub fn ui_example_system(
                 );
                 ui.selectable_value(
                     &mut ui_state.e_config.drag_type,
-                    ExteralEffectType::DragFrameOne,
-                    "DragFrameOne",
-                );
-                ui.selectable_value(
-                    &mut ui_state.e_config.drag_type,
                     ExteralEffectType::AddPin,
                     "AddPin",
                 );
@@ -346,6 +341,11 @@ pub fn ui_example_system(
                     &mut ui_state.e_config.drag_type,
                     ExteralEffectType::DragJoint,
                     "DragJoint",
+                );
+                ui.selectable_value(
+                    &mut ui_state.e_config.drag_type,
+                    ExteralEffectType::SnapJointToMouse,
+                    "SnapJointToMouse",
                 );
             });
 
@@ -403,7 +403,7 @@ impl ColliderStatus {
 }
 
 pub fn drag_all_particles(particles: Vec<ParticleInfo>, data: FilterData) -> Vec<ExternalForce> {
-    let impulse = Vec2::new(data.impulse.x, -data.impulse.y) * 0.25;
+    let impulse = bevy_to_vello(data.impulse) * 0.25;
     let mut result = vec![];
     for item in particles {
         result.push(ExternalForce::Impulse(item.index, impulse.x, impulse.y));
@@ -411,38 +411,21 @@ pub fn drag_all_particles(particles: Vec<ParticleInfo>, data: FilterData) -> Vec
     result
 }
 
-pub fn drag_best_particle(particles: Vec<ParticleInfo>, data: FilterData) -> Vec<ExternalForce> {
-    let impulse = Vec2::new(data.impulse.x, -data.impulse.y);
+pub fn drag_particle_to_point(
+    particles: Vec<ParticleInfo>,
+    data: FilterData,
+) -> Vec<ExternalForce> {
+    let target = bevy_to_vello(data.impulse);
     let mut result = vec![];
-    let mut min_x: f32 = 0.0;
-    let mut min_y: f32 = 0.0;
-    let count = particles.len();
-    for item in &particles {
-        min_x += item.pos_x;
-        min_y += item.pos_y;
-    }
-    min_x /= count as f32;
-    min_y /= count as f32;
-    let center = Vec2::new(min_x, min_y);
-    let mut most_project = 0.0;
-    let mut target_index = -1;
-    let impulse_n = impulse.normalize();
-    for (index, item) in particles.iter().enumerate() {
-        let temp = Vec2::new(item.pos_x, item.pos_y);
-        let delta = (temp - center).dot(impulse_n);
-        if delta > most_project {
-            most_project = delta;
-            target_index = index as i32;
-        }
-    }
-    if target_index > 0 {
-        result.push(ExternalForce::Impulse(
-            particles[target_index as usize].index,
-            impulse.x,
-            impulse.y,
-        ));
-    }
+    let item = particles[0];
+    let delta = 16.0 * (target - Vector2::new(item.pos_x, item.pos_y));
+    result.push(ExternalForce::Impulse(item.index, delta.x, delta.y));
     result
+}
+
+#[inline]
+pub fn bevy_to_vello(point: Vec2) -> Vector2<f32> {
+    Vector2::new(point.x, -point.y)
 }
 
 pub fn update_collider_from_mouse(
@@ -457,14 +440,24 @@ pub fn update_collider_from_mouse(
     ui_state: Res<UiState>,
 ) {
     let effect = ui_state.e_config.drag_type;
+    if effect == ExteralEffectType::SnapJointToMouse && mouse_position.pressed {
+        if let Some(handle) = &connection_status.last_connection {
+            if let Some(index) = connections.get(handle) {
+                force_on_joint_events.send(JointExternalForceEvent {
+                    filter: drag_particle_to_point,
+                    connection_index: index,
+                    filter_data: FilterData {
+                        impulse: mouse_position.world_pos,
+                    },
+                });
+                info!("add drag joint");
+            }
+        }
+    }
     if status.applied_impulse != Vec2::ZERO {
         match effect {
-            ExteralEffectType::DragFrameAll | ExteralEffectType::DragFrameOne => {
-                let drag_filter = if let ExteralEffectType::DragFrameAll = effect {
-                    drag_all_particles
-                } else {
-                    drag_best_particle
-                };
+            ExteralEffectType::DragFrameAll => {
+                let drag_filter = drag_all_particles;
 
                 if let Some(entity) = &status.selected {
                     force_on_frame_events.send(ColliderExternalImpulseEvent {
@@ -477,8 +470,32 @@ pub fn update_collider_from_mouse(
                     status.applied_impulse = Vec2::ZERO
                 }
             }
+            ExteralEffectType::AddPin => {
+                let position = bevy_to_vello(mouse_position.world_pos);
+                let pos = Vector2::new(position.x, position.y);
+                if let Some(entity) = &status.selected {
+                    let temp = add_soft_body_connections(
+                        &mut connections,
+                        &mut add_connection_events,
+                        ConnectionInitConfig::SinglePivot((
+                            VelloParticle {
+                                previous_pos: pos,
+                                pos,
+                                velocity: Vector2::new(0.0, 0.0),
+                                inv_mass: 1.0,
+                            },
+                            0.01,
+                        )),
+                        *entity,
+                        *entity,
+                    );
+                    connection_status.push(temp);
+                    info!("add pin at {:?}", pos);
+                }
+                status.applied_impulse = Vec2::ZERO;
+            }
             ExteralEffectType::AddPinJoint => {
-                let position = mouse_position.world_pos;
+                let position = bevy_to_vello(mouse_position.world_pos);
                 let pos = Vector2::new(position.x, position.y);
                 if status.selected.is_some() && status.secondary_selected.is_some() {
                     let e1 = status.selected.clone().unwrap();
@@ -523,33 +540,10 @@ pub fn update_collider_from_mouse(
                 }
                 status.applied_impulse = Vec2::ZERO
             }
-            ExteralEffectType::AddPin => {
-                let position = mouse_position.world_pos;
-                let pos = Vector2::new(position.x, position.y);
-                if let Some(entity) = &status.selected {
-                    let temp = add_soft_body_connections(
-                        &mut connections,
-                        &mut add_connection_events,
-                        ConnectionInitConfig::SinglePivot((
-                            VelloParticle {
-                                previous_pos: pos,
-                                pos,
-                                velocity: Vector2::new(0.0, 0.0),
-                                inv_mass: 1.0,
-                            },
-                            0.01,
-                        )),
-                        *entity,
-                        *entity,
-                    );
-                    connection_status.push(temp);
-                    info!("add pin start");
-                }
-                status.applied_impulse = Vec2::ZERO;
-            }
             ExteralEffectType::Selection => {
                 status.applied_impulse = Vec2::ZERO;
             }
+            ExteralEffectType::SnapJointToMouse => {}
         }
     }
 

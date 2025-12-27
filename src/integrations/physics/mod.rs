@@ -3,6 +3,7 @@ mod systems;
 
 use bevy::{
     ecs::{
+        component::Component,
         entity::Entity,
         event::{Event, EventWriter},
         system::{In, ResMut, Resource},
@@ -137,3 +138,6 @@ pub fn add_soft_body_connections(
     });
     return index;
 }
+
+#[derive(Component)]
+pub struct PivotVisualizer;

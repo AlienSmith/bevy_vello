@@ -10,12 +10,12 @@ use crate::{
     integrations::physics::{
         systems::{
             add_connection_on_softbody, apply_explicit_impulse_on_joint,
-            apply_explicit_impulse_on_softbody, generate_soft_body_for_collider,
-            make_collision_constraints, remove_soft_body, update_collider_from_soft_body,
-            update_constraint_world, visualize_colliders,
+            apply_explicit_impulse_on_softbody, create_update_pivot_visualizer,
+            generate_soft_body_for_collider, make_collision_constraints, remove_soft_body,
+            update_collider_from_soft_body, update_constraint_world, visualize_colliders,
         },
         AddBodyConnectionEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
-        SoftBodyConnections, VelloConstraintWorld,
+        PivotVisualizer, SoftBodyConnections, VelloConstraintWorld,
     },
 };
 
@@ -41,6 +41,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                     remove_soft_body,
                     update_collider_from_soft_body,
                     visualize_colliders,
+                    create_update_pivot_visualizer,
                 )
                     .chain()
                     .in_set(CollisionSystems::CollisionResponsePhysics),

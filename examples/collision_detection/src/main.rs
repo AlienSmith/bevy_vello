@@ -21,7 +21,10 @@ use bevy_vello::{
     },
     integrations::{
         particles::{self, ExplosionEffect},
-        physics::{ConnectionHandle, SoftBodyConnections, VelloConstraintWorld},
+        physics::{
+            add_soft_body_connections, AddBodyConnectionEvent, ConnectionHandle,
+            ConnectionInitConfig, SoftBodyConnections, VelloConstraintWorld, VelloParticle,
+        },
         svg_collider::{
             SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
             VelloImageAssetManager, VelloImageAssetMetaData,
@@ -34,12 +37,13 @@ use bevy_vello::{
     VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
+use nalgebra::Vector2;
 
 use crate::{
     connections::ConnectionStatus,
     utility::{
-        get_default_parameters, ui_example_system, update_collider_from_mouse, update_mouse,
-        ColliderType, UiState,
+        bevy_to_vello, get_default_parameters, ui_example_system, update_collider_from_mouse,
+        update_mouse, ColliderType, UiState,
     },
 };
 
@@ -195,8 +199,13 @@ fn spawn_collider(
     f: impl Fn() -> (BezPath, kurbo::Rect),
     soft_body_config: SoftBodyInitConfig,
     collision_config: CollisionConstraintConfig,
+    connections: &mut ResMut<SoftBodyConnections>,
+    add_connection_events: &mut EventWriter<AddBodyConnectionEvent>,
+    connection_status: &mut ResMut<ConnectionStatus>,
 ) {
-    for index in 0..1 {
+    let mut entitys = vec![];
+    let count = 2;
+    for index in 0..count {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         let temp = make_collision_shape(
             commands,
@@ -218,6 +227,42 @@ fn spawn_collider(
             Some(collision_config),
             1,
         );
+        entitys.push(temp);
+    }
+    let make_particle = |pos: Vector2<f32>| -> VelloParticle {
+        VelloParticle {
+            previous_pos: pos,
+            pos,
+            velocity: Vector2::new(0.0, 0.0),
+            inv_mass: 1.0,
+        }
+    };
+    for index in 0..count - 1 {
+        let x = ui_state.current.pos_x + (100.0 * index as f32) - 450.0;
+        let y = ui_state.current.pos_y;
+        let pos = bevy_to_vello(Vec2::new(x - 5.0, y + 5.0));
+        let pos1 = bevy_to_vello(Vec2::new(x, y));
+        let pos2 = bevy_to_vello(Vec2::new(x + 5.0, y + 5.0));
+
+        let e1 = entitys[index].clone();
+        let e2 = entitys[index + 1].clone();
+
+        let temp = add_soft_body_connections(
+            connections,
+            add_connection_events,
+            ConnectionInitConfig::HingeJoint(
+                make_particle(pos),
+                make_particle(pos1),
+                make_particle(pos2),
+                -180.0,
+                180.0,
+                0.01,
+                1.0,
+            ),
+            e1,
+            e2,
+        );
+        connection_status.push(temp);
     }
 }
 
@@ -229,8 +274,9 @@ fn update_from_ui(
     image_assets: Res<Assets<VelloImageAsset>>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut connections: ResMut<ConnectionStatus>,
     mut connection_handles: ResMut<SoftBodyConnections>,
+    mut add_connection_events: EventWriter<AddBodyConnectionEvent>,
+    mut connection_status: ResMut<ConnectionStatus>,
     query: Query<(Entity, &VelloCollider)>,
 ) {
     if ui_state.delete_all_dynamic {
@@ -239,7 +285,8 @@ fn update_from_ui(
                 commands.entity(entity).despawn();
             }
         }
-        for item in connections.reset().drain(..) {
+        info!("remove dynamic {}", connection_status.all_connectiion.len());
+        for item in connection_status.reset().drain(..) {
             if let Some(index) = connection_handles.remove(item) {
                 constraint_world.remove_connection(index);
             }
@@ -271,6 +318,9 @@ fn update_from_ui(
                     make_rect,
                     config,
                     collision_config,
+                    &mut connection_handles,
+                    &mut add_connection_events,
+                    &mut connection_status,
                 );
             }
             ColliderType::Circle => {
@@ -288,6 +338,9 @@ fn update_from_ui(
                     make_circle,
                     config,
                     collision_config,
+                    &mut connection_handles,
+                    &mut add_connection_events,
+                    &mut connection_status,
                 );
             }
             ColliderType::Ammo => {
@@ -336,6 +389,9 @@ fn update_from_ui(
                     make_collider,
                     config,
                     collision_config,
+                    &mut connection_handles,
+                    &mut add_connection_events,
+                    &mut connection_status,
                 );
             }
             _ => {
@@ -362,6 +418,9 @@ fn update_from_ui(
                     make_collider,
                     config,
                     collision_config,
+                    &mut connection_handles,
+                    &mut add_connection_events,
+                    &mut connection_status,
                 );
             }
         };
