@@ -18,8 +18,6 @@ use bevy::{
     },
     sprite::Material2dPlugin,
 };
-#[cfg(feature = "particles")]
-use bevy_hanabi::HanabiDriverNode;
 pub struct VelloRenderPlugin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
@@ -144,9 +142,6 @@ impl Plugin for VelloRenderPlugin {
         // runs before the camera driver, since rendering needs to access simulated
         // particles.
         graph.add_node(main_graph::node::VelloDriverNode, VelloRenderDriverNode {});
-
-        #[cfg(feature = "particles")]
-        graph.add_node_edge(HanabiDriverNode, main_graph::node::VelloDriverNode);
 
         graph.add_node_edge(
             main_graph::node::VelloDriverNode,

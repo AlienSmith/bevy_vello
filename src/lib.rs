@@ -10,7 +10,6 @@ pub use plugin::VelloPlugin;
 
 pub mod collision;
 pub mod debug;
-pub mod dock;
 pub mod integrations;
 pub mod render;
 pub mod text;

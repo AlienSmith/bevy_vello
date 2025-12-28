@@ -16,9 +16,6 @@ pub mod dot_lottie;
 
 pub mod svg_collider;
 
-pub mod hanabi;
-pub use hanabi::{HanabiIntegrationPlugin, VelloSceneSubBundle};
-
 mod error;
 pub use error::VectorLoaderError;
 
