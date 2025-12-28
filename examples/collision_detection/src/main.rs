@@ -204,7 +204,7 @@ fn spawn_collider(
     connection_status: &mut ResMut<ConnectionStatus>,
 ) {
     let mut entitys = vec![];
-    let count = 2;
+    let count = 5;
     for index in 0..count {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         let temp = make_collision_shape(
@@ -240,12 +240,18 @@ fn spawn_collider(
     for index in 0..count - 1 {
         let x = ui_state.current.pos_x + (100.0 * index as f32) - 450.0;
         let y = ui_state.current.pos_y;
-        let pos = bevy_to_vello(Vec2::new(x - 5.0, y + 5.0));
+        let pos = bevy_to_vello(Vec2::new(x - 50.0, y + 50.0));
         let pos1 = bevy_to_vello(Vec2::new(x, y));
-        let pos2 = bevy_to_vello(Vec2::new(x + 5.0, y + 5.0));
+        let pos2 = bevy_to_vello(Vec2::new(x + 50.0, y + 50.0));
 
         let e1 = entitys[index].clone();
         let e2 = entitys[index + 1].clone();
+
+        let offset = if index == 0 || index == count - 2 {
+            1.0
+        } else {
+            0.2
+        };
 
         let temp = add_soft_body_connections(
             connections,
@@ -254,9 +260,9 @@ fn spawn_collider(
                 make_particle(pos),
                 make_particle(pos1),
                 make_particle(pos2),
+                ui_state.current.connection_complaince * 1e-3 * offset,
                 -180.0,
                 180.0,
-                0.01,
                 1.0,
             ),
             e1,

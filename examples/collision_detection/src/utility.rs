@@ -82,6 +82,7 @@ pub(crate) struct EntityConfig {
     pub(crate) vec_y: f32,
     pub(crate) rotation: f32,
     pub(crate) scale: f32,
+    pub(crate) connection_complaince: f32,
     pub(crate) collider_type: ColliderType,
 }
 
@@ -123,6 +124,7 @@ impl Default for EntityConfig {
             vec_x: 0.0,
             vec_y: 0.0,
             rotation: 0.0,
+            connection_complaince: 0.01,
             collider_type: Default::default(),
         }
     }
@@ -261,6 +263,10 @@ pub fn ui_example_system(
         //TODO: Fix the rotation problem probably with obb.
         //ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
         ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
+        ui.add(
+            egui::Slider::new(&mut ui_state.current.connection_complaince, 0.001..=1.0)
+                .text("connection_compliance"),
+        );
 
         egui::ComboBox::from_label("Collider Type")
             .selected_text(format!("{:?}", ui_state.current.collider_type))
@@ -418,7 +424,7 @@ pub fn drag_particle_to_point(
     let target = bevy_to_vello(data.impulse);
     let mut result = vec![];
     let item = particles[0];
-    let delta = 16.0 * (target - Vector2::new(item.pos_x, item.pos_y));
+    let delta = (target - Vector2::new(item.pos_x, item.pos_y));
     result.push(ExternalForce::Impulse(item.index, delta.x, delta.y));
     result
 }
