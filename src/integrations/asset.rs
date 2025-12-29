@@ -1,9 +1,9 @@
 use crate::VectorFile;
 use bevy::{
     asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
+    platform::collections::HashMap,
     prelude::*,
     reflect::TypePath,
-    utils::ConditionalSendFuture,
 };
 use thiserror::Error;
 use vello::ReuseSceneReplayer;
@@ -158,8 +158,6 @@ pub enum TankGameAssetsMetaData {
     //we need the total frame counts
     SpriteSheet(u32),
 }
-
-use bevy::utils::HashMap;
 
 pub trait AssetWithMeta: Asset {
     type Meta: Clone + Default; // Metadata type for this asset

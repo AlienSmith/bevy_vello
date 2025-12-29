@@ -37,10 +37,13 @@ fn render_asset_debug(
         Without<Node>,
     >,
     vectors: Res<Assets<VelloAsset>>,
-    query_cam: Query<(&Camera, &GlobalTransform, &OrthographicProjection), With<Camera2d>>,
+    query_cam: Query<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     mut gizmos: Gizmos,
 ) {
-    let Ok((camera, view, projection)) = query_cam.get_single() else {
+    let Ok((camera, view, projection)) = query_cam.single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = projection else {
         return;
     };
 
@@ -54,7 +57,7 @@ fn render_asset_debug(
                 CoordinateSpace::WorldSpace => {
                     // Origin
                     let origin = gtransform.translation().xy();
-                    draw_origin(&mut gizmos, projection, origin);
+                    draw_origin(&mut gizmos, ortho, origin);
                     // Bounding box
                     let gtransform = &alignment.compute(vector, gtransform);
                     let rect_center = gtransform.translation().xy();
@@ -67,7 +70,7 @@ fn render_asset_debug(
                     let Ok(origin) = camera.viewport_to_world_2d(view, origin) else {
                         continue;
                     };
-                    draw_origin(&mut gizmos, projection, origin);
+                    draw_origin(&mut gizmos, ortho, origin);
                     // Bounding box
                     let gtransform = &alignment.compute(vector, gtransform);
                     let rect_center = gtransform.translation().xy();
@@ -97,11 +100,14 @@ fn render_text_debug(
         ),
         Without<Node>,
     >,
-    query_cam: Query<(&Camera, &GlobalTransform, &OrthographicProjection), With<Camera2d>>,
+    query_cam: Query<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
     fonts: Res<Assets<VelloFont>>,
     mut gizmos: Gizmos,
 ) {
     let Ok((camera, view, projection)) = query_cam.get_single() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = projection else {
         return;
     };
 
@@ -115,7 +121,7 @@ fn render_text_debug(
             let mut origin = gtransform.translation().xy();
             match space {
                 CoordinateSpace::WorldSpace => {
-                    draw_origin(&mut gizmos, projection, origin);
+                    draw_origin(&mut gizmos, ortho, origin);
                     let size = rect.size();
                     let (width, height) = size.into();
                     match alignment {
@@ -162,7 +168,7 @@ fn render_text_debug(
                     else {
                         continue;
                     };
-                    draw_origin(&mut gizmos, projection, origin);
+                    draw_origin(&mut gizmos, ortho, origin);
                     let size = rect.size();
                     let (width, height) = size.into();
                     match alignment {

@@ -3,7 +3,7 @@
 //! An integration to render SVG and Lottie assets in Bevy with Vello.
 
 use crate::{integrations::VelloAssetSource, prelude::*};
-use bevy::prelude::*;
+use bevy::{prelude::*, render::view::NoFrustumCulling};
 
 mod plugin;
 pub use plugin::VelloPlugin;
@@ -88,6 +88,7 @@ pub struct VelloSceneBundle {
     /// Algorithmically-computed indication of whether an entity is visible. Should be extracted
     /// for rendering.
     pub view_visibility: ViewVisibility,
+    //pub culling: NoFrustumCulling, // Disables frustum culling for this bundle
 }
 
 #[derive(Bundle, Default)]

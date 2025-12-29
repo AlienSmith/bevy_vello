@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::{
-    ecs::{component::Component, entity::Entity, schedule::SystemSet, system::Resource},
+    ecs::{component::Component, entity::Entity, schedule::SystemSet},
     math::{Vec2, Vec4},
 };
 pub use plugin::VelloCollisionPlugin;

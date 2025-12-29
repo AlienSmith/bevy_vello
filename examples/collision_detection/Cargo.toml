@@ -13,5 +13,5 @@ ron = "0.8"
 bevy = { workspace = true}
 
 bevy_vello = { path = "../../"}
-bevy_egui = "0.33.0"
+bevy_egui = "0.34.0"
 nalgebra = "0.33.0"

@@ -162,7 +162,9 @@ pub fn scene_instances(
     for (scene, coord_space, transform, view_visibility, inherited_visibility, ui_node) in
         query_scenes.iter()
     {
-        if view_visibility.get() && inherited_visibility.get() {
+        //if view_visibility.get() && inherited_visibility.get() {
+        //TODO: reenable the frustum culling parts for which it does work anymore.
+        if inherited_visibility.get() {
             commands.spawn((
                 ExtractedRenderScene {
                     transform: *transform,

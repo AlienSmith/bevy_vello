@@ -2,11 +2,8 @@ use crate::{
     integrations::{lottie::load_lottie_from_bytes, VectorLoaderError},
     VelloAsset,
 };
-use bevy::{
-    asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
-    prelude::*,
-    utils::ConditionalSendFuture,
-};
+use bevy::asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext};
+use bevy::prelude::*;
 
 #[derive(Default)]
 pub struct VelloLottieLoader;
@@ -40,11 +37,11 @@ impl AssetLoader for VelloLottieLoader {
         match ext {
             "json" => {
                 let vello_vector = load_lottie_from_bytes(&bytes)?;
-                // Using direct path display for logging
                 info!(
-                    path = %path.display(),
-                    size = ?(vello_vector.width, vello_vector.height),
-                    "finished parsing lottie json asset"
+                    "finished parsing lottie json asset: path={}, size={}x{}",
+                    path.display(),
+                    vello_vector.width,
+                    vello_vector.height
                 );
                 Ok(vello_vector)
             }

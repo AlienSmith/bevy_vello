@@ -7,7 +7,7 @@
 mod connections;
 mod edge_pan_camera;
 mod utility;
-use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, utils::HashMap};
+use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, platform::collections::HashMap, prelude::*};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
@@ -147,7 +147,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init_state::<GameState>()
         .insert_resource(UiState::default())
         .insert_resource(CollisionEventTracker::new(0.5, 1.1))
-        .add_plugins(EguiPlugin)
+        .add_plugins(EguiPlugin {
+            enable_multipass_for_primary_context: false,
+        })
         .add_plugins(FrameTimeDiagnosticsPlugin::default());
     // Systems that create Egui widgets should be run during the `CoreSet::Update` set,
     // or after the `EguiSet::BeginPass` system (which belongs to the `CoreSet::PreUpdate` set).
@@ -436,7 +438,7 @@ fn update_from_ui(
 //make a white background
 fn setup_back_ground(mut commands: Commands) {
     commands.spawn((
-        Camera2dBundle::default(),
+        Camera2d::default(),
         edge_pan_camera::EdgePanCamera {
             edge_margin: -10.0,
             ..Default::default()

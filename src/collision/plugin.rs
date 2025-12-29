@@ -13,7 +13,6 @@ use crate::collision::VelloCollisionEvent;
 use crate::collision::VelloCollisionScene;
 use crate::collision::VelloCollisionWorld;
 use crate::integrations::svg_collider::SvgColliderPlugin;
-use bevy::ecs::schedule::IntoSystemConfigs;
 use bevy::prelude::*;
 use bevy::render::ExtractSchedule;
 use bevy::render::RenderApp;

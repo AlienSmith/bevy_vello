@@ -1,6 +1,5 @@
 use bevy::input::mouse::MouseWheel;
 pub use bevy::prelude::*;
-use bevy::render::camera::CameraProjection;
 pub use bevy::window::PrimaryWindow;
 #[derive(Component)]
 pub struct EdgePanCamera {
@@ -24,21 +23,25 @@ impl Default for EdgePanCamera {
 pub fn update_edge_pan_camera(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut scroll_events: EventReader<MouseWheel>,
-    mut cameras: Query<(
-        &mut Transform,
-        &mut EdgePanCamera,
-        &mut OrthographicProjection,
-    )>,
+    mut cameras: Query<(&mut Transform, &mut EdgePanCamera, &mut Projection)>,
     time: Res<Time>,
 ) {
-    let window = windows.single();
-    let (mut transform, mut camera, mut projection) = cameras.single_mut();
-    for event in scroll_events.read() {
-        // Zoom in/out with scroll wheel
-        camera.zoom_level = (camera.zoom_level - event.y * 0.1).clamp(0.01, 5.0);
-        // Keep zoom reasonable
+    let window = windows.single().unwrap();
+
+    let Ok((mut transform, mut camera, mut projection)) = cameras.single_mut() else {
+        return;
+    };
+
+    if let Projection::Orthographic(ref mut ortho) = *projection {
+        for event in scroll_events.read() {
+            // Update your custom zoom_level
+            camera.zoom_level = (camera.zoom_level - event.y * 0.1).clamp(0.01, 5.0);
+        }
+
+        // 3. This now correctly updates the actual camera projection
+        ortho.scale = camera.zoom_level;
     }
-    projection.scale = camera.zoom_level;
+
     if let Some(cursor_pos) = window.cursor_position() {
         let window_size = Vec2::new(window.width(), window.height());
         let mut movement = Vec2::ZERO;

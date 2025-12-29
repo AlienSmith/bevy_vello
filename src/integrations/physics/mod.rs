@@ -6,7 +6,8 @@ use bevy::{
         component::Component,
         entity::Entity,
         event::{Event, EventWriter},
-        system::{In, ResMut, Resource},
+        resource::Resource,
+        system::{In, ResMut},
     },
     math::Vec2,
 };

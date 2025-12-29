@@ -1,6 +1,6 @@
 use bevy::{
     app::{FixedUpdate, Plugin, PostUpdate},
-    ecs::schedule::IntoSystemConfigs,
+    ecs::schedule::IntoScheduleConfigs,
     math::Vec2,
     time::{Fixed, Time},
 };

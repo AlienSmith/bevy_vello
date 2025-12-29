@@ -1,4 +1,4 @@
-use bevy::ecs::system::Resource;
+use bevy::prelude::*;
 use bevy_vello::integrations::physics::Index;
 
 #[derive(Resource, Default)]

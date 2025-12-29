@@ -118,12 +118,11 @@ impl Plugin for VelloRenderPlugin {
         .add_systems(
             Update,
             (systems::resize_rendertargets, systems::clear_when_empty),
-        )
-        .add_systems(
-            PostUpdate,
-            check_visibility::<Or<(With<VelloScene>, With<VelloAssetSource>)>>
-                .in_set(VisibilitySystems::CheckVisibility),
         );
+        // .add_systems(
+        //     PostUpdate,
+        //     check_visibility.in_set(VisibilitySystems::CheckVisibility),
+        // );
     }
 
     fn finish(&self, app: &mut App) {

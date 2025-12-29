@@ -1,6 +1,12 @@
 use super::vello_text::VelloText;
 use super::VelloTextAlignment;
-use bevy::{prelude::*, reflect::TypePath, render::render_asset::RenderAsset};
+use bevy::{
+    asset::RenderAssetUsages,
+    ecs::system::SystemParamItem,
+    prelude::*,
+    reflect::TypePath,
+    render::render_asset::{PrepareAssetError, RenderAsset},
+};
 use std::sync::Arc;
 use vello::{
     glyph::{
@@ -24,13 +30,21 @@ pub struct VelloFontSource(pub Handle<VelloFont>);
 
 impl RenderAsset for VelloFont {
     type SourceAsset = VelloFont;
-
     type Param = ();
+
+    // REQUIRED in Bevy 0.16: Define memory management
+    fn asset_usage(_source_asset: &Self::SourceAsset) -> RenderAssetUsages {
+        // Use GPU_ONLY to save RAM on Android;
+        // Use MAIN_WORLD | RENDER_WORLD if you need to read pixels back on CPU.
+        RenderAssetUsages::default()
+    }
 
     fn prepare_asset(
         source_asset: Self::SourceAsset,
-        _param: &mut bevy::ecs::system::SystemParamItem<Self::Param>,
-    ) -> Result<Self, bevy::render::render_asset::PrepareAssetError<Self::SourceAsset>> {
+        _asset_id: AssetId<Self::SourceAsset>, // New parameter in 0.16
+        _param: &mut SystemParamItem<Self::Param>,
+    ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
+        // For a simple wrapper asset, we just pass it through.
         Ok(source_asset)
     }
 }

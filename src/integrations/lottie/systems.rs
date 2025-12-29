@@ -2,8 +2,8 @@ use crate::{
     integrations::{asset::VelloAssetSource, lottie::PlaybackPlayMode},
     PlaybackDirection, PlaybackLoopBehavior, PlaybackOptions, Playhead, VectorFile, VelloAsset,
 };
-use bevy::{prelude::*, utils::Instant};
-use std::time::Duration;
+use bevy::prelude::*;
+use std::time::{Duration, Instant};
 use vello_svg::usvg::strict_num::Ulps;
 
 /// Spawn playheads for Lotties. Every Lottie gets exactly 1 playhead.

@@ -2,7 +2,6 @@ use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     math::VectorSpace,
     prelude::*,
-    utils::HashMap,
     window::PrimaryWindow,
 };
 use bevy_egui::{egui, EguiContexts};
@@ -580,7 +579,7 @@ pub fn update_mouse_position(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     mut p: ResMut<MouseStatus>,
 ) {
-    let (camera, camera_transform) = camera_query.single();
+    let (camera, camera_transform) = camera_query.single().unwrap();
     if let Some(mouse_position) = windows
         .iter()
         .next()

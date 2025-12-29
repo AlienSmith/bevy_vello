@@ -5,7 +5,6 @@ use crate::{
 use bevy::{
     asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
     prelude::*,
-    utils::ConditionalSendFuture,
 };
 
 #[derive(Default)]

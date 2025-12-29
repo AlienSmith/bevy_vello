@@ -6,7 +6,6 @@ use crate::integrations::{
 use bevy::{
     asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
     prelude::*,
-    utils::ConditionalSendFuture,
 };
 use vello::kurbo;
 
@@ -96,7 +95,7 @@ impl AssetLoader for VelloColliderSvgLoader {
             })?;
 
         // Optional: Use log::debug! or bevy::log::debug!
-        bevy::log::debug!("parsing {}...", path.display());
+        bevy::log::debug!("parsing {:?}...", path);
 
         match ext {
             "svg" => {

@@ -81,7 +81,7 @@ pub fn prepare_scene(
     collision_scene: Res<ExtractedVelloCollisionScene>,
 ) {
     for item in render_batches_query.iter() {
-        if let Some(entity_commands) = commands.get_entity(item) {
+        if let Ok(mut entity_commands) = commands.get_entity(item) {
             entity_commands.despawn_recursive();
         }
     }
@@ -451,8 +451,8 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                             &gpu_image.texture_view,
                             &(RenderParams {
                                 base_color: vello::peniko::Color::TRANSPARENT,
-                                width: gpu_image.size.x as u32,
-                                height: gpu_image.size.y as u32,
+                                width: gpu_image.size.width as u32,
+                                height: gpu_image.size.height as u32,
                                 time_in_second,
                                 environment_light_intensity: 2.0,
                             }),
