@@ -232,7 +232,7 @@ pub fn update_constraint_world(
     time: Res<Time>,
 ) {
     if !collision_world.paused {
-        let delta = time.delta_seconds();
+        let delta = time.delta_secs();
         let substep = max(collision_world.substeps, 1);
         constraint_world.data.step(delta, substep);
         collision_scene.state = crate::collision::CollisionSceneState::Created;

@@ -3,6 +3,7 @@ use bevy::{
     asset::{io::Reader, AssetLoader, AsyncReadExt, LoadContext},
     prelude::*,
     reflect::TypePath,
+    utils::ConditionalSendFuture,
 };
 use thiserror::Error;
 use vello::ReuseSceneReplayer;
@@ -30,12 +31,12 @@ impl AssetLoader for VelloReplaySceneAssetLoader {
     type Asset = VelloReplaySceneAsset;
     type Settings = ();
     type Error = VelloReplaySceneAssetLoaderError;
-    async fn load<'a>(
-        &'a self,
-        reader: &'a mut Reader<'_>,
-        _settings: &'a (),
-        _load_context: &'a mut LoadContext<'_>,
-    ) -> Result<VelloReplaySceneAsset, Self::Error> {
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &Self::Settings,
+        load_context: &mut LoadContext<'_>,
+    ) -> Result<Self::Asset, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let player = vello::ReuseSceneReplayer::new(&bytes)?;
@@ -56,6 +57,9 @@ pub struct VelloAsset {
     pub alpha: f32,
 }
 
+#[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
+pub struct VelloAssetSource(pub Handle<VelloAsset>);
+
 impl VelloAsset {
     /// Returns the bounding box in world space
     pub fn bb_in_world_space(&self, gtransform: &GlobalTransform) -> Rect {
@@ -72,18 +76,24 @@ impl VelloAsset {
         Rect { min, max }
     }
 
-    /// Returns the bounding box in screen space
+    /// Returns the bounding box in world space projected from screen space
     pub fn bb_in_screen_space(
         &self,
         gtransform: &GlobalTransform,
         camera: &Camera,
         camera_transform: &GlobalTransform,
     ) -> Option<Rect> {
-        let Rect { min, max } = self.bb_in_world_space(gtransform);
-        camera
-            .viewport_to_world_2d(camera_transform, min)
-            .zip(camera.viewport_to_world_2d(camera_transform, max))
-            .map(|(min, max)| Rect { min, max })
+        let world_bb = self.bb_in_world_space(gtransform);
+
+        // viewport_to_world_2d now returns Ok(Vec2) or Err(ViewportToWorldError)
+        let min_world = camera
+            .viewport_to_world_2d(camera_transform, world_bb.min)
+            .ok()?;
+        let max_world = camera
+            .viewport_to_world_2d(camera_transform, world_bb.max)
+            .ok()?;
+
+        Some(Rect::from_corners(min_world, max_world))
     }
 }
 

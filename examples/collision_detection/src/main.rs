@@ -603,7 +603,6 @@ fn make_static_collision_shape(
         None,
         0,
     );
-    info!("static_entity: {:?}", entity);
 }
 
 fn check_assets_loaded(
@@ -685,6 +684,7 @@ pub fn add_light(mut commands: Commands) {
     let mut light_scene: VelloScene = VelloScene::default();
     let light_radius = 800.0;
     //let light_shape_ratio = 1.0 / 40.0;
+    info!("Add Light");
     light_scene.push_point_light(
         kurbo::Affine::scale(light_radius * 2.0),
         &[1.0, 1.0, 1.0],
@@ -701,7 +701,7 @@ fn filter_collision_event(
     mut c: ResMut<CollisionEventTracker>,
     time: Res<Time>,
 ) {
-    let t = time.elapsed_seconds();
+    let t = time.elapsed_secs();
     // notice you might recieved events from previous frame and this frame.
     for item in reader.read() {
         c.insert(item.clone(), t);

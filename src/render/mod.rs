@@ -30,6 +30,9 @@ pub struct VelloCanvasMaterial {
     pub texture: Handle<Image>,
 }
 
+#[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
+pub struct VelloCanvasMaterialSource(pub Handle<VelloCanvasMaterial>);
+
 impl Material2d for VelloCanvasMaterial {
     fn vertex_shader() -> ShaderRef {
         SSRT_SHADER_HANDLE.into()

@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/linebender/bevy_vello"
 
 [workspace.dependencies]
-bevy = { version = "0.14.0", default-features = false, features = [
+bevy = { version = "0.15.2", default-features = false, features = [
   "bevy_state",
   "bevy_asset",
   "bevy_winit",

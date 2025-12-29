@@ -10,7 +10,7 @@ use vello_svg::usvg::strict_num::Ulps;
 /// Advance all the dotLottie playheads in the scene
 pub fn advance_dot_lottie_playheads(
     mut query: Query<(
-        &Handle<VelloAsset>,
+        &VelloAssetSource,
         &mut Playhead,
         &mut DotLottiePlayer,
         &PlaybackOptions,

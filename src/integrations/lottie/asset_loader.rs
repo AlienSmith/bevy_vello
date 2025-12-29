@@ -13,46 +13,46 @@ pub struct VelloLottieLoader;
 
 impl AssetLoader for VelloLottieLoader {
     type Asset = VelloAsset;
-
     type Settings = ();
-
     type Error = VectorLoaderError;
 
-    fn load<'a>(
-        &'a self,
-        reader: &'a mut Reader,
-        _settings: &'a Self::Settings,
-        load_context: &'a mut LoadContext,
-    ) -> impl ConditionalSendFuture<Output = Result<Self::Asset, Self::Error>> {
-        Box::pin(async move {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).await?;
-            let path = load_context.path().to_owned();
-            let ext =
-                path.extension()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .ok_or(VectorLoaderError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Invalid file extension",
-                    )))?;
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &Self::Settings,
+        load_context: &mut LoadContext<'_>,
+    ) -> Result<Self::Asset, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
 
-            debug!("parsing {}...", load_context.path().display());
-            match ext {
-                "json" => {
-                    let vello_vector = load_lottie_from_bytes(&bytes)?;
-                    info!(
-                        path = format!("{}", load_context.path().display()),
-                        size = format!("{:?}", (vello_vector.width, vello_vector.height)),
-                        "finished parsing lottie json asset"
-                    );
-                    Ok(vello_vector)
-                }
-                ext => Err(VectorLoaderError::Io(std::io::Error::new(
+        // In 0.15, LoadContext path access is slightly different
+        let path = load_context.asset_path().path();
+        let ext = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| {
+                VectorLoaderError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Invalid file extension: '{ext}'"),
-                ))),
+                    "Invalid file extension",
+                ))
+            })?;
+
+        match ext {
+            "json" => {
+                let vello_vector = load_lottie_from_bytes(&bytes)?;
+                // Using direct path display for logging
+                info!(
+                    path = %path.display(),
+                    size = ?(vello_vector.width, vello_vector.height),
+                    "finished parsing lottie json asset"
+                );
+                Ok(vello_vector)
             }
-        })
+            _ => Err(VectorLoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid file extension: '{ext}'"),
+            ))),
+        }
     }
 
     fn extensions(&self) -> &[&str] {

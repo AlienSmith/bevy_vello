@@ -141,7 +141,9 @@ pub fn prepare_scene_affines(
     };
     let size_pixels: UVec2 = camera.physical_viewport_size.unwrap();
     let (pixels_x, pixels_y) = (size_pixels.x as f32, size_pixels.y as f32);
+    let mut count = 0;
     for (entity, render_scene) in render_scenes.iter_mut() {
+        count += 1;
         let ndc_to_pixels_matrix = Mat4::from_cols_array_2d(&[
             [pixels_x / 2.0, 0.0, 0.0, pixels_x / 2.0],
             [0.0, pixels_y / 2.0, 0.0, pixels_y / 2.0],

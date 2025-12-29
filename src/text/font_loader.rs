@@ -15,19 +15,17 @@ impl AssetLoader for VelloFontLoader {
 
     type Error = VectorLoaderError;
 
-    fn load<'a>(
-        &'a self,
-        reader: &'a mut Reader,
-        _settings: &'a Self::Settings,
-        _load_context: &'a mut LoadContext,
-    ) -> impl ConditionalSendFuture<Output = Result<Self::Asset, Self::Error>> {
-        Box::pin(async move {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).await?;
-            let vello_font = VelloFont::new(bytes.to_vec());
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &Self::Settings,
+        _load_context: &mut LoadContext<'_>,
+    ) -> Result<Self::Asset, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        let vello_font = VelloFont::new(bytes.to_vec());
 
-            Ok(vello_font)
-        })
+        Ok(vello_font)
     }
 
     fn extensions(&self) -> &[&str] {

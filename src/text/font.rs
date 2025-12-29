@@ -19,6 +19,9 @@ pub struct VelloFont {
     pub font: peniko::Font,
 }
 
+#[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
+pub struct VelloFontSource(pub Handle<VelloFont>);
+
 impl RenderAsset for VelloFont {
     type SourceAsset = VelloFont;
 

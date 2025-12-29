@@ -3,6 +3,7 @@ use super::plugin::simulate_graph::VelloSimulateGraph;
 use super::prepare::PreparedAffine;
 use crate::collision::{CollisionResults, ExtractedVelloCollisionScene};
 use crate::render::extract::ExtractedRenderScene;
+use crate::render::VelloCanvasMaterialSource;
 use crate::{CoordinateSpace, VelloCanvasMaterial, VelloFont};
 use bevy::ecs::system::lifetimeless::Read;
 use bevy::prelude::*;
@@ -16,7 +17,6 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{ExtractedView, NoFrustumCulling};
-use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
 use bevy::window::{WindowResized, WindowResolution};
 use vello::kurbo::Affine;
 use vello::{RenderParams, RendererOptions, Scene};
@@ -187,12 +187,14 @@ pub fn prepare_scene(
                     alignment,
                     ..
                 }) => {
-                    if let Some(font) = font_render_assets.get_mut(font) {
+                    if let Some(font) = font_render_assets.get_mut(font.id()) {
                         font.render(&mut scene_buffer, *affine, text, *alignment);
                     }
+                    panic!("Current no entity is apwned with this, If the entity is not spawned with a TemporaryRenderEntity you have repeated things");
                 }
             }
         }
+        //info!("scene appended");
 
         // TODO: Vello should be ignoring 0-sized buffers in the future, so this could go away.
         // Prevent a panic in the vello renderer if all the items contain empty encoding data
@@ -265,7 +267,7 @@ pub fn prepare_scene(
 
 pub fn resize_rendertargets(
     mut window_resize_events: EventReader<WindowResized>,
-    mut query: Query<(&mut SSRenderTarget, &Handle<VelloCanvasMaterial>)>,
+    mut query: Query<(&mut SSRenderTarget, &VelloCanvasMaterialSource)>,
     mut images: ResMut<Assets<Image>>,
     mut target_materials: ResMut<Assets<VelloCanvasMaterial>>,
     windows: Query<&Window>,
@@ -284,7 +286,7 @@ pub fn resize_rendertargets(
         }
         for (mut target, target_mat_handle) in query.iter_mut() {
             let image = setup_image(&mut images, &window.resolution);
-            if let Some(mat) = target_materials.get_mut(target_mat_handle) {
+            if let Some(mat) = target_materials.get_mut(target_mat_handle.id()) {
                 target.0 = image.clone();
                 mat.texture = image;
             }
@@ -335,20 +337,20 @@ pub fn setup_ss_rendertarget(
     });
     let texture_image = setup_image(&mut images, &window.resolution);
     let render_target = SSRenderTarget(texture_image.clone());
-    let mesh = Mesh2dHandle(mesh_handle.clone());
     let material = custom_materials.add(VelloCanvasMaterial {
         texture: texture_image,
     });
 
     commands
-        .spawn(MaterialMesh2dBundle {
-            mesh,
-            material,
-            transform: Transform::from_translation(0.001 * Vec3::NEG_Z), /* Make sure the vello
-                                                                          * canvas renders behind
-                                                                          * Gizmos */
-            ..Default::default()
-        })
+        .spawn((
+            // Replaces MaterialMesh2dBundle
+            Mesh2d(mesh_handle.clone()),
+            MeshMaterial2d(material),
+            Transform::from_translation(0.001 * Vec3::NEG_Z),
+            Visibility::default(), // Required if not using a bundle
+                                   // Note: 'InheritedVisibility' and 'ViewVisibility' are now required
+                                   // but are automatically added via Required Components in 0.15
+        ))
         .insert(NoFrustumCulling)
         .insert(render_target);
 }
@@ -433,7 +435,7 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
         let device = world.resource::<RenderDevice>();
         let queue = world.resource::<RenderQueue>();
         let time = world.resource::<Time>();
-        let time_in_second = time.elapsed_seconds();
+        let time_in_second = time.elapsed_secs();
 
         for (_entity, batches) in self.render_query.iter_manual(world) {
             if let Some(image) = &batches.image {

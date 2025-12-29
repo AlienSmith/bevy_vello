@@ -63,6 +63,6 @@ pub fn update_edge_pan_camera(
 
         // Apply movement (scaled by zoom and time)
         let move_speed = camera.pan_speed * camera.zoom_level;
-        transform.translation += (movement * move_speed * time.delta_seconds()).extend(0.0);
+        transform.translation += (movement * move_speed * time.delta_secs()).extend(0.0);
     }
 }

@@ -264,7 +264,7 @@ macro_rules! define_particle_effect {
                 mut query: Query<(Entity, &mut $name)>,
                 time: Res<Time>
             ){
-                let delta = time.delta_seconds();
+                let delta = time.delta_secs();
                 let mut rng = rand::thread_rng();
                 for (entity, mut effect) in query.iter_mut() {
                     effect.0.update(delta, &mut rng);

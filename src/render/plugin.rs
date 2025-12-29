@@ -1,6 +1,7 @@
 use super::extract::{self, ExtractedPixelScale, SSRenderTarget};
 use super::systems::{VelloRenderDriverNode, VelloRenderNode};
 use super::{prepare, systems};
+use crate::integrations::VelloAssetSource;
 use crate::render::extract::ExtractedRenderText;
 use crate::render::SSRT_SHADER_HANDLE;
 use crate::{VelloAsset, VelloScene};
@@ -120,7 +121,7 @@ impl Plugin for VelloRenderPlugin {
         )
         .add_systems(
             PostUpdate,
-            check_visibility::<Or<(With<VelloScene>, With<Handle<VelloAsset>>)>>
+            check_visibility::<Or<(With<VelloScene>, With<VelloAssetSource>)>>
                 .in_set(VisibilitySystems::CheckVisibility),
         );
     }

@@ -586,7 +586,7 @@ pub fn update_mouse_position(
         .next()
         .and_then(|window| window.cursor_position())
     {
-        if let Some(world_pos) = camera.viewport_to_world_2d(camera_transform, mouse_position) {
+        if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, mouse_position) {
             p.world_pos = world_pos;
         }
     }

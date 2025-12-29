@@ -62,9 +62,10 @@ impl VelloText {
         camera_transform: &GlobalTransform,
     ) -> Option<Rect> {
         let Rect { min, max } = self.bb_in_world_space(font, gtransform);
-        camera
-            .viewport_to_world_2d(camera_transform, min)
-            .zip(camera.viewport_to_world_2d(camera_transform, max))
-            .map(|(min, max)| Rect { min, max })
+        // viewport_to_world_2d now returns Ok(Vec2) or Err(ViewportToWorldError)
+        let min_world = camera.viewport_to_world_2d(camera_transform, min).ok()?;
+        let max_world = camera.viewport_to_world_2d(camera_transform, max).ok()?;
+
+        Some(Rect::from_corners(min_world, max_world))
     }
 }

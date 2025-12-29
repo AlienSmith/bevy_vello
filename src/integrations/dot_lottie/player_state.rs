@@ -88,7 +88,7 @@ impl PlayerState {
         self
     }
 
-    pub fn get_asset(&self) -> Option<&Handle<VelloAsset>> {
+    pub fn get_asset(&self) -> Option<&VelloAssetSource> {
         self.asset.as_ref()
     }
 

@@ -2,7 +2,7 @@
 // #![deny(missing_docs)] -- This would be great! But we are far away.
 //! An integration to render SVG and Lottie assets in Bevy with Vello.
 
-use crate::prelude::*;
+use crate::{integrations::VelloAssetSource, prelude::*};
 use bevy::prelude::*;
 
 mod plugin;
@@ -51,7 +51,7 @@ pub enum CoordinateSpace {
 #[derive(Bundle, Default)]
 pub struct VelloAssetBundle {
     /// Asset data to render
-    pub vector: Handle<VelloAsset>,
+    pub vector: VelloAssetSource,
     /// How the bounding asset is aligned, respective to the transform.
     pub alignment: VelloAssetAlignment,
     /// The coordinate space in which this vector should be rendered.
@@ -93,7 +93,7 @@ pub struct VelloSceneBundle {
 #[derive(Bundle, Default)]
 pub struct VelloTextBundle {
     /// Font to render
-    pub font: Handle<VelloFont>,
+    pub font: VelloAssetSource,
     /// Text to render
     pub text: VelloText,
     /// How the bounding text is aligned, respective to the transform.
@@ -161,6 +161,7 @@ pub fn add_default_light(mut commands: Commands) {
     let mut light_scene: VelloScene = VelloScene::default();
     let light_radius = 800.0;
     //let light_shape_ratio = 1.0 / 40.0;
+    info!("Add Light");
     light_scene.push_point_light(
         kurbo::Affine::scale(light_radius * 2.0),
         &[1.0, 1.0, 1.0],

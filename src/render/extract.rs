@@ -1,10 +1,12 @@
+#[cfg(feature = "lottie")]
+use crate::integrations::VelloAssetSource;
 use crate::{
-    text::VelloTextAlignment, CoordinateSpace, VelloAsset, VelloAssetAlignment, VelloFont,
-    VelloScene, VelloText,
+    text::{VelloFontSource, VelloTextAlignment},
+    CoordinateSpace, VelloAsset, VelloAssetAlignment, VelloScene, VelloText,
 };
 use bevy::{
     prelude::*,
-    render::{extract_component::ExtractComponent, Extract},
+    render::{extract_component::ExtractComponent, sync_world::TemporaryRenderEntity, Extract},
     window::PrimaryWindow,
 };
 #[allow(dead_code)]
@@ -28,7 +30,7 @@ pub fn extract_svg_instances(
     mut commands: Commands,
     query_vectors: Extract<
         Query<(
-            &Handle<VelloAsset>,
+            &VelloAssetSource,
             &VelloAssetAlignment,
             &CoordinateSpace,
             &GlobalTransform,
@@ -55,21 +57,24 @@ pub fn extract_svg_instances(
                 alpha,
                 ..
             },
-        ) = assets.get(vello_vector_handle)
+        ) = assets.get(vello_vector_handle.id())
         {
             if view_visibility.get() && inherited_visibility.get() {
-                commands.spawn(ExtractedRenderAsset {
-                    asset: asset.to_owned(),
-                    transform: *transform,
-                    alignment: *alignment,
-                    render_mode: *coord_space,
-                    ui_node: ui_node.cloned(),
-                    alpha: *alpha,
-                    #[cfg(feature = "lottie")]
-                    theme: None,
-                    #[cfg(feature = "lottie")]
-                    playhead: 0.0,
-                });
+                commands.spawn((
+                    ExtractedRenderAsset {
+                        asset: asset.to_owned(),
+                        transform: *transform,
+                        alignment: *alignment,
+                        render_mode: *coord_space,
+                        ui_node: ui_node.cloned(),
+                        alpha: *alpha,
+                        #[cfg(feature = "lottie")]
+                        theme: None,
+                        #[cfg(feature = "lottie")]
+                        playhead: 0.0,
+                    },
+                    TemporaryRenderEntity,
+                ));
             }
         }
     }
@@ -80,7 +85,7 @@ pub fn extract_lottie_instances(
     mut commands: Commands,
     query_vectors: Extract<
         Query<(
-            &Handle<VelloAsset>,
+            &VelloAssetSource,
             &VelloAssetAlignment,
             &CoordinateSpace,
             &GlobalTransform,
@@ -111,20 +116,23 @@ pub fn extract_lottie_instances(
                 alpha,
                 ..
             },
-        ) = assets.get(vello_vector_handle)
+        ) = assets.get(vello_vector_handle.id())
         {
             if view_visibility.get() && inherited_visibility.get() {
                 let playhead = playhead.frame();
-                commands.spawn(ExtractedRenderAsset {
-                    asset: asset.to_owned(),
-                    transform: *transform,
-                    alignment: *alignment,
-                    theme: theme.cloned(),
-                    render_mode: *coord_space,
-                    playhead,
-                    alpha: *alpha,
-                    ui_node: ui_node.cloned(),
-                });
+                commands.spawn((
+                    ExtractedRenderAsset {
+                        asset: asset.to_owned(),
+                        transform: *transform,
+                        alignment: *alignment,
+                        theme: theme.cloned(),
+                        render_mode: *coord_space,
+                        playhead,
+                        alpha: *alpha,
+                        ui_node: ui_node.cloned(),
+                    },
+                    TemporaryRenderEntity,
+                ));
             }
         }
     }
@@ -155,19 +163,22 @@ pub fn scene_instances(
         query_scenes.iter()
     {
         if view_visibility.get() && inherited_visibility.get() {
-            commands.spawn(ExtractedRenderScene {
-                transform: *transform,
-                render_mode: *coord_space,
-                scene: scene.clone(),
-                ui_node: ui_node.cloned(),
-            });
+            commands.spawn((
+                ExtractedRenderScene {
+                    transform: *transform,
+                    render_mode: *coord_space,
+                    scene: scene.clone(),
+                    ui_node: ui_node.cloned(),
+                },
+                TemporaryRenderEntity,
+            ));
         }
     }
 }
-
+//This is atually never spawned in a entity how wired.
 #[derive(Component, Clone)]
 pub struct ExtractedRenderText {
-    pub font: Handle<VelloFont>,
+    pub font: VelloFontSource,
     pub text: VelloText,
     pub alignment: VelloTextAlignment,
     pub transform: GlobalTransform,
@@ -176,7 +187,7 @@ pub struct ExtractedRenderText {
 
 impl ExtractComponent for ExtractedRenderText {
     type QueryData = (
-        &'static Handle<VelloFont>,
+        &'static VelloFontSource,
         &'static VelloText,
         &'static VelloTextAlignment,
         &'static GlobalTransform,
