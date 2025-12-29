@@ -133,7 +133,6 @@ pub fn add_connection_on_softbody(
             .unwrap();
         temp.connection = index;
         temp.initialized = true;
-        info!("add pin");
     }
 }
 

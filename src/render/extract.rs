@@ -163,7 +163,7 @@ pub fn scene_instances(
         query_scenes.iter()
     {
         //if view_visibility.get() && inherited_visibility.get() {
-        //TODO: reenable the frustum culling parts for which it does work anymore.
+        //TODO: reenable the frustum culling parts for which it does work anymore. be aware scene with only light should always got rendered.
         if inherited_visibility.get() {
             commands.spawn((
                 ExtractedRenderScene {

@@ -455,7 +455,6 @@ pub fn update_collider_from_mouse(
                         impulse: mouse_position.world_pos,
                     },
                 });
-                info!("add drag joint");
             }
         }
     }
@@ -495,7 +494,6 @@ pub fn update_collider_from_mouse(
                         *entity,
                     );
                     connection_status.push(temp);
-                    info!("add pin at {:?}", pos);
                 }
                 status.applied_impulse = Vec2::ZERO;
             }
@@ -540,10 +538,9 @@ pub fn update_collider_from_mouse(
                                 impulse: status.applied_impulse * ui_state.e_config.scale * 16.0,
                             },
                         });
-                        info!("add drag joint");
                     }
                 }
-                status.applied_impulse = Vec2::ZERO
+                status.applied_impulse = Vec2::ZERO;
             }
             ExteralEffectType::Selection => {
                 status.applied_impulse = Vec2::ZERO;
