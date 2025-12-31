@@ -260,7 +260,7 @@ pub fn ui_example_system(
         ui.add(egui::Slider::new(&mut ui_state.current.vec_y, -500.0..=500.0).text("vec_y"));
 
         //TODO: Fix the rotation problem probably with obb.
-        //ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
+        ui.add(egui::Slider::new(&mut ui_state.current.rotation, -360.0..=360.0).text("rotation"));
         ui.add(egui::Slider::new(&mut ui_state.current.scale, 0.01..=10.0).text("scale"));
         ui.add(
             egui::Slider::new(&mut ui_state.current.connection_complaince, 0.001..=1.0)

@@ -111,6 +111,7 @@ pub struct VelloCollider {
     pub(crate) uvs: Option<Vec<f32>>,
     pub(crate) soft_body_config: Option<SoftBodyInitConfig>,
     pub(crate) collision_config: Option<CollisionConstraintConfig>,
+    pub(crate) soft_body_global_transform: Transform,
     pub(crate) collision_group: u32, //item in the same collision group won't collide against each other
     pub is_selected: bool,
 }
@@ -132,6 +133,7 @@ impl VelloCollider {
         soft_body_init_config: Option<SoftBodyInitConfig>,
         collision_constraint_config: Option<CollisionConstraintConfig>,
         collision_group: u32,
+        transform: Transform,
     ) -> Self {
         Self {
             shape: path.clone(),
@@ -146,6 +148,7 @@ impl VelloCollider {
             soft_body_config: soft_body_init_config,
             collision_config: collision_constraint_config,
             collision_group,
+            soft_body_global_transform: transform,
         }
     }
 

@@ -206,7 +206,7 @@ fn spawn_collider(
     connection_status: &mut ResMut<ConnectionStatus>,
 ) {
     let mut entitys = vec![];
-    let count = 5;
+    let count = 1;
     for index in 0..count {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         let temp = make_collision_shape(
@@ -239,39 +239,39 @@ fn spawn_collider(
             inv_mass: 1.0,
         }
     };
-    for index in 0..count - 1 {
-        let x = ui_state.current.pos_x + (100.0 * index as f32) - 450.0;
-        let y = ui_state.current.pos_y;
-        let pos = bevy_to_vello(Vec2::new(x - 50.0, y + 50.0));
-        let pos1 = bevy_to_vello(Vec2::new(x, y));
-        let pos2 = bevy_to_vello(Vec2::new(x + 50.0, y + 50.0));
+    // for index in 0..count - 1 {
+    //     let x = ui_state.current.pos_x + (100.0 * index as f32) - 450.0;
+    //     let y = ui_state.current.pos_y;
+    //     let pos = bevy_to_vello(Vec2::new(x - 50.0, y + 50.0));
+    //     let pos1 = bevy_to_vello(Vec2::new(x, y));
+    //     let pos2 = bevy_to_vello(Vec2::new(x + 50.0, y + 50.0));
 
-        let e1 = entitys[index].clone();
-        let e2 = entitys[index + 1].clone();
+    //     let e1 = entitys[index].clone();
+    //     let e2 = entitys[index + 1].clone();
 
-        let offset = if index == 0 || index == count - 2 {
-            1.0
-        } else {
-            0.2
-        };
+    //     let offset = if index == 0 || index == count - 2 {
+    //         1.0
+    //     } else {
+    //         0.2
+    //     };
 
-        let temp = add_soft_body_connections(
-            connections,
-            add_connection_events,
-            ConnectionInitConfig::HingeJoint(
-                make_particle(pos),
-                make_particle(pos1),
-                make_particle(pos2),
-                ui_state.current.connection_complaince * 1e-3 * offset,
-                -180.0,
-                180.0,
-                1.0,
-            ),
-            e1,
-            e2,
-        );
-        connection_status.push(temp);
-    }
+    //     let temp = add_soft_body_connections(
+    //         connections,
+    //         add_connection_events,
+    //         ConnectionInitConfig::HingeJoint(
+    //             make_particle(pos),
+    //             make_particle(pos1),
+    //             make_particle(pos2),
+    //             ui_state.current.connection_complaince * 1e-3 * offset,
+    //             -180.0,
+    //             180.0,
+    //             1.0,
+    //         ),
+    //         e1,
+    //         e2,
+    //     );
+    //     connection_status.push(temp);
+    // }
 }
 
 fn update_from_ui(
@@ -556,14 +556,18 @@ fn make_collision_shape(
         _ => None,
     };
     let frame_path = rect.to_path(0.1);
+    let soft_body_init_transform = Transform {
+        translation: Vec3::new(transform.x, transform.y, 0.0),
+        rotation: Quat::from_rotation_z(transform.z.to_radians()),
+        scale: Vec3::new(transform.w, transform.w, 1.0),
+    };
     commands
         .spawn((
             VelloSceneBundle {
                 scene,
                 transform: Transform {
                     translation: Vec3::new(transform.x, transform.y, 0.0),
-                    rotation: Quat::from_rotation_z(transform.z.to_radians()),
-                    scale: Vec3::new(transform.w, transform.w, 1.0),
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -579,6 +583,7 @@ fn make_collision_shape(
                 soft_body_init_config,
                 collision_config,
                 collision_group,
+                soft_body_init_transform,
             ),
         ))
         .id()

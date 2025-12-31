@@ -1,5 +1,6 @@
 use core::f32;
 
+use avian2d::prelude::collider;
 use bevy::prelude::*;
 use parry2d::bounding_volume::Aabb;
 use parry2d::bounding_volume::SimdAabb;
@@ -13,6 +14,7 @@ use parry2d::partitioning::QbvhUpdateWorkspace;
 use parry2d::partitioning::SimdBestFirstVisitStatus;
 use parry2d::partitioning::SimdBestFirstVisitor;
 use parry2d::query::visitors::BoundingVolumeIntersectionsSimultaneousVisitor;
+use vello_physics::soft_body_connection;
 
 use crate::collision::CollisionSceneState;
 use crate::collision::RemovedColliders;
@@ -23,8 +25,8 @@ use crate::collision::VelloCollisionWorld;
 use crate::mat4_to_affine;
 use crate::VelloCollider;
 //aabb will only take the effect of position ignoring entity rotation and scale.
-pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &GlobalTransform) -> Aabb {
-    let position = transform.translation();
+pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &Transform) -> Aabb {
+    let position = transform.translation;
     let bbox = collider.get_aabb();
     let result = Aabb::new(
         Point::new(bbox.x + position.x, bbox.y + position.y),
@@ -33,7 +35,7 @@ pub fn compute_aabb_from_collider(collider: &VelloCollider, transform: &GlobalTr
     result
 }
 #[allow(dead_code)]
-pub fn compute_aabb(collider: &VelloCollider, transform: &GlobalTransform) -> Vec4 {
+pub fn compute_aabb(collider: &VelloCollider, transform: &Transform) -> Vec4 {
     let pos = mat4_to_affine(transform.compute_matrix()).translation();
     return Vec4::new(
         (pos.x + collider.aabb.x0) as f32,
@@ -110,7 +112,7 @@ impl BroadPhaseQbvh {
 
     pub fn update(
         &mut self,
-        all_colliders: &Query<(Entity, &VelloCollider, &GlobalTransform)>,
+        all_colliders: &Query<(Entity, &VelloCollider)>,
         modified_colliders: &Query<
             (Entity, &VelloCollider),
             Or<(Changed<VelloCollider>, Changed<GlobalTransform>)>,
@@ -137,10 +139,10 @@ impl BroadPhaseQbvh {
         let full_rebuild = self.qbvh.raw_nodes().is_empty();
         if full_rebuild {
             self.qbvh.clear_and_rebuild(
-                all_colliders.iter().map(|(index, collider, &transform)| {
+                all_colliders.iter().map(|(index, collider)| {
                     (
                         ColliderHandle(index),
-                        compute_aabb_from_collider(collider, &transform),
+                        compute_aabb_from_collider(collider, &collider.soft_body_global_transform),
                     )
                 }),
                 margin,
@@ -158,8 +160,11 @@ impl BroadPhaseQbvh {
 
             let _ = self.qbvh.refit(margin, &mut self.workspace, |handle| {
                 //TODO: The assumption is missing removed component would be collect later, other wise this could be a potential memory leak
-                if let Ok((_entity, collider, transform)) = all_colliders.get(handle.0) {
-                    return compute_aabb_from_collider(collider, transform);
+                if let Ok((_entity, collider)) = all_colliders.get(handle.0) {
+                    return compute_aabb_from_collider(
+                        collider,
+                        &collider.soft_body_global_transform,
+                    );
                 } else {
                     Aabb::new_invalid()
                 }
@@ -174,7 +179,7 @@ impl BroadPhaseQbvh {
 }
 
 pub fn update_broad_phase(
-    all_colliders: Query<(Entity, &VelloCollider, &GlobalTransform)>,
+    all_colliders: Query<(Entity, &VelloCollider)>,
     modified_colliders: Query<
         (Entity, &VelloCollider),
         Or<(Changed<VelloCollider>, Changed<GlobalTransform>)>,
@@ -196,7 +201,7 @@ pub fn update_broad_phase(
 
 #[allow(dead_code)]
 pub fn update_broad_phase_simple(
-    all_colliders: Query<(Entity, &VelloCollider, &GlobalTransform)>,
+    all_colliders: Query<(Entity, &VelloCollider)>,
     mut collision_world: ResMut<VelloCollisionWorld>,
     mut broad_phase: ResMut<SimpleBroadPhase>,
 ) {
@@ -210,13 +215,13 @@ pub struct BroadPhaseSimple;
 impl BroadPhaseSimple {
     pub fn update(
         &mut self,
-        all_colliders: &Query<(Entity, &VelloCollider, &GlobalTransform)>,
+        all_colliders: &Query<(Entity, &VelloCollider)>,
         collision_world: &mut ResMut<VelloCollisionWorld>,
     ) {
         collision_world.collision_pairs_bvh.clear();
         let mut static_colliders: Vec<Entity> = vec![];
         let mut dynamic_colliders: Vec<Entity> = vec![];
-        for (item, collider, _) in all_colliders.iter() {
+        for (item, collider) in all_colliders.iter() {
             if collider.is_soft_body() {
                 dynamic_colliders.push(item);
             } else {
@@ -224,24 +229,22 @@ impl BroadPhaseSimple {
             }
         }
         for i in 0..dynamic_colliders.len() {
-            let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
-            let aabb = compute_aabb(collider, transform);
+            let (item, collider) = all_colliders.get(dynamic_colliders[i]).unwrap();
+            let aabb = compute_aabb(collider, &collider.soft_body_global_transform);
             for j in (i + 1)..dynamic_colliders.len() {
-                let (item1, collider1, transform1) =
-                    all_colliders.get(dynamic_colliders[j]).unwrap();
-                let aabb1 = compute_aabb(collider1, transform1);
+                let (item1, collider1) = all_colliders.get(dynamic_colliders[j]).unwrap();
+                let aabb1 = compute_aabb(collider1, &collider1.soft_body_global_transform);
                 if check_overlaps(aabb, aabb1) {
                     collision_world.collision_pairs_bvh.push((item, item1));
                 }
             }
         }
         for i in 0..dynamic_colliders.len() {
-            let (item, collider, transform) = all_colliders.get(dynamic_colliders[i]).unwrap();
-            let aabb = compute_aabb(collider, transform);
+            let (item, collider) = all_colliders.get(dynamic_colliders[i]).unwrap();
+            let aabb = compute_aabb(collider, &collider.soft_body_global_transform);
             for j in 0..static_colliders.len() {
-                let (item1, collider1, transform1) =
-                    all_colliders.get(static_colliders[j]).unwrap();
-                let aabb1 = compute_aabb(collider1, transform1);
+                let (item1, collider1) = all_colliders.get(static_colliders[j]).unwrap();
+                let aabb1 = compute_aabb(collider1, &collider.soft_body_global_transform);
                 if check_overlaps(aabb, aabb1) {
                     collision_world.collision_pairs_bvh.push((item, item1));
                 }
