@@ -44,7 +44,7 @@ repository.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 bevy = { workspace = true }
-vello = {path = "../study_vello", features = ["gpu_particles"]}
+vello = {path = "../study_vello"}
 vello_svg = {path = "../study_vello/integrations/vello_svg"}
 velato = {path = "../study_vello/integrations/velato"}
 vello_physics = {path = "../study_vello/integrations/vello_physics", features = ["parallel"]}

@@ -7,7 +7,15 @@
 mod connections;
 mod edge_pan_camera;
 mod utility;
-use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, platform::collections::HashMap, prelude::*};
+use bevy::{
+    diagnostic::FrameTimeDiagnosticsPlugin,
+    platform::collections::HashMap,
+    prelude::*,
+    render::{
+        settings::{InstanceFlags, RenderCreation, WgpuSettings},
+        RenderDebugFlags, RenderPlugin,
+    },
+};
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
@@ -143,6 +151,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // filter: "wgpu=warn,bevy_ecs=info".to_string(),
                     ..default()
                 }),
+            //Enable the following code to have the source code build in the shader binary to work with aftermath, renderdoc etc
+            // .set(RenderPlugin {
+            //     debug_flags: RenderDebugFlags::all(),
+            //     render_creation: RenderCreation::Automatic(WgpuSettings {
+            //         // 2. EXPLICITLY UNSET DISCARD_HAL_LABELS
+            //         // By default, InstanceFlags::from_build_config() unsets markers in release.
+            //         // We must force them back on.
+            //         instance_flags: InstanceFlags::DEBUG | InstanceFlags::VALIDATION,
+            //         ..Default::default()
+            //     }),
+            //     ..Default::default()
+            // }),
         )
         .init_state::<GameState>()
         .insert_resource(UiState::default())
@@ -206,7 +226,7 @@ fn spawn_collider(
     connection_status: &mut ResMut<ConnectionStatus>,
 ) {
     let mut entitys = vec![];
-    let count = 1;
+    let count = 10;
     for index in 0..count {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         let temp = make_collision_shape(
@@ -721,7 +741,7 @@ fn collision_response(
     mut c: ResMut<CollisionEventTracker>,
     ui_state: Res<UiState>,
 ) {
-    if ui_state.spawn_particles {
+    if ui_state.spawn_particle_effect {
         for item in c.filtered_events.drain(..) {
             let pos = 0.5 * (item.collision_point_a + item.collision_point_b);
             let mut scene = VelloScene::default();
