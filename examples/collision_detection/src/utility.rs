@@ -39,7 +39,8 @@ pub enum ColliderType {
     Key = 4,
     Shield = 5,
     Knife = 6,
-    Ammo = 7,
+    Capsule = 7,
+    Ammo = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -64,6 +65,7 @@ pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i3
         ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
         ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
         ColliderType::Ammo => (peniko::Color::GREEN, 0.1, 1),
+        ColliderType::Capsule => (peniko::Color::PINK, 0.5, 1),
     }
 }
 
@@ -81,6 +83,7 @@ pub(crate) struct EntityConfig {
     pub(crate) vec_y: f32,
     pub(crate) rotation: f32,
     pub(crate) scale: f32,
+    pub(crate) scale_modifier: f32,
     pub(crate) connection_complaince: f32,
     pub(crate) collider_type: ColliderType,
 }
@@ -118,6 +121,7 @@ impl Default for EntityConfig {
     fn default() -> Self {
         EntityConfig {
             scale: 1.0,
+            scale_modifier: 1.0,
             pos_x: 0.0,
             pos_y: 0.0,
             vec_x: 0.0,
@@ -128,6 +132,9 @@ impl Default for EntityConfig {
         }
     }
 }
+
+#[derive(Default, Component)]
+pub struct Preview;
 
 #[derive(Default, Resource)]
 
@@ -141,6 +148,8 @@ pub(crate) struct UiState {
     pub(crate) collision_config: CollisionConstraintConfig,
     pub(crate) delete_all_dynamic: bool,
     pub(crate) spawn_particle_effect: bool,
+    pub(crate) preview_state: bool,
+    pub(crate) preview_state_just_modified: bool,
 }
 
 pub fn ui_example_system(
@@ -239,6 +248,7 @@ pub fn ui_example_system(
         ui_state.just_spawn = false;
         ui_state.just_modified = false;
         ui_state.delete_all_dynamic = false;
+        ui_state.preview_state_just_modified = false;
         // Get the FPS diagnostic path
         let fps_path = FrameTimeDiagnosticsPlugin::FPS;
 
@@ -266,7 +276,7 @@ pub fn ui_example_system(
             egui::Slider::new(&mut ui_state.current.connection_complaince, 0.001..=1.0)
                 .text("connection_compliance"),
         );
-
+        let last_spawn_type = ui_state.current.collider_type;
         egui::ComboBox::from_label("Collider Type")
             .selected_text(format!("{:?}", ui_state.current.collider_type))
             .show_ui(ui, |ui| {
@@ -302,11 +312,30 @@ pub fn ui_example_system(
                 );
                 ui.selectable_value(
                     &mut ui_state.current.collider_type,
+                    ColliderType::Knife,
+                    "Knife",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::Capsule,
+                    "Capsule",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
                     ColliderType::Ammo,
                     "Ammo",
                 );
             });
+
+        if last_spawn_type != ui_state.current.collider_type {
+            ui_state.preview_state_just_modified = true;
+        }
         ui.checkbox(&mut ui_state.spawn_particle_effect, "Spawn Particles");
+        if ui.button("TogglePreview").clicked() {
+            ui_state.preview_state = !ui_state.preview_state;
+            ui_state.preview_state_just_modified = true;
+        }
+
         if ui.button("StackSpawn").clicked() {
             ui_state.current.pos_y += 40.0;
             ui_state.just_spawn = true;

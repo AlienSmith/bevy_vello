@@ -6,6 +6,7 @@
 
 mod connections;
 mod edge_pan_camera;
+mod primitives;
 mod utility;
 use bevy::{
     diagnostic::FrameTimeDiagnosticsPlugin,
@@ -51,7 +52,7 @@ use crate::{
     connections::ConnectionStatus,
     utility::{
         bevy_to_vello, get_default_parameters, ui_example_system, update_collider_from_mouse,
-        update_mouse, ColliderType, UiState,
+        update_mouse, ColliderType, Preview, UiState,
     },
 };
 
@@ -213,9 +214,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn update_preview(
+    commands: &mut Commands,
+    ui_state: &ResMut<UiState>,
+    query: &mut Query<(&mut VelloScene, &mut Transform), With<Preview>>,
+    f: impl Fn() -> (BezPath, kurbo::Rect),
+) {
+    let scaler = ui_state.current.scale * ui_state.current.scale_modifier;
+    let transform = Transform {
+        translation: Vec3::new(ui_state.current.pos_x, ui_state.current.pos_y, 2000.0),
+        rotation: Quat::from_rotation_z(ui_state.current.rotation.to_radians()),
+        scale: Vec3::new(scaler, scaler, 1.0),
+    };
+
+    if let Ok((_, mut t)) = query.single_mut() {
+        *t = transform;
+    }
+    if ui_state.preview_state_just_modified {
+        let scene = if ui_state.preview_state {
+            let (p, _) = f();
+            let mut scene: VelloScene = VelloScene::default();
+            scene.fill(
+                peniko::Fill::NonZero,
+                kurbo::Affine::default(),
+                peniko::Color::rgba(0.0, 0.0, 1.0, 0.5),
+                None,
+                &p,
+            );
+            Some(scene)
+        } else {
+            None
+        };
+        if let Ok((mut s, _)) = query.single_mut() {
+            s.reset();
+            if let Some(scene) = scene {
+                *s = scene;
+            }
+        } else {
+            if let Some(scene) = scene {
+                commands.spawn((
+                    VelloSceneBundle {
+                        scene,
+                        transform,
+                        ..Default::default()
+                    },
+                    Preview,
+                ));
+            }
+        }
+    }
+}
+
 fn spawn_collider(
     commands: &mut Commands,
-    ui_state: &Res<UiState>,
+    ui_state: &ResMut<UiState>,
     color: peniko::Brush,
     scale_modifier: f32,
     f: impl Fn() -> (BezPath, kurbo::Rect),
@@ -225,14 +277,18 @@ fn spawn_collider(
     add_connection_events: &mut EventWriter<AddBodyConnectionEvent>,
     connection_status: &mut ResMut<ConnectionStatus>,
 ) {
+    if !ui_state.just_spawn {
+        return;
+    }
     let mut entitys = vec![];
-    let count = 10;
+    let count = 1;
     for index in 0..count {
         let reverse_velocity = if index > 4 { -1.0 } else { 1.0 };
         let temp = make_collision_shape(
             commands,
             Vec4::new(
-                ui_state.current.pos_x + (100.0 * index as f32) - 500.0,
+                // ui_state.current.pos_x + (100.0 * index as f32) - 500.0,
+                ui_state.current.pos_x,
                 ui_state.current.pos_y,
                 ui_state.current.rotation,
                 ui_state.current.scale * scale_modifier,
@@ -295,7 +351,7 @@ fn spawn_collider(
 }
 
 fn update_from_ui(
-    ui_state: Res<UiState>,
+    mut ui_state: ResMut<UiState>,
     mut commands: Commands,
     svg_colliders: Res<SvgColliderAssetManager>,
     images: Res<VelloImageAssetManager>,
@@ -306,6 +362,7 @@ fn update_from_ui(
     mut add_connection_events: EventWriter<AddBodyConnectionEvent>,
     mut connection_status: ResMut<ConnectionStatus>,
     query: Query<(Entity, &VelloCollider)>,
+    mut preview_query: Query<(&mut VelloScene, &mut Transform), With<Preview>>,
 ) {
     if ui_state.delete_all_dynamic {
         for (entity, collider) in query.iter() {
@@ -326,7 +383,7 @@ fn update_from_ui(
             ui_state.c_config.gravity_y,
         ));
     }
-    if ui_state.just_spawn {
+    if ui_state.just_spawn || (ui_state.preview_state_just_modified && ui_state.preview_state) {
         let config = ui_state.soft_body_config;
         let (color, scaler, _complexity_modifier) =
             get_default_parameters(ui_state.current.collider_type);
@@ -338,6 +395,8 @@ fn update_from_ui(
                     let rect_path = rect.to_path(0.1);
                     (rect_path, rect)
                 };
+                ui_state.current.scale_modifier = scaler;
+                update_preview(&mut commands, &ui_state, &mut preview_query, make_rect);
                 spawn_collider(
                     &mut commands,
                     &ui_state,
@@ -358,6 +417,8 @@ fn update_from_ui(
                     let rect_path = circle.to_path(0.1);
                     (rect_path, rect)
                 };
+                ui_state.current.scale_modifier = scaler;
+                update_preview(&mut commands, &ui_state, &mut preview_query, make_circle);
                 spawn_collider(
                     &mut commands,
                     &ui_state,
@@ -372,17 +433,11 @@ fn update_from_ui(
                 );
             }
             ColliderType::Ammo => {
+                let index =
+                    (ui_state.current.collider_type as u32 - ColliderType::Star as u32) as usize;
                 let make_collider = || {
                     let svg_collider = custom_assets
-                        .get(
-                            &svg_colliders
-                                .get_index(
-                                    (ui_state.current.collider_type as u32
-                                        - ColliderType::Star as u32)
-                                        as usize,
-                                )
-                                .unwrap(),
-                        )
+                        .get(&svg_colliders.get_index(index).unwrap())
                         .unwrap();
                     (svg_collider.shape.clone(), svg_collider.aabb.clone())
                 };
@@ -408,7 +463,8 @@ fn update_from_ui(
                 //     .clone()
                 //     .with_usage(peniko::ImageUsageType::TRANSPARENT);
                 // let brush = bevy_vello::prelude::peniko::Brush::Image(image);
-
+                ui_state.current.scale_modifier = scaler;
+                update_preview(&mut commands, &ui_state, &mut preview_query, make_collider);
                 spawn_collider(
                     &mut commands,
                     &ui_state,
@@ -423,21 +479,16 @@ fn update_from_ui(
                 );
             }
             _ => {
+                let index =
+                    (ui_state.current.collider_type as u32 - ColliderType::Star as u32) as usize;
                 let make_collider = || {
                     let svg_collider = custom_assets
-                        .get(
-                            &svg_colliders
-                                .get_index(
-                                    (ui_state.current.collider_type as u32
-                                        - ColliderType::Star as u32)
-                                        as usize,
-                                )
-                                .unwrap(),
-                        )
+                        .get(&svg_colliders.get_index(index).unwrap())
                         .unwrap();
                     (svg_collider.shape.clone(), svg_collider.aabb.clone())
                 };
-
+                ui_state.current.scale_modifier = scaler;
+                update_preview(&mut commands, &ui_state, &mut preview_query, make_collider);
                 spawn_collider(
                     &mut commands,
                     &ui_state,
@@ -452,6 +503,13 @@ fn update_from_ui(
                 );
             }
         };
+    } else {
+        let make_rect = || {
+            let rect = kurbo::Rect::new(-20.0, -20.0, 20.0, 20.0);
+            let rect_path = rect.to_path(0.1);
+            (rect_path, rect)
+        };
+        update_preview(&mut commands, &ui_state, &mut preview_query, make_rect);
     }
 }
 
@@ -685,6 +743,10 @@ fn setup_resources(
     );
     colliders.push(
         asset_server.load("colliders/knife.collider.svg"),
+        VelloColliderAssetMetaData::default(),
+    );
+    colliders.push(
+        asset_server.load("colliders/capsule.collider.svg"),
         VelloColliderAssetMetaData::default(),
     );
     colliders.push(
