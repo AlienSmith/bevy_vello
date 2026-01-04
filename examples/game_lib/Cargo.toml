@@ -1,10 +1,12 @@
 [package]
-name = "collision_detection"
+name = "game_lib"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
 repository.workspace = true
 publish = false
+
+[lib]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
@@ -15,4 +17,3 @@ bevy = { workspace = true}
 bevy_vello = { path = "../../"}
 bevy_egui = "0.34.0"
 nalgebra = "0.33.0"
-game_lib ={ path = "../game_lib" }

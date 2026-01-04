@@ -142,3 +142,14 @@ pub fn add_soft_body_connections(
 
 #[derive(Component)]
 pub struct PivotVisualizer;
+
+pub struct VelloConnectionInitConfig {
+    pub connection_config: ConnectionInitConfig,
+    pub entity_a: Entity,
+    pub entity_b: Entity,
+}
+
+#[derive(Component)]
+pub struct VelloJoint {
+    init_config: VelloConnectionInitConfig,
+}

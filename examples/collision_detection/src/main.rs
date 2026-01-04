@@ -6,7 +6,6 @@
 
 mod connections;
 mod edge_pan_camera;
-mod primitives;
 mod utility;
 use bevy::{
     diagnostic::FrameTimeDiagnosticsPlugin,

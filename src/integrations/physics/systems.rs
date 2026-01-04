@@ -5,7 +5,7 @@ use crate::{
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
         AddBodyConnectionEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
-        PivotVisualizer, SoftBodyConnections, VelloConstraintWorld,
+        PivotVisualizer, SoftBodyConnections, VelloConstraintWorld, VelloJoint,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -38,6 +38,25 @@ pub fn generate_soft_body_for_collider(
                 collider.soft_body_config.clone().unwrap(),
             );
         }
+    }
+}
+
+pub fn generate_connection_for_joint(
+    query: Query<(Entity, &VelloJoint), Added<VelloJoint>>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    for (e, j) in query.iter() {
+        let index_a = constraint_world
+            .data
+            .get_softbody_from_collider(j.init_config.entity_a)
+            .unwrap();
+        let index_b = constraint_world
+            .data
+            .get_softbody_from_collider(j.init_config.entity_b)
+            .unwrap();
+        let index = constraint_world
+            .data
+            .add_connection(&j.init_config.connection_config, (index_a, index_b));
     }
 }
 
