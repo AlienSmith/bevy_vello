@@ -1,11 +1,11 @@
-use std::{cmp::max, vec};
+use std::cmp::max;
 
 use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
-        AddBodyConnectionEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
-        PivotVisualizer, SoftBodyConnections, VelloConstraintWorld, VelloJoint,
+        ColliderExternalImpulseEvent, JointExternalForceEvent, PivotVisualizer,
+        VelloConstraintWorld, VelloJoint,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -54,9 +54,11 @@ pub fn generate_connection_for_joint(
             .data
             .get_softbody_from_collider(j.init_config.entity_b)
             .unwrap();
-        let index = constraint_world
-            .data
-            .add_connection(&j.init_config.connection_config, (index_a, index_b));
+        constraint_world.data.add_connection(
+            &j.init_config.connection_config,
+            (index_a, index_b),
+            e,
+        );
     }
 }
 
@@ -67,6 +69,15 @@ pub fn remove_soft_body(
     for item in &removed_colliders.colliders {
         constraint_world.data.remove_soft_body(*item);
     }
+}
+
+pub fn remove_connection(
+    mut removed: RemovedComponents<VelloJoint>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    removed.read().into_iter().for_each(|e| {
+        constraint_world.data.remove_connection(e);
+    });
 }
 
 pub fn update_collider_from_soft_body(
@@ -107,52 +118,18 @@ pub fn apply_explicit_impulse_on_softbody(
 pub fn apply_explicit_impulse_on_joint(
     mut constraint_world: ResMut<VelloConstraintWorld>,
     mut events: EventReader<JointExternalForceEvent>,
-    connections: Res<SoftBodyConnections>,
 ) {
     for event in events.read() {
         if let Some(particles) = constraint_world
             .data
-            .softbody_connection
             .get_particles_info_of_connection(event.connection_index)
         {
-            if let Some(handle) = connections.connections.get(event.connection_index) {
-                if !handle.initialized {
-                    panic!("try to add an external force to a connectioin not existing");
-                }
-                for item in (event.filter)(particles, event.filter_data) {
-                    constraint_world
-                        .data
-                        .softbody_connection
-                        .add_external_force(item, handle.connection);
-                }
+            for item in (event.filter)(particles, event.filter_data) {
+                constraint_world
+                    .data
+                    .add_external_force_connection(event.connection_index, item);
             }
         }
-    }
-}
-
-pub fn add_connection_on_softbody(
-    mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut events: EventReader<AddBodyConnectionEvent>,
-    mut connections: ResMut<SoftBodyConnections>,
-) {
-    for event in events.read() {
-        let index_a = constraint_world
-            .data
-            .get_softbody_from_collider(event.entity_a)
-            .unwrap();
-        let index_b = constraint_world
-            .data
-            .get_softbody_from_collider(event.entity_b)
-            .unwrap();
-        let index = constraint_world
-            .data
-            .add_connection(&event.connection_config, (index_a, index_b));
-        let temp = connections
-            .connections
-            .get_mut(event.connection_handle)
-            .unwrap();
-        temp.connection = index;
-        temp.initialized = true;
     }
 }
 
@@ -331,7 +308,7 @@ pub fn create_update_pivot_visualizer(
             PivotVisualizer,
         ));
     } else {
-        if let Ok(mut data) = q.get_single_mut() {
+        if let Ok(mut data) = q.single_mut() {
             *data = scene;
         }
     }

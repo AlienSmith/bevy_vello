@@ -13,9 +13,8 @@ use bevy_vello::{
     integrations::{
         particles::Particle,
         physics::{
-            add_soft_body_connections, AddBodyConnectionEvent, ColliderExternalImpulseEvent,
-            ConnectionInitConfig, ExternalForce, FilterData, JointExternalForceEvent, ParticleInfo,
-            SoftBodyConnections, VelloParticle,
+            ColliderExternalImpulseEvent, ConnectionInitConfig, ExternalForce, FilterData,
+            JointExternalForceEvent, ParticleInfo, VelloJoint, VelloParticle,
         },
     },
     vello::{
@@ -27,6 +26,9 @@ use bevy_vello::{
 use nalgebra::Vector2;
 
 use crate::connections::ConnectionStatus;
+
+#[derive(Component)]
+pub struct StaticSceneComponent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u32)]
@@ -463,12 +465,11 @@ pub fn bevy_to_vello(point: Vec2) -> Vector2<f32> {
 }
 
 pub fn update_collider_from_mouse(
+    mut commands: Commands,
     mut query: Query<&mut VelloCollider>,
     mut status: ResMut<ColliderStatus>,
     mut force_on_frame_events: EventWriter<ColliderExternalImpulseEvent>,
-    mut add_connection_events: EventWriter<AddBodyConnectionEvent>,
     mut force_on_joint_events: EventWriter<JointExternalForceEvent>,
-    mut connections: ResMut<SoftBodyConnections>,
     mouse_position: Res<MouseStatus>,
     mut connection_status: ResMut<ConnectionStatus>,
     ui_state: Res<UiState>,
@@ -476,15 +477,13 @@ pub fn update_collider_from_mouse(
     let effect = ui_state.e_config.drag_type;
     if effect == ExteralEffectType::SnapJointToMouse && mouse_position.pressed {
         if let Some(handle) = &connection_status.last_connection {
-            if let Some(index) = connections.get(handle) {
-                force_on_joint_events.send(JointExternalForceEvent {
-                    filter: drag_particle_to_point,
-                    connection_index: index,
-                    filter_data: FilterData {
-                        impulse: mouse_position.world_pos,
-                    },
-                });
-            }
+            force_on_joint_events.write(JointExternalForceEvent {
+                filter: drag_particle_to_point,
+                connection_index: *handle,
+                filter_data: FilterData {
+                    impulse: mouse_position.world_pos,
+                },
+            });
         }
     }
     if status.applied_impulse != Vec2::ZERO {
@@ -493,7 +492,7 @@ pub fn update_collider_from_mouse(
                 let drag_filter = drag_all_particles;
 
                 if let Some(entity) = &status.selected {
-                    force_on_frame_events.send(ColliderExternalImpulseEvent {
+                    force_on_frame_events.write(ColliderExternalImpulseEvent {
                         filter: drag_filter,
                         entity: *entity,
                         filter_data: FilterData {
@@ -507,22 +506,22 @@ pub fn update_collider_from_mouse(
                 let position = bevy_to_vello(mouse_position.world_pos);
                 let pos = Vector2::new(position.x, position.y);
                 if let Some(entity) = &status.selected {
-                    let temp = add_soft_body_connections(
-                        &mut connections,
-                        &mut add_connection_events,
-                        ConnectionInitConfig::SinglePivot((
-                            VelloParticle {
-                                previous_pos: pos,
-                                pos,
-                                velocity: Vector2::new(0.0, 0.0),
-                                inv_mass: 1.0,
-                            },
-                            0.01,
-                        )),
-                        *entity,
-                        *entity,
-                    );
-                    connection_status.push(temp);
+                    let id = commands
+                        .spawn(VelloJoint::new(
+                            ConnectionInitConfig::SinglePivot((
+                                VelloParticle {
+                                    previous_pos: pos,
+                                    pos,
+                                    velocity: Vector2::new(0.0, 0.0),
+                                    inv_mass: 1.0,
+                                },
+                                0.01,
+                            )),
+                            *entity,
+                            *entity,
+                        ))
+                        .id();
+                    connection_status.last_connection = Some(id);
                 }
                 status.applied_impulse = Vec2::ZERO;
             }
@@ -534,23 +533,22 @@ pub fn update_collider_from_mouse(
                     let e2 = status.secondary_selected.clone().unwrap();
 
                     if e1 != e2 {
-                        let temp = add_soft_body_connections(
-                            &mut connections,
-                            &mut add_connection_events,
-                            ConnectionInitConfig::SingleJoint((
-                                VelloParticle {
-                                    previous_pos: pos,
-                                    pos,
-                                    velocity: Vector2::new(0.0, 0.0),
-                                    inv_mass: 1.0,
-                                },
-                                0.01,
-                            )),
-                            e1,
-                            e2,
-                        );
-                        connection_status.push(temp);
-                        info!("add joint start");
+                        let id = commands
+                            .spawn(VelloJoint::new(
+                                ConnectionInitConfig::SingleJoint((
+                                    VelloParticle {
+                                        previous_pos: pos,
+                                        pos,
+                                        velocity: Vector2::new(0.0, 0.0),
+                                        inv_mass: 1.0,
+                                    },
+                                    0.01,
+                                )),
+                                e1,
+                                e2,
+                            ))
+                            .id();
+                        connection_status.last_connection = Some(id);
                     } else {
                         info!("can not add joint to the same entity");
                     }
@@ -559,15 +557,13 @@ pub fn update_collider_from_mouse(
             }
             ExteralEffectType::DragJoint => {
                 if let Some(handle) = &connection_status.last_connection {
-                    if let Some(index) = connections.get(handle) {
-                        force_on_joint_events.send(JointExternalForceEvent {
-                            filter: drag_all_particles,
-                            connection_index: index,
-                            filter_data: FilterData {
-                                impulse: status.applied_impulse * ui_state.e_config.scale * 16.0,
-                            },
-                        });
-                    }
+                    force_on_joint_events.write(JointExternalForceEvent {
+                        filter: drag_all_particles,
+                        connection_index: handle.clone(),
+                        filter_data: FilterData {
+                            impulse: status.applied_impulse * ui_state.e_config.scale * 16.0,
+                        },
+                    });
                 }
                 status.applied_impulse = Vec2::ZERO;
             }

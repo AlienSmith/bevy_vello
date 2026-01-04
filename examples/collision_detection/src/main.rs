@@ -29,10 +29,7 @@ use bevy_vello::{
     },
     integrations::{
         particles::{self, ExplosionEffect},
-        physics::{
-            add_soft_body_connections, AddBodyConnectionEvent, ConnectionHandle,
-            ConnectionInitConfig, SoftBodyConnections, VelloConstraintWorld, VelloParticle,
-        },
+        physics::{ConnectionInitConfig, VelloConstraintWorld, VelloJoint, VelloParticle},
         svg_collider::{
             SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
             VelloImageAssetManager, VelloImageAssetMetaData,
@@ -51,7 +48,7 @@ use crate::{
     connections::ConnectionStatus,
     utility::{
         bevy_to_vello, get_default_parameters, ui_example_system, update_collider_from_mouse,
-        update_mouse, ColliderType, Preview, UiState,
+        update_mouse, ColliderType, Preview, StaticSceneComponent, UiState,
     },
 };
 
@@ -272,9 +269,6 @@ fn spawn_collider(
     f: impl Fn() -> (BezPath, kurbo::Rect),
     soft_body_config: SoftBodyInitConfig,
     collision_config: CollisionConstraintConfig,
-    connections: &mut ResMut<SoftBodyConnections>,
-    add_connection_events: &mut EventWriter<AddBodyConnectionEvent>,
-    connection_status: &mut ResMut<ConnectionStatus>,
 ) {
     if !ui_state.just_spawn {
         return;
@@ -357,24 +351,17 @@ fn update_from_ui(
     image_assets: Res<Assets<VelloImageAsset>>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut connection_handles: ResMut<SoftBodyConnections>,
-    mut add_connection_events: EventWriter<AddBodyConnectionEvent>,
-    mut connection_status: ResMut<ConnectionStatus>,
-    query: Query<(Entity, &VelloCollider)>,
+    query_c: Query<Entity, (With<VelloCollider>, Without<StaticSceneComponent>)>,
+    query_j: Query<Entity, With<VelloJoint>>,
     mut preview_query: Query<(&mut VelloScene, &mut Transform), With<Preview>>,
 ) {
     if ui_state.delete_all_dynamic {
-        for (entity, collider) in query.iter() {
-            if collider.is_soft_body() {
-                commands.entity(entity).despawn();
-            }
-        }
-        info!("remove dynamic {}", connection_status.all_connectiion.len());
-        for item in connection_status.reset().drain(..) {
-            if let Some(index) = connection_handles.remove(item) {
-                constraint_world.remove_connection(index);
-            }
-        }
+        query_c.iter().for_each(|e| {
+            commands.entity(e).despawn();
+        });
+        query_j.iter().for_each(|e| {
+            commands.entity(e).despawn();
+        });
     }
     if ui_state.just_modified {
         constraint_world.set_gravity(Vec2::new(
@@ -404,9 +391,6 @@ fn update_from_ui(
                     make_rect,
                     config,
                     collision_config,
-                    &mut connection_handles,
-                    &mut add_connection_events,
-                    &mut connection_status,
                 );
             }
             ColliderType::Circle => {
@@ -426,9 +410,6 @@ fn update_from_ui(
                     make_circle,
                     config,
                     collision_config,
-                    &mut connection_handles,
-                    &mut add_connection_events,
-                    &mut connection_status,
                 );
             }
             ColliderType::Ammo => {
@@ -472,9 +453,6 @@ fn update_from_ui(
                     make_collider,
                     config,
                     collision_config,
-                    &mut connection_handles,
-                    &mut add_connection_events,
-                    &mut connection_status,
                 );
             }
             _ => {
@@ -496,9 +474,6 @@ fn update_from_ui(
                     make_collider,
                     config,
                     collision_config,
-                    &mut connection_handles,
-                    &mut add_connection_events,
-                    &mut connection_status,
                 );
             }
         };
@@ -638,7 +613,7 @@ fn make_collision_shape(
         rotation: Quat::from_rotation_z(transform.z.to_radians()),
         scale: Vec3::new(transform.w, transform.w, 1.0),
     };
-    commands
+    let entity = commands
         .spawn((
             VelloSceneBundle {
                 scene,
@@ -663,7 +638,11 @@ fn make_collision_shape(
                 soft_body_init_transform,
             ),
         ))
-        .id()
+        .id();
+    if !is_soft_body {
+        commands.entity(entity).insert(StaticSceneComponent);
+    }
+    entity
 }
 
 fn make_static_collision_shape(
