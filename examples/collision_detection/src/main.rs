@@ -703,46 +703,36 @@ fn setup_resources(
     mut images: ResMut<VelloImageAssetManager>,
     asset_server: Res<AssetServer>,
 ) {
-    colliders.push(
-        asset_server.load("colliders/star.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    colliders.push(
-        asset_server.load("colliders/heart.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    colliders.push(
-        asset_server.load("colliders/key.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    colliders.push(
-        asset_server.load("colliders/shield.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    colliders.push(
-        asset_server.load("colliders/knife.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    colliders.push(
-        asset_server.load("colliders/capsule.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    colliders.push(
-        asset_server.load("colliders/ammo.collider.svg"),
-        VelloColliderAssetMetaData::default(),
-    );
-    images.push(
-        asset_server.load("image/ammo_albedo.png"),
-        VelloImageAssetMetaData::default(),
-    );
-    images.push(
-        asset_server.load("image/ammo_normal.png"),
-        VelloImageAssetMetaData::default(),
-    );
-    images.push(
-        asset_server.load("image/test.png"),
-        VelloImageAssetMetaData::default(),
-    );
+    let mut collider = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        colliders.push(
+            asset_server.load(path),
+            VelloColliderAssetMetaData::default(),
+            name,
+        );
+    };
+    let mut image = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        images.push(
+            asset_server.load(path),
+            VelloImageAssetMetaData::default(),
+            name,
+        );
+    };
+    collider("colliders/star.collider.svg");
+    collider("colliders/heart.collider.svg");
+    collider("colliders/key.collider.svg");
+    collider("colliders/shield.collider.svg");
+    collider("colliders/knife.collider.svg");
+    collider("colliders/capsule.collider.svg");
+    collider("colliders/ammo.collider.svg");
+    image("image/ammo_albedo.png");
+    image("image/ammo_normal.png");
+    image("image/test.png");
 }
 
 //fn update_blood_instances()

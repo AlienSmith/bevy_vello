@@ -508,7 +508,7 @@ pub fn update_collider_from_mouse(
                 if let Some(entity) = &status.selected {
                     let id = commands
                         .spawn(VelloJoint::new(
-                            ConnectionInitConfig::SinglePivot((
+                            ConnectionInitConfig::SinglePivot(
                                 VelloParticle {
                                     previous_pos: pos,
                                     pos,
@@ -516,7 +516,7 @@ pub fn update_collider_from_mouse(
                                     inv_mass: 1.0,
                                 },
                                 0.01,
-                            )),
+                            ),
                             *entity,
                             *entity,
                         ))
@@ -535,7 +535,7 @@ pub fn update_collider_from_mouse(
                     if e1 != e2 {
                         let id = commands
                             .spawn(VelloJoint::new(
-                                ConnectionInitConfig::SingleJoint((
+                                ConnectionInitConfig::SingleJoint(
                                     VelloParticle {
                                         previous_pos: pos,
                                         pos,
@@ -543,7 +543,7 @@ pub fn update_collider_from_mouse(
                                         inv_mass: 1.0,
                                     },
                                     0.01,
-                                )),
+                                ),
                                 e1,
                                 e2,
                             ))

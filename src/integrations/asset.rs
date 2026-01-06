@@ -185,6 +185,7 @@ pub struct VelloAssetManager<T: AssetWithMeta> {
     pub id_to_index: HashMap<AssetId<T>, usize>,
     pub parts: Vec<AssetEntry<T>>,
     pub load_state: Vec<bool>,
+    pub string_to_index: HashMap<String, usize>,
 }
 
 impl<T: AssetWithMeta> Default for VelloAssetManager<T> {
@@ -193,6 +194,7 @@ impl<T: AssetWithMeta> Default for VelloAssetManager<T> {
             id_to_index: Default::default(),
             parts: Default::default(),
             load_state: Default::default(),
+            string_to_index: Default::default(),
         }
     }
 }
@@ -203,17 +205,19 @@ impl<T: AssetWithMeta> Clone for VelloAssetManager<T> {
             id_to_index: self.id_to_index.clone(),
             parts: self.parts.clone(),
             load_state: self.load_state.clone(),
+            string_to_index: self.string_to_index.clone(),
         }
     }
 }
 
 impl<T: AssetWithMeta> VelloAssetManager<T> {
-    pub fn push(&mut self, handle: Handle<T>, meta: T::Meta) {
+    pub fn push(&mut self, handle: Handle<T>, meta: T::Meta, name: &str) {
         let index = self.parts.len();
         let id = handle.id();
         self.id_to_index.insert(id, index);
         self.parts.push(AssetEntry { handle, meta });
         self.load_state.push(false);
+        self.string_to_index.insert(name.to_string(), index);
     }
 
     pub fn get_index<R: Into<usize>>(&self, index: R) -> Option<Handle<T>> {
@@ -222,6 +226,12 @@ impl<T: AssetWithMeta> VelloAssetManager<T> {
             return Some(self.parts[index].clone().handle);
         }
         None
+    }
+
+    pub fn get_index_from_name(&self, name: &str) -> Option<Handle<T>> {
+        self.string_to_index
+            .get(name)
+            .map(|index| self.parts[*index].clone().handle)
     }
 
     pub fn get_entry_at_index<R: Into<usize>>(&self, index: R) -> Option<AssetEntry<T>> {
