@@ -1,5 +1,5 @@
 mod character;
-mod character_asset;
+pub mod character_asset;
 mod character_factory;
 mod utility;
 use bevy::prelude::*;
@@ -8,6 +8,7 @@ use crate::{
     character::plugin::GameCharacterPlugin, character_asset::plugin::CharacterLoaderPlugin,
     character_factory::plugin::CharacterFactoryPlugin,
 };
+#[derive(Default)]
 pub struct VelloCharacterPlugin;
 pub use crate::character_factory::CharacterRoot;
 

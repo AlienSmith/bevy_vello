@@ -31,8 +31,8 @@ use bevy_vello::{
         particles::{self, ExplosionEffect},
         physics::{ConnectionInitConfig, VelloConstraintWorld, VelloJoint, VelloParticle},
         svg_collider::{
-            SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
-            VelloImageAssetManager, VelloImageAssetMetaData,
+            self, SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData,
+            VelloImageAsset, VelloImageAssetManager, VelloImageAssetMetaData,
         },
     },
     vello::{
@@ -42,6 +42,13 @@ use bevy_vello::{
     VelloCollider, VelloCollisionResponsePlugin,
 };
 use bevy_vello::{prelude::*, VelloPlugin};
+use game_lib::{
+    character_asset::{
+        BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
+        SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
+    },
+    CharacterRoot, VelloCharacterPlugin,
+};
 use nalgebra::Vector2;
 
 use crate::{
@@ -167,7 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
-        .add_plugins(FrameTimeDiagnosticsPlugin::default());
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .add_plugins(VelloCharacterPlugin::default());
     // Systems that create Egui widgets should be run during the `CoreSet::Update` set,
     // or after the `EguiSet::BeginPass` system (which belongs to the `CoreSet::PreUpdate` set).
 
@@ -513,6 +521,30 @@ fn setup_back_ground(mut commands: Commands) {
 
 fn setup_entity(mut commands: Commands) {
     make_static_scene(&mut commands);
+    let mut scene: VelloScene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgb(1.0, 0.0, 0.0),
+        None,
+        &kurbo::Rect::new(-10.0, -10.0, 10.0, 10.0),
+    );
+
+    commands.spawn((
+        VelloSceneBundle {
+            transform: Transform {
+                translation: Vec3::new(0.0, 0.0, 100.0),
+                scale: Vec3::new(0.5, 0.5, 1.0),
+                ..Default::default()
+            },
+            scene,
+            ..Default::default()
+        },
+        CharacterRoot {
+            svg_asset_id: "two_circle.character.svg".to_owned(),
+            blueprint_asset_id: "two_circle.character.json".to_owned(),
+        },
+    ));
 }
 
 fn make_static_scene(commands: &mut Commands) {
@@ -671,9 +703,13 @@ fn make_static_collision_shape(
 fn check_assets_loaded(
     mut sc_asset: EventReader<AssetEvent<SvgColliderAsset>>,
     mut im_asset: EventReader<AssetEvent<VelloImageAsset>>,
+    mut cs_asset: EventReader<AssetEvent<SvgCharacterAsset>>,
+    mut cb_asset: EventReader<AssetEvent<BlueprintCharacterAsset>>,
     mut colliders: ResMut<SvgColliderAssetManager>,
     mut images: ResMut<VelloImageAssetManager>,
     mut next_state: ResMut<NextState<GameState>>,
+    mut character_svg: ResMut<SvgCharacterAssetManager>,
+    mut character_blueprint: ResMut<BlueprintCharacterAssetManager>,
 ) {
     for sc in sc_asset.read() {
         match sc {
@@ -693,7 +729,29 @@ fn check_assets_loaded(
         }
     }
 
-    if colliders.all_loaded() && images.all_loaded() {
+    for cs in cs_asset.read() {
+        match cs {
+            AssetEvent::LoadedWithDependencies { id } => {
+                character_svg.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    for cb in cb_asset.read() {
+        match cb {
+            AssetEvent::LoadedWithDependencies { id } => {
+                character_blueprint.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    if colliders.all_loaded()
+        && images.all_loaded()
+        && character_svg.all_loaded()
+        && character_blueprint.all_loaded()
+    {
         next_state.set(GameState::Game);
     }
 }
@@ -701,6 +759,8 @@ fn check_assets_loaded(
 fn setup_resources(
     mut colliders: ResMut<SvgColliderAssetManager>,
     mut images: ResMut<VelloImageAssetManager>,
+    mut character_svg: ResMut<SvgCharacterAssetManager>,
+    mut character_blueprint: ResMut<BlueprintCharacterAssetManager>,
     asset_server: Res<AssetServer>,
 ) {
     let mut collider = |path: &str| {
@@ -723,6 +783,26 @@ fn setup_resources(
             name,
         );
     };
+    let mut c_svg = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        character_svg.push(
+            asset_server.load(path),
+            SvgCharacterAssetMetaData::default(),
+            name,
+        );
+    };
+    let mut c_blueprint = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        character_blueprint.push(
+            asset_server.load(path),
+            BlueprintCharacterAssetMetaData::default(),
+            name,
+        );
+    };
     collider("colliders/star.collider.svg");
     collider("colliders/heart.collider.svg");
     collider("colliders/key.collider.svg");
@@ -733,6 +813,8 @@ fn setup_resources(
     image("image/ammo_albedo.png");
     image("image/ammo_normal.png");
     image("image/test.png");
+    c_svg("character/two_circle.character.svg");
+    c_blueprint("character/two_circle.character.json");
 }
 
 //fn update_blood_instances()

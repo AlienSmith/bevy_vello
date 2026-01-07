@@ -105,8 +105,8 @@ pub fn assemble_character(
                 clamp,
             ) => {
                 particle.pos = apply_transform_to_pos(particle.pos);
-                particle1.pos = apply_transform_to_pos(particle.pos);
-                particle2.pos = apply_transform_to_pos(particle.pos);
+                particle1.pos = apply_transform_to_pos(particle1.pos);
+                particle2.pos = apply_transform_to_pos(particle2.pos);
                 ConnectionInitConfig::HingeJoint(
                     particle, particle1, particle2, complaince, min, max, clamp,
                 )
