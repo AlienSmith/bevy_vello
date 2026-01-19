@@ -1,10 +1,15 @@
 use bevy::prelude::*;
 
-use crate::character::system::clean_up_dead_body_parts;
+use crate::character::{
+    observers::{on_remove_connectivity, on_remove_connectivity_root},
+    StringPool,
+};
 pub struct GameCharacterPlugin;
 
 impl Plugin for GameCharacterPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        app.add_systems(Update, clean_up_dead_body_parts);
+        app.insert_resource(StringPool::default())
+            .add_observer(on_remove_connectivity)
+            .add_observer(on_remove_connectivity_root);
     }
 }

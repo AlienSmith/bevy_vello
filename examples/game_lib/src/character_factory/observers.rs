@@ -1,4 +1,4 @@
-use bevy::{platform::collections::HashMap, prelude::*};
+use bevy::{ecs::intern::Interned, platform::collections::HashMap, prelude::*};
 use bevy_vello::{
     collision::path_to_ccw_quad_path, integrations::physics::VelloJoint, VelloCollider, VelloScene,
     VelloSceneBundle,
@@ -14,7 +14,7 @@ use vello_physics::{
 };
 
 use crate::{
-    character::Connectivity,
+    character::{Connectivity, ConnectivityRoot, StringPool},
     character_asset::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, SvgCharacterAsset,
         SvgCharacterAssetManager,
@@ -29,6 +29,7 @@ pub fn assemble_character(
     blueprint_manager: Res<BlueprintCharacterAssetManager>,
     svg_assets: Res<Assets<SvgCharacterAsset>>,
     blueprint_assets: Res<Assets<BlueprintCharacterAsset>>,
+    string_pool: ResMut<StringPool>,
 ) {
     let root_entity = trigger.target();
     // 1. Get the specific asset IDs for this character
@@ -50,7 +51,7 @@ pub fn assemble_character(
     };
     let blueprint = blueprint_assets.get(blueprint_handle.id()).unwrap();
     let svgs = svg_assets.get(svg_handle.id()).unwrap();
-    let mut character_connectivity = Connectivity::new(None, true);
+    let mut character_connectivity = ConnectivityRoot::default();
     let mut colliders_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
     for item in blueprint.data.colliders.iter() {
         let Some((s, rect)) = svgs.data.get(&item.path_id) else {
@@ -81,11 +82,12 @@ pub fn assemble_character(
             Some(item.collision),
             collision_group,
         );
+        let collider_name = string_pool.pool.intern(&item.path_id);
         colliders_entity.insert(
             item.path_id.to_string(),
-            (entity, Connectivity::new(Some(root_entity), true)),
+            (entity, Connectivity::new(root_entity, true, collider_name)),
         );
-        character_connectivity.parts.insert(entity);
+        character_connectivity.parts.insert(collider_name, entity);
     }
     let affine = transform_to_affine(transform);
     let apply_transform_to_pos = |p: Vector2<f32>| -> Vector2<f32> {
@@ -100,19 +102,25 @@ pub fn assemble_character(
                 mut particle1,
                 mut particle2,
                 complaince,
-                min,
-                max,
-                clamp,
+                c_a,
+                c_ab,
+                c_cb,
+                c_c,
             ) => {
                 particle.pos = apply_transform_to_pos(particle.pos);
                 particle1.pos = apply_transform_to_pos(particle1.pos);
                 particle2.pos = apply_transform_to_pos(particle2.pos);
                 ConnectionInitConfig::HingeJoint(
-                    particle, particle1, particle2, complaince, min, max, clamp,
+                    particle, particle1, particle2, complaince, c_a, c_ab, c_cb, c_c,
                 )
             }
+            ConnectionInitConfig::DoubleJoint(mut particle, mut particle1, r0, r1) => {
+                particle.pos = apply_transform_to_pos(particle.pos);
+                particle1.pos = apply_transform_to_pos(particle1.pos);
+                ConnectionInitConfig::DoubleJoint(particle, particle1, r0, r1)
+            }
             _ => {
-                todo!()
+                todo!("other kind of joint are not supported yet");
             }
         };
 
@@ -133,8 +141,18 @@ pub fn assemble_character(
             };
             (*entity_a, *entity_b)
         };
-        let joint_entity = make_joint(&mut commands, joint_config, entity_a, entity_b, root_entity);
-        character_connectivity.parts.insert(joint_entity);
+        let joint_name = string_pool.pool.intern(&item.path_id);
+        let joint_entity = make_joint(
+            &mut commands,
+            joint_config,
+            entity_a,
+            entity_b,
+            root_entity,
+            joint_name,
+        );
+        character_connectivity
+            .parts
+            .insert(joint_name, joint_entity);
         colliders_entity
             .get_mut(&item.collider_a_id)
             .unwrap()
@@ -163,8 +181,9 @@ fn make_joint(
     entity_a: Entity,
     entity_b: Entity,
     character: Entity,
+    name: Interned<str>,
 ) -> Entity {
-    let mut connectivity = Connectivity::new(Some(character), false);
+    let mut connectivity = Connectivity::new(character, false, name);
     connectivity.parts.insert(entity_a);
     connectivity.parts.insert(entity_b);
     commands

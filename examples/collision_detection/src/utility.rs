@@ -30,6 +30,8 @@ use crate::connections::ConnectionStatus;
 #[derive(Component)]
 pub struct StaticSceneComponent;
 
+const GRAVITY: f32 = 0.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(u32)]
 pub enum ColliderType {
@@ -112,9 +114,9 @@ impl Default for VelloConstraintWorldConfig {
     fn default() -> Self {
         Self {
             gravity_x: 0.0,
-            gravity_y: -98.0,
+            gravity_y: GRAVITY,
             pre_gravity_x: 0.0,
-            pre_gravity_y: -98.0,
+            pre_gravity_y: GRAVITY,
         }
     }
 }

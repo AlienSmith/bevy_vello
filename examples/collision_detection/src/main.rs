@@ -541,8 +541,8 @@ fn setup_entity(mut commands: Commands) {
             ..Default::default()
         },
         CharacterRoot {
-            svg_asset_id: "two_circle.character.svg".to_owned(),
-            blueprint_asset_id: "two_circle.character.json".to_owned(),
+            svg_asset_id: "base_pivot.character.svg".to_owned(),
+            blueprint_asset_id: "base_pivot.character.json".to_owned(),
         },
     ));
 }
@@ -815,6 +815,18 @@ fn setup_resources(
     image("image/test.png");
     c_svg("character/two_circle.character.svg");
     c_blueprint("character/two_circle.character.json");
+    c_svg("character/base.character.svg");
+    c_blueprint("character/base.character.json");
+    c_svg("character/tri_shape.character.svg");
+    c_blueprint("character/tri_shape.character.json");
+    c_svg("character/angle.character.svg");
+    c_blueprint("character/angle.character.json");
+    c_svg("character/three.character.svg");
+    c_blueprint("character/three.character.json");
+    c_svg("character/quad_shape.character.svg");
+    c_blueprint("character/quad_shape.character.json");
+    c_svg("character/base_pivot.character.svg");
+    c_blueprint("character/base_pivot.character.json");
 }
 
 //fn update_blood_instances()

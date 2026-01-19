@@ -23,7 +23,7 @@ pub struct VelloCollisionResponsePlugin;
 
 impl Plugin for VelloCollisionResponsePlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        app.insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, -98.0)))
+        app.insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, 0.0)))
             .insert_resource(Time::<Fixed>::from_hz(90.0))
             .add_event::<ColliderExternalImpulseEvent>()
             .add_event::<JointExternalForceEvent>()

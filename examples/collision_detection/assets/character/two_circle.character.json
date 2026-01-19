@@ -1,8 +1,8 @@
 {
   "colliders": [
     {
-      "svg_id": "two_circle.character.svg",
-      "path_id": "ra",
+      "svg_id": "pivot.character.svg",
+      "path_id": "r",
       "softbody": {
         "max_complexity": 2,
         "resititution": 0.9,
@@ -22,8 +22,8 @@
       }
     },
     {
-      "svg_id": "two_circle.character.svg",
-      "path_id": "la",
+      "svg_id": "pivot.character.svg",
+      "path_id": "l",
       "softbody": {
         "max_complexity": 2,
         "resititution": 0.9,
@@ -45,37 +45,28 @@
   ],
   "joints": [
     {
-      "svg_id": "two_circle.character.svg",
-      "path_id": "ra_la",
-      "collider_a_id": "ra",
-      "collider_b_id": "la",
+      "svg_id": "pivot.character.svg",
+      "path_id": "l_r",
+      "collider_a_id": "l",
+      "collider_b_id": "r",
       "config": {
-        "HingeJoint": [
+        "DoubleJoint": [
           {
             "pos": [
-              172.0,
-              59.0
+              288.5,
+              9.5
             ],
             "inv_mass": 1.0
           },
           {
             "pos": [
-              285.0,
-              59.0
+              288.5,
+              102.81
             ],
             "inv_mass": 1.0
           },
-          {
-            "pos": [
-              397.0,
-              59.0
-            ],
-            "inv_mass": 1.0
-          },
-          0.00001,
-          0.0,
-          0.0,
-          0.0
+          1.0,
+          1.0
         ]
       }
     }

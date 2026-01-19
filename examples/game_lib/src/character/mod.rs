@@ -1,26 +1,36 @@
-use bevy::{platform::collections::HashSet, prelude::*};
+use bevy::{
+    ecs::intern::{Interned, Interner},
+    platform::collections::{HashMap, HashSet},
+    prelude::*,
+};
+mod observers;
 pub mod plugin;
-mod system;
 
-#[derive(Component, Default, Clone)]
+#[derive(Component, Clone)]
 pub struct Connectivity {
-    pub character: Option<Entity>,
+    pub name: Interned<str>,
+    pub character: Entity,
     pub parts: HashSet<Entity>,
-    pub mark_of_death: bool,
     pub death_propegate: bool,
 }
 
+#[derive(Component, Default, Clone)]
+pub struct ConnectivityRoot {
+    pub parts: HashMap<Interned<str>, Entity>,
+}
+
 impl Connectivity {
-    pub fn new(character: Option<Entity>, death_propegate: bool) -> Self {
+    pub fn new(character: Entity, death_propegate: bool, name: Interned<str>) -> Self {
         Connectivity {
+            name,
             character,
             parts: HashSet::default(),
-            mark_of_death: false,
             death_propegate,
         }
     }
+}
 
-    pub fn mark_as_dead(&mut self, _through_propergate: bool) {
-        self.mark_of_death = true;
-    }
+#[derive(Resource, Default)]
+pub struct StringPool {
+    pub pool: Interner<str>,
 }
