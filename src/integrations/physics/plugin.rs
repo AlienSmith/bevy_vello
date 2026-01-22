@@ -13,7 +13,7 @@ use crate::{
             create_update_pivot_visualizer, generate_connection_for_joint,
             generate_soft_body_for_collider, make_collision_constraints, remove_connection,
             remove_soft_body, update_collider_from_soft_body, update_constraint_world,
-            visualize_colliders,
+            update_joint_from_connection, visualize_colliders,
         },
         ColliderExternalImpulseEvent, JointExternalForceEvent, VelloConstraintWorld,
     },
@@ -39,6 +39,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                     remove_soft_body,
                     remove_connection,
                     update_collider_from_soft_body,
+                    update_joint_from_connection,
                     visualize_colliders,
                     create_update_pivot_visualizer,
                 )

@@ -9,6 +9,7 @@ mod edge_pan_camera;
 mod utility;
 use bevy::{
     diagnostic::FrameTimeDiagnosticsPlugin,
+    math::VectorSpace,
     platform::collections::HashMap,
     prelude::*,
     render::{
@@ -47,7 +48,7 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterRoot, VelloCharacterPlugin,
+    CharacterController, CharacterRoot, VelloCharacterPlugin,
 };
 use nalgebra::Vector2;
 
@@ -198,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(
             Update,
             (
+                player_movement,
                 utility::update_mouse_position,
                 ui_example_system,
                 update_from_ui.after(ui_example_system),
@@ -541,8 +543,11 @@ fn setup_entity(mut commands: Commands) {
             ..Default::default()
         },
         CharacterRoot {
-            svg_asset_id: "base_pivot.character.svg".to_owned(),
-            blueprint_asset_id: "base_pivot.character.json".to_owned(),
+            svg_asset_id: "v1.character.svg".to_owned(),
+            blueprint_asset_id: "v1.character.json".to_owned(),
+        },
+        CharacterController {
+            move_vector: Vec2::ZERO,
         },
     ));
 }
@@ -827,6 +832,8 @@ fn setup_resources(
     c_blueprint("character/quad_shape.character.json");
     c_svg("character/base_pivot.character.svg");
     c_blueprint("character/base_pivot.character.json");
+    c_svg("character/v1.character.svg");
+    c_blueprint("character/v1.character.json");
 }
 
 //fn update_blood_instances()
@@ -905,5 +912,30 @@ fn collision_response(
                 item.collision_point_a, item.collision_point_b
             );
         }
+    }
+}
+
+fn player_movement(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut query: Query<&mut CharacterController>, // Assuming a 'Player' component
+) {
+    let mut direction = Vec2::ZERO;
+
+    // Check for key presses
+    if keyboard_input.pressed(KeyCode::KeyW) {
+        direction.y += 100.0;
+    }
+    if keyboard_input.pressed(KeyCode::KeyS) {
+        direction.y -= 100.0;
+    }
+    if keyboard_input.pressed(KeyCode::KeyA) {
+        direction.x -= 100.0;
+    }
+    if keyboard_input.pressed(KeyCode::KeyD) {
+        direction.x += 100.0;
+    }
+
+    if let Ok(mut item) = query.single_mut() {
+        item.move_vector = direction;
     }
 }

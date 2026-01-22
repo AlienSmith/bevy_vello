@@ -119,6 +119,10 @@ pub fn assemble_character(
                 particle1.pos = apply_transform_to_pos(particle1.pos);
                 ConnectionInitConfig::DoubleJoint(particle, particle1, r0, r1)
             }
+            ConnectionInitConfig::SinglePivot(mut particle, r0) => {
+                particle.pos = apply_transform_to_pos(particle.pos);
+                ConnectionInitConfig::SinglePivot(particle, r0)
+            }
             _ => {
                 todo!("other kind of joint are not supported yet");
             }

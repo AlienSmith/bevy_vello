@@ -75,6 +75,7 @@ pub struct VelloConnectionInitConfig {
 #[derive(Component)]
 pub struct VelloJoint {
     init_config: VelloConnectionInitConfig,
+    pub particle_info: Vec<ParticleInfo>,
 }
 
 impl VelloJoint {
@@ -89,6 +90,7 @@ impl VelloJoint {
                 entity_a,
                 entity_b,
             },
+            particle_info: vec![],
         }
     }
 }

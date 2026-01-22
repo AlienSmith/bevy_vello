@@ -62,6 +62,17 @@ pub fn generate_connection_for_joint(
     }
 }
 
+pub fn update_joint_from_connection(
+    mut query: Query<(Entity, &mut VelloJoint)>,
+    constraint_world: Res<VelloConstraintWorld>,
+) {
+    for (e, mut joint) in query.iter_mut() {
+        if let Some(item) = constraint_world.data.get_particles_info_of_connection(e) {
+            joint.particle_info = item;
+        }
+    }
+}
+
 pub fn remove_soft_body(
     removed_colliders: Res<RemovedColliders>,
     mut constraint_world: ResMut<VelloConstraintWorld>,

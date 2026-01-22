@@ -5,6 +5,7 @@ use bevy::{
 };
 mod observers;
 pub mod plugin;
+mod systems;
 
 #[derive(Component, Clone)]
 pub struct Connectivity {
@@ -33,4 +34,9 @@ impl Connectivity {
 #[derive(Resource, Default)]
 pub struct StringPool {
     pub pool: Interner<str>,
+}
+
+#[derive(Component, Clone)]
+pub struct CharacterController {
+    pub move_vector: Vec2,
 }

@@ -10,7 +10,7 @@ use crate::{
 };
 #[derive(Default)]
 pub struct VelloCharacterPlugin;
-pub use crate::character_factory::CharacterRoot;
+pub use crate::{character::CharacterController, character_factory::CharacterRoot};
 
 impl Plugin for VelloCharacterPlugin {
     fn build(&self, app: &mut App) {
