@@ -4,8 +4,8 @@ use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
-        ColliderExternalImpulseEvent, JointExternalForceEvent, PivotVisualizer,
-        VelloConstraintWorld, VelloJoint,
+        CharacterPivotForceEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
+        PivotVisualizer, VelloConstraintWorld, VelloJoint,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -141,6 +141,17 @@ pub fn apply_explicit_impulse_on_joint(
                     .add_external_force_connection(event.connection_index, item);
             }
         }
+    }
+}
+
+pub fn apply_explicit_impulse_on_pivot(
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut events: EventReader<CharacterPivotForceEvent>,
+) {
+    for event in events.read() {
+        constraint_world
+            .data
+            .add_external_force_connection(event.joint_entity, event.force.clone());
     }
 }
 

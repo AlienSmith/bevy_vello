@@ -9,13 +9,15 @@ use crate::{
     collision::CollisionSystems,
     integrations::physics::{
         systems::{
-            apply_explicit_impulse_on_joint, apply_explicit_impulse_on_softbody,
-            create_update_pivot_visualizer, generate_connection_for_joint,
-            generate_soft_body_for_collider, make_collision_constraints, remove_connection,
-            remove_soft_body, update_collider_from_soft_body, update_constraint_world,
-            update_joint_from_connection, visualize_colliders,
+            apply_explicit_impulse_on_joint, apply_explicit_impulse_on_pivot,
+            apply_explicit_impulse_on_softbody, create_update_pivot_visualizer,
+            generate_connection_for_joint, generate_soft_body_for_collider,
+            make_collision_constraints, remove_connection, remove_soft_body,
+            update_collider_from_soft_body, update_constraint_world, update_joint_from_connection,
+            visualize_colliders,
         },
-        ColliderExternalImpulseEvent, JointExternalForceEvent, VelloConstraintWorld,
+        CharacterPivotForceEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
+        VelloConstraintWorld,
     },
 };
 
@@ -27,6 +29,7 @@ impl Plugin for VelloCollisionResponsePlugin {
             .insert_resource(Time::<Fixed>::from_hz(90.0))
             .add_event::<ColliderExternalImpulseEvent>()
             .add_event::<JointExternalForceEvent>()
+            .add_event::<CharacterPivotForceEvent>()
             .add_systems(FixedUpdate, update_constraint_world)
             .add_systems(
                 PostUpdate,
@@ -35,6 +38,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                     generate_connection_for_joint,
                     apply_explicit_impulse_on_softbody,
                     apply_explicit_impulse_on_joint,
+                    apply_explicit_impulse_on_pivot,
                     make_collision_constraints,
                     remove_soft_body,
                     remove_connection,

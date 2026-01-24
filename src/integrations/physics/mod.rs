@@ -57,6 +57,12 @@ pub struct ColliderExternalImpulseEvent {
 }
 
 #[derive(Event)]
+pub struct CharacterPivotForceEvent {
+    pub joint_entity: Entity,
+    pub force: vello_physics::soft_body::ExternalForce,
+}
+
+#[derive(Event)]
 pub struct JointExternalForceEvent {
     pub filter: fn(Vec<ParticleInfo>, FilterData) -> Vec<vello_physics::soft_body::ExternalForce>,
     pub connection_index: Entity,

@@ -14,3 +14,4 @@
     "typescript.format.insertSpaceBeforeAndAfterBinaryOperators": true
   }
 }
+//wgsl analyzer = 0.7.0
