@@ -73,8 +73,8 @@ pub fn update_character_movement(
     mut force_events: EventWriter<CharacterPivotForceEvent>,
 ) {
     // 1. Intern strings once outside the loop
-    let pivot_h = string_pool.pool.intern("p0");
-    let pivot_w = string_pool.pool.intern("p1");
+    let pivot_h = string_pool.pool.intern("P0");
+    let pivot_w = string_pool.pool.intern("P3");
 
     for (root, control) in &c_q {
         // 2. Early exit for dead-zone check

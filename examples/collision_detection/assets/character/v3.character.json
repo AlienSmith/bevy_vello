@@ -1,0 +1,931 @@
+{
+  "colliders": [
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "S2",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "S1",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "S0",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "H",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "LUL",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "LLL",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "RUL",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "RLL",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "RLA",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "RUA",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "LUA",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "LLA",
+      "softbody": {
+        "max_complexity": 2,
+        "resititution": 0.9,
+        "velocity_against_nromal_damping_threhold": 5.0,
+        "total_inv_mass": 1.0,
+        "inner_constraints_scaler": 100.0,
+        "frame_constraints_scaler": 1.0,
+        "substeps": 2,
+        "self_collision_complaince": 0.5,
+        "self_collision_distance_threhold": 5.0,
+        "shape_matching_damping": 0.1
+      },
+      "collision": {
+        "push_compliance_penetration_scaler": 0.3,
+        "friction_compliance_scaler": 0.1,
+        "pull_compliance_scaler": 0.7
+      }
+    }
+  ],
+  "particles": [
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P0",
+      "particle": {
+        "pos": [
+          237.75967,
+          54.999996
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1",
+      "particle": {
+        "pos": [
+          237.75967,
+          114.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2",
+      "particle": {
+        "pos": [
+          237.75967,
+          186.99998
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3",
+      "particle": {
+        "pos": [
+          237.75967,
+          256.99997
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P40",
+      "particle": {
+        "pos": [
+          204.75969,
+          363.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P41",
+      "particle": {
+        "pos": [
+          276.75967,
+          361.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P10",
+      "particle": {
+        "pos": [
+          126.75971,
+          114.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P11",
+      "particle": {
+        "pos": [
+          347.7597,
+          114.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PH",
+      "particle": {
+        "pos": [
+          237.75967,
+          6.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PLLA",
+      "particle": {
+        "pos": [
+          16.75969,
+          115.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PRLA",
+      "particle": {
+        "pos": [
+          459.7597,
+          113.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PRLL",
+      "particle": {
+        "pos": [
+          316.7597,
+          464.0
+        ],
+        "inv_mass": 1.0
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PLLL",
+      "particle": {
+        "pos": [
+          171.75969,
+          469.0
+        ],
+        "inv_mass": 1.0
+      }
+    }
+  ],
+  "joints": [
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P0_P1",
+      "config": {
+        "Distance": [
+          "P0",
+          "P1",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_P2",
+      "config": {
+        "Distance": [
+          "P1",
+          "P2",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_P11",
+      "config": {
+        "Distance": [
+          "P1",
+          "P11",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P10_P1",
+      "config": {
+        "Distance": [
+          "P10",
+          "P1",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_P3",
+      "config": {
+        "Distance": [
+          "P2",
+          "P3",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_P40",
+      "config": {
+        "Distance": [
+          "P3",
+          "P40",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_P41",
+      "config": {
+        "Distance": [
+          "P3",
+          "P41",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PH_P0",
+      "config": {
+        "Distance": [
+          "PH",
+          "P0",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P11_PRLA",
+      "config": {
+        "Distance": [
+          "P11",
+          "PRLA",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P10_PLLA",
+      "config": {
+        "Distance": [
+          "P10",
+          "PLLA",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P40_PLLL",
+      "config": {
+        "Distance": [
+          "P40",
+          "PLLL",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P41_PRLL",
+      "config": {
+        "Distance": [
+          "P41",
+          "PRLL",
+          0.000001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P0_P1_P2",
+      "config": {
+        "Angular": [
+          "P0",
+          "P1",
+          "P2",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_P1_P11",
+      "config": {
+        "Angular": [
+          "P2",
+          "P1",
+          "P11",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_P1_P10",
+      "config": {
+        "Angular": [
+          "P2",
+          "P1",
+          "P10",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_P2_P3",
+      "config": {
+        "Angular": [
+          "P1",
+          "P2",
+          "P3",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_P3_P40",
+      "config": {
+        "Angular": [
+          "P2",
+          "P3",
+          "P40",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_P3_P41",
+      "config": {
+        "Angular": [
+          "P2",
+          "P3",
+          "P41",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PH_P0_P1",
+      "config": {
+        "Angular": [
+          "PH",
+          "P0",
+          "P1",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_P11_PRLA",
+      "config": {
+        "Angular": [
+          "P1",
+          "P11",
+          "PRLA",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_P10_PLLA",
+      "config": {
+        "Angular": [
+          "P1",
+          "P10",
+          "PLLA",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_P40_PLLL",
+      "config": {
+        "Angular": [
+          "P3",
+          "P40",
+          "PLLL",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_P41_PRLL",
+      "config": {
+        "Angular": [
+          "P3",
+          "P41",
+          "PRLL",
+          0.00001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P0_H",
+      "config": {
+        "Bilinear": [
+          "P0",
+          "H",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P0_S0",
+      "config": {
+        "Bilinear": [
+          "P0",
+          "S0",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_S0",
+      "config": {
+        "Bilinear": [
+          "P1",
+          "S0",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_S1",
+      "config": {
+        "Bilinear": [
+          "P1",
+          "S1",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_LUA",
+      "config": {
+        "Bilinear": [
+          "P1",
+          "LUA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P1_RUA",
+      "config": {
+        "Bilinear": [
+          "P1",
+          "RUA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P11_RUA",
+      "config": {
+        "Bilinear": [
+          "P11",
+          "RUA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P11_RLA",
+      "config": {
+        "Bilinear": [
+          "P11",
+          "RLA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P10_LUA",
+      "config": {
+        "Bilinear": [
+          "P10",
+          "LUA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P10_LLA",
+      "config": {
+        "Bilinear": [
+          "P10",
+          "LLA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_S1",
+      "config": {
+        "Bilinear": [
+          "P2",
+          "S1",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P2_S2",
+      "config": {
+        "Bilinear": [
+          "P2",
+          "S2",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_S2",
+      "config": {
+        "Bilinear": [
+          "P3",
+          "S2",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_LUL",
+      "config": {
+        "Bilinear": [
+          "P3",
+          "LUL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P3_RUL",
+      "config": {
+        "Bilinear": [
+          "P3",
+          "RUL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P40_LUL",
+      "config": {
+        "Bilinear": [
+          "P40",
+          "LUL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P40_LLL",
+      "config": {
+        "Bilinear": [
+          "P40",
+          "LLL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P41_RUL",
+      "config": {
+        "Bilinear": [
+          "P41",
+          "RUL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "P41_RLL",
+      "config": {
+        "Bilinear": [
+          "P41",
+          "RLL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PH_H",
+      "config": {
+        "Bilinear": [
+          "PH",
+          "H",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PRLA_RLA",
+      "config": {
+        "Bilinear": [
+          "PRLA",
+          "RLA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PLLA_LLA",
+      "config": {
+        "Bilinear": [
+          "PLLA",
+          "LLA",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PLLL_LLL",
+      "config": {
+        "Bilinear": [
+          "PLLL",
+          "LLL",
+          0.0001
+        ]
+      }
+    },
+    {
+      "svg_id": "v3.character.svg",
+      "path_id": "PRLL_RLL",
+      "config": {
+        "Bilinear": [
+          "PRLL",
+          "RLL",
+          0.0001
+        ]
+      }
+    }
+  ]
+}
