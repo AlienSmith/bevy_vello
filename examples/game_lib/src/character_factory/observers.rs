@@ -114,10 +114,10 @@ pub fn assemble_character(
                     particle, particle1, particle2, complaince, c_a, c_ab, c_cb, c_c,
                 )
             }
-            ConnectionInitConfig::DoubleJoint(mut particle, mut particle1, r0, r1) => {
+            ConnectionInitConfig::DoubleJoint(mut particle, mut particle1, r0, r1, i0, i1) => {
                 particle.pos = apply_transform_to_pos(particle.pos);
                 particle1.pos = apply_transform_to_pos(particle1.pos);
-                ConnectionInitConfig::DoubleJoint(particle, particle1, r0, r1)
+                ConnectionInitConfig::DoubleJoint(particle, particle1, r0, r1, i0, i1)
             }
             ConnectionInitConfig::SinglePivot(mut particle, r0) => {
                 particle.pos = apply_transform_to_pos(particle.pos);

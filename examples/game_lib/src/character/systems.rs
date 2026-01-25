@@ -10,8 +10,8 @@ fn bevy_to_vello(point: Vec2) -> Vector2<f32> {
     Vector2::new(point.x, -point.y)
 }
 #[inline]
-pub fn corss(a: Vector2<f32>, b: Vector2<f32>) -> f32 {
-    a.x * b.y - b.y * a.x
+pub fn cross(a: Vector2<f32>, b: Vector2<f32>) -> f32 {
+    (a.x * b.y) - (a.y * b.x)
 }
 #[inline]
 fn get_normal_of_b_away_from_a(b: &Vector2<f32>, cross_result: f32) -> Vector2<f32> {
@@ -29,6 +29,7 @@ fn get_normal_of_b_away_from_a(b: &Vector2<f32>, cross_result: f32) -> Vector2<f
     }
 }
 
+const WEIGHT_RATIO: f32 = 1.0;
 //generate force to move whist to head direction point to vec direction
 fn claculate_force(
     e_h: Entity,
@@ -42,17 +43,22 @@ fn claculate_force(
     let length = dir.magnitude();
     let dir = dir / length;
     let pos_h = Vector2::new(p_h.pos_x, p_h.pos_y);
-    let pos_w = Vector2::new(p_w.pos_x, p_w.pos_y);
+    let pos_w: nalgebra::Matrix<
+        f32,
+        nalgebra::Const<2>,
+        nalgebra::Const<1>,
+        nalgebra::ArrayStorage<f32, 2, 1>,
+    > = Vector2::new(p_w.pos_x, p_w.pos_y);
     let delta = (pos_h - pos_w).normalize();
     let proj = delta.dot(&dir);
-    let (d_h, d_w) = if proj <= 0.0 {
-        let normal = get_normal_of_b_away_from_a(&delta, corss(dir, delta)) * length;
-        (-normal, normal)
+    let (d_h, d_w) = if proj < 0.0 {
+        let normal = get_normal_of_b_away_from_a(&delta, cross(dir, delta)) * length;
+        (-normal * WEIGHT_RATIO, normal)
     } else {
         let diff = delta - proj * dir;
         let d_h = (proj * dir - diff) * length;
         let d_w = (proj * dir + diff) * length;
-        (d_h, d_w)
+        (d_h * WEIGHT_RATIO, d_w)
     };
     result.push(CharacterPivotForceEvent {
         joint_entity: e_h,
@@ -72,8 +78,8 @@ pub fn update_character_movement(
     mut force_events: EventWriter<CharacterPivotForceEvent>,
 ) {
     // 1. Intern strings once outside the loop
-    let pivot_h = string_pool.pool.intern("s0_s0");
-    let pivot_w = string_pool.pool.intern("s1_s1");
+    let pivot_h = string_pool.pool.intern("s0_s0_h");
+    let pivot_w = string_pool.pool.intern("s0_s0");
 
     for (root, control) in &c_q {
         // 2. Early exit for dead-zone check
