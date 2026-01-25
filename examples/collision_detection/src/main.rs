@@ -310,47 +310,6 @@ fn spawn_collider(
         );
         entitys.push(temp);
     }
-    let make_particle = |pos: Vector2<f32>| -> VelloParticle {
-        VelloParticle {
-            previous_pos: pos,
-            pos,
-            velocity: Vector2::new(0.0, 0.0),
-            inv_mass: 1.0,
-        }
-    };
-    // for index in 0..count - 1 {
-    //     let x = ui_state.current.pos_x + (100.0 * index as f32) - 450.0;
-    //     let y = ui_state.current.pos_y;
-    //     let pos = bevy_to_vello(Vec2::new(x - 50.0, y + 50.0));
-    //     let pos1 = bevy_to_vello(Vec2::new(x, y));
-    //     let pos2 = bevy_to_vello(Vec2::new(x + 50.0, y + 50.0));
-
-    //     let e1 = entitys[index].clone();
-    //     let e2 = entitys[index + 1].clone();
-
-    //     let offset = if index == 0 || index == count - 2 {
-    //         1.0
-    //     } else {
-    //         0.2
-    //     };
-
-    //     let temp = add_soft_body_connections(
-    //         connections,
-    //         add_connection_events,
-    //         ConnectionInitConfig::HingeJoint(
-    //             make_particle(pos),
-    //             make_particle(pos1),
-    //             make_particle(pos2),
-    //             ui_state.current.connection_complaince * 1e-3 * offset,
-    //             -180.0,
-    //             180.0,
-    //             1.0,
-    //         ),
-    //         e1,
-    //         e2,
-    //     );
-    //     connection_status.push(temp);
-    // }
 }
 
 fn update_from_ui(
@@ -543,8 +502,8 @@ fn setup_entity(mut commands: Commands) {
             ..Default::default()
         },
         CharacterRoot {
-            svg_asset_id: "v2.character.svg".to_owned(),
-            blueprint_asset_id: "v2.character.json".to_owned(),
+            svg_asset_id: "bar2.character.svg".to_owned(),
+            blueprint_asset_id: "bar2.character.json".to_owned(),
         },
         CharacterController {
             move_vector: Vec2::ZERO,
@@ -818,20 +777,10 @@ fn setup_resources(
     image("image/ammo_albedo.png");
     image("image/ammo_normal.png");
     image("image/test.png");
-    c_svg("character/base.character.svg");
-    c_blueprint("character/base.character.json");
-    c_svg("character/tri_shape.character.svg");
-    c_blueprint("character/tri_shape.character.json");
-    c_svg("character/angle.character.svg");
-    c_blueprint("character/angle.character.json");
-    c_svg("character/three.character.svg");
-    c_blueprint("character/three.character.json");
-    c_svg("character/quad_shape.character.svg");
-    c_blueprint("character/quad_shape.character.json");
-    c_svg("character/v1.character.svg");
-    c_blueprint("character/v1.character.json");
-    c_svg("character/v2.character.svg");
-    c_blueprint("character/v2.character.json");
+    c_svg("character/bar.character.svg");
+    c_blueprint("character/bar.character.json");
+    c_svg("character/bar2.character.svg");
+    c_blueprint("character/bar2.character.json");
 }
 
 //fn update_blood_instances()
@@ -921,16 +870,16 @@ fn player_movement(
 
     // Check for key presses
     if keyboard_input.pressed(KeyCode::KeyW) {
-        direction.y += 100.0;
+        direction.y += 10.0;
     }
     if keyboard_input.pressed(KeyCode::KeyS) {
-        direction.y -= 100.0;
+        direction.y -= 10.0;
     }
     if keyboard_input.pressed(KeyCode::KeyA) {
-        direction.x -= 100.0;
+        direction.x -= 10.0;
     }
     if keyboard_input.pressed(KeyCode::KeyD) {
-        direction.x += 100.0;
+        direction.x += 10.0;
     }
 
     if let Ok(mut item) = query.single_mut() {

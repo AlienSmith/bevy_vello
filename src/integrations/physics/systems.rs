@@ -4,8 +4,8 @@ use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
-        CharacterPivotForceEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
-        PivotVisualizer, VelloConstraintWorld, VelloJoint,
+        CharacterPivotForceEvent, ColliderExternalImpulseEvent, PivotVisualizer,
+        VelloConstraintWorld, VelloJoint, VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -41,38 +41,6 @@ pub fn generate_soft_body_for_collider(
     }
 }
 
-pub fn generate_connection_for_joint(
-    query: Query<(Entity, &VelloJoint), Added<VelloJoint>>,
-    mut constraint_world: ResMut<VelloConstraintWorld>,
-) {
-    for (e, j) in query.iter() {
-        let index_a = constraint_world
-            .data
-            .get_softbody_from_collider(j.init_config.entity_a)
-            .unwrap();
-        let index_b = constraint_world
-            .data
-            .get_softbody_from_collider(j.init_config.entity_b)
-            .unwrap();
-        constraint_world.data.add_connection(
-            &j.init_config.connection_config,
-            (index_a, index_b),
-            e,
-        );
-    }
-}
-
-pub fn update_joint_from_connection(
-    mut query: Query<(Entity, &mut VelloJoint)>,
-    constraint_world: Res<VelloConstraintWorld>,
-) {
-    for (e, mut joint) in query.iter_mut() {
-        if let Some(item) = constraint_world.data.get_particles_info_of_connection(e) {
-            joint.particle_info = item;
-        }
-    }
-}
-
 pub fn remove_soft_body(
     removed_colliders: Res<RemovedColliders>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
@@ -80,15 +48,6 @@ pub fn remove_soft_body(
     for item in &removed_colliders.colliders {
         constraint_world.data.remove_soft_body(*item);
     }
-}
-
-pub fn remove_connection(
-    mut removed: RemovedComponents<VelloJoint>,
-    mut constraint_world: ResMut<VelloConstraintWorld>,
-) {
-    removed.read().into_iter().for_each(|e| {
-        constraint_world.data.remove_connection(e);
-    });
 }
 
 pub fn update_collider_from_soft_body(
@@ -125,36 +84,6 @@ pub fn apply_explicit_impulse_on_softbody(
         }
     }
 }
-
-pub fn apply_explicit_impulse_on_joint(
-    mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut events: EventReader<JointExternalForceEvent>,
-) {
-    for event in events.read() {
-        if let Some(particles) = constraint_world
-            .data
-            .get_particles_info_of_connection(event.connection_index)
-        {
-            for item in (event.filter)(particles, event.filter_data) {
-                constraint_world
-                    .data
-                    .add_external_force_connection(event.connection_index, item);
-            }
-        }
-    }
-}
-
-pub fn apply_explicit_impulse_on_pivot(
-    mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut events: EventReader<CharacterPivotForceEvent>,
-) {
-    for event in events.read() {
-        constraint_world
-            .data
-            .add_external_force_connection(event.joint_entity, event.force.clone());
-    }
-}
-
 //consume the collision result togather with the collision pairs.
 //notice the collision results are from last frame so some entity could already been removed,
 //hence we don't need to add collision constraints to them anymore.
@@ -301,16 +230,76 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
     }
 }
 
+/////The following logic Works With softbody connection
+////
+///
+/// //
+///
+///
+
+pub fn generate_connection(
+    query_p: Query<(Entity, &VelloParticle), Added<VelloParticle>>,
+    query_c: Query<(Entity, &VelloJoint), Added<VelloJoint>>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    //all particles must be added before constraints
+    for (e, p) in query_p.iter() {
+        constraint_world.data.add_connect_particle(e, p);
+    }
+
+    for (e, c) in query_c.iter() {
+        constraint_world
+            .data
+            .add_connect_constraint(e, c.init_config.clone());
+    }
+}
+
+pub fn remove_connection(
+    mut removed_c: RemovedComponents<VelloJoint>,
+    mut removed_p: RemovedComponents<VelloParticle>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    removed_c.read().into_iter().for_each(|e| {
+        constraint_world.data.remove_connect_constraint(&e);
+    });
+    removed_p.read().into_iter().for_each(|e| {
+        constraint_world.data.remove_connect_particle(&e);
+    });
+}
+
+pub fn update_connection_particles(
+    mut query: Query<(Entity, &mut VelloParticle)>,
+    constraint_world: Res<VelloConstraintWorld>,
+) {
+    for (e, mut joint) in query.iter_mut() {
+        if let Some(item) = constraint_world.data.get_connect_particle(&e) {
+            *joint = item.into();
+        }
+    }
+}
+
+pub fn apply_explicit_impulse_on_connection_particle(
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    mut events: EventReader<CharacterPivotForceEvent>,
+) {
+    for event in events.read() {
+        constraint_world.data.add_connect_external_force(
+            &event.joint_entity,
+            &Vector2::new(event.force.x, event.force.y),
+        );
+    }
+}
+
 pub fn create_update_pivot_visualizer(
     mut commands: Commands,
     mut q: Query<&mut VelloScene, With<PivotVisualizer>>,
-    constraint_world: Res<VelloConstraintWorld>,
+    q_p: Query<&VelloParticle>,
 ) {
-    let mut pos = constraint_world.data.get_pivots_position();
     let mut path = BezPath::new();
-    for item in pos.drain(..) {
-        path.push(PathEl::MoveTo((item.0, item.1).into()));
-        path.push(PathEl::LineTo((item.0 + 0.01, item.1).into()));
+    for p in q_p.iter() {
+        let item = p.pos;
+        path.push(PathEl::MoveTo((item.x, item.y).into()));
+        path.push(PathEl::LineTo((item.x + 0.01, item.y).into()));
     }
     let mut scene = VelloScene::default();
     scene.stroke(

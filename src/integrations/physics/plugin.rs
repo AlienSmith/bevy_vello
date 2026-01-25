@@ -9,15 +9,13 @@ use crate::{
     collision::CollisionSystems,
     integrations::physics::{
         systems::{
-            apply_explicit_impulse_on_joint, apply_explicit_impulse_on_pivot,
-            apply_explicit_impulse_on_softbody, create_update_pivot_visualizer,
-            generate_connection_for_joint, generate_soft_body_for_collider,
+            apply_explicit_impulse_on_connection_particle, apply_explicit_impulse_on_softbody,
+            create_update_pivot_visualizer, generate_connection, generate_soft_body_for_collider,
             make_collision_constraints, remove_connection, remove_soft_body,
-            update_collider_from_soft_body, update_constraint_world, update_joint_from_connection,
+            update_collider_from_soft_body, update_connection_particles, update_constraint_world,
             visualize_colliders,
         },
-        CharacterPivotForceEvent, ColliderExternalImpulseEvent, JointExternalForceEvent,
-        VelloConstraintWorld,
+        CharacterPivotForceEvent, ColliderExternalImpulseEvent, VelloConstraintWorld,
     },
 };
 
@@ -28,22 +26,20 @@ impl Plugin for VelloCollisionResponsePlugin {
         app.insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, 0.0)))
             .insert_resource(Time::<Fixed>::from_hz(90.0))
             .add_event::<ColliderExternalImpulseEvent>()
-            .add_event::<JointExternalForceEvent>()
             .add_event::<CharacterPivotForceEvent>()
             .add_systems(FixedUpdate, update_constraint_world)
             .add_systems(
                 PostUpdate,
                 (
                     generate_soft_body_for_collider,
-                    generate_connection_for_joint,
+                    generate_connection,
                     apply_explicit_impulse_on_softbody,
-                    apply_explicit_impulse_on_joint,
-                    apply_explicit_impulse_on_pivot,
+                    apply_explicit_impulse_on_connection_particle,
                     make_collision_constraints,
                     remove_soft_body,
                     remove_connection,
                     update_collider_from_soft_body,
-                    update_joint_from_connection,
+                    update_connection_particles,
                     visualize_colliders,
                     create_update_pivot_visualizer,
                 )

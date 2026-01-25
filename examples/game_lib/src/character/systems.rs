@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_vello::integrations::physics::{CharacterPivotForceEvent, VelloJoint};
+use bevy_vello::integrations::physics::{CharacterPivotForceEvent, VelloJoint, VelloParticle};
 use nalgebra::Vector2;
 use vello_physics::soft_body::{ExternalForce, ParticleInfo};
 
@@ -34,21 +34,16 @@ const WEIGHT_RATIO: f32 = 1.0;
 fn claculate_force(
     e_h: Entity,
     e_w: Entity,
-    p_h: &ParticleInfo,
-    p_w: &ParticleInfo,
+    p_h: &VelloParticle,
+    p_w: &VelloParticle,
     vec: Vec2,
 ) -> Vec<CharacterPivotForceEvent> {
     let mut result = vec![];
     let dir = bevy_to_vello(vec);
     let length = dir.magnitude();
     let dir = dir / length;
-    let pos_h = Vector2::new(p_h.pos_x, p_h.pos_y);
-    let pos_w: nalgebra::Matrix<
-        f32,
-        nalgebra::Const<2>,
-        nalgebra::Const<1>,
-        nalgebra::ArrayStorage<f32, 2, 1>,
-    > = Vector2::new(p_w.pos_x, p_w.pos_y);
+    let pos_h = p_h.pos;
+    let pos_w = p_w.pos;
     let delta = (pos_h - pos_w).normalize();
     let proj = delta.dot(&dir);
     let (d_h, d_w) = if proj < 0.0 {
@@ -62,24 +57,24 @@ fn claculate_force(
     };
     result.push(CharacterPivotForceEvent {
         joint_entity: e_h,
-        force: ExternalForce::Impulse(p_h.index, d_h.x, d_h.y),
+        force: vec2(d_h.x, d_h.y),
     });
     result.push(CharacterPivotForceEvent {
         joint_entity: e_w,
-        force: ExternalForce::Impulse(p_w.index, d_w.x, d_w.y),
+        force: vec2(d_w.x, d_w.y),
     });
     result
 }
 
 pub fn update_character_movement(
     c_q: Query<(&ConnectivityRoot, &CharacterController)>,
-    j_q: Query<&VelloJoint>,
+    j_q: Query<&VelloParticle>,
     string_pool: ResMut<StringPool>,
     mut force_events: EventWriter<CharacterPivotForceEvent>,
 ) {
     // 1. Intern strings once outside the loop
-    let pivot_h = string_pool.pool.intern("s0_s0_h");
-    let pivot_w = string_pool.pool.intern("s0_s0");
+    let pivot_h = string_pool.pool.intern("p0");
+    let pivot_w = string_pool.pool.intern("p1");
 
     for (root, control) in &c_q {
         // 2. Early exit for dead-zone check
@@ -100,13 +95,7 @@ pub fn update_character_movement(
 
         // 4. Use if-let to execute the logic only if all requirements are met
         if let Some((e_h, e_w, j_h, j_w)) = data {
-            let forces = claculate_force(
-                e_h,
-                e_w,
-                &j_h.particle_info[0],
-                &j_w.particle_info[0],
-                control.move_vector,
-            );
+            let forces = claculate_force(e_h, e_w, &j_h, &j_w, control.move_vector);
 
             // 5. Send events directly (no need for .drain() unless reusing the Vec)
             force_events.write_batch(forces);

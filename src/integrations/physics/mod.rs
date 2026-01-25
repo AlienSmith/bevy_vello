@@ -24,10 +24,6 @@ impl VelloConstraintWorld {
     pub fn set_gravity(&mut self, gravity: Vec2) {
         self.data.gravity = nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y);
     }
-
-    pub fn remove_connection(&mut self, joint: Entity) {
-        self.data.remove_connection(joint);
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -37,11 +33,11 @@ pub struct FilterData {
 
 pub use plugin::VelloCollisionResponsePlugin;
 pub use thunderdome::Index;
-pub use vello_physics::collision_response::Particle as VelloParticle;
+pub use vello_physics::collision_response::Particle;
 pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
-use vello_physics::ConstraintWorld;
+use vello_physics::{ConnectionConstraintInitConfig, ConstraintWorld};
 
 // #[derive(Event)]
 // pub struct ColliderExternalImpulseEvent {
@@ -59,44 +55,51 @@ pub struct ColliderExternalImpulseEvent {
 #[derive(Event)]
 pub struct CharacterPivotForceEvent {
     pub joint_entity: Entity,
-    pub force: vello_physics::soft_body::ExternalForce,
-}
-
-#[derive(Event)]
-pub struct JointExternalForceEvent {
-    pub filter: fn(Vec<ParticleInfo>, FilterData) -> Vec<vello_physics::soft_body::ExternalForce>,
-    pub connection_index: Entity,
-    pub filter_data: FilterData,
+    pub force: Vec2,
 }
 
 #[derive(Component)]
 pub struct PivotVisualizer;
 
-pub struct VelloConnectionInitConfig {
-    pub connection_config: ConnectionInitConfig,
-    pub entity_a: Entity,
-    pub entity_b: Entity,
-}
-
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct VelloJoint {
-    init_config: VelloConnectionInitConfig,
-    pub particle_info: Vec<ParticleInfo>,
+    init_config: ConnectionConstraintInitConfig<Entity>,
 }
 
 impl VelloJoint {
-    pub fn new(
-        connection_config: ConnectionInitConfig,
-        entity_a: Entity,
-        entity_b: Entity,
-    ) -> Self {
+    pub fn new(connection_config: ConnectionConstraintInitConfig<Entity>) -> Self {
         Self {
-            init_config: VelloConnectionInitConfig {
-                connection_config,
-                entity_a,
-                entity_b,
-            },
-            particle_info: vec![],
+            init_config: connection_config,
         }
+    }
+}
+
+/// A simple newtype component wrapper for [`vello::Scene`] for rendering.
+#[derive(Component, Default, Clone)]
+pub struct VelloParticle(Particle);
+
+impl std::ops::Deref for VelloParticle {
+    type Target = Particle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for VelloParticle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl VelloParticle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl From<Particle> for VelloParticle {
+    fn from(scene: Particle) -> Self {
+        Self(scene)
     }
 }

@@ -1,7 +1,8 @@
 use bevy::{ecs::intern::Interned, platform::collections::HashMap, prelude::*};
 use bevy_vello::{
-    collision::path_to_ccw_quad_path, integrations::physics::VelloJoint, VelloCollider, VelloScene,
-    VelloSceneBundle,
+    collision::path_to_ccw_quad_path,
+    integrations::physics::{VelloJoint, VelloParticle},
+    VelloCollider, VelloScene, VelloSceneBundle,
 };
 use nalgebra::Vector2;
 use vello::{
@@ -9,8 +10,8 @@ use vello::{
     peniko::{self, GlowColor},
 };
 use vello_physics::{
-    generate_uvs, soft_body_connection::ConnectionInitConfig, CollisionConstraintConfig,
-    SoftBodyInitConfig,
+    collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
+    CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
 };
 
 use crate::{
@@ -34,6 +35,15 @@ pub fn assemble_character(
     let root_entity = trigger.target();
     // 1. Get the specific asset IDs for this character
     let (config, transform) = query.get(root_entity).unwrap();
+
+    let affine = transform_to_affine(transform);
+    let apply_transform_to_particle = |p: &mut Particle| {
+        let point = kurbo::Point::new(p.pos.x as f64, p.pos.y as f64);
+        let result = affine * point;
+        p.pos = Vector2::new(result.x as f32, result.y as f32);
+        return;
+    };
+
     let Some(blueprint_handle) = blueprint_manager.get_index_from_name(&config.blueprint_asset_id)
     else {
         warn!(
@@ -52,7 +62,7 @@ pub fn assemble_character(
     let blueprint = blueprint_assets.get(blueprint_handle.id()).unwrap();
     let svgs = svg_assets.get(svg_handle.id()).unwrap();
     let mut character_connectivity = ConnectivityRoot::default();
-    let mut colliders_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
+    let mut colliders_particle_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
     for item in blueprint.data.colliders.iter() {
         let Some((s, rect)) = svgs.data.get(&item.path_id) else {
             warn!(
@@ -83,118 +93,108 @@ pub fn assemble_character(
             collision_group,
         );
         let collider_name = string_pool.pool.intern(&item.path_id);
-        colliders_entity.insert(
+        colliders_particle_entity.insert(
             item.path_id.to_string(),
             (entity, Connectivity::new(root_entity, true, collider_name)),
         );
         character_connectivity.parts.insert(collider_name, entity);
     }
-    let affine = transform_to_affine(transform);
-    let apply_transform_to_pos = |p: Vector2<f32>| -> Vector2<f32> {
-        let point = kurbo::Point::new(p.x as f64, p.y as f64);
-        let result = affine * point;
-        return Vector2::new(result.x as f32, result.y as f32);
-    };
-    for item in blueprint.data.joints.iter() {
-        let joint_config = match item.config {
-            ConnectionInitConfig::HingeJoint(
-                mut particle,
-                mut particle1,
-                mut particle2,
-                complaince,
-                c_a,
-                c_ab,
-                c_cb,
-                c_c,
-            ) => {
-                particle.pos = apply_transform_to_pos(particle.pos);
-                particle1.pos = apply_transform_to_pos(particle1.pos);
-                particle2.pos = apply_transform_to_pos(particle2.pos);
-                ConnectionInitConfig::HingeJoint(
-                    particle, particle1, particle2, complaince, c_a, c_ab, c_cb, c_c,
-                )
-            }
-            ConnectionInitConfig::DoubleJoint(mut particle, mut particle1, r0, r1, i0, i1) => {
-                particle.pos = apply_transform_to_pos(particle.pos);
-                particle1.pos = apply_transform_to_pos(particle1.pos);
-                ConnectionInitConfig::DoubleJoint(particle, particle1, r0, r1, i0, i1)
-            }
-            ConnectionInitConfig::SinglePivot(mut particle, r0) => {
-                particle.pos = apply_transform_to_pos(particle.pos);
-                ConnectionInitConfig::SinglePivot(particle, r0)
-            }
-            _ => {
-                todo!("other kind of joint are not supported yet");
-            }
-        };
 
-        let (entity_a, entity_b) = {
-            let Some((entity_a, _)) = colliders_entity.get(&item.collider_a_id) else {
-                warn!(
-                    "could not found collider {:?}, for joint {:?}, in {:?}",
-                    item.collider_a_id, item.path_id, config.svg_asset_id
-                );
-                return;
-            };
-            let Some((entity_b, _)) = colliders_entity.get(&item.collider_b_id) else {
-                warn!(
-                    "could not found collider {:?}, for joint {:?}, in {:?}",
-                    item.collider_b_id, item.path_id, config.svg_asset_id,
-                );
-                return;
-            };
-            (*entity_a, *entity_b)
+    for item in blueprint.data.particles.iter() {
+        let mut particle = item.particle.clone();
+        apply_transform_to_particle(&mut particle);
+        let entity = make_particle(&mut commands, particle.into());
+        let particle_name = string_pool.pool.intern(&item.path_id);
+        colliders_particle_entity.insert(
+            item.path_id.to_string(),
+            (entity, Connectivity::new(root_entity, true, particle_name)),
+        );
+        character_connectivity.parts.insert(particle_name, entity);
+    }
+    let mut sibling: Vec<(String, Entity)> = vec![];
+    let process_name = |colliders_particle_entity: &HashMap<String, (Entity, Connectivity)>,
+                        sibling: &mut Vec<(String, Entity)>,
+                        name: &String,
+                        path_name: &String|
+     -> Entity {
+        let Some((entity_a, _)) = colliders_particle_entity.get(name) else {
+            panic!(
+                "could not found collider {:?}, constraint {:?}, in {:?}",
+                name, path_name, config.svg_asset_id
+            );
+        };
+        sibling.push((name.clone(), *entity_a));
+        *entity_a
+    };
+
+    for item in blueprint.data.joints.iter() {
+        sibling.clear();
+        let joint_config = match &item.config {
+            ConnectionInitConfig::Bilinear(s0, s1, compliance) => {
+                let e0 = process_name(&colliders_particle_entity, &mut sibling, s0, &item.path_id);
+                let e1 = process_name(&colliders_particle_entity, &mut sibling, s1, &item.path_id);
+                ConnectionConstraintInitConfig::<Entity>::Bilinear(e0, e1, *compliance)
+            }
+            ConnectionInitConfig::Distance(s0, s1, compliance) => {
+                let e0 = process_name(&colliders_particle_entity, &mut sibling, s0, &item.path_id);
+                let e1 = process_name(&colliders_particle_entity, &mut sibling, s1, &item.path_id);
+                ConnectionConstraintInitConfig::<Entity>::Distance(e0, e1, *compliance)
+            }
+            ConnectionInitConfig::Angular(s0, s1, s2, compliance) => {
+                let e0 = process_name(&colliders_particle_entity, &mut sibling, s0, &item.path_id);
+                let e1 = process_name(&colliders_particle_entity, &mut sibling, s1, &item.path_id);
+                let e2 = process_name(&colliders_particle_entity, &mut sibling, s2, &item.path_id);
+                ConnectionConstraintInitConfig::<Entity>::Angular(e0, e1, e2, *compliance)
+            }
         };
         let joint_name = string_pool.pool.intern(&item.path_id);
         let joint_entity = make_joint(
             &mut commands,
             joint_config,
-            entity_a,
-            entity_b,
+            &sibling,
             root_entity,
             joint_name,
         );
+
+        for (s, _) in sibling.iter() {
+            colliders_particle_entity
+                .get_mut(s)
+                .unwrap()
+                .1
+                .parts
+                .insert(joint_entity);
+        }
+
         character_connectivity
             .parts
             .insert(joint_name, joint_entity);
-        colliders_entity
-            .get_mut(&item.collider_a_id)
-            .unwrap()
-            .1
-            .parts
-            .insert(joint_entity);
-        colliders_entity
-            .get_mut(&item.collider_b_id)
-            .unwrap()
-            .1
-            .parts
-            .insert(joint_entity);
     }
 
     commands.entity(root_entity).insert(character_connectivity);
-    for (_, (e, c)) in colliders_entity.drain() {
+    for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);
     }
 
     // The CharacterRoot remains on the entity as your permanent marker.
 }
 
+fn make_particle(commands: &mut Commands, particle: VelloParticle) -> Entity {
+    commands.spawn(particle).id()
+}
+
 fn make_joint(
     commands: &mut Commands,
-    connection_config: ConnectionInitConfig,
-    entity_a: Entity,
-    entity_b: Entity,
+    connection_config: ConnectionConstraintInitConfig<Entity>,
+    entity: &[(String, Entity)],
     character: Entity,
     name: Interned<str>,
 ) -> Entity {
     let mut connectivity = Connectivity::new(character, false, name);
-    connectivity.parts.insert(entity_a);
-    connectivity.parts.insert(entity_b);
+    for item in entity {
+        connectivity.parts.insert(item.1.clone());
+    }
     commands
-        .spawn((
-            VelloJoint::new(connection_config, entity_a, entity_b),
-            connectivity,
-        ))
+        .spawn((VelloJoint::new(connection_config), connectivity))
         .id()
 }
 
