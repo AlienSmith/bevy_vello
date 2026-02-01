@@ -2,9 +2,17 @@ mod plugin;
 mod systems;
 
 use bevy::{
-    ecs::{component::Component, entity::Entity, event::Event, resource::Resource},
+    ecs::{
+        component::{Component, ComponentHooks, HookContext, Mutable, StorageType},
+        entity::Entity,
+        event::Event,
+        resource::Resource,
+        world::DeferredWorld,
+    },
     math::Vec2,
 };
+
+use bevy::prelude::*;
 
 #[derive(Resource)]
 pub struct VelloConstraintWorld {
@@ -62,10 +70,7 @@ pub struct CharacterPivotForceEvent {
 #[derive(Component)]
 pub struct PivotVisualizer;
 
-#[derive(Component, Clone)]
-pub struct VelloCharacterPhysicsRoot;
-
-#[derive(Component, Clone)]
+#[derive(Clone)]
 pub struct VelloJoint {
     pub init_config: ConnectionConstraintInitConfig<Entity>,
     pub root_entity: Entity,
@@ -83,8 +88,35 @@ impl VelloJoint {
     }
 }
 
+impl Component for VelloJoint {
+    const STORAGE_TYPE: StorageType = StorageType::Table;
+    type Mutability = Mutable;
+
+    fn register_component_hooks(hooks: &mut ComponentHooks) {
+        // Match the signature: (DeferredWorld, HookContext)
+        hooks.on_remove(|mut world: DeferredWorld, context: HookContext| {
+            let entity = context.entity; // Entity ID is now inside the context
+
+            // 1. Read the data
+            let character = {
+                let joint = world.get::<VelloJoint>(entity).unwrap();
+                joint.root_entity
+            };
+
+            // 2. Queue the mutation
+            world.commands().queue(move |world: &mut World| {
+                if let Some(mut cv) = world.get_resource_mut::<VelloConstraintWorld>() {
+                    if let Ok(group) = cv.data.get_group_mut(character) {
+                        group.remove_connect_constraint(&entity);
+                    }
+                }
+            });
+        });
+    }
+}
+
 /// A simple newtype component wrapper for [`vello::Scene`] for rendering.
-#[derive(Component, Clone)]
+#[derive(Clone)]
 pub struct VelloParticle {
     pub particle: Particle,
     pub root_entity: Entity,
@@ -96,5 +128,47 @@ impl VelloParticle {
             particle,
             root_entity: entity,
         }
+    }
+}
+
+impl Component for VelloParticle {
+    const STORAGE_TYPE: StorageType = StorageType::Table;
+    type Mutability = Mutable;
+
+    fn register_component_hooks(hooks: &mut ComponentHooks) {
+        hooks.on_remove(|mut world: DeferredWorld, context: HookContext| {
+            let entity = context.entity;
+            // 1. Read the data
+            let character = {
+                let joint = world.get::<VelloJoint>(entity).unwrap();
+                joint.root_entity
+            };
+            world.commands().queue(move |world: &mut World| {
+                if let Some(mut cv) = world.get_resource_mut::<VelloConstraintWorld>() {
+                    if let Ok(group) = cv.data.get_group_mut(character) {
+                        group.remove_connect_particle(&entity);
+                    }
+                }
+            });
+        });
+    }
+}
+
+#[derive(Clone)]
+pub struct VelloCharacterPhysicsRoot;
+
+impl Component for VelloCharacterPhysicsRoot {
+    const STORAGE_TYPE: StorageType = StorageType::Table;
+    type Mutability = Mutable;
+
+    fn register_component_hooks(hooks: &mut ComponentHooks) {
+        hooks.on_remove(|mut world: DeferredWorld, context: HookContext| {
+            let entity = context.entity;
+            world.commands().queue(move |world: &mut World| {
+                if let Some(mut cv) = world.get_resource_mut::<VelloConstraintWorld>() {
+                    cv.data.remove_group(entity);
+                }
+            });
+        });
     }
 }

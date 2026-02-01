@@ -259,30 +259,31 @@ pub fn generate_connection(
             .unwrap();
     }
 }
-
-pub fn remove_connection(
-    query_p: Query<&VelloParticle>,
-    query_c: Query<&VelloJoint>,
-    mut removed_r: RemovedComponents<VelloCharacterPhysicsRoot>,
-    mut removed_c: RemovedComponents<VelloJoint>,
-    mut removed_p: RemovedComponents<VelloParticle>,
-    mut constraint_world: ResMut<VelloConstraintWorld>,
-) {
-    removed_c.read().into_iter().for_each(|e| {
-        let character = query_p.get(e).unwrap().root_entity;
-        let group = constraint_world.data.get_group_mut(character).unwrap();
-        group.remove_connect_constraint(&e);
-    });
-    removed_p.read().into_iter().for_each(|e| {
-        let character = query_c.get(e).unwrap().root_entity;
-        let group = constraint_world.data.get_group_mut(character).unwrap();
-        group.remove_connect_particle(&e);
-    });
-    removed_r
-        .read()
-        .into_iter()
-        .for_each(|e| constraint_world.data.remove_group(e));
-}
+//deprecated and unsafe for not able to obtain component after removal.
+//use component hooks instead.
+// pub fn remove_connection(
+//     query_p: Query<&VelloParticle>,
+//     query_c: Query<&VelloJoint>,
+//     mut removed_r: RemovedComponents<VelloCharacterPhysicsRoot>,
+//     mut removed_c: RemovedComponents<VelloJoint>,
+//     mut removed_p: RemovedComponents<VelloParticle>,
+//     mut constraint_world: ResMut<VelloConstraintWorld>,
+// ) {
+//     removed_c.read().into_iter().for_each(|e| {
+//         let character = query_p.get(e).unwrap().root_entity;
+//         let group = constraint_world.data.get_group_mut(character).unwrap();
+//         group.remove_connect_constraint(&e);
+//     });
+//     removed_p.read().into_iter().for_each(|e| {
+//         let character = query_c.get(e).unwrap().root_entity;
+//         let group = constraint_world.data.get_group_mut(character).unwrap();
+//         group.remove_connect_particle(&e);
+//     });
+//     removed_r
+//         .read()
+//         .into_iter()
+//         .for_each(|e| constraint_world.data.remove_group(e));
+// }
 
 pub fn update_connection_particles(
     mut query: Query<(Entity, &mut VelloParticle)>,
