@@ -502,8 +502,8 @@ fn setup_entity(mut commands: Commands) {
             ..Default::default()
         },
         CharacterRoot {
-            svg_asset_id: "v3.character.svg".to_owned(),
-            blueprint_asset_id: "v3.character.json".to_owned(),
+            svg_asset_id: "v4.character.svg".to_owned(),
+            blueprint_asset_id: "v4.character.json".to_owned(),
         },
         CharacterController {
             move_vector: Vec2::ZERO,
@@ -777,14 +777,8 @@ fn setup_resources(
     image("image/ammo_albedo.png");
     image("image/ammo_normal.png");
     image("image/test.png");
-    c_svg("character/bar.character.svg");
-    c_blueprint("character/bar.character.json");
-    c_svg("character/bar2.character.svg");
-    c_blueprint("character/bar2.character.json");
-    c_svg("character/v2.character.svg");
-    c_blueprint("character/v2.character.json");
-    c_svg("character/v3.character.svg");
-    c_blueprint("character/v3.character.json");
+    c_svg("character/v4.character.svg");
+    c_blueprint("character/v4.character.json");
 }
 
 //fn update_blood_instances()

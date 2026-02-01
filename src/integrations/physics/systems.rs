@@ -238,18 +238,20 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
 ///
 
 pub fn generate_connection(
-    query_r: Query<Entity, Added<VelloCharacterPhysicsRoot>>,
+    query_r: Query<(Entity, &VelloCharacterPhysicsRoot), Added<VelloCharacterPhysicsRoot>>,
     query_p: Query<(Entity, &VelloParticle), Added<VelloParticle>>,
     query_c: Query<(Entity, &VelloJoint), Added<VelloJoint>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
-    for e in query_r.iter() {
-        constraint_world.data.add_group(e);
+    for (e, c) in query_r.iter() {
+        constraint_world
+            .data
+            .add_group(e, &c.shape_matching_frame_config);
     }
     //all particles must be added before constraints
     for (e, p) in query_p.iter() {
         let group = constraint_world.data.get_group_mut(p.root_entity).unwrap();
-        group.add_connect_particle(e, &p.particle);
+        group.add_connect_particle(e, &p.particle, &p.frame_connect_config);
     }
 
     for (e, c) in query_c.iter() {

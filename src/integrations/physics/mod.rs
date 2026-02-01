@@ -45,7 +45,9 @@ pub use vello_physics::collision_response::Particle;
 pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
-use vello_physics::{ConnectionConstraintInitConfig, ConstraintWorld};
+use vello_physics::{
+    ConnectionConstraintInitConfig, ConstraintWorld, FrameBilinearConstraintConfig, FrameInitConfig,
+};
 
 // #[derive(Event)]
 // pub struct ColliderExternalImpulseEvent {
@@ -120,13 +122,19 @@ impl Component for VelloJoint {
 pub struct VelloParticle {
     pub particle: Particle,
     pub root_entity: Entity,
+    pub frame_connect_config: FrameBilinearConstraintConfig,
 }
 
 impl VelloParticle {
-    pub fn new(particle: Particle, entity: Entity) -> Self {
+    pub fn new(
+        particle: Particle,
+        entity: Entity,
+        frame_connect_config: FrameBilinearConstraintConfig,
+    ) -> Self {
         Self {
             particle,
             root_entity: entity,
+            frame_connect_config,
         }
     }
 }
@@ -155,7 +163,17 @@ impl Component for VelloParticle {
 }
 
 #[derive(Clone)]
-pub struct VelloCharacterPhysicsRoot;
+pub struct VelloCharacterPhysicsRoot {
+    pub shape_matching_frame_config: FrameInitConfig,
+}
+
+impl VelloCharacterPhysicsRoot {
+    pub fn new(config: FrameInitConfig) -> Self {
+        Self {
+            shape_matching_frame_config: config,
+        }
+    }
+}
 
 impl Component for VelloCharacterPhysicsRoot {
     const STORAGE_TYPE: StorageType = StorageType::Table;

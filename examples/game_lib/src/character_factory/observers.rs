@@ -11,7 +11,8 @@ use vello::{
 };
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
-    CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
+    CollisionConstraintConfig, ConnectionConstraintInitConfig, FrameBilinearConstraintConfig,
+    SoftBodyInitConfig,
 };
 
 use crate::{
@@ -103,7 +104,12 @@ pub fn assemble_character(
     for item in blueprint.data.particles.iter() {
         let mut particle = item.particle.clone();
         apply_transform_to_particle(&mut particle);
-        let entity = make_particle(&mut commands, particle, &root_entity);
+        let entity = make_particle(
+            &mut commands,
+            particle,
+            &root_entity,
+            item.frame_conn.clone(),
+        );
         let particle_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
             item.path_id.to_string(),
@@ -171,9 +177,14 @@ pub fn assemble_character(
     }
 
     commands.entity(root_entity).insert(character_connectivity);
+    let mut frame_config = blueprint.data.frame.init_config.clone();
+    for item in frame_config.frame_particles.iter_mut() {
+        apply_transform_to_particle(item);
+    }
+
     commands
         .entity(root_entity)
-        .insert(VelloCharacterPhysicsRoot);
+        .insert(VelloCharacterPhysicsRoot::new(frame_config));
     for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);
     }
@@ -181,9 +192,18 @@ pub fn assemble_character(
     // The CharacterRoot remains on the entity as your permanent marker.
 }
 
-fn make_particle(commands: &mut Commands, particle: Particle, root_entity: &Entity) -> Entity {
+fn make_particle(
+    commands: &mut Commands,
+    particle: Particle,
+    root_entity: &Entity,
+    frame_connect_config: FrameBilinearConstraintConfig,
+) -> Entity {
     commands
-        .spawn(VelloParticle::new(particle, *root_entity))
+        .spawn(VelloParticle::new(
+            particle,
+            *root_entity,
+            frame_connect_config,
+        ))
         .id()
 }
 
