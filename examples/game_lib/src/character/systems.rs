@@ -42,8 +42,8 @@ fn claculate_force(
     let dir = bevy_to_vello(vec);
     let length = dir.magnitude();
     let dir = dir / length;
-    let pos_h = p_h.pos;
-    let pos_w = p_w.pos;
+    let pos_h = p_h.particle.pos;
+    let pos_w = p_w.particle.pos;
     let delta = (pos_h - pos_w).normalize();
     let proj = delta.dot(&dir);
     let (d_h, d_w) = if proj < 0.0 {
@@ -56,10 +56,12 @@ fn claculate_force(
         (d_h * WEIGHT_RATIO, d_w)
     };
     result.push(CharacterPivotForceEvent {
+        character_entity: p_h.root_entity,
         joint_entity: e_h,
         force: vec2(d_h.x, d_h.y),
     });
     result.push(CharacterPivotForceEvent {
+        character_entity: p_h.root_entity,
         joint_entity: e_w,
         force: vec2(d_w.x, d_w.y),
     });

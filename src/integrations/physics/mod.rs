@@ -54,6 +54,7 @@ pub struct ColliderExternalImpulseEvent {
 
 #[derive(Event)]
 pub struct CharacterPivotForceEvent {
+    pub character_entity: Entity,
     pub joint_entity: Entity,
     pub force: Vec2,
 }
@@ -62,44 +63,38 @@ pub struct CharacterPivotForceEvent {
 pub struct PivotVisualizer;
 
 #[derive(Component, Clone)]
+pub struct VelloCharacterPhysicsRoot;
+
+#[derive(Component, Clone)]
 pub struct VelloJoint {
-    init_config: ConnectionConstraintInitConfig<Entity>,
+    pub init_config: ConnectionConstraintInitConfig<Entity>,
+    pub root_entity: Entity,
 }
 
 impl VelloJoint {
-    pub fn new(connection_config: ConnectionConstraintInitConfig<Entity>) -> Self {
+    pub fn new(
+        connection_config: ConnectionConstraintInitConfig<Entity>,
+        character: Entity,
+    ) -> Self {
         Self {
             init_config: connection_config,
+            root_entity: character,
         }
     }
 }
 
 /// A simple newtype component wrapper for [`vello::Scene`] for rendering.
-#[derive(Component, Default, Clone)]
-pub struct VelloParticle(Particle);
-
-impl std::ops::Deref for VelloParticle {
-    type Target = Particle;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for VelloParticle {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+#[derive(Component, Clone)]
+pub struct VelloParticle {
+    pub particle: Particle,
+    pub root_entity: Entity,
 }
 
 impl VelloParticle {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl From<Particle> for VelloParticle {
-    fn from(scene: Particle) -> Self {
-        Self(scene)
+    pub fn new(particle: Particle, entity: Entity) -> Self {
+        Self {
+            particle,
+            root_entity: entity,
+        }
     }
 }

@@ -1,7 +1,7 @@
 use bevy::{ecs::intern::Interned, platform::collections::HashMap, prelude::*};
 use bevy_vello::{
     collision::path_to_ccw_quad_path,
-    integrations::physics::{VelloJoint, VelloParticle},
+    integrations::physics::{VelloCharacterPhysicsRoot, VelloJoint, VelloParticle},
     VelloCollider, VelloScene, VelloSceneBundle,
 };
 use nalgebra::Vector2;
@@ -103,7 +103,7 @@ pub fn assemble_character(
     for item in blueprint.data.particles.iter() {
         let mut particle = item.particle.clone();
         apply_transform_to_particle(&mut particle);
-        let entity = make_particle(&mut commands, particle.into());
+        let entity = make_particle(&mut commands, particle, &root_entity);
         let particle_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
             item.path_id.to_string(),
@@ -171,6 +171,9 @@ pub fn assemble_character(
     }
 
     commands.entity(root_entity).insert(character_connectivity);
+    commands
+        .entity(root_entity)
+        .insert(VelloCharacterPhysicsRoot);
     for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);
     }
@@ -178,8 +181,10 @@ pub fn assemble_character(
     // The CharacterRoot remains on the entity as your permanent marker.
 }
 
-fn make_particle(commands: &mut Commands, particle: VelloParticle) -> Entity {
-    commands.spawn(particle).id()
+fn make_particle(commands: &mut Commands, particle: Particle, root_entity: &Entity) -> Entity {
+    commands
+        .spawn(VelloParticle::new(particle, *root_entity))
+        .id()
 }
 
 fn make_joint(
@@ -194,7 +199,7 @@ fn make_joint(
         connectivity.parts.insert(item.1.clone());
     }
     commands
-        .spawn((VelloJoint::new(connection_config), connectivity))
+        .spawn((VelloJoint::new(connection_config, character), connectivity))
         .id()
 }
 

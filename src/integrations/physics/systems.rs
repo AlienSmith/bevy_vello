@@ -5,7 +5,7 @@ use crate::{
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
         CharacterPivotForceEvent, ColliderExternalImpulseEvent, PivotVisualizer,
-        VelloConstraintWorld, VelloJoint, VelloParticle,
+        VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -238,33 +238,50 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
 ///
 
 pub fn generate_connection(
+    query_r: Query<Entity, Added<VelloCharacterPhysicsRoot>>,
     query_p: Query<(Entity, &VelloParticle), Added<VelloParticle>>,
     query_c: Query<(Entity, &VelloJoint), Added<VelloJoint>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
+    for e in query_r.iter() {
+        constraint_world.data.add_group(e);
+    }
     //all particles must be added before constraints
     for (e, p) in query_p.iter() {
-        constraint_world.data.add_connect_particle(e, p);
+        let group = constraint_world.data.get_group_mut(p.root_entity).unwrap();
+        group.add_connect_particle(e, &p.particle);
     }
 
     for (e, c) in query_c.iter() {
         constraint_world
             .data
-            .add_connect_constraint(e, c.init_config.clone());
+            .add_connect_constraint(c.root_entity, e, c.init_config.clone())
+            .unwrap();
     }
 }
 
 pub fn remove_connection(
+    query_p: Query<&VelloParticle>,
+    query_c: Query<&VelloJoint>,
+    mut removed_r: RemovedComponents<VelloCharacterPhysicsRoot>,
     mut removed_c: RemovedComponents<VelloJoint>,
     mut removed_p: RemovedComponents<VelloParticle>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
     removed_c.read().into_iter().for_each(|e| {
-        constraint_world.data.remove_connect_constraint(&e);
+        let character = query_p.get(e).unwrap().root_entity;
+        let group = constraint_world.data.get_group_mut(character).unwrap();
+        group.remove_connect_constraint(&e);
     });
     removed_p.read().into_iter().for_each(|e| {
-        constraint_world.data.remove_connect_particle(&e);
+        let character = query_c.get(e).unwrap().root_entity;
+        let group = constraint_world.data.get_group_mut(character).unwrap();
+        group.remove_connect_particle(&e);
     });
+    removed_r
+        .read()
+        .into_iter()
+        .for_each(|e| constraint_world.data.remove_group(e));
 }
 
 pub fn update_connection_particles(
@@ -272,8 +289,10 @@ pub fn update_connection_particles(
     constraint_world: Res<VelloConstraintWorld>,
 ) {
     for (e, mut joint) in query.iter_mut() {
-        if let Some(item) = constraint_world.data.get_connect_particle(&e) {
-            *joint = item.into();
+        let character = joint.root_entity;
+        let group = constraint_world.data.get_group_ref(character).unwrap();
+        if let Some(item) = group.get_connect_particle(&e) {
+            joint.particle = item;
         }
     }
 }
@@ -283,7 +302,11 @@ pub fn apply_explicit_impulse_on_connection_particle(
     mut events: EventReader<CharacterPivotForceEvent>,
 ) {
     for event in events.read() {
-        constraint_world.data.add_connect_external_force(
+        let group = constraint_world
+            .data
+            .get_group_mut(event.character_entity)
+            .unwrap();
+        group.add_connect_external_force(
             &event.joint_entity,
             &Vector2::new(event.force.x, event.force.y),
         );
@@ -297,7 +320,7 @@ pub fn create_update_pivot_visualizer(
 ) {
     let mut path = BezPath::new();
     for p in q_p.iter() {
-        let item = p.pos;
+        let item = p.particle.pos;
         path.push(PathEl::MoveTo((item.x, item.y).into()));
         path.push(PathEl::LineTo((item.x + 0.01, item.y).into()));
     }

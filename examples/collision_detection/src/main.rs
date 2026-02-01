@@ -874,16 +874,16 @@ fn player_movement(
 
     // Check for key presses
     if keyboard_input.pressed(KeyCode::KeyW) {
-        direction.y += 10.0;
+        direction.y += 50.0;
     }
     if keyboard_input.pressed(KeyCode::KeyS) {
-        direction.y -= 10.0;
+        direction.y -= 50.0;
     }
     if keyboard_input.pressed(KeyCode::KeyA) {
-        direction.x -= 10.0;
+        direction.x -= 50.0;
     }
     if keyboard_input.pressed(KeyCode::KeyD) {
-        direction.x += 10.0;
+        direction.x += 50.0;
     }
 
     if let Ok(mut item) = query.single_mut() {
