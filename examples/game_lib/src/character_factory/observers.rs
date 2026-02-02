@@ -11,8 +11,8 @@ use vello::{
 };
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
-    CollisionConstraintConfig, ConnectionConstraintInitConfig, FrameBilinearConstraintConfig,
-    SoftBodyInitConfig,
+    utility::bilinear_interpolate, CollisionConstraintConfig, ConnectionConstraintInitConfig,
+    FrameBilinearConstraintConfig, SoftBodyInitConfig,
 };
 
 use crate::{
@@ -64,6 +64,17 @@ pub fn assemble_character(
     let svgs = svg_assets.get(svg_handle.id()).unwrap();
     let mut character_connectivity = ConnectivityRoot::default();
     let mut colliders_particle_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
+
+    let mut frame_config = blueprint.data.frame.init_config.clone();
+    for item in frame_config.frame_particles.iter_mut() {
+        apply_transform_to_particle(item);
+    }
+    let corners: Vec<Vector2<f32>> = frame_config
+        .frame_particles
+        .iter()
+        .map(|item| item.pos)
+        .collect();
+
     for item in blueprint.data.colliders.iter() {
         let Some((s, rect)) = svgs.data.get(&item.path_id) else {
             warn!(
@@ -104,12 +115,11 @@ pub fn assemble_character(
     for item in blueprint.data.particles.iter() {
         let mut particle = item.particle.clone();
         apply_transform_to_particle(&mut particle);
-        let entity = make_particle(
-            &mut commands,
-            particle,
-            &root_entity,
-            item.frame_conn.clone(),
-        );
+        let mut config = item.frame_conn.clone();
+        //if not default value
+        let temp_uv = bilinear_interpolate(particle.pos, corners.as_slice());
+        config.uv = (temp_uv.x, temp_uv.y);
+        let entity = make_particle(&mut commands, particle, &root_entity, config);
         let particle_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
             item.path_id.to_string(),
@@ -177,10 +187,6 @@ pub fn assemble_character(
     }
 
     commands.entity(root_entity).insert(character_connectivity);
-    let mut frame_config = blueprint.data.frame.init_config.clone();
-    for item in frame_config.frame_particles.iter_mut() {
-        apply_transform_to_particle(item);
-    }
 
     commands
         .entity(root_entity)
