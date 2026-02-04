@@ -1,5 +1,7 @@
 use bevy::prelude::*;
-use bevy_vello::integrations::physics::{CharacterPivotForceEvent, VelloJoint, VelloParticle};
+use bevy_vello::integrations::physics::{
+    CharacterFrameForceEvent, CharacterPivotForceEvent, VelloJoint, VelloParticle,
+};
 use nalgebra::Vector2;
 use vello_physics::soft_body::{ExternalForce, ParticleInfo};
 
@@ -30,6 +32,7 @@ fn get_normal_of_b_away_from_a(b: &Vector2<f32>, cross_result: f32) -> Vector2<f
 }
 
 const WEIGHT_RATIO: f32 = 1.0;
+const FRAME_TO_JOINT_PARTICLE_MASS_RATIO: f32 = 1.5;
 //generate force to move whist to head direction point to vec direction
 fn claculate_force(
     e_h: Entity,
@@ -37,7 +40,7 @@ fn claculate_force(
     p_h: &VelloParticle,
     p_w: &VelloParticle,
     vec: Vec2,
-) -> Vec<CharacterPivotForceEvent> {
+) -> (Vec<CharacterPivotForceEvent>, CharacterFrameForceEvent) {
     let mut result = vec![];
     let dir = bevy_to_vello(vec);
     let length = dir.magnitude();
@@ -55,17 +58,31 @@ fn claculate_force(
         let d_w = (proj * dir + diff) * length;
         (d_h * WEIGHT_RATIO, d_w)
     };
+    let v_h = vec2(d_h.x, d_h.y);
+    let v_w = vec2(d_w.x, d_w.y);
     result.push(CharacterPivotForceEvent {
         character_entity: p_h.root_entity,
         joint_entity: e_h,
-        force: vec2(d_h.x, d_h.y),
+        force: v_h,
     });
     result.push(CharacterPivotForceEvent {
         character_entity: p_h.root_entity,
         joint_entity: e_w,
-        force: vec2(d_w.x, d_w.y),
+        force: v_w,
     });
-    result
+    let weights_h = p_h.get_weights();
+    let weights_w = p_w.get_weights();
+    let frame_force: Vec<Vec2> = weights_h
+        .iter()
+        .zip(weights_w.iter())
+        .map(|(h, w)| FRAME_TO_JOINT_PARTICLE_MASS_RATIO * (h * v_h + w * v_w))
+        .collect();
+
+    let temp = CharacterFrameForceEvent {
+        character_entity: p_h.root_entity,
+        forces: frame_force,
+    };
+    (result, temp)
 }
 
 pub fn update_character_movement(
@@ -73,6 +90,7 @@ pub fn update_character_movement(
     j_q: Query<&VelloParticle>,
     string_pool: ResMut<StringPool>,
     mut force_events: EventWriter<CharacterPivotForceEvent>,
+    mut frame_force_events: EventWriter<CharacterFrameForceEvent>,
 ) {
     // 1. Intern strings once outside the loop
     let pivot_h = string_pool.pool.intern("P0");
@@ -100,7 +118,8 @@ pub fn update_character_movement(
             let forces = claculate_force(e_h, e_w, &j_h, &j_w, control.move_vector);
 
             // 5. Send events directly (no need for .drain() unless reusing the Vec)
-            force_events.write_batch(forces);
+            force_events.write_batch(forces.0);
+            frame_force_events.write(forces.1);
         }
     }
 }

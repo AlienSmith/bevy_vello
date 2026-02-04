@@ -14,7 +14,8 @@ use crate::{
             make_collision_constraints, remove_soft_body, update_collider_from_soft_body,
             update_connection_particles, update_constraint_world, visualize_colliders,
         },
-        CharacterPivotForceEvent, ColliderExternalImpulseEvent, VelloConstraintWorld,
+        CharacterFrameForceEvent, CharacterPivotForceEvent, ColliderExternalImpulseEvent,
+        VelloConstraintWorld,
     },
 };
 
@@ -26,6 +27,7 @@ impl Plugin for VelloCollisionResponsePlugin {
             .insert_resource(Time::<Fixed>::from_hz(90.0))
             .add_event::<ColliderExternalImpulseEvent>()
             .add_event::<CharacterPivotForceEvent>()
+            .add_event::<CharacterFrameForceEvent>()
             .add_systems(FixedUpdate, update_constraint_world)
             .add_systems(
                 PostUpdate,

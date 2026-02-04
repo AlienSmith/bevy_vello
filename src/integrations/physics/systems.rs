@@ -4,8 +4,9 @@ use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
-        CharacterPivotForceEvent, ColliderExternalImpulseEvent, PivotVisualizer,
-        VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
+        CharacterFrameForceEvent, CharacterPivotForceEvent, ColliderExternalImpulseEvent,
+        PivotVisualizer, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
+        VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -303,6 +304,7 @@ pub fn update_connection_particles(
 pub fn apply_explicit_impulse_on_connection_particle(
     mut constraint_world: ResMut<VelloConstraintWorld>,
     mut events: EventReader<CharacterPivotForceEvent>,
+    mut frame_events: EventReader<CharacterFrameForceEvent>,
 ) {
     for event in events.read() {
         let group = constraint_world
@@ -313,6 +315,18 @@ pub fn apply_explicit_impulse_on_connection_particle(
             &event.joint_entity,
             &Vector2::new(event.force.x, event.force.y),
         );
+    }
+    for event in frame_events.read() {
+        let group = constraint_world
+            .data
+            .get_group_mut(event.character_entity)
+            .unwrap();
+        let nalgebra_vecs: Vec<Vector2<f32>> = event
+            .forces
+            .iter()
+            .map(|v| Vector2::new(v.x, v.y))
+            .collect();
+        group.add_connect_frame_external_force(&nalgebra_vecs);
     }
 }
 

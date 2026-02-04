@@ -69,6 +69,12 @@ pub struct CharacterPivotForceEvent {
     pub force: Vec2,
 }
 
+#[derive(Event)]
+pub struct CharacterFrameForceEvent {
+    pub character_entity: Entity,
+    pub forces: Vec<Vec2>,
+}
+
 #[derive(Component)]
 pub struct PivotVisualizer;
 
@@ -136,6 +142,18 @@ impl VelloParticle {
             root_entity: entity,
             frame_connect_config,
         }
+    }
+
+    pub fn get_weights(&self) -> [f32; 4] {
+        let u = self.frame_connect_config.uv.0;
+        let v = self.frame_connect_config.uv.1;
+        // Bilinear shape function values (N0, N1, N2, N3)
+        let n0 = (1.0 - u) * (1.0 - v); // bottom-left
+        let n1 = u * (1.0 - v); // bottom-right
+        let n2 = u * v; // top-right
+        let n3 = (1.0 - u) * v; // top-left
+        let weights = [n0, n1, n2, n3];
+        return weights;
     }
 }
 
