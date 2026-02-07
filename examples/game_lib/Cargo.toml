@@ -18,6 +18,5 @@ bevy_vello = { path = "../../"}
 vello = {workspace = true}
 vello_physics = {workspace = true}
 bevy_egui = "0.34.0"
-nalgebra = "0.33.0"
 thiserror = "1.0.61"
 serde_json = {workspace = true}
