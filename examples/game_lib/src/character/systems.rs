@@ -2,37 +2,36 @@ use bevy::prelude::*;
 use bevy_vello::integrations::physics::{
     CharacterFrameForceEvent, CharacterPivotForceEvent, VelloJoint, VelloParticle,
 };
-use nalgebra::Vector2;
 use vello_physics::soft_body::{ExternalForce, ParticleInfo};
 
 use crate::character::{CharacterController, ConnectivityRoot, StringPool};
 
 #[inline]
-fn bevy_to_vello(point: Vec2) -> Vector2<f32> {
-    Vector2::new(point.x, -point.y)
+fn bevy_to_vello(point: Vec2) -> Vec2 {
+    Vec2::new(point.x, -point.y)
 }
 #[inline]
-pub fn cross(a: Vector2<f32>, b: Vector2<f32>) -> f32 {
+pub fn cross(a: Vec2, b: Vec2) -> f32 {
     (a.x * b.y) - (a.y * b.x)
 }
 #[inline]
-fn get_normal_of_b_away_from_a(b: &Vector2<f32>, cross_result: f32) -> Vector2<f32> {
+fn get_normal_of_b_away_from_a(b: &Vec2, cross_result: f32) -> Vec2 {
     if cross_result < 0.0 {
         // Clockwise winding: Rotate b 90° Clockwise to point further away
         // (x, y) -> (y, -x)
-        Vector2::new(b.y, -b.x)
+        Vec2::new(b.y, -b.x)
     } else if cross_result > 0.0 {
         // Counter-Clockwise winding: Rotate b 90° Counter-Clockwise to point further away
         // (x, y) -> (-y, x)
-        Vector2::new(-b.y, b.x)
+        Vec2::new(-b.y, b.x)
     } else {
         // Collinear: Vectors are parallel; any perpendicular works or return zero
-        Vector2::new(-b.y, b.x)
+        Vec2::new(-b.y, b.x)
     }
 }
 
 const WEIGHT_RATIO: f32 = 1.0;
-const FRAME_TO_JOINT_PARTICLE_MASS_RATIO: f32 = 1.5;
+const FRAME_TO_JOINT_PARTICLE_MASS_RATIO: f32 = 2.0;
 //generate force to move whist to head direction point to vec direction
 fn claculate_force(
     e_h: Entity,
@@ -43,12 +42,12 @@ fn claculate_force(
 ) -> (Vec<CharacterPivotForceEvent>, CharacterFrameForceEvent) {
     let mut result = vec![];
     let dir = bevy_to_vello(vec);
-    let length = dir.magnitude();
+    let length = dir.length();
     let dir = dir / length;
     let pos_h = p_h.particle.pos;
     let pos_w = p_w.particle.pos;
     let delta = (pos_h - pos_w).normalize();
-    let proj = delta.dot(&dir);
+    let proj = delta.dot(dir);
     let (d_h, d_w) = if proj < 0.0 {
         let normal = get_normal_of_b_away_from_a(&delta, cross(dir, delta)) * length;
         (-normal * WEIGHT_RATIO, normal)
@@ -93,7 +92,7 @@ pub fn update_character_movement(
     mut frame_force_events: EventWriter<CharacterFrameForceEvent>,
 ) {
     // 1. Intern strings once outside the loop
-    let pivot_h = string_pool.pool.intern("P0");
+    let pivot_h = string_pool.pool.intern("PH");
     let pivot_w = string_pool.pool.intern("P3");
 
     for (root, control) in &c_q {

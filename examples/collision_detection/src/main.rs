@@ -50,7 +50,6 @@ use game_lib::{
     },
     CharacterController, CharacterRoot, VelloCharacterPlugin,
 };
-use nalgebra::Vector2;
 
 use crate::{
     connections::ConnectionStatus,

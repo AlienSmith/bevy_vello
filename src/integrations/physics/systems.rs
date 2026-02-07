@@ -12,14 +12,13 @@ use crate::{
 };
 
 use bevy::prelude::*;
-use nalgebra::Vector2;
 use vello::{
     kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
 #[inline]
-fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vector2<f32> {
-    Vector2::<f32>::new(v.x, -v.y)
+fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vec2 {
+    Vec2::new(v.x, -v.y)
 }
 
 pub fn generate_soft_body_for_collider(
@@ -31,10 +30,7 @@ pub fn generate_soft_body_for_collider(
             constraint_world.data.create_soft_body_from_path_with_frame(
                 &collider.shape,
                 &mat4_to_affine(collider.soft_body_global_transform.compute_matrix()),
-                nalgebra::Vector2::<f32>::new(
-                    collider.initial_velocity.x,
-                    -collider.initial_velocity.y,
-                ),
+                Vec2::new(collider.initial_velocity.x, -collider.initial_velocity.y),
                 entity,
                 collider.soft_body_config.clone().unwrap(),
             );
@@ -105,9 +101,9 @@ pub fn make_collision_constraints(
         let b_normal = vec2_to_vector2_inverse_y(&item.collision_normal_b);
         let diff = a_position - b_position;
 
-        let get_info = |entity: Entity| -> (f32, Vector2<f32>) {
+        let get_info = |entity: Entity| -> (f32, Vec2) {
             let mut inv_mass = 0.0;
-            let mut velocity = Vector2::new(0.0, 0.0);
+            let mut velocity = Vec2::new(0.0, 0.0);
             if let Ok(item) = query.get(entity) {
                 inv_mass = item._inverse_mass;
                 if item.is_soft_body() {
@@ -121,7 +117,7 @@ pub fn make_collision_constraints(
         };
 
         //consistent with COLLISION_MARGIN
-        if diff.dot(&a_normal) > 0.0 {
+        if diff.dot(a_normal) > 0.0 {
             let (inv_mass_a, vel_a) = get_info(a_index);
             let (inv_mass_b, vel_b) = get_info(b_index);
 
@@ -313,7 +309,7 @@ pub fn apply_explicit_impulse_on_connection_particle(
             .unwrap();
         group.add_connect_external_force(
             &event.joint_entity,
-            &Vector2::new(event.force.x, event.force.y),
+            &Vec2::new(event.force.x, event.force.y),
         );
     }
     for event in frame_events.read() {
@@ -321,11 +317,7 @@ pub fn apply_explicit_impulse_on_connection_particle(
             .data
             .get_group_mut(event.character_entity)
             .unwrap();
-        let nalgebra_vecs: Vec<Vector2<f32>> = event
-            .forces
-            .iter()
-            .map(|v| Vector2::new(v.x, v.y))
-            .collect();
+        let nalgebra_vecs: Vec<Vec2> = event.forces.iter().map(|v| Vec2::new(v.x, v.y)).collect();
         group.add_connect_frame_external_force(&nalgebra_vecs);
     }
 }

@@ -23,14 +23,14 @@ impl VelloConstraintWorld {
     pub fn new(gravity: Vec2) -> Self {
         VelloConstraintWorld {
             data: ConstraintWorld {
-                gravity: nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y),
+                gravity,
                 ..Default::default()
             },
         }
     }
     // vello coordinate is x right y down
     pub fn set_gravity(&mut self, gravity: Vec2) {
-        self.data.gravity = nalgebra::Vector2::<f32>::new(gravity.x, -gravity.y);
+        self.data.gravity = gravity;
     }
 }
 

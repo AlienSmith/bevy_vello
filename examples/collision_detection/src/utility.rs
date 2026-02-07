@@ -23,7 +23,6 @@ use bevy_vello::{
     },
     VelloCollider, VelloScene, VelloSceneBundle,
 };
-use nalgebra::Vector2;
 
 use crate::connections::ConnectionStatus;
 
@@ -456,14 +455,14 @@ pub fn drag_particle_to_point(
     let target = bevy_to_vello(data.impulse);
     let mut result = vec![];
     let item = particles[0];
-    let delta = (target - Vector2::new(item.pos_x, item.pos_y));
+    let delta = (target - Vec2::new(item.pos_x, item.pos_y));
     result.push(ExternalForce::Impulse(item.index, delta.x, delta.y));
     result
 }
 
 #[inline]
-pub fn bevy_to_vello(point: Vec2) -> Vector2<f32> {
-    Vector2::new(point.x, -point.y)
+pub fn bevy_to_vello(point: Vec2) -> Vec2 {
+    Vec2::new(point.x, -point.y)
 }
 
 pub fn update_collider_from_mouse(

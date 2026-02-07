@@ -4,7 +4,6 @@ use bevy_vello::{
     integrations::physics::{VelloCharacterPhysicsRoot, VelloJoint, VelloParticle},
     VelloCollider, VelloScene, VelloSceneBundle,
 };
-use nalgebra::Vector2;
 use vello::{
     kurbo::{self, Affine, BezPath, Shape},
     peniko::{self, GlowColor},
@@ -41,7 +40,7 @@ pub fn assemble_character(
     let apply_transform_to_particle = |p: &mut Particle| {
         let point = kurbo::Point::new(p.pos.x as f64, p.pos.y as f64);
         let result = affine * point;
-        p.pos = Vector2::new(result.x as f32, result.y as f32);
+        p.pos = Vec2::new(result.x as f32, result.y as f32);
         return;
     };
 
@@ -69,7 +68,7 @@ pub fn assemble_character(
     for item in frame_config.frame_particles.iter_mut() {
         apply_transform_to_particle(item);
     }
-    let corners: Vec<Vector2<f32>> = frame_config
+    let corners: Vec<Vec2> = frame_config
         .frame_particles
         .iter()
         .map(|item| item.pos)
