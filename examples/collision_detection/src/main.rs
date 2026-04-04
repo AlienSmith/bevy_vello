@@ -501,8 +501,8 @@ fn setup_entity(mut commands: Commands) {
             ..Default::default()
         },
         CharacterRoot {
-            svg_asset_id: "v4.character.svg".to_owned(),
-            blueprint_asset_id: "v4.character.json".to_owned(),
+            svg_asset_id: "v6.character.svg".to_owned(),
+            blueprint_asset_id: "v6.character.json".to_owned(),
         },
         CharacterController {
             move_vector: Vec2::ZERO,
@@ -776,12 +776,11 @@ fn setup_resources(
     image("image/ammo_albedo.png");
     image("image/ammo_normal.png");
     image("image/test.png");
-    c_svg("character/v4.character.svg");
-    c_blueprint("character/v4.character.json");
+    c_svg("character/v6.character.svg");
+    c_blueprint("character/v6.character.json");
 }
 
 //fn update_blood_instances()
-
 pub fn add_light(mut commands: Commands) {
     let mut light_scene: VelloScene = VelloScene::default();
     let light_radius = 800.0;
