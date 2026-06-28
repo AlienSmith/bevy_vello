@@ -46,7 +46,8 @@ pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 use vello_physics::{
-    ConnectionConstraintInitConfig, ConstraintWorld, FrameBilinearConstraintConfig, FrameInitConfig,
+    ConnectionConstraintInitConfig, ConstraintWorld, FrameBilinearConstraintConfig,
+    FrameInitConfig, FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -73,6 +74,13 @@ pub struct CharacterPivotForceEvent {
 pub struct CharacterFrameForceEvent {
     pub character_entity: Entity,
     pub forces: Vec<Vec2>,
+}
+
+#[derive(Event)]
+pub struct CharacterPivotVelocityEvent {
+    pub character_entity: Entity,
+    pub joint_entity: Entity,
+    pub velocity: Vec2,
 }
 
 #[derive(Component)]
@@ -183,11 +191,13 @@ impl Component for VelloParticle {
 #[derive(Clone)]
 pub struct VelloCharacterPhysicsRoot {
     pub shape_matching_frame_config: FrameInitConfig,
+    pub particle: [Particle; FRAME_PARTICLES_COUNT],
 }
 
 impl VelloCharacterPhysicsRoot {
     pub fn new(config: FrameInitConfig) -> Self {
         Self {
+            particle: config.frame_particles.clone(),
             shape_matching_frame_config: config,
         }
     }

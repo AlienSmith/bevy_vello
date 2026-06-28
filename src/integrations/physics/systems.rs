@@ -4,9 +4,9 @@ use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
-        CharacterFrameForceEvent, CharacterPivotForceEvent, ColliderExternalImpulseEvent,
-        PivotVisualizer, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
-        VelloParticle,
+        CharacterFrameForceEvent, CharacterPivotForceEvent, CharacterPivotVelocityEvent,
+        ColliderExternalImpulseEvent, PivotVisualizer, VelloCharacterPhysicsRoot,
+        VelloConstraintWorld, VelloJoint, VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -286,6 +286,7 @@ pub fn generate_connection(
 
 pub fn update_connection_particles(
     mut query: Query<(Entity, &mut VelloParticle)>,
+    mut query_c: Query<(Entity, &mut VelloCharacterPhysicsRoot)>,
     constraint_world: Res<VelloConstraintWorld>,
 ) {
     for (e, mut joint) in query.iter_mut() {
@@ -295,11 +296,19 @@ pub fn update_connection_particles(
             joint.particle = item;
         }
     }
+    for (character, mut joint) in query_c.iter_mut() {
+        let group = constraint_world.data.get_group_ref(character).unwrap();
+        let item = group.get_frame_connect_particle();
+        if item.is_empty() {
+            joint.particle = item.try_into().unwrap();
+        }
+    }
 }
 
 pub fn apply_explicit_impulse_on_connection_particle(
     mut constraint_world: ResMut<VelloConstraintWorld>,
     mut events: EventReader<CharacterPivotForceEvent>,
+    mut v_events: EventReader<CharacterPivotVelocityEvent>,
     mut frame_events: EventReader<CharacterFrameForceEvent>,
 ) {
     for event in events.read() {
@@ -311,6 +320,13 @@ pub fn apply_explicit_impulse_on_connection_particle(
             &event.joint_entity,
             &Vec2::new(event.force.x, event.force.y),
         );
+    }
+    for event in v_events.read() {
+        let group = constraint_world
+            .data
+            .get_group_mut(event.character_entity)
+            .unwrap();
+        group.queue_connect_particle_velocity(&event.joint_entity, event.velocity);
     }
     for event in frame_events.read() {
         let group = constraint_world
@@ -326,6 +342,7 @@ pub fn create_update_pivot_visualizer(
     mut commands: Commands,
     mut q: Query<&mut VelloScene, With<PivotVisualizer>>,
     q_p: Query<&VelloParticle>,
+    q_f_p: Query<&VelloCharacterPhysicsRoot>,
 ) {
     let mut path = BezPath::new();
     for p in q_p.iter() {
@@ -340,6 +357,23 @@ pub fn create_update_pivot_visualizer(
         peniko::GlowColor::new(peniko::Color::rgba(0.0, 0.0, 1.0, 0.9), 1.0),
         None,
         &path,
+    );
+    let mut frame_path = BezPath::new();
+    for f_p in q_f_p.iter() {
+        let item = f_p.particle[0].pos;
+        frame_path.push(PathEl::MoveTo((item.x, item.y).into()));
+        for i in 1..f_p.particle.len() {
+            let item = f_p.particle[i].pos;
+            frame_path.push(PathEl::LineTo((item.x, item.y).into()));
+        }
+        frame_path.push(PathEl::LineTo((item.x, item.y).into()));
+    }
+    scene.stroke(
+        &Stroke::new(4.0),
+        Affine::IDENTITY,
+        peniko::GlowColor::new(peniko::Color::rgba(0.0, 1.0, 1.0, 0.9), 1.0),
+        None,
+        &frame_path,
     );
     if q.is_empty() {
         commands.spawn((

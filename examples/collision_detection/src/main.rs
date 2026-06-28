@@ -16,6 +16,7 @@ use bevy::{
         settings::{InstanceFlags, RenderCreation, WgpuSettings},
         RenderDebugFlags, RenderPlugin,
     },
+    window::PresentMode,
 };
 // #[cfg(feature = "examples_world_inspector")]
 // use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -138,13 +139,24 @@ impl Default for ParticleState {
         }
     }
 }
-
+//cargo run --package collision_detection --bin collision_detection --release
 //Notic without "meta_check: AssetMetaCheck::Never" bevy would complain about the HanabiNode.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::default();
     app.insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Vello Study - Unlocked".into(),
+                        // PresentMode::AutoNoVsync is usually the best for Linux/NVIDIA
+                        // It avoids the 60fps cap while preventing "tearing" where possible.
+                        // Use PresentMode::Immediate if you want absolute raw output.
+                        present_mode: PresentMode::AutoNoVsync,
+                        ..default()
+                    }),
+                    ..default()
+                })
                 .set(AssetPlugin {
                     meta_check: AssetMetaCheck::Never,
                     ..default()
@@ -506,6 +518,7 @@ fn setup_entity(mut commands: Commands) {
         },
         CharacterController {
             move_vector: Vec2::ZERO,
+            ..Default::default()
         },
     ));
 }
