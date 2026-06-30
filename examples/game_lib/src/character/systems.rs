@@ -210,7 +210,22 @@ fn claculate_velocity_spine(
         //    Head (t = +1) rotates toward desired_dir; tail (t = -1) opposite.
         let pivot = tangent * t * rotation_error * config.rotation_gain * length;
 
-        let velocity = translational + pivot;
+        let target_velocity = translational + pivot;
+
+        // 3. Smooth blend: lerp from the particle's current physics velocity
+        //    toward the computed target. This prevents sudden velocity jumps
+        //    that cause wobble in the XPBD constraint chain.
+        let current_vel = particles[i].particle.velocity;
+        let blended = current_vel + config.velocity_blending * (target_velocity - current_vel);
+
+        // 4. Hard clamp: enforce max speed to keep the character controllable
+        //    even under extreme input or constraint feedback.
+        let speed = blended.length();
+        let velocity = if speed > config.max_speed && speed > f32::EPSILON {
+            blended / speed * config.max_speed
+        } else {
+            blended
+        };
 
         result.push(CharacterPivotVelocityEvent {
             character_entity: particles[i].root_entity,

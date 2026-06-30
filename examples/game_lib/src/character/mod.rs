@@ -43,13 +43,21 @@ pub struct SpineController {
     pub rotation_gain: f32,
     /// Forward velocity scale when aligned.
     pub velocity_scale: f32,
+    /// Lerp factor blending current→target particle velocity per frame.
+    /// 0.0 = freeze (no control response), 1.0 = instant (original behavior).
+    pub velocity_blending: f32,
+    /// Hard cap on particle velocity magnitude. Blended result is clamped
+    /// to this limit before being applied.
+    pub max_speed: f32,
 }
 
 impl Default for SpineController {
     fn default() -> Self {
         Self {
-            rotation_gain: 6.0,
-            velocity_scale: 5.0,
+            rotation_gain: 24.0,
+            velocity_scale: 10.0,
+            velocity_blending: 0.5,
+            max_speed: 600.0,
         }
     }
 }
