@@ -1,7 +1,7 @@
 {
   "frame": {
-    "svg_id": "v6.character.svg",
-    "path_id": "P0_P11_P1_P12_P2_P30_P3_P31_12.0",
+    "svg_id": "Frame/P0_P11_P1_P12_P2_P30_P3_P31",
+    "path_id": "P0_P11_P1_P12_P2_P30_P3_P31",
     "init_config": {
       "frame_particles": [
         {
@@ -34,14 +34,14 @@
         }
       ],
       "reference_particles": [
-        "P0",
-        "P11",
-        "P1",
-        "P12",
-        "P2",
-        "P30",
-        "P3",
-        "P31"
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
       ],
       "distance_compliance": 0.0001,
       "area_compliance": 0.01
@@ -49,7 +49,7 @@
   },
   "colliders": [
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/S2",
       "path_id": "S2",
       "softbody": {
         "max_complexity": 2,
@@ -70,7 +70,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/S1",
       "path_id": "S1",
       "softbody": {
         "max_complexity": 2,
@@ -91,7 +91,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/S0",
       "path_id": "S0",
       "softbody": {
         "max_complexity": 2,
@@ -112,7 +112,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/H",
       "path_id": "H",
       "softbody": {
         "max_complexity": 2,
@@ -133,7 +133,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/LUL",
       "path_id": "LUL",
       "softbody": {
         "max_complexity": 2,
@@ -154,7 +154,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/LLL",
       "path_id": "LLL",
       "softbody": {
         "max_complexity": 2,
@@ -175,7 +175,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/RUL",
       "path_id": "RUL",
       "softbody": {
         "max_complexity": 2,
@@ -196,7 +196,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/RLL",
       "path_id": "RLL",
       "softbody": {
         "max_complexity": 2,
@@ -217,7 +217,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/RLA",
       "path_id": "RLA",
       "softbody": {
         "max_complexity": 2,
@@ -238,7 +238,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/RUA",
       "path_id": "RUA",
       "softbody": {
         "max_complexity": 2,
@@ -259,7 +259,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/LUA",
       "path_id": "LUA",
       "softbody": {
         "max_complexity": 2,
@@ -280,7 +280,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/LLA",
       "path_id": "LLA",
       "softbody": {
         "max_complexity": 2,
@@ -301,7 +301,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/RS",
       "path_id": "RS",
       "softbody": {
         "max_complexity": 2,
@@ -322,7 +322,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/LS",
       "path_id": "LS",
       "softbody": {
         "max_complexity": 2,
@@ -343,7 +343,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/LH",
       "path_id": "LH",
       "softbody": {
         "max_complexity": 2,
@@ -364,7 +364,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Collider/RH",
       "path_id": "RH",
       "softbody": {
         "max_complexity": 2,
@@ -387,7 +387,7 @@
   ],
   "particles": [
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P0",
       "path_id": "P0",
       "particle": {
         "pos": [
@@ -406,7 +406,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P1",
       "path_id": "P1",
       "particle": {
         "pos": [
@@ -425,7 +425,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P2",
       "path_id": "P2",
       "particle": {
         "pos": [
@@ -444,7 +444,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P3",
       "path_id": "P3",
       "particle": {
         "pos": [
@@ -463,7 +463,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P40",
       "path_id": "P40",
       "particle": {
         "pos": [
@@ -482,7 +482,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P41",
       "path_id": "P41",
       "particle": {
         "pos": [
@@ -501,7 +501,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P10",
       "path_id": "P10",
       "particle": {
         "pos": [
@@ -520,7 +520,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P13",
       "path_id": "P13",
       "particle": {
         "pos": [
@@ -539,7 +539,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/PH",
       "path_id": "PH",
       "particle": {
         "pos": [
@@ -558,7 +558,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/PLLA",
       "path_id": "PLLA",
       "particle": {
         "pos": [
@@ -577,7 +577,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/PRLA",
       "path_id": "PRLA",
       "particle": {
         "pos": [
@@ -596,7 +596,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/PRLL",
       "path_id": "PRLL",
       "particle": {
         "pos": [
@@ -615,7 +615,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/PLLL",
       "path_id": "PLLL",
       "particle": {
         "pos": [
@@ -634,7 +634,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P12",
       "path_id": "P12",
       "particle": {
         "pos": [
@@ -653,7 +653,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P11",
       "path_id": "P11",
       "particle": {
         "pos": [
@@ -672,7 +672,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P30",
       "path_id": "P30",
       "particle": {
         "pos": [
@@ -691,7 +691,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Particle/P31",
       "path_id": "P31",
       "particle": {
         "pos": [
@@ -712,7 +712,7 @@
   ],
   "joints": [
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P0_P1",
       "path_id": "P0_P1",
       "config": {
         "Distance": [
@@ -723,7 +723,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P1_P2",
       "path_id": "P1_P2",
       "config": {
         "Distance": [
@@ -734,7 +734,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P2_P3",
       "path_id": "P2_P3",
       "config": {
         "Distance": [
@@ -745,7 +745,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/PH_P0",
       "path_id": "PH_P0",
       "config": {
         "Distance": [
@@ -756,7 +756,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P13_PRLA",
       "path_id": "P13_PRLA",
       "config": {
         "Distance": [
@@ -767,7 +767,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P10_PLLA",
       "path_id": "P10_PLLA",
       "config": {
         "Distance": [
@@ -778,7 +778,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P40_PLLL",
       "path_id": "P40_PLLL",
       "config": {
         "Distance": [
@@ -789,7 +789,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P41_PRLL",
       "path_id": "P41_PRLL",
       "config": {
         "Distance": [
@@ -800,7 +800,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P12_P13",
       "path_id": "P12_P13",
       "config": {
         "Distance": [
@@ -811,7 +811,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P1_P12",
       "path_id": "P1_P12",
       "config": {
         "Distance": [
@@ -822,7 +822,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P1_P11",
       "path_id": "P1_P11",
       "config": {
         "Distance": [
@@ -833,7 +833,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P11_P10",
       "path_id": "P11_P10",
       "config": {
         "Distance": [
@@ -844,7 +844,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P3_P31",
       "path_id": "P3_P31",
       "config": {
         "Distance": [
@@ -855,7 +855,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P3_P30",
       "path_id": "P3_P30",
       "config": {
         "Distance": [
@@ -866,7 +866,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P31_P41",
       "path_id": "P31_P41",
       "config": {
         "Distance": [
@@ -877,7 +877,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P30_P40",
       "path_id": "P30_P40",
       "config": {
         "Distance": [
@@ -888,7 +888,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P0_P11",
       "path_id": "P0_P11",
       "config": {
         "Distance": [
@@ -899,7 +899,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P0_P12",
       "path_id": "P0_P12",
       "config": {
         "Distance": [
@@ -910,7 +910,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P2_P30",
       "path_id": "P2_P30",
       "config": {
         "Distance": [
@@ -921,7 +921,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Distance/P2_P31",
       "path_id": "P2_P31",
       "config": {
         "Distance": [
@@ -932,187 +932,187 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P1_P2_P3",
       "path_id": "P1_P2_P3",
       "config": {
         "Angular": [
           "P1",
           "P2",
           "P3",
-          0.0000005
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/PH_P0_P1",
       "path_id": "PH_P0_P1",
       "config": {
         "Angular": [
           "PH",
           "P0",
           "P1",
-          0.0000005
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P0_P1_P2",
       "path_id": "P0_P1_P2",
       "config": {
         "Angular": [
           "P0",
           "P1",
           "P2",
-          0.0000005
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P2_P1_P12",
       "path_id": "P2_P1_P12",
       "config": {
         "Angular": [
           "P2",
           "P1",
           "P12",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P2_P1_P11",
       "path_id": "P2_P1_P11",
       "config": {
         "Angular": [
           "P2",
           "P1",
           "P11",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P1_P12_P13",
       "path_id": "P1_P12_P13",
       "config": {
         "Angular": [
           "P1",
           "P12",
           "P13",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P12_P13_PRLA",
       "path_id": "P12_P13_PRLA",
       "config": {
         "Angular": [
           "P12",
           "P13",
           "PRLA",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P1_P11_P10",
       "path_id": "P1_P11_P10",
       "config": {
         "Angular": [
           "P1",
           "P11",
           "P10",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P11_P10_PLLA",
       "path_id": "P11_P10_PLLA",
       "config": {
         "Angular": [
           "P11",
           "P10",
           "PLLA",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P2_P3_P31",
       "path_id": "P2_P3_P31",
       "config": {
         "Angular": [
           "P2",
           "P3",
           "P31",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P2_P3_P30",
       "path_id": "P2_P3_P30",
       "config": {
         "Angular": [
           "P2",
           "P3",
           "P30",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P3_P30_P40",
       "path_id": "P3_P30_P40",
       "config": {
         "Angular": [
           "P3",
           "P30",
           "P40",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P3_P31_P41",
       "path_id": "P3_P31_P41",
       "config": {
         "Angular": [
           "P3",
           "P31",
           "P41",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P31_P41_PRLL",
       "path_id": "P31_P41_PRLL",
       "config": {
         "Angular": [
           "P31",
           "P41",
           "PRLL",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Angular/P30_P40_PLLL",
       "path_id": "P30_P40_PLLL",
       "config": {
         "Angular": [
           "P30",
           "P40",
           "PLLL",
-          0.000001
+          0.00001
         ]
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P0_H",
       "path_id": "P0_H",
       "config": {
         "Bilinear": [
@@ -1123,7 +1123,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P0_S0",
       "path_id": "P0_S0",
       "config": {
         "Bilinear": [
@@ -1134,7 +1134,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P1_S0",
       "path_id": "P1_S0",
       "config": {
         "Bilinear": [
@@ -1145,7 +1145,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P1_S1",
       "path_id": "P1_S1",
       "config": {
         "Bilinear": [
@@ -1156,7 +1156,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P13_RUA",
       "path_id": "P13_RUA",
       "config": {
         "Bilinear": [
@@ -1167,7 +1167,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P13_RLA",
       "path_id": "P13_RLA",
       "config": {
         "Bilinear": [
@@ -1178,7 +1178,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P10_LUA",
       "path_id": "P10_LUA",
       "config": {
         "Bilinear": [
@@ -1189,7 +1189,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P10_LLA",
       "path_id": "P10_LLA",
       "config": {
         "Bilinear": [
@@ -1200,7 +1200,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P2_S1",
       "path_id": "P2_S1",
       "config": {
         "Bilinear": [
@@ -1211,7 +1211,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P2_S2",
       "path_id": "P2_S2",
       "config": {
         "Bilinear": [
@@ -1222,7 +1222,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P3_S2",
       "path_id": "P3_S2",
       "config": {
         "Bilinear": [
@@ -1233,7 +1233,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P40_LUL",
       "path_id": "P40_LUL",
       "config": {
         "Bilinear": [
@@ -1244,7 +1244,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P40_LLL",
       "path_id": "P40_LLL",
       "config": {
         "Bilinear": [
@@ -1255,7 +1255,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P41_RUL",
       "path_id": "P41_RUL",
       "config": {
         "Bilinear": [
@@ -1266,7 +1266,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P41_RLL",
       "path_id": "P41_RLL",
       "config": {
         "Bilinear": [
@@ -1277,7 +1277,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/PH_H",
       "path_id": "PH_H",
       "config": {
         "Bilinear": [
@@ -1288,7 +1288,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/PRLA_RLA",
       "path_id": "PRLA_RLA",
       "config": {
         "Bilinear": [
@@ -1299,7 +1299,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/PLLA_LLA",
       "path_id": "PLLA_LLA",
       "config": {
         "Bilinear": [
@@ -1310,7 +1310,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/PLLL_LLL",
       "path_id": "PLLL_LLL",
       "config": {
         "Bilinear": [
@@ -1321,7 +1321,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/PRLL_RLL",
       "path_id": "PRLL_RLL",
       "config": {
         "Bilinear": [
@@ -1332,7 +1332,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P12_RS",
       "path_id": "P12_RS",
       "config": {
         "Bilinear": [
@@ -1343,7 +1343,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P11_LS",
       "path_id": "P11_LS",
       "config": {
         "Bilinear": [
@@ -1354,7 +1354,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P1_RS",
       "path_id": "P1_RS",
       "config": {
         "Bilinear": [
@@ -1365,7 +1365,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P1_LS",
       "path_id": "P1_LS",
       "config": {
         "Bilinear": [
@@ -1376,7 +1376,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P3_RH",
       "path_id": "P3_RH",
       "config": {
         "Bilinear": [
@@ -1387,7 +1387,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P3_LH",
       "path_id": "P3_LH",
       "config": {
         "Bilinear": [
@@ -1398,7 +1398,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P31_RH",
       "path_id": "P31_RH",
       "config": {
         "Bilinear": [
@@ -1409,7 +1409,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P30_LH",
       "path_id": "P30_LH",
       "config": {
         "Bilinear": [
@@ -1420,7 +1420,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P31_RUL",
       "path_id": "P31_RUL",
       "config": {
         "Bilinear": [
@@ -1431,7 +1431,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P30_LUL",
       "path_id": "P30_LUL",
       "config": {
         "Bilinear": [
@@ -1442,7 +1442,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P11_LUA",
       "path_id": "P11_LUA",
       "config": {
         "Bilinear": [
@@ -1453,7 +1453,7 @@
       }
     },
     {
-      "svg_id": "v6.character.svg",
+      "svg_id": "Bilinear/P12_RUA",
       "path_id": "P12_RUA",
       "config": {
         "Bilinear": [

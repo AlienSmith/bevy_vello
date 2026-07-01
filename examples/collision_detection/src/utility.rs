@@ -180,7 +180,7 @@ pub fn ui_example_system(
             .text("velocity_threhold"),
         );
         ui.add(
-            egui::Slider::new(&mut ui_state.soft_body_config.total_inv_mass, 0.1..=1.0)
+            egui::Slider::new(&mut ui_state.soft_body_config.total_inv_mass, 0.1..=10.0)
                 .text("total_inv_mass"),
         );
         ui.add(

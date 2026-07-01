@@ -317,7 +317,7 @@ fn spawn_collider(
             true,
             Some(soft_body_config),
             Some(collision_config),
-            1,
+            11,
         );
         entitys.push(temp);
     }
