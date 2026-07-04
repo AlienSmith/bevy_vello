@@ -316,6 +316,10 @@
     "SoftBodyInitConfig": {
       "type": "object",
       "properties": {
+        "bilinear_constraints_scaler": {
+          "type": "number",
+          "format": "float"
+        },
         "frame_constraints_scaler": {
           "type": "number",
           "format": "float"
@@ -365,6 +369,7 @@
         "velocity_against_nromal_damping_threhold",
         "total_inv_mass",
         "inner_constraints_scaler",
+        "bilinear_constraints_scaler",
         "frame_constraints_scaler",
         "substeps",
         "self_collision_complaince",
