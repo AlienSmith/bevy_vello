@@ -46,6 +46,8 @@ pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 use vello_physics::{
+    AngularConstraintConfig,
+    ConnectionConstraint::{self, Bilinear},
     ConnectionConstraintInitConfig, ConstraintWorld, FrameBilinearConstraintConfig,
     FrameInitConfig, FRAME_PARTICLES_COUNT,
 };
@@ -83,6 +85,13 @@ pub struct CharacterPivotVelocityEvent {
     pub velocity: Vec2,
 }
 
+#[derive(Event)]
+pub struct CharacterAngularConstraintEvent {
+    pub character_entity: Entity,
+    pub joint_entity: Entity,
+    pub config: AngularConstraintConfig,
+}
+
 #[derive(Component)]
 pub struct PivotVisualizer;
 
@@ -90,6 +99,7 @@ pub struct PivotVisualizer;
 pub struct VelloJoint {
     pub init_config: ConnectionConstraintInitConfig<Entity>,
     pub root_entity: Entity,
+    pub constraint: ConnectionConstraint,
 }
 
 impl VelloJoint {
@@ -97,9 +107,17 @@ impl VelloJoint {
         connection_config: ConnectionConstraintInitConfig<Entity>,
         character: Entity,
     ) -> Self {
+        let constraint = match connection_config {
+            ConnectionConstraintInitConfig::Bilinear(_, _, _) => ConnectionConstraint::Bilinear,
+            ConnectionConstraintInitConfig::Distance(_, _, _) => ConnectionConstraint::Distance,
+            ConnectionConstraintInitConfig::Angular(_, _, _, _) => {
+                ConnectionConstraint::Angular(AngularConstraintConfig::default())
+            }
+        };
         Self {
             init_config: connection_config,
             root_entity: character,
+            constraint,
         }
     }
 }
@@ -174,7 +192,7 @@ impl Component for VelloParticle {
             let entity = context.entity;
             // 1. Read the data
             let character = {
-                let joint = world.get::<VelloJoint>(entity).unwrap();
+                let joint = world.get::<VelloParticle>(entity).unwrap();
                 joint.root_entity
             };
             world.commands().queue(move |world: &mut World| {

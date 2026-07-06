@@ -4,9 +4,9 @@ use crate::{
     affine_to_mat4,
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
-        CharacterFrameForceEvent, CharacterPivotForceEvent, CharacterPivotVelocityEvent,
-        ColliderExternalImpulseEvent, PivotVisualizer, VelloCharacterPhysicsRoot,
-        VelloConstraintWorld, VelloJoint, VelloParticle,
+        CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
+        CharacterPivotVelocityEvent, ColliderExternalImpulseEvent, PivotVisualizer,
+        VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -287,6 +287,7 @@ pub fn generate_connection(
 pub fn update_connection_particles(
     mut query: Query<(Entity, &mut VelloParticle)>,
     mut query_c: Query<(Entity, &mut VelloCharacterPhysicsRoot)>,
+    mut query_j: Query<(Entity, &mut VelloJoint)>,
     constraint_world: Res<VelloConstraintWorld>,
 ) {
     for (e, mut joint) in query.iter_mut() {
@@ -303,6 +304,19 @@ pub fn update_connection_particles(
             joint.particle = item.try_into().unwrap();
         }
     }
+    for (e, mut joint) in query_j.iter_mut() {
+        let character = joint.root_entity;
+        let group = constraint_world.data.get_group_ref(character).unwrap();
+        match &mut joint.constraint {
+            vello_physics::ConnectionConstraint::Bilinear => {}
+            vello_physics::ConnectionConstraint::Distance => {}
+            vello_physics::ConnectionConstraint::Angular(angular_constraint_config) => {
+                if let Some(item) = group.get_connect_angular_config(&e) {
+                    *angular_constraint_config = item;
+                }
+            }
+        }
+    }
 }
 
 pub fn apply_explicit_impulse_on_connection_particle(
@@ -310,6 +324,7 @@ pub fn apply_explicit_impulse_on_connection_particle(
     mut events: EventReader<CharacterPivotForceEvent>,
     mut v_events: EventReader<CharacterPivotVelocityEvent>,
     mut frame_events: EventReader<CharacterFrameForceEvent>,
+    mut angular_event: EventReader<CharacterAngularConstraintEvent>,
 ) {
     for event in events.read() {
         let group = constraint_world
@@ -335,6 +350,13 @@ pub fn apply_explicit_impulse_on_connection_particle(
             .unwrap();
         let nalgebra_vecs: Vec<Vec2> = event.forces.iter().map(|v| Vec2::new(v.x, v.y)).collect();
         group.add_connect_frame_external_force(&nalgebra_vecs);
+    }
+    for event in angular_event.read() {
+        let group = constraint_world
+            .data
+            .get_group_mut(event.character_entity)
+            .unwrap();
+        group.set_connect_angular_config(&event.joint_entity, &event.config);
     }
 }
 
