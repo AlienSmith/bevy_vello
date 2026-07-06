@@ -1,14 +1,16 @@
 use bevy::{ecs::intern::Interned, prelude::*};
 use bevy_vello::integrations::physics::{
-    CharacterFrameForceEvent, CharacterPivotForceEvent, CharacterPivotVelocityEvent,
-    VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
+    CharacterAngularConstraintEvent, CharacterPivotVelocityEvent, VelloCharacterPhysicsRoot,
+    VelloJoint, VelloParticle,
 };
-use vello_physics::{
-    soft_body::{ExternalForce, ParticleInfo},
-    Particle,
-};
+use vello_physics::utility::cos_sin;
 
-use crate::character::{CharacterController, ConnectivityRoot, SpineController, StringPool};
+use crate::{
+    character::{
+        ArmController, CharacterController, ConnectivityRoot, SpineController, StringPool,
+    },
+    utility::nlerp_cos_sin,
+};
 
 #[inline]
 fn bevy_to_vello(point: Vec2) -> Vec2 {
@@ -17,116 +19,6 @@ fn bevy_to_vello(point: Vec2) -> Vec2 {
 #[inline]
 pub fn cross(a: Vec2, b: Vec2) -> f32 {
     (a.x * b.y) - (a.y * b.x)
-}
-#[inline]
-fn get_normal_of_b_away_from_a(b: &Vec2, cross_result: f32) -> Vec2 {
-    if cross_result < 0.0 {
-        // Clockwise winding: Rotate b 90° Clockwise to point further away
-        // (x, y) -> (y, -x)
-        Vec2::new(b.y, -b.x)
-    } else if cross_result > 0.0 {
-        // Counter-Clockwise winding: Rotate b 90° Counter-Clockwise to point further away
-        // (x, y) -> (-y, x)
-        Vec2::new(-b.y, b.x)
-    } else {
-        // Collinear: Vectors are parallel; any perpendicular works or return zero
-        Vec2::new(-b.y, b.x)
-    }
-}
-
-const WEIGHT_RATIO: f32 = 1.0;
-const FRAME_TO_JOINT_PARTICLE_MASS_RATIO: f32 = 2.0;
-//generate force to move whist to head direction point to vec direction
-fn claculate_force(
-    e_h: Entity,
-    e_w: Entity,
-    p_h: &VelloParticle,
-    p_w: &VelloParticle,
-    vec: Vec2,
-) -> (Vec<CharacterPivotForceEvent>, CharacterFrameForceEvent) {
-    let mut result = vec![];
-    let dir = bevy_to_vello(vec);
-    let length = dir.length();
-    let dir = dir / length;
-    let pos_h = p_h.particle.pos;
-    let pos_w = p_w.particle.pos;
-    let delta = (pos_h - pos_w).normalize();
-    let proj = delta.dot(dir);
-    let (d_h, d_w) = if proj < 0.0 {
-        let normal = get_normal_of_b_away_from_a(&delta, cross(dir, delta)) * length;
-        (-normal * WEIGHT_RATIO, normal)
-    } else {
-        let diff = delta - proj * dir;
-        let d_h = (proj * dir - diff) * length;
-        let d_w = (proj * dir + diff) * length;
-        (d_h * WEIGHT_RATIO, d_w)
-    };
-    let v_h = vec2(d_h.x, d_h.y);
-    let v_w = vec2(d_w.x, d_w.y);
-    result.push(CharacterPivotForceEvent {
-        character_entity: p_h.root_entity,
-        joint_entity: e_h,
-        force: v_h,
-    });
-    result.push(CharacterPivotForceEvent {
-        character_entity: p_h.root_entity,
-        joint_entity: e_w,
-        force: v_w,
-    });
-    let weights_h = p_h.get_weights();
-    let weights_w = p_w.get_weights();
-    let frame_force: Vec<Vec2> = weights_h
-        .iter()
-        .zip(weights_w.iter())
-        .map(|(h, w)| FRAME_TO_JOINT_PARTICLE_MASS_RATIO * (h * v_h + w * v_w))
-        .collect();
-
-    let temp = CharacterFrameForceEvent {
-        character_entity: p_h.root_entity,
-        forces: frame_force,
-    };
-    (result, temp)
-}
-
-//generate force to move whist to head direction point to vec direction
-fn claculate_velocity(
-    e_h: Entity,
-    e_w: Entity,
-    p_h: &VelloParticle,
-    p_w: &VelloParticle,
-    vec: Vec2,
-) -> Vec<CharacterPivotVelocityEvent> {
-    let vec = vec * 5.0;
-    let mut result = vec![];
-    let dir = bevy_to_vello(vec);
-    let length = dir.length();
-    let dir = dir / length;
-    let pos_h = p_h.particle.pos;
-    let pos_w = p_w.particle.pos;
-    let delta = (pos_h - pos_w).normalize();
-    let proj = delta.dot(dir);
-    let (d_h, d_w) = if proj < 0.0 {
-        let normal = get_normal_of_b_away_from_a(&delta, cross(dir, delta)) * length;
-        (-normal * WEIGHT_RATIO, normal)
-    } else {
-        let diff = delta - proj * dir;
-        let d_h = (proj * dir - diff) * length;
-        let d_w = (proj * dir + diff) * length;
-        (d_h * WEIGHT_RATIO, d_w)
-    };
-    let v_h = vec2(d_h.x, d_h.y);
-    let v_w = vec2(d_w.x, d_w.y);
-    result.push(CharacterPivotVelocityEvent {
-        character_entity: p_h.root_entity,
-        joint_entity: e_h,
-        velocity: v_h,
-    });
-    result.push(CharacterPivotVelocityEvent {
-        character_entity: p_h.root_entity,
-        joint_entity: e_w,
-        velocity: v_w,
-    });
-    result
 }
 
 fn claculate_velocity_spine(
@@ -237,24 +129,205 @@ fn claculate_velocity_spine(
     result
 }
 
+/// 2-bone IK for the right arm.
+///
+/// # Arm topology
+/// ```text
+/// P1 (spine) --[distance]--> P12 (shoulder) --[distance]--> P13 (elbow) --[distance]--> PRLA (wrist)
+/// ```
+///
+/// Angular joints (pivot in bold):
+/// - `P1_P12_P13`   → shoulder angle at **P12** between P1→P12 and P12→P13
+/// - `P12_P13_PRLA` → elbow angle at **P13** between P12→P13 and P13→PRLA
+///
+/// Strategy:
+/// - The 2-bone IK chain is P12 (root) → P13 (elbow) → PRLA (end effector).
+/// - P1 is the spine attachment point used for computing the shoulder rest angle.
+/// - We compute desired shoulder and elbow angles from the target position,
+///   then emit angular constraint events to drive the XPBD solver.
+fn calculate_arm_ik(
+    target: Vec2,
+    particles: &Vec<VelloParticle>,
+    joints_entity: &Vec<Entity>,
+    joints: &Vec<VelloJoint>,
+    _arm_controller: &ArmController,
+) -> Vec<CharacterAngularConstraintEvent> {
+    const ARM_PARTICLE_COUNT: usize = 4; // P1, P12, P13, PRLA
+    const ARM_JOINT_COUNT: usize = 2; // P1_P12_P13, P12_P13_PRLA
+
+    let mut angular_events = vec![];
+
+    if particles.len() < ARM_PARTICLE_COUNT || joints.len() < ARM_JOINT_COUNT {
+        return angular_events;
+    }
+
+    // Positions in Vello coordinate space (x-right, y-down).
+    let p1 = particles[0].particle.pos; // spine base
+    let p12 = particles[1].particle.pos; // shoulder (IK root / pivot)
+    let p13 = particles[2].particle.pos; // elbow
+    let prla = particles[3].particle.pos; // wrist (end effector)
+
+    let target_vello = bevy_to_vello(target);
+
+    // Segment lengths.
+    let upper_arm_len = (p13 - p12).length(); // L1: shoulder → elbow
+    let forearm_len = (prla - p13).length(); // L2: elbow → wrist
+
+    if upper_arm_len <= f32::EPSILON || forearm_len <= f32::EPSILON {
+        return angular_events;
+    }
+
+    // IK chain: P12 (root) → P13 (elbow) → PRLA (end effector)
+    let root_to_target = target_vello - p12;
+    let dist = root_to_target.length();
+
+    if dist <= f32::EPSILON {
+        return angular_events;
+    }
+
+    let root_to_target_dir = root_to_target / dist;
+
+    // Reachable range.
+    let reach = upper_arm_len + forearm_len;
+
+    // Cosine law for elbow angle at P13.
+    // When the target is out of reach, the arm points straight at the target
+    // with the elbow fully extended (elbow_angle = π).
+    let (desired_upper_arm_dir, _elbow_angle) = if dist >= reach {
+        // Out of reach: upper arm points directly at target, elbow fully extended.
+        // The desired P13 is at the end of the upper arm pointing toward target.
+        (root_to_target_dir, std::f32::consts::PI)
+    } else {
+        // Within reach: use cosine law for 2-bone IK.
+        let clamped_dist = dist.max(f32::EPSILON);
+
+        let cos_elbow_ik = ((upper_arm_len * upper_arm_len) + (forearm_len * forearm_len)
+            - (clamped_dist * clamped_dist))
+            / (2.0 * upper_arm_len * forearm_len);
+        let cos_elbow_ik = cos_elbow_ik.clamp(-1.0, 1.0);
+        let elbow_angle_ik = f32::acos(cos_elbow_ik);
+
+        // Shoulder angle offset (angle from root_to_target_dir to upper arm direction).
+        let sin_elbow_ik = f32::sin(elbow_angle_ik);
+        let shoulder_offset = f32::atan2(
+            forearm_len * sin_elbow_ik,
+            upper_arm_len + forearm_len * cos_elbow_ik,
+        );
+
+        // Bend direction: for the right arm the elbow bends "inward" (downward
+        // in Vello Y-down coords, which is CCW relative to the shoulder→target
+        // direction). bend_sign = -1.0 rotates CCW in Vello coordinates.
+        let bend_sign = -1.0;
+
+        // Desired upper arm direction (from P12 toward P13).
+        let total_angle = shoulder_offset * bend_sign;
+        let (sin_total, cos_total) = f32::sin_cos(total_angle);
+        let desired_upper_arm_dir = Vec2::new(
+            root_to_target_dir.x * cos_total - root_to_target_dir.y * sin_total,
+            root_to_target_dir.x * sin_total + root_to_target_dir.y * cos_total,
+        );
+
+        (desired_upper_arm_dir, elbow_angle_ik)
+    };
+
+    // Desired P13 position (elbow).
+    let desired_p13 = p12 + desired_upper_arm_dir * upper_arm_len;
+
+    // ---- Shoulder angular constraint ----
+    // The shoulder joint P1_P12_P13 measures the angle at P12.
+    // cos_sin(p1, p12, desired_p13) gives the target (cos, sin) at P12.
+    // Use nlerp with a small factor to smoothly move the rest angle toward
+    // the IK target, preventing violent yanks from the stiff compliance.
+    let shoulder_cs = cos_sin(p1, p12, desired_p13);
+    if let vello_physics::ConnectionConstraint::Angular(config) = &joints[0].constraint {
+        let (cos, sin) = nlerp_cos_sin(
+            (config.rest_cos, config.rest_sin),
+            (shoulder_cs.x, shoulder_cs.y),
+            0.05,
+        );
+        angular_events.push(CharacterAngularConstraintEvent {
+            character_entity: joints[0].root_entity,
+            joint_entity: joints_entity[0],
+            config: vello_physics::AngularConstraintConfig {
+                rest_cos: cos,
+                rest_sin: sin,
+                compliance: config.compliance,
+            },
+        });
+    }
+
+    // ---- Elbow angular constraint ----
+    // The elbow joint P12_P13_PRLA measures the angle at P13.
+    // cos_sin(p12, desired_p13, target_vello) gives the target (cos, sin) at P13.
+    let elbow_cs = cos_sin(p12, desired_p13, target_vello);
+    if let vello_physics::ConnectionConstraint::Angular(config) = &joints[1].constraint {
+        let (cos, sin) = nlerp_cos_sin(
+            (config.rest_cos, config.rest_sin),
+            (elbow_cs.x, elbow_cs.y),
+            0.05,
+        );
+        angular_events.push(CharacterAngularConstraintEvent {
+            character_entity: joints[1].root_entity,
+            joint_entity: joints_entity[1],
+            config: vello_physics::AngularConstraintConfig {
+                rest_cos: cos,
+                rest_sin: sin,
+                compliance: config.compliance,
+            },
+        });
+    }
+
+    angular_events
+}
+
 pub fn update_character_movement(
     c_q: Query<(
         &ConnectivityRoot,
         &CharacterController,
         &VelloCharacterPhysicsRoot,
     )>,
-    j_q: Query<&VelloParticle>,
+    p_q: Query<&VelloParticle>,
+    j_q: Query<&VelloJoint>,
     string_pool: ResMut<StringPool>,
-    mut force_events: EventWriter<CharacterPivotForceEvent>,
-    mut frame_force_events: EventWriter<CharacterFrameForceEvent>,
     mut velocity_events: EventWriter<CharacterPivotVelocityEvent>,
+    mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
 ) {
+    //body control
     let temp = ["PH", "P0", "P1", "P2", "P3"];
     let tokens: Vec<Interned<str>> = temp
         .iter()
         .map(|item| string_pool.pool.intern(&item))
         .collect();
-    for (root, control, p_root) in &c_q {
+    for (root, control, _p_root) in &c_q {
+        //arm control
+        let right_arm = ["P1", "P12", "P13", "PRLA", "P1_P12_P13", "P12_P13_PRLA"];
+        let right_arm_tokens: Vec<Interned<str>> = right_arm
+            .iter()
+            .map(|item| string_pool.pool.intern(&item))
+            .collect();
+        let (p, j) = right_arm_tokens.split_at(4);
+        let p_e: Vec<Entity> = p
+            .iter()
+            .map(|item| root.parts.get(item).unwrap().clone())
+            .collect();
+        let j_e: Vec<Entity> = j
+            .iter()
+            .map(|item| root.parts.get(item).unwrap().clone())
+            .collect();
+        let particles: Vec<VelloParticle> =
+            p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
+        let angular_constraints: Vec<VelloJoint> =
+            j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
+
+        let arm_angular_events = calculate_arm_ik(
+            control.point_vector,
+            &particles,
+            &j_e,
+            &angular_constraints,
+            &control.arm_controller,
+        );
+        angular_events.write_batch(arm_angular_events);
+
         if control.move_vector.length_squared() <= 0.01 {
             continue;
         }
@@ -264,7 +337,7 @@ pub fn update_character_movement(
             .collect();
         let particles: Vec<VelloParticle> = entities
             .iter()
-            .map(|e| j_q.get(*e).unwrap().clone())
+            .map(|e| p_q.get(*e).unwrap().clone())
             .collect();
         let velocities = claculate_velocity_spine(
             &entities,
@@ -273,30 +346,5 @@ pub fn update_character_movement(
             &control.spine_controller,
         );
         velocity_events.write_batch(velocities);
-        // // 3. Resolve entities and components using a clean chain
-        // let data = root
-        //     .parts
-        //     .get(&pivot_h)
-        //     .and_then(|&e_h| root.parts.get(&pivot_w).map(|&e_w| (e_h, e_w)))
-        //     .and_then(|(e_h, e_w)| {
-        //         j_q.get_many([e_h, e_w])
-        //             .ok()
-        //             .map(|[j_h, j_w]| (e_h, e_w, j_h, j_w))
-        //     });
-
-        // 4. Use if-let to execute the logic only if all requirements are met
-        // if let Some((e_h, e_w, j_h, j_w)) = data {
-        //     let forces = claculate_force(e_h, e_w, &j_h, &j_w, control.move_vector);
-
-        //     // 5. Send events directly (no need for .drain() unless reusing the Vec)
-        //     force_events.write_batch(forces.0);
-        //     frame_force_events.write(forces.1);
-        // }
-        // if let Some((e_h, e_w, j_h, j_w)) = data {
-        //     let velocities = claculate_velocity(e_h, e_w, &j_h, &j_w, control.move_vector);
-
-        //     // 5. Send events directly (no need for .drain() unless reusing the Vec)
-        //     velocity_events.write_batch(velocities);
-        // }
     }
 }

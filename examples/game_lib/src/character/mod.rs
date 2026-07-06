@@ -62,17 +62,38 @@ impl Default for SpineController {
     }
 }
 
-#[derive(Component, Clone, Default)]
-pub struct CharacterController {
-    pub move_vector: Vec2,
-    pub spine_controller: SpineController,
+#[derive(Clone)]
+pub struct ArmController {
+    /// Velocity scale for moving arm particles toward IK target.
+    pub velocity_scale: f32,
+    /// Maximum speed for arm particle velocity (clamp).
+    pub max_speed: f32,
 }
 
-impl CharacterController {
-    pub fn new(move_vector: Vec2) -> Self {
+impl Default for ArmController {
+    fn default() -> Self {
         Self {
-            move_vector,
+            velocity_scale: 10.0,
+            max_speed: 600.0,
+        }
+    }
+}
+
+#[derive(Component, Clone)]
+pub struct CharacterController {
+    pub move_vector: Vec2,
+    pub point_vector: Vec2,
+    pub spine_controller: SpineController,
+    pub arm_controller: ArmController,
+}
+
+impl Default for CharacterController {
+    fn default() -> Self {
+        Self {
+            move_vector: Vec2::ZERO,
+            point_vector: Vec2::ZERO,
             spine_controller: SpineController::default(),
+            arm_controller: ArmController::default(),
         }
     }
 }

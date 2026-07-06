@@ -56,7 +56,7 @@ use crate::{
     connections::ConnectionStatus,
     utility::{
         bevy_to_vello, get_default_parameters, ui_example_system, update_collider_from_mouse,
-        update_mouse, ColliderType, Preview, StaticSceneComponent, UiState,
+        update_mouse, ColliderType, MouseStatus, Preview, StaticSceneComponent, UiState,
     },
 };
 
@@ -518,6 +518,7 @@ fn setup_entity(mut commands: Commands) {
         },
         CharacterController {
             move_vector: Vec2::ZERO,
+            point_vector: Vec2::ZERO,
             ..Default::default()
         },
     ));
@@ -872,6 +873,7 @@ fn collision_response(
 }
 
 fn player_movement(
+    mouse_status: ResMut<MouseStatus>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut CharacterController>, // Assuming a 'Player' component
 ) {
@@ -893,5 +895,6 @@ fn player_movement(
 
     if let Ok(mut item) = query.single_mut() {
         item.move_vector = direction;
+        item.point_vector = mouse_status.world_pos;
     }
 }
