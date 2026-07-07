@@ -156,13 +156,22 @@ fn claculate_velocity_spine(
 ///
 /// 4. **Convergence dead zone**: When the wrist is within `convergence_threshold`
 ///    of the true target, we stop emitting events.
+///
+/// 5. **Rotate-toward damping**: The rest angle is not snapped to the IK result
+///    directly. Instead, it rotates toward the desired angle at a maximum rate
+///    of `arm_controller.max_angle_rate` radians/second. This prevents sudden
+///    jumps in the constraint rest condition that cause arm overshoot and body
+///    wobble.
+///
+///    Small angular differences pass through at full speed (no slow creep like
+///    lerp), while large jumps are capped to a fixed angular velocity.
 fn calculate_arm_ik(
     target: Vec2,
-    _dt: f32,
+    dt: f32,
     _particles_entity: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
     joints_entity: &Vec<Entity>,
-    _joints: &Vec<VelloJoint>,
+    joints: &Vec<VelloJoint>,
     arm_controller: &ArmController,
 ) -> Vec<CharacterAngularConstraintEvent> {
     const ARM_PARTICLE_COUNT: usize = 4; // P1, P12, P13, PRLA
@@ -222,35 +231,112 @@ fn calculate_arm_ik(
     );
     let desired_p13 = p12 + desired_upper_dir * upper_len;
 
-    // ---- Shoulder constraint (unchanged) ----
-    let shoulder_cs = cos_sin(p1, p12, desired_p13);
+    // Compute the frame's max angular delta from the rate
+    let max_delta = arm_controller.max_angle_rate * dt;
+
+    // ---- Shoulder constraint with rotate-toward damping ----
+    let desired_shoulder_cs = cos_sin(p1, p12, desired_p13);
+
+    // Compute the current actual shoulder angle from particle positions.
+    // This is more reliable than reading the rest angle from the joint,
+    // which may be stale or already blended from a previous frame.
+    let current_shoulder_cs = cos_sin(p1, p12, p13);
+
+    let (blended_cos, blended_sin) = rotate_toward(
+        current_shoulder_cs.x,
+        current_shoulder_cs.y,
+        desired_shoulder_cs.x,
+        desired_shoulder_cs.y,
+        max_delta,
+    );
+
     angular_events.push(CharacterAngularConstraintEvent {
         character_entity: particles[0].root_entity,
         joint_entity: joints_entity[0],
         config: vello_physics::AngularConstraintConfig {
-            rest_cos: shoulder_cs.x,
-            rest_sin: shoulder_cs.y,
+            rest_cos: blended_cos,
+            rest_sin: blended_sin,
             compliance: arm_controller.angular_compliance,
         },
     });
 
-    // ---- Elbow constraint (FIXED) ----
+    // ---- Elbow constraint with rotate-toward damping ----
     // The elbow pivot is at desired_p13. We need the signed angle between
     //   desired_p13 -> p12   (toward the shoulder)
     //   desired_p13 -> target_pos (which is the desired forearm direction)
     // This exactly matches the geometry of the solved pose.
-    let elbow_cs = cos_sin(p12, desired_p13, target_pos);
+    let desired_elbow_cs = cos_sin(p12, desired_p13, target_pos);
+
+    // Compute the current actual elbow angle from particle positions.
+    let current_elbow_cs = cos_sin(p12, p13, prla);
+
+    let (blended_cos, blended_sin) = rotate_toward(
+        current_elbow_cs.x,
+        current_elbow_cs.y,
+        desired_elbow_cs.x,
+        desired_elbow_cs.y,
+        max_delta,
+    );
+
     angular_events.push(CharacterAngularConstraintEvent {
         character_entity: particles[0].root_entity,
         joint_entity: joints_entity[1],
         config: vello_physics::AngularConstraintConfig {
-            rest_cos: elbow_cs.x,
-            rest_sin: elbow_cs.y,
+            rest_cos: blended_cos,
+            rest_sin: blended_sin,
             compliance: arm_controller.angular_compliance,
         },
     });
 
     angular_events
+}
+
+/// Rotate unit vector (cos_a, sin_a) toward (cos_b, sin_b) by at most `max_delta` radians.
+/// Returns the new (cos, sin) after the rotation.
+///
+/// Uses the tangent half-angle error metric, matching the angular constraint solver's
+/// own error function (`-delta_sin / (1 + delta_cos)`). This ensures the clamped result
+/// is compatible with how the constraint interprets the rest angle, avoiding feedback
+/// mismatches that cause wobble or sluggish response.
+///
+/// `max_delta` is clamped to `[0, PI)` internally to keep `tan(max_delta/2)` well-defined
+/// (tan has asymptotes at odd multiples of PI/2). An angular change larger than PI radians
+/// would go the long way around the circle anyway.
+fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32) -> (f32, f32) {
+    // sin(θ_b - θ_a) = sin_b*cos_a - cos_b*sin_a = -(sin_a*cos_b - cos_a*sin_b) = -cross
+    // cos(θ_b - θ_a) = cos_b*cos_a + sin_b*sin_a = dot
+    let cross = sin_a * cos_b - cos_a * sin_b; // sin(θ_a - θ_b)
+    let dot = cos_a * cos_b + sin_a * sin_b; // cos(θ_b - θ_a)
+
+    // Tangent half-angle: tan((θ_b - θ_a)/2) = sin(θ_b - θ_a) / (1 + cos(θ_b - θ_a))
+    // sin(θ_b - θ_a) = -cross
+    let error = -cross / (1.0 + dot).max(1e-6);
+
+    // Clamp max_delta to [0, PI) so tan(max_delta/2) is always valid and non-negative.
+    // tan(θ) has asymptotes at θ = PI/2 + n*PI, and max_delta > PI would go the long way.
+    let clamped_delta = max_delta.clamp(0.0, std::f32::consts::PI * 0.9999);
+
+    // Max error in tangent half-angle space, matching the constraint's error metric
+    let max_error = (clamped_delta / 2.0).tan();
+
+    // Clamp the error
+    let clamped_error = error.clamp(-max_error, max_error);
+
+    // Reconstruct delta cos/sin from clamped tangent half-angle using:
+    //   cos(θ) = (1 - tan²(θ/2)) / (1 + tan²(θ/2))
+    //   sin(θ) = 2*tan(θ/2) / (1 + tan²(θ/2))
+    let error_sq = clamped_error * clamped_error;
+    let denom = 1.0 + error_sq;
+    let new_delta_cos = (1.0 - error_sq) / denom;
+    let new_delta_sin = 2.0 * clamped_error / denom;
+
+    // Rotate current by the clamped delta: rest = current + clamped_delta
+    // cos(θ_a + Δ) = cos_a * cos(Δ) - sin_a * sin(Δ)
+    // sin(θ_a + Δ) = sin_a * cos(Δ) + cos_a * sin(Δ)
+    let new_cos = cos_a * new_delta_cos - sin_a * new_delta_sin;
+    let new_sin = sin_a * new_delta_cos + cos_a * new_delta_sin;
+
+    (new_cos, new_sin)
 }
 
 pub fn update_character_movement(

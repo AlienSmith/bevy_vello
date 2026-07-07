@@ -73,6 +73,11 @@ pub struct ArmController {
     /// Must be significantly softer than the default 0.000001 from the character
     /// JSON so the XPBD solver can actually move the arm. 0.1 is a good start.
     pub angular_compliance: f32,
+    /// Maximum angular velocity for the constraint rest angle, in radians per second.
+    /// The rest angle chases the IK target at this rate, preventing sudden jumps
+    /// that cause overshoot and body wobble.
+    /// π rad/s = 180°/s — fast enough to be responsive, slow enough to prevent overshoot.
+    pub max_angle_rate: f32,
 }
 
 impl Default for ArmController {
@@ -81,6 +86,7 @@ impl Default for ArmController {
             target_blend: 0.3,
             convergence_threshold: 2.0,
             angular_compliance: 1e-6,
+            max_angle_rate: std::f32::consts::PI,
         }
     }
 }
