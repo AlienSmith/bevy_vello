@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_vello::collision::CollisionSystems;
 
 use crate::character::{
     observers::{on_remove_connectivity, on_remove_connectivity_root},
@@ -12,6 +13,9 @@ impl Plugin for GameCharacterPlugin {
         app.insert_resource(StringPool::default())
             .add_observer(on_remove_connectivity)
             .add_observer(on_remove_connectivity_root)
-            .add_systems(Update, update_character_movement);
+            .add_systems(
+                PostUpdate,
+                update_character_movement.before(CollisionSystems::CollisionResponsePhysics),
+            );
     }
 }

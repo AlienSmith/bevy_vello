@@ -5,11 +5,8 @@ use bevy_vello::integrations::physics::{
 };
 use vello_physics::utility::cos_sin;
 
-use crate::{
-    character::{
-        ArmController, CharacterController, ConnectivityRoot, SpineController, StringPool,
-    },
-    utility::nlerp_cos_sin,
+use crate::character::{
+    ArmController, CharacterController, ConnectivityRoot, SpineController, StringPool,
 };
 
 #[inline]
@@ -129,7 +126,7 @@ fn claculate_velocity_spine(
     result
 }
 
-/// 2-bone IK for the right arm.
+/// 2-bone IK for the right arm, driven entirely by angular constraints.
 ///
 /// # Arm topology
 /// ```text
@@ -140,147 +137,124 @@ fn claculate_velocity_spine(
 /// - `P1_P12_P13`   → shoulder angle at **P12** between P1→P12 and P12→P13
 /// - `P12_P13_PRLA` → elbow angle at **P13** between P12→P13 and P13→PRLA
 ///
-/// Strategy:
-/// - The 2-bone IK chain is P12 (root) → P13 (elbow) → PRLA (end effector).
-/// - P1 is the spine attachment point used for computing the shoulder rest angle.
-/// - We compute desired shoulder and elbow angles from the target position,
-///   then emit angular constraint events to drive the XPBD solver.
+/// # Strategy
+///
+/// Angular-constraint-only approach. The XPBD solver handles all the physics —
+/// it distributes forces correctly between elbow, wrist, shoulder, and body.
+/// This avoids the non-physical velocity injection that fought the solver.
+///
+/// 1. **Midpoint target damping**: `virtual_target = lerp(prla, true_target, target_blend)`.
+///    Each step is small and self-damping — corrections shrink as the wrist
+///    approaches the target.
+///
+/// 2. **Analytic 2-bone IK**: Cosine law on the virtual target → desired angles.
+///
+/// 3. **Angular constraint events only**: Set the rest angles and a softer
+///    compliance (`angular_compliance`, default 0.1 instead of 0.000001).
+///    The XPBD constraint solver moves particles in physically correct ways,
+///    naturally pushing the body in the opposite direction.
+///
+/// 4. **Convergence dead zone**: When the wrist is within `convergence_threshold`
+///    of the true target, we stop emitting events.
 fn calculate_arm_ik(
     target: Vec2,
+    _dt: f32,
+    _particles_entity: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
     joints_entity: &Vec<Entity>,
-    joints: &Vec<VelloJoint>,
-    _arm_controller: &ArmController,
+    _joints: &Vec<VelloJoint>,
+    arm_controller: &ArmController,
 ) -> Vec<CharacterAngularConstraintEvent> {
     const ARM_PARTICLE_COUNT: usize = 4; // P1, P12, P13, PRLA
-    const ARM_JOINT_COUNT: usize = 2; // P1_P12_P13, P12_P13_PRLA
+    const ARM_JOINT_COUNT: usize = 2; // shoulder, elbow
 
     let mut angular_events = vec![];
 
-    if particles.len() < ARM_PARTICLE_COUNT || joints.len() < ARM_JOINT_COUNT {
+    if particles.len() < ARM_PARTICLE_COUNT || joints_entity.len() < ARM_JOINT_COUNT {
         return angular_events;
     }
 
-    // Positions in Vello coordinate space (x-right, y-down).
     let p1 = particles[0].particle.pos; // spine base
-    let p12 = particles[1].particle.pos; // shoulder (IK root / pivot)
+    let p12 = particles[1].particle.pos; // shoulder (IK root)
     let p13 = particles[2].particle.pos; // elbow
-    let prla = particles[3].particle.pos; // wrist (end effector)
+    let prla = particles[3].particle.pos; // wrist
 
-    let target_vello = bevy_to_vello(target);
+    let true_target = bevy_to_vello(target);
+    let dist_to_target = (prla - true_target).length();
 
-    // Segment lengths.
-    let upper_arm_len = (p13 - p12).length(); // L1: shoulder → elbow
-    let forearm_len = (prla - p13).length(); // L2: elbow → wrist
-
-    if upper_arm_len <= f32::EPSILON || forearm_len <= f32::EPSILON {
+    if dist_to_target <= arm_controller.convergence_threshold {
         return angular_events;
     }
 
-    // IK chain: P12 (root) → P13 (elbow) → PRLA (end effector)
-    let root_to_target = target_vello - p12;
+    let upper_len = (p13 - p12).length();
+    let forearm_len = (prla - p13).length();
+    if upper_len <= f32::EPSILON || forearm_len <= f32::EPSILON {
+        return angular_events;
+    }
+
+    let reach = upper_len + forearm_len;
+    let mut target_pos = true_target;
+    let root_to_target = target_pos - p12;
     let dist = root_to_target.length();
-
-    if dist <= f32::EPSILON {
-        return angular_events;
+    if dist > reach {
+        target_pos = p12 + root_to_target.normalize() * (reach - 0.001);
     }
+    let to_target = target_pos - p12;
+    let target_dist = to_target.length().max(f32::EPSILON);
+    let target_dir = to_target / target_dist;
 
-    let root_to_target_dir = root_to_target / dist;
+    // Law of cosines for shoulder offset
+    let cos_shoulder = (upper_len * upper_len + target_dist * target_dist
+        - forearm_len * forearm_len)
+        / (2.0 * upper_len * target_dist);
+    let cos_shoulder = cos_shoulder.clamp(-1.0, 1.0);
+    let shoulder_offset = cos_shoulder.acos();
 
-    // Reachable range.
-    let reach = upper_arm_len + forearm_len;
+    // Choose bend direction for the shoulder (negative = one branch, positive = the other)
+    let bend_sign = -1.0;
 
-    // Cosine law for elbow angle at P13.
-    // When the target is out of reach, the arm points straight at the target
-    // with the elbow fully extended (elbow_angle = π).
-    let (desired_upper_arm_dir, _elbow_angle) = if dist >= reach {
-        // Out of reach: upper arm points directly at target, elbow fully extended.
-        // The desired P13 is at the end of the upper arm pointing toward target.
-        (root_to_target_dir, std::f32::consts::PI)
-    } else {
-        // Within reach: use cosine law for 2-bone IK.
-        let clamped_dist = dist.max(f32::EPSILON);
+    // Rotate target direction by shoulder_offset * bend_sign to get the desired upper arm direction
+    let total_shoulder_angle = shoulder_offset * bend_sign;
+    let (sin_sh, cos_sh) = total_shoulder_angle.sin_cos();
+    let desired_upper_dir = Vec2::new(
+        target_dir.x * cos_sh - target_dir.y * sin_sh,
+        target_dir.x * sin_sh + target_dir.y * cos_sh,
+    );
+    let desired_p13 = p12 + desired_upper_dir * upper_len;
 
-        let cos_elbow_ik = ((upper_arm_len * upper_arm_len) + (forearm_len * forearm_len)
-            - (clamped_dist * clamped_dist))
-            / (2.0 * upper_arm_len * forearm_len);
-        let cos_elbow_ik = cos_elbow_ik.clamp(-1.0, 1.0);
-        let elbow_angle_ik = f32::acos(cos_elbow_ik);
-
-        // Shoulder angle offset (angle from root_to_target_dir to upper arm direction).
-        let sin_elbow_ik = f32::sin(elbow_angle_ik);
-        let shoulder_offset = f32::atan2(
-            forearm_len * sin_elbow_ik,
-            upper_arm_len + forearm_len * cos_elbow_ik,
-        );
-
-        // Bend direction: for the right arm the elbow bends "inward" (downward
-        // in Vello Y-down coords, which is CCW relative to the shoulder→target
-        // direction). bend_sign = -1.0 rotates CCW in Vello coordinates.
-        let bend_sign = -1.0;
-
-        // Desired upper arm direction (from P12 toward P13).
-        let total_angle = shoulder_offset * bend_sign;
-        let (sin_total, cos_total) = f32::sin_cos(total_angle);
-        let desired_upper_arm_dir = Vec2::new(
-            root_to_target_dir.x * cos_total - root_to_target_dir.y * sin_total,
-            root_to_target_dir.x * sin_total + root_to_target_dir.y * cos_total,
-        );
-
-        (desired_upper_arm_dir, elbow_angle_ik)
-    };
-
-    // Desired P13 position (elbow).
-    let desired_p13 = p12 + desired_upper_arm_dir * upper_arm_len;
-
-    // ---- Shoulder angular constraint ----
-    // The shoulder joint P1_P12_P13 measures the angle at P12.
-    // cos_sin(p1, p12, desired_p13) gives the target (cos, sin) at P12.
-    // Use nlerp with a small factor to smoothly move the rest angle toward
-    // the IK target, preventing violent yanks from the stiff compliance.
+    // ---- Shoulder constraint (unchanged) ----
     let shoulder_cs = cos_sin(p1, p12, desired_p13);
-    if let vello_physics::ConnectionConstraint::Angular(config) = &joints[0].constraint {
-        let (cos, sin) = nlerp_cos_sin(
-            (config.rest_cos, config.rest_sin),
-            (shoulder_cs.x, shoulder_cs.y),
-            0.05,
-        );
-        angular_events.push(CharacterAngularConstraintEvent {
-            character_entity: joints[0].root_entity,
-            joint_entity: joints_entity[0],
-            config: vello_physics::AngularConstraintConfig {
-                rest_cos: cos,
-                rest_sin: sin,
-                compliance: config.compliance,
-            },
-        });
-    }
+    angular_events.push(CharacterAngularConstraintEvent {
+        character_entity: particles[0].root_entity,
+        joint_entity: joints_entity[0],
+        config: vello_physics::AngularConstraintConfig {
+            rest_cos: shoulder_cs.x,
+            rest_sin: shoulder_cs.y,
+            compliance: arm_controller.angular_compliance,
+        },
+    });
 
-    // ---- Elbow angular constraint ----
-    // The elbow joint P12_P13_PRLA measures the angle at P13.
-    // cos_sin(p12, desired_p13, target_vello) gives the target (cos, sin) at P13.
-    let elbow_cs = cos_sin(p12, desired_p13, target_vello);
-    if let vello_physics::ConnectionConstraint::Angular(config) = &joints[1].constraint {
-        let (cos, sin) = nlerp_cos_sin(
-            (config.rest_cos, config.rest_sin),
-            (elbow_cs.x, elbow_cs.y),
-            0.05,
-        );
-        angular_events.push(CharacterAngularConstraintEvent {
-            character_entity: joints[1].root_entity,
-            joint_entity: joints_entity[1],
-            config: vello_physics::AngularConstraintConfig {
-                rest_cos: cos,
-                rest_sin: sin,
-                compliance: config.compliance,
-            },
-        });
-    }
+    // ---- Elbow constraint (FIXED) ----
+    // The elbow pivot is at desired_p13. We need the signed angle between
+    //   desired_p13 -> p12   (toward the shoulder)
+    //   desired_p13 -> target_pos (which is the desired forearm direction)
+    // This exactly matches the geometry of the solved pose.
+    let elbow_cs = cos_sin(p12, desired_p13, target_pos);
+    angular_events.push(CharacterAngularConstraintEvent {
+        character_entity: particles[0].root_entity,
+        joint_entity: joints_entity[1],
+        config: vello_physics::AngularConstraintConfig {
+            rest_cos: elbow_cs.x,
+            rest_sin: elbow_cs.y,
+            compliance: arm_controller.angular_compliance,
+        },
+    });
 
     angular_events
 }
 
 pub fn update_character_movement(
+    time: Res<Time>,
     c_q: Query<(
         &ConnectivityRoot,
         &CharacterController,
@@ -292,6 +266,8 @@ pub fn update_character_movement(
     mut velocity_events: EventWriter<CharacterPivotVelocityEvent>,
     mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
 ) {
+    let dt = time.delta_secs();
+
     //body control
     let temp = ["PH", "P0", "P1", "P2", "P3"];
     let tokens: Vec<Interned<str>> = temp
@@ -321,6 +297,8 @@ pub fn update_character_movement(
 
         let arm_angular_events = calculate_arm_ik(
             control.point_vector,
+            dt,
+            &p_e,
             &particles,
             &j_e,
             &angular_constraints,

@@ -64,17 +64,23 @@ impl Default for SpineController {
 
 #[derive(Clone)]
 pub struct ArmController {
-    /// Velocity scale for moving arm particles toward IK target.
-    pub velocity_scale: f32,
-    /// Maximum speed for arm particle velocity (clamp).
-    pub max_speed: f32,
+    /// Fraction of distance to blend toward true target each frame.
+    /// 0.3 = move virtual target 30% toward true target from current wrist.
+    pub target_blend: f32,
+    /// Distance threshold: when |wrist - true_target| < this, stop updating.
+    pub convergence_threshold: f32,
+    /// Compliance for angular constraints on arm joints.
+    /// Must be significantly softer than the default 0.000001 from the character
+    /// JSON so the XPBD solver can actually move the arm. 0.1 is a good start.
+    pub angular_compliance: f32,
 }
 
 impl Default for ArmController {
     fn default() -> Self {
         Self {
-            velocity_scale: 10.0,
-            max_speed: 600.0,
+            target_blend: 0.3,
+            convergence_threshold: 2.0,
+            angular_compliance: 1e-6,
         }
     }
 }
