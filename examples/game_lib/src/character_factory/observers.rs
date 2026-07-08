@@ -11,7 +11,7 @@ use vello::{
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
     utility::bilinear_interpolate, CollisionConstraintConfig, ConnectionConstraintInitConfig,
-    FrameBilinearConstraintConfig, SoftBodyInitConfig, FRAME_PARTICLES_COUNT,
+    FramePositionConstraintConfig, SoftBodyInitConfig, FRAME_PARTICLES_COUNT,
 };
 
 use crate::{
@@ -64,16 +64,6 @@ pub fn assemble_character(
     let mut character_connectivity = ConnectivityRoot::default();
     let mut colliders_particle_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
 
-    let mut frame_config = blueprint.data.frame.init_config.clone();
-    for item in frame_config.frame_particles.iter_mut() {
-        apply_transform_to_particle(item);
-    }
-    let corners: Vec<Vec2> = frame_config
-        .frame_particles
-        .iter()
-        .map(|item| item.pos)
-        .collect();
-
     for item in blueprint.data.colliders.iter() {
         let Some((s, rect)) = svgs.data.get(&item.path_id) else {
             warn!(
@@ -115,9 +105,6 @@ pub fn assemble_character(
         let mut particle = item.particle.clone();
         apply_transform_to_particle(&mut particle);
         let mut config = item.frame_conn.clone();
-        //if not default value
-        let temp_uv = bilinear_interpolate(particle.pos, corners.as_slice());
-        config.uv = (temp_uv.x, temp_uv.y);
         let entity = make_particle(&mut commands, particle, &root_entity, config);
         let particle_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
@@ -186,12 +173,28 @@ pub fn assemble_character(
     }
 
     commands.entity(root_entity).insert(character_connectivity);
-
+    let frame_config = blueprint.data.frame.init_config.clone();
     //to do read these from the FrameConfig.
-    let left_hip = colliders_particle_entity.get("P30").unwrap().0.clone();
-    let right_hip = colliders_particle_entity.get("P31").unwrap().0.clone();
-    let base_spine = colliders_particle_entity.get("P3").unwrap().0.clone();
-    let mid_spine = colliders_particle_entity.get("P2").unwrap().0.clone();
+    let left_hip = colliders_particle_entity
+        .get(&frame_config.left_hip)
+        .unwrap()
+        .0
+        .clone();
+    let right_hip = colliders_particle_entity
+        .get(&frame_config.right_hip)
+        .unwrap()
+        .0
+        .clone();
+    let base_spine = colliders_particle_entity
+        .get(&frame_config.spine_base)
+        .unwrap()
+        .0
+        .clone();
+    let mid_spine = colliders_particle_entity
+        .get(&frame_config.spine_mid)
+        .unwrap()
+        .0
+        .clone();
     let frame_entites: [Entity; FRAME_PARTICLES_COUNT] =
         [left_hip, right_hip, base_spine, mid_spine];
 
@@ -209,7 +212,7 @@ fn make_particle(
     commands: &mut Commands,
     particle: Particle,
     root_entity: &Entity,
-    frame_connect_config: FrameBilinearConstraintConfig,
+    frame_connect_config: FramePositionConstraintConfig,
 ) -> Entity {
     commands
         .spawn(VelloParticle::new(

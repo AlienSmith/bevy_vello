@@ -46,10 +46,9 @@ pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 use vello_physics::{
-    AngularConstraintConfig,
-    ConnectionConstraint::{self, Bilinear},
-    ConnectionConstraintInitConfig, ConstraintWorld, FrameBilinearConstraintConfig,
-    FrameInitConfig, FRAME_PARTICLES_COUNT,
+    utility::BalancedCoreFrame, AngularConstraintConfig, ConnectionConstraint,
+    ConnectionConstraintInitConfig, ConstraintWorld, FrameInitConfig,
+    FramePositionConstraintConfig, FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -154,32 +153,20 @@ impl Component for VelloJoint {
 pub struct VelloParticle {
     pub particle: Particle,
     pub root_entity: Entity,
-    pub frame_connect_config: FrameBilinearConstraintConfig,
+    pub frame_connect_config: FramePositionConstraintConfig,
 }
 
 impl VelloParticle {
     pub fn new(
         particle: Particle,
         entity: Entity,
-        frame_connect_config: FrameBilinearConstraintConfig,
+        frame_connect_config: FramePositionConstraintConfig,
     ) -> Self {
         Self {
             particle,
             root_entity: entity,
             frame_connect_config,
         }
-    }
-
-    pub fn get_weights(&self) -> [f32; 4] {
-        let u = self.frame_connect_config.uv.0;
-        let v = self.frame_connect_config.uv.1;
-        // Bilinear shape function values (N0, N1, N2, N3)
-        let n0 = (1.0 - u) * (1.0 - v); // bottom-left
-        let n1 = u * (1.0 - v); // bottom-right
-        let n2 = u * v; // top-right
-        let n3 = (1.0 - u) * v; // top-left
-        let weights = [n0, n1, n2, n3];
-        return weights;
     }
 }
 
@@ -209,16 +196,16 @@ impl Component for VelloParticle {
 #[derive(Clone)]
 pub struct VelloCharacterPhysicsRoot {
     pub shape_matching_frame_config: FrameInitConfig,
-    pub particle: [Particle; FRAME_PARTICLES_COUNT],
     pub frame_entities: [Entity; FRAME_PARTICLES_COUNT],
+    pub frame_coordinates: BalancedCoreFrame,
 }
 
 impl VelloCharacterPhysicsRoot {
     pub fn new(config: FrameInitConfig, frame_entities: [Entity; FRAME_PARTICLES_COUNT]) -> Self {
         Self {
-            particle: config.frame_particles.clone(),
             shape_matching_frame_config: config,
             frame_entities,
+            frame_coordinates: Default::default(),
         }
     }
 }

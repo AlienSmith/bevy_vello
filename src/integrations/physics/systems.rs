@@ -16,6 +16,7 @@ use vello::{
     kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
+use vello_physics::{utility::BalancedCoreFrame, FRAME_PARTICLES_COUNT};
 #[inline]
 fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vec2 {
     Vec2::new(v.x, -v.y)
@@ -318,8 +319,9 @@ pub fn update_connection_particles(
     for (character, mut joint) in query_c.iter_mut() {
         let group = constraint_world.data.get_group_ref(character).unwrap();
         let item = group.get_frame_connect_particle();
-        if item.is_empty() {
-            joint.particle = item.try_into().unwrap();
+        if item.len() == FRAME_PARTICLES_COUNT {
+            joint.frame_coordinates =
+                BalancedCoreFrame::new(item[0].pos, item[1].pos, item[2].pos, item[3].pos);
         }
     }
     for (e, mut joint) in query_j.iter_mut() {
@@ -398,22 +400,29 @@ pub fn create_update_pivot_visualizer(
         None,
         &path,
     );
-    let mut frame_path = BezPath::new();
+    let mut frame_coordinate_path = BezPath::new();
     for f_p in q_f_p.iter() {
-        let item = f_p.particle[0].pos;
-        frame_path.push(PathEl::MoveTo((item.x, item.y).into()));
-        for i in 1..f_p.particle.len() {
-            let item = f_p.particle[i].pos;
-            frame_path.push(PathEl::LineTo((item.x, item.y).into()));
-        }
-        frame_path.push(PathEl::LineTo((item.x, item.y).into()));
+        let points = vec![
+            Vec2::new(-100.0, 0.0),
+            Vec2::new(100.0, 0.0),
+            Vec2::new(0.0, -100.0),
+            Vec2::new(0.0, 100.0),
+        ];
+        let world_point: Vec<Vec2> = points
+            .iter()
+            .map(|pos| f_p.frame_coordinates.local_to_world(*pos))
+            .collect();
+        frame_coordinate_path.push(PathEl::MoveTo((world_point[0].x, world_point[0].y).into()));
+        frame_coordinate_path.push(PathEl::LineTo((world_point[1].x, world_point[1].y).into()));
+        frame_coordinate_path.push(PathEl::MoveTo((world_point[2].x, world_point[2].y).into()));
+        frame_coordinate_path.push(PathEl::LineTo((world_point[3].x, world_point[3].y).into()));
     }
     scene.stroke(
         &Stroke::new(4.0),
         Affine::IDENTITY,
         peniko::GlowColor::new(peniko::Color::rgba(0.0, 1.0, 1.0, 0.9), 1.0),
         None,
-        &frame_path,
+        &frame_coordinate_path,
     );
     if q.is_empty() {
         commands.spawn((

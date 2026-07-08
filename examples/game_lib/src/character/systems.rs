@@ -382,7 +382,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let arm_angular_events = calculate_arm_ik(
+        let right_arm_angular_events = calculate_arm_ik(
             control.point_vector,
             dt,
             &p_e,
@@ -391,7 +391,6 @@ pub fn update_character_movement(
             &angular_constraints,
             &control.arm_controller,
         );
-        angular_events.write_batch(arm_angular_events);
 
         let (p, j) = left_arm_tokens.split_at(4);
         let p_e: Vec<Entity> = p
@@ -407,7 +406,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let arm_angular_events = calculate_arm_ik(
+        let left_arm_angular_events = calculate_arm_ik(
             control.point_vector,
             dt,
             &p_e,
@@ -416,7 +415,8 @@ pub fn update_character_movement(
             &angular_constraints,
             &control.arm_controller,
         );
-        angular_events.write_batch(arm_angular_events);
+        // angular_events.write_batch(right_arm_angular_events);
+        // angular_events.write_batch(left_arm_angular_events);
 
         //body control
         let temp = ["PH", "P0", "P1", "P2", "P3"];

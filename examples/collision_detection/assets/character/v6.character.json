@@ -1,50 +1,13 @@
 {
   "frame": {
-    "svg_id": "Frame/P0_P11_P1_P12_P2_P30_P3_P31",
-    "path_id": "P0_P11_P1_P12_P2_P30_P3_P31",
+    "svg_id": "Frame/P30_P31_P3_P2",
+    "path_id": "P30_P31_P3_P2",
     "init_config": {
-      "frame_particles": [
-        {
-          "pos": [
-            0.25,
-            0.25
-          ],
-          "inv_mass": 0.33333334
-        },
-        {
-          "pos": [
-            679.25,
-            0.25
-          ],
-          "inv_mass": 0.33333334
-        },
-        {
-          "pos": [
-            679.25,
-            649.25
-          ],
-          "inv_mass": 0.33333334
-        },
-        {
-          "pos": [
-            0.25,
-            649.25
-          ],
-          "inv_mass": 0.33333334
-        }
-      ],
-      "reference_particles": [
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        ""
-      ],
-      "distance_compliance": 0.0001,
-      "area_compliance": 0.01
+      "left_hip": "P30",
+      "right_hip": "P31",
+      "spine_base": "P3",
+      "spine_mid": "P2",
+      "frame_particles_damping": 0.1
     }
   },
   "colliders": [
@@ -413,10 +376,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -432,10 +391,6 @@
         "inv_mass": 0.5
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -451,10 +406,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -470,10 +421,6 @@
         "inv_mass": 0.6666667
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -489,10 +436,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -508,10 +451,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -527,10 +466,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -546,10 +481,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -565,10 +496,6 @@
         "inv_mass": 2.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -584,10 +511,6 @@
         "inv_mass": 2.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -603,10 +526,6 @@
         "inv_mass": 2.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -622,10 +541,6 @@
         "inv_mass": 2.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -641,10 +556,6 @@
         "inv_mass": 2.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -660,10 +571,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -679,10 +586,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -698,10 +601,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -717,10 +616,6 @@
         "inv_mass": 1.0
       },
       "frame_conn": {
-        "uv": [
-          0.0,
-          0.0
-        ],
         "compliance": 0.01,
         "damping": 0.1
       }
@@ -756,28 +651,6 @@
         "Distance": [
           "P2",
           "P3",
-          1e-8
-        ]
-      }
-    },
-    {
-      "svg_id": "Distance/P2_P30",
-      "path_id": "P2_P30",
-      "config": {
-        "Distance": [
-          "P2",
-          "P30",
-          1e-8
-        ]
-      }
-    },
-    {
-      "svg_id": "Distance/P2_P31",
-      "path_id": "P2_P31",
-      "config": {
-        "Distance": [
-          "P2",
-          "P31",
           1e-8
         ]
       }
@@ -926,35 +799,13 @@
       }
     },
     {
-      "svg_id": "Distance/P0_P11",
-      "path_id": "P0_P11",
-      "config": {
-        "Distance": [
-          "P0",
-          "P11",
-          0.000001
-        ]
-      }
-    },
-    {
-      "svg_id": "Distance/P0_P12",
-      "path_id": "P0_P12",
-      "config": {
-        "Distance": [
-          "P0",
-          "P12",
-          0.000001
-        ]
-      }
-    },
-    {
       "svg_id": "Distance/P2_P30",
       "path_id": "P2_P30",
       "config": {
         "Distance": [
           "P2",
           "P30",
-          0.000001
+          1e-8
         ]
       }
     },
@@ -965,7 +816,7 @@
         "Distance": [
           "P2",
           "P31",
-          0.000001
+          1e-8
         ]
       }
     },

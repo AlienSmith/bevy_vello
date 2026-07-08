@@ -68,8 +68,6 @@
     <line id="P3_P30" class="cls-5" x1="339.75" y1="347.25" x2="313.988" y2="346.522"/>
     <line id="P31_P41" class="cls-5" x1="385.25" y1="351.25" x2="420.25" y2="444.25"/>
     <line id="P30_P40" class="cls-5" x1="306.25" y1="351.25" x2="278.25" y2="447.25"/>
-    <line id="P0_P11" class="cls-5" x1="341.25" y1="149.25" x2="310.25" y2="198.25"/>
-    <line id="P0_P12" class="cls-5" x1="350.131" y1="147.369" x2="383.75" y2="198.75"/>
     <line id="P2_P30" class="cls-5" x1="342.25" y1="278.25" x2="310.25" y2="343.25"/>
     <line id="P2_P31" class="cls-5" x1="351.274" y1="277.655" x2="380.607" y2="341.655"/>
   </g>
@@ -125,56 +123,56 @@
     <rect id="P12_RUA" class="cls-2" x="380.25" y="197.25" width="11" height="11"/>
   </g>
   <g id="Particle">
-    <g id="P0_1.0">
+    <g id="P0">
       <circle class="cls-1" cx="346.75" cy="143.75" r="4"/>
     </g>
-    <g id="P1_2.0">
+    <g id="P1">
       <circle class="cls-1" cx="346.75" cy="202.75" r="4"/>
     </g>
-    <g id="P2_1.0">
+    <g id="P2">
       <circle class="cls-1" cx="346.75" cy="275.75" r="4"/>
     </g>
-    <g id="P3_1.5">
+    <g id="P3">
       <circle class="cls-1" cx="346.75" cy="345.75" r="4"/>
     </g>
-    <g id="P40_1.0">
+    <g id="P40">
       <circle class="cls-1" cx="276.75" cy="451.75" r="4"/>
     </g>
-    <g id="P41_1.0">
+    <g id="P41">
       <circle class="cls-1" cx="422.75" cy="448.75" r="4"/>
     </g>
-    <g id="P10_1.0">
+    <g id="P10">
       <circle class="cls-1" cx="198.75" cy="201.75" r="4"/>
     </g>
-    <g id="P13_1.0">
+    <g id="P13">
       <circle class="cls-1" cx="493.75" cy="202.75" r="4"/>
     </g>
-    <g id="PH_0.5">
+    <g id="PH">
       <circle class="cls-1" cx="346.75" cy="94.75" r="4"/>
     </g>
-    <g id="PLLA_0.5">
+    <g id="PLLA">
       <circle class="cls-1" cx="88.75" cy="202.75" r="4"/>
     </g>
-    <g id="PRLA_0.5">
+    <g id="PRLA">
       <circle class="cls-1" cx="604.75" cy="201.75" r="4"/>
     </g>
-    <g id="PRLL_0.5">
+    <g id="PRLL">
       <circle class="cls-1" cx="462.75" cy="551.75" r="4"/>
     </g>
-    <g id="PLLL_0.5">
+    <g id="PLLL">
       <circle class="cls-1" cx="243.75" cy="557.75" r="4"/>
     </g>
-    <g id="P12_1.0">
+    <g id="P12">
       <circle class="cls-1" cx="383.75" cy="202.75" r="4"/>
     </g>
-    <g id="P11_1.0">
+    <g id="P11">
       <circle class="cls-1" cx="308.75" cy="202.75" r="4"/>
     </g>
-    <g id="P30_1.0">
-      <circle class="cls-1" cx="308.75" cy="346.75" r="4"/>
+    <g id="P30">
+      <circle class="cls-1" cx="308.75" cy="345.75" r="4"/>
     </g>
-    <g id="P31_1.0">
-      <circle class="cls-1" cx="383.631" cy="346.455" r="4"/>
+    <g id="P31">
+      <circle class="cls-1" cx="384.75" cy="345.75" r="4"/>
     </g>
   </g>
   <g id="Frame">
