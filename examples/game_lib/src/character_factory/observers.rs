@@ -11,7 +11,7 @@ use vello::{
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
     utility::bilinear_interpolate, CollisionConstraintConfig, ConnectionConstraintInitConfig,
-    FrameBilinearConstraintConfig, SoftBodyInitConfig,
+    FrameBilinearConstraintConfig, SoftBodyInitConfig, FRAME_PARTICLES_COUNT,
 };
 
 use crate::{
@@ -187,9 +187,17 @@ pub fn assemble_character(
 
     commands.entity(root_entity).insert(character_connectivity);
 
+    //to do read these from the FrameConfig.
+    let left_hip = colliders_particle_entity.get("P30").unwrap().0.clone();
+    let right_hip = colliders_particle_entity.get("P31").unwrap().0.clone();
+    let base_spine = colliders_particle_entity.get("P3").unwrap().0.clone();
+    let mid_spine = colliders_particle_entity.get("P2").unwrap().0.clone();
+    let frame_entites: [Entity; FRAME_PARTICLES_COUNT] =
+        [left_hip, right_hip, base_spine, mid_spine];
+
     commands
         .entity(root_entity)
-        .insert(VelloCharacterPhysicsRoot::new(frame_config));
+        .insert(VelloCharacterPhysicsRoot::new(frame_config, frame_entites));
     for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);
     }

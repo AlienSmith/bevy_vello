@@ -240,17 +240,35 @@ pub fn generate_connection(
     query_c: Query<(Entity, &VelloJoint), Added<VelloJoint>>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
 ) {
+    //create group object
     for (e, c) in query_r.iter() {
-        constraint_world
-            .data
-            .add_group(e, &c.shape_matching_frame_config);
+        constraint_world.data.add_group(e);
     }
     //all particles must be added before constraints
     for (e, p) in query_p.iter() {
         let group = constraint_world.data.get_group_mut(p.root_entity).unwrap();
-        group.add_connect_particle(e, &p.particle, &p.frame_connect_config);
+        group.add_connect_particle(e, &p.particle);
     }
-
+    //initliaze shape matching frame
+    for (e, c) in query_r.iter() {
+        constraint_world
+            .data
+            .initial_frame(
+                &e,
+                &c.frame_entities[0],
+                &c.frame_entities[1],
+                &c.frame_entities[2],
+                &c.frame_entities[3],
+                &c.shape_matching_frame_config,
+            )
+            .expect("character missing particles to form frame");
+    }
+    //add shape matching constraints
+    for (e, p) in query_p.iter() {
+        let group = constraint_world.data.get_group_mut(p.root_entity).unwrap();
+        group.add_connect_particle_shape_matching(&e, &p.frame_connect_config);
+    }
+    //add onther constraints
     for (e, c) in query_c.iter() {
         constraint_world
             .data

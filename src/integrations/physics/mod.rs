@@ -210,13 +210,15 @@ impl Component for VelloParticle {
 pub struct VelloCharacterPhysicsRoot {
     pub shape_matching_frame_config: FrameInitConfig,
     pub particle: [Particle; FRAME_PARTICLES_COUNT],
+    pub frame_entities: [Entity; FRAME_PARTICLES_COUNT],
 }
 
 impl VelloCharacterPhysicsRoot {
-    pub fn new(config: FrameInitConfig) -> Self {
+    pub fn new(config: FrameInitConfig, frame_entities: [Entity; FRAME_PARTICLES_COUNT]) -> Self {
         Self {
             particle: config.frame_particles.clone(),
             shape_matching_frame_config: config,
+            frame_entities,
         }
     }
 }

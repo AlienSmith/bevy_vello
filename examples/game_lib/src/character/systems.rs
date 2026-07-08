@@ -354,13 +354,6 @@ pub fn update_character_movement(
 ) {
     let dt = time.delta_secs();
 
-    //body control
-    let temp = ["PH", "P0", "P1", "P2", "P3"];
-    let tokens: Vec<Interned<str>> = temp
-        .iter()
-        .map(|item| string_pool.pool.intern(&item))
-        .collect();
-
     //arm control
     let right_arm = ["P1", "P12", "P13", "PRLA", "P1_P12_P13", "P12_P13_PRLA"];
     let right_arm_tokens: Vec<Interned<str>> = right_arm
@@ -424,6 +417,13 @@ pub fn update_character_movement(
             &control.arm_controller,
         );
         angular_events.write_batch(arm_angular_events);
+
+        //body control
+        let temp = ["PH", "P0", "P1", "P2", "P3"];
+        let tokens: Vec<Interned<str>> = temp
+            .iter()
+            .map(|item| string_pool.pool.intern(&item))
+            .collect();
 
         if control.move_vector.length_squared() <= 0.01 {
             continue;
