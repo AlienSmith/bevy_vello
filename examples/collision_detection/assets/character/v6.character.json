@@ -756,7 +756,29 @@
         "Distance": [
           "P2",
           "P3",
-          0.000001
+          1e-8
+        ]
+      }
+    },
+    {
+      "svg_id": "Distance/P2_P30",
+      "path_id": "P2_P30",
+      "config": {
+        "Distance": [
+          "P2",
+          "P30",
+          1e-8
+        ]
+      }
+    },
+    {
+      "svg_id": "Distance/P2_P31",
+      "path_id": "P2_P31",
+      "config": {
+        "Distance": [
+          "P2",
+          "P31",
+          1e-8
         ]
       }
     },
@@ -866,7 +888,7 @@
         "Distance": [
           "P3",
           "P31",
-          0.000001
+          1e-8
         ]
       }
     },
@@ -877,7 +899,7 @@
         "Distance": [
           "P3",
           "P30",
-          0.000001
+          1e-8
         ]
       }
     },
