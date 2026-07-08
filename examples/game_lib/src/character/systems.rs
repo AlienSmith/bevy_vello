@@ -360,14 +360,47 @@ pub fn update_character_movement(
         .iter()
         .map(|item| string_pool.pool.intern(&item))
         .collect();
+
+    //arm control
+    let right_arm = ["P1", "P12", "P13", "PRLA", "P1_P12_P13", "P12_P13_PRLA"];
+    let right_arm_tokens: Vec<Interned<str>> = right_arm
+        .iter()
+        .map(|item| string_pool.pool.intern(&item))
+        .collect();
+
+    let left_arm = ["P1", "P11", "P10", "PLLA", "P1_P11_P10", "P11_P10_PLLA"];
+    let left_arm_tokens: Vec<Interned<str>> = left_arm
+        .iter()
+        .map(|item| string_pool.pool.intern(&item))
+        .collect();
+
     for (root, control, _p_root) in &c_q {
-        //arm control
-        let right_arm = ["P1", "P12", "P13", "PRLA", "P1_P12_P13", "P12_P13_PRLA"];
-        let right_arm_tokens: Vec<Interned<str>> = right_arm
-            .iter()
-            .map(|item| string_pool.pool.intern(&item))
-            .collect();
         let (p, j) = right_arm_tokens.split_at(4);
+        let p_e: Vec<Entity> = p
+            .iter()
+            .map(|item| root.parts.get(item).unwrap().clone())
+            .collect();
+        let j_e: Vec<Entity> = j
+            .iter()
+            .map(|item| root.parts.get(item).unwrap().clone())
+            .collect();
+        let particles: Vec<VelloParticle> =
+            p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
+        let angular_constraints: Vec<VelloJoint> =
+            j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
+
+        let arm_angular_events = calculate_arm_ik(
+            control.point_vector,
+            dt,
+            &p_e,
+            &particles,
+            &j_e,
+            &angular_constraints,
+            &control.arm_controller,
+        );
+        angular_events.write_batch(arm_angular_events);
+
+        let (p, j) = left_arm_tokens.split_at(4);
         let p_e: Vec<Entity> = p
             .iter()
             .map(|item| root.parts.get(item).unwrap().clone())

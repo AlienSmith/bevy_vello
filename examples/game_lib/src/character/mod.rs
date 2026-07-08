@@ -1,5 +1,6 @@
 use bevy::{
     ecs::intern::{Interned, Interner},
+    math::VectorSpace,
     platform::collections::{HashMap, HashSet},
     prelude::*,
 };
@@ -85,7 +86,7 @@ impl Default for ArmController {
         Self {
             target_blend: 0.3,
             convergence_threshold: 2.0,
-            angular_compliance: 1e-6,
+            angular_compliance: 1e-7,
             max_angle_rate: std::f32::consts::PI,
         }
     }
