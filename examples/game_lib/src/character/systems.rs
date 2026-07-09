@@ -1,9 +1,13 @@
-use bevy::{ecs::intern::Interned, prelude::*};
-use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent, CharacterPivotVelocityEvent, VelloCharacterPhysicsRoot,
-    VelloJoint, VelloParticle,
+use bevy::{
+    asset::transformer::TransformedAsset,
+    ecs::{intern::Interned, world},
+    prelude::*,
 };
-use vello_physics::utility::cos_sin;
+use bevy_vello::integrations::physics::{
+    CharacterAngularConstraintEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
+    VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
+};
+use vello_physics::utility::{cos_sin, BalancedCoreFrame};
 
 use crate::character::{
     ArmController, CharacterController, ConnectivityRoot, SpineController, StringPool,
@@ -124,6 +128,50 @@ fn claculate_velocity_spine(
     }
 
     result
+}
+
+fn calculate_arm_test(
+    target: Vec2,
+    dt: f32,
+    particles_entity: &Vec<Entity>,
+    particles: &Vec<VelloParticle>,
+    joints_entity: &Vec<Entity>,
+    joints: &Vec<VelloJoint>,
+    arm_controller: &ArmController,
+    blend_core: &BalancedCoreFrame,
+) -> (
+    Vec<CharacterAngularConstraintEvent>,
+    Vec<CharacterPivotPositionEvent>,
+) {
+    let mut angular_events = vec![];
+    let mut position_events = vec![];
+    let world_target = bevy_to_vello(target);
+    let locoal_target = blend_core.world_to_local(world_target);
+    let pos_s = particles[1].shape_matching.local_target;
+    let pos_e = particles[2].shape_matching.local_target;
+    let cos_sin = cos_sin(pos_s, pos_e, locoal_target);
+    let character_entity = particles[0].root_entity;
+    angular_events.push(CharacterAngularConstraintEvent {
+        character_entity,
+        joint_entity: joints_entity[1],
+        config: vello_physics::AngularConstraintConfig {
+            rest_cos: cos_sin.x,
+            rest_sin: cos_sin.y,
+            compliance: 1e-1,
+        },
+    });
+    let mut wrist = particles[3].shape_matching;
+    let distance = (wrist.local_target - pos_e).length();
+    let pos_w = (locoal_target - pos_e).normalize() * distance + pos_e;
+    wrist.local_target = pos_w;
+    wrist.compliance = 1e-2;
+    wrist.damping = 0.5;
+    position_events.push(CharacterPivotPositionEvent {
+        character_entity,
+        joint_entity: particles_entity[3],
+        target: wrist,
+    });
+    (angular_events, position_events)
 }
 
 /// 2-bone IK for the right arm, driven entirely by angular constraints.
@@ -351,6 +399,7 @@ pub fn update_character_movement(
     string_pool: ResMut<StringPool>,
     mut velocity_events: EventWriter<CharacterPivotVelocityEvent>,
     mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
+    mut position_events: EventWriter<CharacterPivotPositionEvent>,
 ) {
     let dt = time.delta_secs();
 
@@ -367,7 +416,12 @@ pub fn update_character_movement(
         .map(|item| string_pool.pool.intern(&item))
         .collect();
 
-    for (root, control, _p_root) in &c_q {
+    for (root, control, p_root) in &c_q {
+        //the game world and physics world are not properly synced yet.
+        if p_root.initial_frame_coordinates.is_none() {
+            continue;
+        }
+
         let (p, j) = right_arm_tokens.split_at(4);
         let p_e: Vec<Entity> = p
             .iter()
@@ -415,8 +469,21 @@ pub fn update_character_movement(
             &angular_constraints,
             &control.arm_controller,
         );
-        // angular_events.write_batch(right_arm_angular_events);
+        //angular_events.write_batch(right_arm_angular_events);
         // angular_events.write_batch(left_arm_angular_events);
+
+        let (angular, position) = calculate_arm_test(
+            control.point_vector,
+            dt,
+            &p_e,
+            &particles,
+            &j_e,
+            &angular_constraints,
+            &control.arm_controller,
+            &p_root.frame_coordinates,
+        );
+        angular_events.write_batch(angular);
+        position_events.write_batch(position);
 
         //body control
         let temp = ["PH", "P0", "P1", "P2", "P3"];

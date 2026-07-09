@@ -5,13 +5,14 @@ use crate::{
     collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
     integrations::physics::{
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotVelocityEvent, ColliderExternalImpulseEvent, PivotVisualizer,
-        VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
+        CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
+        PivotVisualizer, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
+        VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
 
-use bevy::prelude::*;
+use bevy::{ecs::error::info, prelude::*};
 use vello::{
     kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
@@ -267,7 +268,7 @@ pub fn generate_connection(
     //add shape matching constraints
     for (e, p) in query_p.iter() {
         let group = constraint_world.data.get_group_mut(p.root_entity).unwrap();
-        group.add_connect_particle_shape_matching(&e, &p.frame_connect_config);
+        group.add_connect_particle_shape_matching(&e, &p.shape_matching_init);
     }
     //add onther constraints
     for (e, c) in query_c.iter() {
@@ -315,13 +316,20 @@ pub fn update_connection_particles(
         if let Some(item) = group.get_connect_particle(&e) {
             joint.particle = item;
         }
+        if let Some(item) = group.get_connect_particle_shape_matching_config(&e) {
+            joint.shape_matching = item;
+        }
     }
     for (character, mut joint) in query_c.iter_mut() {
         let group = constraint_world.data.get_group_ref(character).unwrap();
         let item = group.get_frame_connect_particle();
         if item.len() == FRAME_PARTICLES_COUNT {
-            joint.frame_coordinates =
+            let frame_coordinates =
                 BalancedCoreFrame::new(item[0].pos, item[1].pos, item[2].pos, item[3].pos);
+            if joint.initial_frame_coordinates.is_none() {
+                joint.initial_frame_coordinates = Some(frame_coordinates.clone());
+            }
+            joint.frame_coordinates = frame_coordinates;
         }
     }
     for (e, mut joint) in query_j.iter_mut() {
@@ -345,6 +353,7 @@ pub fn apply_explicit_impulse_on_connection_particle(
     mut v_events: EventReader<CharacterPivotVelocityEvent>,
     mut frame_events: EventReader<CharacterFrameForceEvent>,
     mut angular_event: EventReader<CharacterAngularConstraintEvent>,
+    mut position_event: EventReader<CharacterPivotPositionEvent>,
 ) {
     for event in events.read() {
         let group = constraint_world
@@ -377,6 +386,13 @@ pub fn apply_explicit_impulse_on_connection_particle(
             .get_group_mut(event.character_entity)
             .unwrap();
         group.set_connect_angular_config(&event.joint_entity, &event.config);
+    }
+    for event in position_event.read() {
+        let group = constraint_world
+            .data
+            .get_group_mut(event.character_entity)
+            .unwrap();
+        group.set_connect_particle_shahep_matching_config(&event.joint_entity, &event.target);
     }
 }
 

@@ -46,9 +46,9 @@ pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 use vello_physics::{
-    utility::BalancedCoreFrame, AngularConstraintConfig, ConnectionConstraint,
-    ConnectionConstraintInitConfig, ConstraintWorld, FrameInitConfig,
-    FramePositionConstraintConfig, FRAME_PARTICLES_COUNT,
+    collision_response::PartcileShapeMatchingConfig, utility::BalancedCoreFrame,
+    AngularConstraintConfig, ConnectionConstraint, ConnectionConstraintInitConfig, ConstraintWorld,
+    FrameInitConfig, FramePositionConstraintConfig, FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -89,6 +89,13 @@ pub struct CharacterAngularConstraintEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,
     pub config: AngularConstraintConfig,
+}
+
+#[derive(Event)]
+pub struct CharacterPivotPositionEvent {
+    pub character_entity: Entity,
+    pub joint_entity: Entity,
+    pub target: PartcileShapeMatchingConfig,
 }
 
 #[derive(Component)]
@@ -151,21 +158,25 @@ impl Component for VelloJoint {
 /// A simple newtype component wrapper for [`vello::Scene`] for rendering.
 #[derive(Clone)]
 pub struct VelloParticle {
+    pub particle_init: Particle,
     pub particle: Particle,
+    pub shape_matching_init: FramePositionConstraintConfig,
+    pub shape_matching: PartcileShapeMatchingConfig,
     pub root_entity: Entity,
-    pub frame_connect_config: FramePositionConstraintConfig,
 }
 
 impl VelloParticle {
     pub fn new(
         particle: Particle,
         entity: Entity,
-        frame_connect_config: FramePositionConstraintConfig,
+        shape_matching_init: FramePositionConstraintConfig,
     ) -> Self {
         Self {
+            particle_init: particle,
             particle,
+            shape_matching_init,
+            shape_matching: Default::default(),
             root_entity: entity,
-            frame_connect_config,
         }
     }
 }
@@ -198,6 +209,7 @@ pub struct VelloCharacterPhysicsRoot {
     pub shape_matching_frame_config: FrameInitConfig,
     pub frame_entities: [Entity; FRAME_PARTICLES_COUNT],
     pub frame_coordinates: BalancedCoreFrame,
+    pub initial_frame_coordinates: Option<BalancedCoreFrame>, //this is used to indicate that the physics world is in sync with game world.
 }
 
 impl VelloCharacterPhysicsRoot {
@@ -205,6 +217,7 @@ impl VelloCharacterPhysicsRoot {
         Self {
             shape_matching_frame_config: config,
             frame_entities,
+            initial_frame_coordinates: None,
             frame_coordinates: Default::default(),
         }
     }
