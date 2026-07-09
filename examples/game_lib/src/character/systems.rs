@@ -1,8 +1,4 @@
-use bevy::{
-    asset::transformer::TransformedAsset,
-    ecs::{intern::Interned, world},
-    prelude::*,
-};
+use bevy::{ecs::intern::Interned, prelude::*};
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
     VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
@@ -130,51 +126,7 @@ fn claculate_velocity_spine(
     result
 }
 
-fn calculate_arm_test(
-    target: Vec2,
-    dt: f32,
-    particles_entity: &Vec<Entity>,
-    particles: &Vec<VelloParticle>,
-    joints_entity: &Vec<Entity>,
-    joints: &Vec<VelloJoint>,
-    arm_controller: &ArmController,
-    blend_core: &BalancedCoreFrame,
-) -> (
-    Vec<CharacterAngularConstraintEvent>,
-    Vec<CharacterPivotPositionEvent>,
-) {
-    let mut angular_events = vec![];
-    let mut position_events = vec![];
-    let world_target = bevy_to_vello(target);
-    let locoal_target = blend_core.world_to_local(world_target);
-    let pos_s = particles[1].shape_matching.local_target;
-    let pos_e = particles[2].shape_matching.local_target;
-    let cos_sin = cos_sin(pos_s, pos_e, locoal_target);
-    let character_entity = particles[0].root_entity;
-    angular_events.push(CharacterAngularConstraintEvent {
-        character_entity,
-        joint_entity: joints_entity[1],
-        config: vello_physics::AngularConstraintConfig {
-            rest_cos: cos_sin.x,
-            rest_sin: cos_sin.y,
-            compliance: 1e-1,
-        },
-    });
-    let mut wrist = particles[3].shape_matching;
-    let distance = (wrist.local_target - pos_e).length();
-    let pos_w = (locoal_target - pos_e).normalize() * distance + pos_e;
-    wrist.local_target = pos_w;
-    wrist.compliance = 1e-2;
-    wrist.damping = 0.5;
-    position_events.push(CharacterPivotPositionEvent {
-        character_entity,
-        joint_entity: particles_entity[3],
-        target: wrist,
-    });
-    (angular_events, position_events)
-}
-
-/// 2-bone IK for the right arm, driven entirely by angular constraints.
+/// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
 ///
 /// # Arm topology
 /// ```text
@@ -187,48 +139,46 @@ fn calculate_arm_test(
 ///
 /// # Strategy
 ///
-/// Angular-constraint-only approach. The XPBD solver handles all the physics —
-/// it distributes forces correctly between elbow, wrist, shoulder, and body.
-/// This avoids the non-physical velocity injection that fought the solver.
+/// Combined angular + shape-matching approach. The IK solve runs entirely in the
+/// character's local frame (via `blend_core`), so both constraint types operate
+/// in the same coordinate space and don't fight each other.
 ///
-/// 1. **Midpoint target damping**: `virtual_target = lerp(prla, true_target, target_blend)`.
-///    Each step is small and self-damping — corrections shrink as the wrist
-///    approaches the target.
+/// 1. **Local-space IK**: All particle positions and the target are converted to
+///    local frame coordinates before solving. The IK result gives desired positions
+///    for shoulder, elbow, and wrist in local space.
 ///
-/// 2. **Analytic 2-bone IK**: Cosine law on the virtual target → desired angles.
+/// 2. **Angular constraints with rotate-toward damping**: The rest angles are
+///    computed from local-space positions and clamped via `rotate_toward` using
+///    `arm_controller.max_angle_rate` to prevent sudden jumps.
 ///
-/// 3. **Angular constraint events only**: Set the rest angles and a softer
-///    compliance (`angular_compliance`, default 0.1 instead of 0.000001).
-///    The XPBD constraint solver moves particles in physically correct ways,
-///    naturally pushing the body in the opposite direction.
+/// 3. **Shape matching position constraints**: The local targets for shoulder,
+///    elbow, and wrist are updated to match the IK solution, also damped via
+///    `rotate_toward` on the direction from each pivot. This prevents the shape
+///    matching from fighting the angular constraints.
 ///
 /// 4. **Convergence dead zone**: When the wrist is within `convergence_threshold`
 ///    of the true target, we stop emitting events.
-///
-/// 5. **Rotate-toward damping**: The rest angle is not snapped to the IK result
-///    directly. Instead, it rotates toward the desired angle at a maximum rate
-///    of `arm_controller.max_angle_rate` radians/second. This prevents sudden
-///    jumps in the constraint rest condition that cause arm overshoot and body
-///    wobble.
-///
-///    Small angular differences pass through at full speed (no slow creep like
-///    lerp), while large jumps are capped to a fixed angular velocity.
 fn calculate_arm_ik(
     target: Vec2,
     dt: f32,
-    _particles_entity: &Vec<Entity>,
+    particles_entity: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
     joints_entity: &Vec<Entity>,
-    joints: &Vec<VelloJoint>,
+    _joints: &Vec<VelloJoint>,
     arm_controller: &ArmController,
-) -> Vec<CharacterAngularConstraintEvent> {
+    blend_core: &BalancedCoreFrame,
+) -> (
+    Vec<CharacterAngularConstraintEvent>,
+    Vec<CharacterPivotPositionEvent>,
+) {
     const ARM_PARTICLE_COUNT: usize = 4; // P1, P12, P13, PRLA
     const ARM_JOINT_COUNT: usize = 2; // shoulder, elbow
 
     let mut angular_events = vec![];
+    let mut position_events = vec![];
 
     if particles.len() < ARM_PARTICLE_COUNT || joints_entity.len() < ARM_JOINT_COUNT {
-        return angular_events;
+        return (angular_events, position_events);
     }
 
     let p1 = particles[0].particle.pos; // spine base
@@ -240,23 +190,30 @@ fn calculate_arm_ik(
     let dist_to_target = (prla - true_target).length();
 
     if dist_to_target <= arm_controller.convergence_threshold {
-        return angular_events;
+        return (angular_events, position_events);
     }
 
-    let upper_len = (p13 - p12).length();
-    let forearm_len = (prla - p13).length();
+    // Convert everything to local space so angular + shape matching agree
+    let local_target = blend_core.world_to_local(true_target);
+    let p1_local = blend_core.world_to_local(p1);
+    let p12_local = blend_core.world_to_local(p12);
+    let p13_local = blend_core.world_to_local(p13);
+    let prla_local = blend_core.world_to_local(prla);
+
+    let upper_len = (p13_local - p12_local).length();
+    let forearm_len = (prla_local - p13_local).length();
     if upper_len <= f32::EPSILON || forearm_len <= f32::EPSILON {
-        return angular_events;
+        return (angular_events, position_events);
     }
 
     let reach = upper_len + forearm_len;
-    let mut target_pos = true_target;
-    let root_to_target = target_pos - p12;
+    let mut target_pos_local = local_target;
+    let root_to_target = target_pos_local - p12_local;
     let dist = root_to_target.length();
     if dist > reach {
-        target_pos = p12 + root_to_target.normalize() * (reach - 0.001);
+        target_pos_local = p12_local + root_to_target.normalize() * (reach - 0.001);
     }
-    let to_target = target_pos - p12;
+    let to_target = target_pos_local - p12_local;
     let target_dist = to_target.length().max(f32::EPSILON);
     let target_dir = to_target / target_dist;
 
@@ -277,18 +234,16 @@ fn calculate_arm_ik(
         target_dir.x * cos_sh - target_dir.y * sin_sh,
         target_dir.x * sin_sh + target_dir.y * cos_sh,
     );
-    let desired_p13 = p12 + desired_upper_dir * upper_len;
+    let desired_p13_local = p12_local + desired_upper_dir * upper_len;
 
     // Compute the frame's max angular delta from the rate
     let max_delta = arm_controller.max_angle_rate * dt;
 
-    // ---- Shoulder constraint with rotate-toward damping ----
-    let desired_shoulder_cs = cos_sin(p1, p12, desired_p13);
+    // ---- Shoulder constraint with rotate-toward damping (local space) ----
+    let desired_shoulder_cs = cos_sin(p1_local, p12_local, desired_p13_local);
 
-    // Compute the current actual shoulder angle from particle positions.
-    // This is more reliable than reading the rest angle from the joint,
-    // which may be stale or already blended from a previous frame.
-    let current_shoulder_cs = cos_sin(p1, p12, p13);
+    // Compute the current actual shoulder angle from local-space particle positions.
+    let current_shoulder_cs = cos_sin(p1_local, p12_local, p13_local);
 
     let (blended_cos, blended_sin) = rotate_toward(
         current_shoulder_cs.x,
@@ -298,8 +253,10 @@ fn calculate_arm_ik(
         max_delta,
     );
 
+    let character_entity = particles[0].root_entity;
+
     angular_events.push(CharacterAngularConstraintEvent {
-        character_entity: particles[0].root_entity,
+        character_entity,
         joint_entity: joints_entity[0],
         config: vello_physics::AngularConstraintConfig {
             rest_cos: blended_cos,
@@ -308,15 +265,11 @@ fn calculate_arm_ik(
         },
     });
 
-    // ---- Elbow constraint with rotate-toward damping ----
-    // The elbow pivot is at desired_p13. We need the signed angle between
-    //   desired_p13 -> p12   (toward the shoulder)
-    //   desired_p13 -> target_pos (which is the desired forearm direction)
-    // This exactly matches the geometry of the solved pose.
-    let desired_elbow_cs = cos_sin(p12, desired_p13, target_pos);
+    // ---- Elbow constraint with rotate-toward damping (local space) ----
+    let desired_elbow_cs = cos_sin(p12_local, desired_p13_local, target_pos_local);
 
-    // Compute the current actual elbow angle from particle positions.
-    let current_elbow_cs = cos_sin(p12, p13, prla);
+    // Compute the current actual elbow angle from local-space particle positions.
+    let current_elbow_cs = cos_sin(p12_local, p13_local, prla_local);
 
     let (blended_cos, blended_sin) = rotate_toward(
         current_elbow_cs.x,
@@ -327,7 +280,7 @@ fn calculate_arm_ik(
     );
 
     angular_events.push(CharacterAngularConstraintEvent {
-        character_entity: particles[0].root_entity,
+        character_entity,
         joint_entity: joints_entity[1],
         config: vello_physics::AngularConstraintConfig {
             rest_cos: blended_cos,
@@ -336,7 +289,74 @@ fn calculate_arm_ik(
         },
     });
 
-    angular_events
+    // ---- Shape matching position constraints (local space, damped) ----
+    // Helper: damp a local target direction using rotate_toward so the shape
+    // matching target doesn't jump suddenly and fight the solver.
+    let damp_local_target = |current_local: Vec2, pivot_local: Vec2, desired_local: Vec2| -> Vec2 {
+        let current_offset = current_local - pivot_local;
+        let desired_offset = desired_local - pivot_local;
+        let current_len = current_offset.length();
+        let desired_len = desired_offset.length();
+        if current_len > f32::EPSILON && desired_len > f32::EPSILON {
+            let current_dir = current_offset / current_len;
+            let desired_dir = desired_offset / desired_len;
+            let (blended_cos, blended_sin) = rotate_toward(
+                current_dir.x,
+                current_dir.y,
+                desired_dir.x,
+                desired_dir.y,
+                max_delta,
+            );
+            let blended_dir = Vec2::new(blended_cos, blended_sin);
+            pivot_local + blended_dir * desired_len
+        } else {
+            desired_local
+        }
+    };
+
+    // Shoulder (particle index 1): local target is the desired elbow position
+    let mut shoulder_sm = particles[1].shape_matching;
+    let desired_shoulder_local =
+        damp_local_target(shoulder_sm.local_target, p12_local, desired_p13_local);
+    shoulder_sm.local_target = desired_shoulder_local;
+    shoulder_sm.compliance = arm_controller.shape_matching_compliance;
+    shoulder_sm.damping = arm_controller.shape_matching_damping;
+    position_events.push(CharacterPivotPositionEvent {
+        character_entity,
+        joint_entity: particles_entity[1],
+        target: shoulder_sm,
+    });
+
+    // Elbow (particle index 2): local target is the desired wrist position
+    let mut elbow_sm = particles[2].shape_matching;
+    let desired_elbow_local =
+        damp_local_target(elbow_sm.local_target, desired_p13_local, target_pos_local);
+    elbow_sm.local_target = desired_elbow_local;
+    elbow_sm.compliance = arm_controller.shape_matching_compliance;
+    elbow_sm.damping = arm_controller.shape_matching_damping;
+    position_events.push(CharacterPivotPositionEvent {
+        character_entity,
+        joint_entity: particles_entity[2],
+        target: elbow_sm,
+    });
+
+    // Wrist (particle index 3): extend from elbow local target toward local target
+    let mut wrist_sm = particles[3].shape_matching;
+    let pos_e = particles[2].shape_matching.local_target;
+    let distance = (wrist_sm.local_target - pos_e).length().max(f32::EPSILON);
+    let dir_to_target = (local_target - pos_e).normalize();
+    let desired_wrist_local = pos_e + dir_to_target * distance;
+    let desired_wrist_local = damp_local_target(wrist_sm.local_target, pos_e, desired_wrist_local);
+    wrist_sm.local_target = desired_wrist_local;
+    wrist_sm.compliance = arm_controller.shape_matching_compliance;
+    wrist_sm.damping = arm_controller.shape_matching_damping;
+    position_events.push(CharacterPivotPositionEvent {
+        character_entity,
+        joint_entity: particles_entity[3],
+        target: wrist_sm,
+    });
+
+    (angular_events, position_events)
 }
 
 /// Rotate unit vector (cos_a, sin_a) toward (cos_b, sin_b) by at most `max_delta` radians.
@@ -436,7 +456,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let right_arm_angular_events = calculate_arm_ik(
+        let (right_arm_angular_events, right_arm_position_events) = calculate_arm_ik(
             control.point_vector,
             dt,
             &p_e,
@@ -444,6 +464,7 @@ pub fn update_character_movement(
             &j_e,
             &angular_constraints,
             &control.arm_controller,
+            &p_root.frame_coordinates,
         );
 
         let (p, j) = left_arm_tokens.split_at(4);
@@ -460,19 +481,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let left_arm_angular_events = calculate_arm_ik(
-            control.point_vector,
-            dt,
-            &p_e,
-            &particles,
-            &j_e,
-            &angular_constraints,
-            &control.arm_controller,
-        );
-        //angular_events.write_batch(right_arm_angular_events);
-        // angular_events.write_batch(left_arm_angular_events);
-
-        let (angular, position) = calculate_arm_test(
+        let (left_arm_angular_events, left_arm_position_events) = calculate_arm_ik(
             control.point_vector,
             dt,
             &p_e,
@@ -482,8 +491,11 @@ pub fn update_character_movement(
             &control.arm_controller,
             &p_root.frame_coordinates,
         );
-        angular_events.write_batch(angular);
-        position_events.write_batch(position);
+
+        angular_events.write_batch(right_arm_angular_events);
+        //angular_events.write_batch(left_arm_angular_events);
+        position_events.write_batch(right_arm_position_events);
+        //position_events.write_batch(left_arm_position_events);
 
         //body control
         let temp = ["PH", "P0", "P1", "P2", "P3"];

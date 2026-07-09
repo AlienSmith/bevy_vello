@@ -79,6 +79,13 @@ pub struct ArmController {
     /// that cause overshoot and body wobble.
     /// π rad/s = 180°/s — fast enough to be responsive, slow enough to prevent overshoot.
     pub max_angle_rate: f32,
+    /// Compliance for shape matching position constraints on arm particles.
+    /// Controls how soft the position constraint is. Lower values = stiffer.
+    /// 1e-2 is a good default — soft enough to not fight the solver, stiff enough to track.
+    pub shape_matching_compliance: f32,
+    /// Damping for shape matching position constraints on arm particles.
+    /// Higher values = more damping, less waggle. 0.5 is a good default.
+    pub shape_matching_damping: f32,
 }
 
 impl Default for ArmController {
@@ -86,8 +93,10 @@ impl Default for ArmController {
         Self {
             target_blend: 0.3,
             convergence_threshold: 2.0,
-            angular_compliance: 1e-7,
+            angular_compliance: 5e-8,
             max_angle_rate: std::f32::consts::PI,
+            shape_matching_compliance: 0.01,
+            shape_matching_damping: 0.1,
         }
     }
 }
