@@ -49,7 +49,8 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterController, CharacterRoot, VelloCharacterPlugin,
+    CharacterController, CharacterRoot, LeftArmController, RightArmController, SpineController,
+    VelloCharacterPlugin,
 };
 
 use crate::{
@@ -875,7 +876,10 @@ fn collision_response(
 fn player_movement(
     mouse_status: ResMut<MouseStatus>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<&mut CharacterController>, // Assuming a 'Player' component
+    mut spine_q: Query<&mut SpineController>,
+    mut right_arm_q: Query<&mut RightArmController>,
+    mut left_arm_q: Query<&mut LeftArmController>,
+    mut legacy_q: Query<&mut CharacterController>,
 ) {
     let mut direction = Vec2::ZERO;
 
@@ -893,8 +897,21 @@ fn player_movement(
         direction.x += 50.0;
     }
 
-    if let Ok(mut item) = query.single_mut() {
+    if let Ok(mut spine) = spine_q.single_mut() {
+        spine.move_vector = direction;
+    }
+
+    let target = mouse_status.world_pos;
+    if let Ok(mut arm) = right_arm_q.single_mut() {
+        arm.target = target;
+    }
+    if let Ok(mut arm) = left_arm_q.single_mut() {
+        arm.target = target;
+    }
+
+    // Legacy: keep CharacterController in sync for any old systems still reading it.
+    if let Ok(mut item) = legacy_q.single_mut() {
         item.move_vector = direction;
-        item.point_vector = mouse_status.world_pos;
+        item.point_vector = target;
     }
 }

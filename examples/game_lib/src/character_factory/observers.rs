@@ -15,7 +15,10 @@ use vello_physics::{
 };
 
 use crate::{
-    character::{Connectivity, ConnectivityRoot, StringPool},
+    character::{
+        ArmConfig, Connectivity, ConnectivityRoot, LeftArmController, RightArmController,
+        SpineConfig, SpineController, StringPool,
+    },
     character_asset::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, SvgCharacterAsset,
         SvgCharacterAssetManager,
@@ -172,6 +175,42 @@ pub fn assemble_character(
             .insert(joint_name, joint_entity);
     }
 
+    // Look up controller entity handles BEFORE character_connectivity is moved.
+    let intern = |name: &str| string_pool.pool.intern(name);
+    let get = |name: &str| -> Entity {
+        *character_connectivity
+            .parts
+            .get(&intern(name))
+            .unwrap_or_else(|| panic!("missing entity for {name}"))
+    };
+
+    // Maybe make this into json file too.
+
+    // Spine particles: [PH, P0, P1, P2, P3]
+    let spine = SpineController {
+        particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
+        config: SpineConfig::default(),
+        move_vector: Vec2::ZERO,
+    };
+
+    // Right arm particles: [P1, P12, P13, PRLA]
+    // Right arm joints:    [P1_P12_P13, P12_P13_PRLA]
+    let right_arm = RightArmController {
+        particles: [get("P1"), get("P12"), get("P13"), get("PRLA")],
+        joints: [get("P1_P12_P13"), get("P12_P13_PRLA")],
+        config: ArmConfig::default(),
+        target: Vec2::ZERO,
+    };
+
+    // Left arm particles: [P1, P11, P10, PLLA]
+    // Left arm joints:    [P1_P11_P10, P11_P10_PLLA]
+    let left_arm = LeftArmController {
+        particles: [get("P1"), get("P11"), get("P10"), get("PLLA")],
+        joints: [get("P1_P11_P10"), get("P11_P10_PLLA")],
+        config: ArmConfig::default(),
+        target: Vec2::ZERO,
+    };
+
     commands.entity(root_entity).insert(character_connectivity);
     let frame_config = blueprint.data.frame.init_config.clone();
     //to do read these from the FrameConfig.
@@ -198,9 +237,13 @@ pub fn assemble_character(
     let frame_entites: [Entity; FRAME_PARTICLES_COUNT] =
         [left_hip, right_hip, base_spine, mid_spine];
 
-    commands
-        .entity(root_entity)
-        .insert(VelloCharacterPhysicsRoot::new(frame_config, frame_entites));
+    commands.entity(root_entity).insert((
+        VelloCharacterPhysicsRoot::new(frame_config, frame_entites),
+        spine,
+        right_arm,
+        left_arm,
+    ));
+
     for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);
     }

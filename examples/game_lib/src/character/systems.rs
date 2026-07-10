@@ -1,4 +1,4 @@
-use bevy::{ecs::intern::Interned, prelude::*};
+use bevy::prelude::*;
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
     VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
@@ -6,7 +6,7 @@ use bevy_vello::integrations::physics::{
 use vello_physics::utility::{cos_sin, BalancedCoreFrame};
 
 use crate::character::{
-    ArmController, CharacterController, ConnectivityRoot, SpineController, StringPool,
+    ArmConfig, LeftArmController, RightArmController, SpineConfig, SpineController,
 };
 
 #[inline]
@@ -22,7 +22,7 @@ fn claculate_velocity_spine(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
     vec: Vec2,
-    config: &SpineController,
+    config: &SpineConfig,
 ) -> Vec<CharacterPivotVelocityEvent> {
     const SPINE_PARTICLE_COUNT: usize = 5;
 
@@ -149,7 +149,7 @@ fn claculate_velocity_spine(
 ///
 /// 2. **Angular constraints with rotate-toward damping**: The rest angles are
 ///    computed from local-space positions and clamped via `rotate_toward` using
-///    `arm_controller.max_angle_rate` to prevent sudden jumps.
+///    `config.max_angle_rate` to prevent sudden jumps.
 ///
 /// 3. **Shape matching position constraints**: The local targets for shoulder,
 ///    elbow, and wrist are updated to match the IK solution, also damped via
@@ -165,7 +165,7 @@ fn calculate_arm_ik(
     particles: &Vec<VelloParticle>,
     joints_entity: &Vec<Entity>,
     _joints: &Vec<VelloJoint>,
-    arm_controller: &ArmController,
+    config: &ArmConfig,
     blend_core: &BalancedCoreFrame,
 ) -> (
     Vec<CharacterAngularConstraintEvent>,
@@ -189,7 +189,7 @@ fn calculate_arm_ik(
     let true_target = bevy_to_vello(target);
     let dist_to_target = (prla - true_target).length();
 
-    if dist_to_target <= arm_controller.convergence_threshold {
+    if dist_to_target <= config.convergence_threshold {
         return (angular_events, position_events);
     }
 
@@ -237,7 +237,7 @@ fn calculate_arm_ik(
     let desired_p13_local = p12_local + desired_upper_dir * upper_len;
 
     // Compute the frame's max angular delta from the rate
-    let max_delta = arm_controller.max_angle_rate * dt;
+    let max_delta = config.max_angle_rate * dt;
 
     // ---- Shoulder constraint with rotate-toward damping (local space) ----
     let desired_shoulder_cs = cos_sin(p1_local, p12_local, desired_p13_local);
@@ -261,7 +261,7 @@ fn calculate_arm_ik(
         config: vello_physics::AngularConstraintConfig {
             rest_cos: blended_cos,
             rest_sin: blended_sin,
-            compliance: arm_controller.angular_compliance,
+            compliance: config.angular_compliance,
         },
     });
 
@@ -285,7 +285,7 @@ fn calculate_arm_ik(
         config: vello_physics::AngularConstraintConfig {
             rest_cos: blended_cos,
             rest_sin: blended_sin,
-            compliance: arm_controller.angular_compliance,
+            compliance: config.angular_compliance,
         },
     });
 
@@ -319,8 +319,8 @@ fn calculate_arm_ik(
     let desired_shoulder_local =
         damp_local_target(shoulder_sm.local_target, p12_local, desired_p13_local);
     shoulder_sm.local_target = desired_shoulder_local;
-    shoulder_sm.compliance = arm_controller.shape_matching_compliance;
-    shoulder_sm.damping = arm_controller.shape_matching_damping;
+    shoulder_sm.compliance = config.shape_matching_compliance;
+    shoulder_sm.damping = config.shape_matching_damping;
     position_events.push(CharacterPivotPositionEvent {
         character_entity,
         joint_entity: particles_entity[1],
@@ -332,8 +332,8 @@ fn calculate_arm_ik(
     let desired_elbow_local =
         damp_local_target(elbow_sm.local_target, desired_p13_local, target_pos_local);
     elbow_sm.local_target = desired_elbow_local;
-    elbow_sm.compliance = arm_controller.shape_matching_compliance;
-    elbow_sm.damping = arm_controller.shape_matching_damping;
+    elbow_sm.compliance = config.shape_matching_compliance;
+    elbow_sm.damping = config.shape_matching_damping;
     position_events.push(CharacterPivotPositionEvent {
         character_entity,
         joint_entity: particles_entity[2],
@@ -348,8 +348,8 @@ fn calculate_arm_ik(
     let desired_wrist_local = pos_e + dir_to_target * distance;
     let desired_wrist_local = damp_local_target(wrist_sm.local_target, pos_e, desired_wrist_local);
     wrist_sm.local_target = desired_wrist_local;
-    wrist_sm.compliance = arm_controller.shape_matching_compliance;
-    wrist_sm.damping = arm_controller.shape_matching_damping;
+    wrist_sm.compliance = config.shape_matching_compliance;
+    wrist_sm.damping = config.shape_matching_damping;
     position_events.push(CharacterPivotPositionEvent {
         character_entity,
         joint_entity: particles_entity[3],
@@ -378,21 +378,11 @@ fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32)
 
     // Tangent half-angle: tan((θ_b - θ_a)/2) = sin(θ_b - θ_a) / (1 + cos(θ_b - θ_a))
     // sin(θ_b - θ_a) = -cross
-    let error = -cross / (1.0 + dot).max(1e-6);
-
-    // Clamp max_delta to [0, PI) so tan(max_delta/2) is always valid and non-negative.
-    // tan(θ) has asymptotes at θ = PI/2 + n*PI, and max_delta > PI would go the long way.
-    let clamped_delta = max_delta.clamp(0.0, std::f32::consts::PI * 0.9999);
-
-    // Max error in tangent half-angle space, matching the constraint's error metric
-    let max_error = (clamped_delta / 2.0).tan();
-
-    // Clamp the error
+    let error = -cross / (1.0 + dot);
+    let max_error = (max_delta * 0.5).tan();
     let clamped_error = error.clamp(-max_error, max_error);
 
-    // Reconstruct delta cos/sin from clamped tangent half-angle using:
-    //   cos(θ) = (1 - tan²(θ/2)) / (1 + tan²(θ/2))
-    //   sin(θ) = 2*tan(θ/2) / (1 + tan²(θ/2))
+    // Convert back: cos(Δ) = (1 - t²) / (1 + t²), sin(Δ) = 2t / (1 + t²)
     let error_sq = clamped_error * clamped_error;
     let denom = 1.0 + error_sq;
     let new_delta_cos = (1.0 - error_sq) / denom;
@@ -409,118 +399,90 @@ fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32)
 
 pub fn update_character_movement(
     time: Res<Time>,
-    c_q: Query<(
-        &ConnectivityRoot,
-        &CharacterController,
-        &VelloCharacterPhysicsRoot,
-    )>,
+    spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
+    right_arm_q: Query<(&RightArmController, &VelloCharacterPhysicsRoot)>,
+    left_arm_q: Query<(&LeftArmController, &VelloCharacterPhysicsRoot)>,
     p_q: Query<&VelloParticle>,
     j_q: Query<&VelloJoint>,
-    string_pool: ResMut<StringPool>,
     mut velocity_events: EventWriter<CharacterPivotVelocityEvent>,
     mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
     mut position_events: EventWriter<CharacterPivotPositionEvent>,
 ) {
     let dt = time.delta_secs();
 
-    //arm control
-    let right_arm = ["P1", "P12", "P13", "PRLA", "P1_P12_P13", "P12_P13_PRLA"];
-    let right_arm_tokens: Vec<Interned<str>> = right_arm
-        .iter()
-        .map(|item| string_pool.pool.intern(&item))
-        .collect();
-
-    let left_arm = ["P1", "P11", "P10", "PLLA", "P1_P11_P10", "P11_P10_PLLA"];
-    let left_arm_tokens: Vec<Interned<str>> = left_arm
-        .iter()
-        .map(|item| string_pool.pool.intern(&item))
-        .collect();
-
-    for (root, control, p_root) in &c_q {
-        //the game world and physics world are not properly synced yet.
+    // ---- Right arm ----
+    for (arm, p_root) in &right_arm_q {
         if p_root.initial_frame_coordinates.is_none() {
             continue;
         }
 
-        let (p, j) = right_arm_tokens.split_at(4);
-        let p_e: Vec<Entity> = p
-            .iter()
-            .map(|item| root.parts.get(item).unwrap().clone())
-            .collect();
-        let j_e: Vec<Entity> = j
-            .iter()
-            .map(|item| root.parts.get(item).unwrap().clone())
-            .collect();
+        let p_e: Vec<Entity> = arm.particles.to_vec();
+        let j_e: Vec<Entity> = arm.joints.to_vec();
         let particles: Vec<VelloParticle> =
             p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let (right_arm_angular_events, right_arm_position_events) = calculate_arm_ik(
-            control.point_vector,
+        let (arm_angular, arm_position) = calculate_arm_ik(
+            arm.target,
             dt,
             &p_e,
             &particles,
             &j_e,
             &angular_constraints,
-            &control.arm_controller,
+            &arm.config,
             &p_root.frame_coordinates,
         );
 
-        let (p, j) = left_arm_tokens.split_at(4);
-        let p_e: Vec<Entity> = p
-            .iter()
-            .map(|item| root.parts.get(item).unwrap().clone())
-            .collect();
-        let j_e: Vec<Entity> = j
-            .iter()
-            .map(|item| root.parts.get(item).unwrap().clone())
-            .collect();
-        let particles: Vec<VelloParticle> =
-            p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
-        let angular_constraints: Vec<VelloJoint> =
-            j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
+        angular_events.write_batch(arm_angular);
+        position_events.write_batch(arm_position);
+    }
 
-        let (left_arm_angular_events, left_arm_position_events) = calculate_arm_ik(
-            control.point_vector,
-            dt,
-            &p_e,
-            &particles,
-            &j_e,
-            &angular_constraints,
-            &control.arm_controller,
-            &p_root.frame_coordinates,
-        );
-
-        angular_events.write_batch(right_arm_angular_events);
-        //angular_events.write_batch(left_arm_angular_events);
-        position_events.write_batch(right_arm_position_events);
-        //position_events.write_batch(left_arm_position_events);
-
-        //body control
-        let temp = ["PH", "P0", "P1", "P2", "P3"];
-        let tokens: Vec<Interned<str>> = temp
-            .iter()
-            .map(|item| string_pool.pool.intern(&item))
-            .collect();
-
-        if control.move_vector.length_squared() <= 0.01 {
+    // ---- Left arm ----
+    for (arm, p_root) in &left_arm_q {
+        if p_root.initial_frame_coordinates.is_none() {
             continue;
         }
-        let entities: Vec<Entity> = tokens
-            .iter()
-            .map(|item| root.parts.get(item).unwrap().clone())
-            .collect();
+
+        let p_e: Vec<Entity> = arm.particles.to_vec();
+        let j_e: Vec<Entity> = arm.joints.to_vec();
+        let particles: Vec<VelloParticle> =
+            p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
+        let angular_constraints: Vec<VelloJoint> =
+            j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
+
+        let (arm_angular_events, arm_position_events) = calculate_arm_ik(
+            arm.target,
+            dt,
+            &p_e,
+            &particles,
+            &j_e,
+            &angular_constraints,
+            &arm.config,
+            &p_root.frame_coordinates,
+        );
+
+        angular_events.write_batch(arm_angular_events);
+        position_events.write_batch(arm_position_events);
+    }
+
+    // ---- Spine ----
+    for (spine, p_root) in &spine_q {
+        if p_root.initial_frame_coordinates.is_none() {
+            continue;
+        }
+
+        if spine.move_vector.length_squared() <= 0.01 {
+            continue;
+        }
+
+        let entities: Vec<Entity> = spine.particles.to_vec();
         let particles: Vec<VelloParticle> = entities
             .iter()
             .map(|e| p_q.get(*e).unwrap().clone())
             .collect();
-        let velocities = claculate_velocity_spine(
-            &entities,
-            &particles,
-            control.move_vector,
-            &control.spine_controller,
-        );
+        let velocities =
+            claculate_velocity_spine(&entities, &particles, spine.move_vector, &spine.config);
         velocity_events.write_batch(velocities);
     }
 }
