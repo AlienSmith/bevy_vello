@@ -1,6 +1,7 @@
 mod character;
 pub mod character_asset;
 mod character_factory;
+mod collider_factory;
 mod utility;
 use bevy::prelude::*;
 
@@ -25,3 +26,5 @@ impl Plugin for VelloCharacterPlugin {
             .add_plugins(CharacterLoaderPlugin);
     }
 }
+
+pub use crate::{collider_factory::plugin::ColliderFactoryPlugin, collider_factory::ColliderRoot};

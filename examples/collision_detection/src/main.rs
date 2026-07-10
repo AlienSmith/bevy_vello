@@ -49,8 +49,8 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterController, CharacterRoot, IkMode, LeftArmController, RightArmController,
-    SpineController, VelloCharacterPlugin,
+    CharacterController, CharacterRoot, ColliderFactoryPlugin, ColliderRoot, IkMode,
+    LeftArmController, RightArmController, SpineController, VelloCharacterPlugin,
 };
 
 use crate::{
@@ -188,7 +188,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             enable_multipass_for_primary_context: false,
         })
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(VelloCharacterPlugin::default());
+        .add_plugins(VelloCharacterPlugin::default())
+        .add_plugins(ColliderFactoryPlugin::default());
     // Systems that create Egui widgets should be run during the `CoreSet::Update` set,
     // or after the `EguiSet::BeginPass` system (which belongs to the `CoreSet::PreUpdate` set).
 
@@ -564,6 +565,28 @@ fn setup_entity(mut commands: Commands) {
             move_vector: Vec2::ZERO,
             point_vector: Vec2::ZERO,
             ..Default::default()
+        },
+    ));
+
+    let soft_body_init_transform = Transform {
+        translation: Vec3::new(325.0, -90.0, 0.0),
+        rotation: Quat::from_rotation_z(0.0_f32.to_radians()),
+        scale: Vec3::new(0.1, 0.1, 1.0),
+    };
+
+    commands.spawn((
+        VelloSceneBundle {
+            ..Default::default()
+        },
+        ColliderRoot {
+            svg_asset_id: "pistol.collider.svg".to_string(),
+            albedo_asset_id: "pistol_albedo.png".to_string(),
+            normal_asset_id: "pistol_normal.png".to_string(),
+            metallic: 0.9,
+            roughness: 0.2,
+            softbody_config: SoftBodyInitConfig::default(),
+            collision_config: CollisionConstraintConfig::default(),
+            soft_body_init_transform,
         },
     ));
 }
@@ -948,8 +971,12 @@ fn player_movement(
 
     let target = mouse_status.world_pos;
     if let Ok(mut arm) = right_arm_q.single_mut() {
-        arm.config.ik_mode = IkMode::Aim {
-            weapon_offset_angle: 0.0,
+        arm.config.ik_mode = if keyboard_input.pressed(KeyCode::KeyC) {
+            IkMode::Aim {
+                weapon_offset_angle: 0.0,
+            }
+        } else {
+            IkMode::Disabled
         };
         arm.target = target;
     }

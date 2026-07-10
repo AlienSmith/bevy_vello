@@ -97,8 +97,8 @@ pub struct SimpleBroadPhase {
     pub(crate) broad_phase: BroadPhaseSimple,
 }
 
-//TODO: remvoe this component from entity could cause memory leak in the xpbd softbody system and qbvh broad phase of collision detection
-// make this component private by hide it in a bundle, do not expose it to user.
+//Use the debug_color and soft_body_global_transform in here to initialize this entity, instead of using the transform and scene
+//in the VelloBundle.
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,

@@ -646,14 +646,14 @@ pub fn update_mouse(
         collider_status
             .apply_impulse_to_selected_entity(mouse_position.world_pos - mouse_position.last_pos);
         mouse_position.pressed = false;
-        if let Ok((e, _)) = q_indicator.get_single() {
+        if let Ok((e, _)) = q_indicator.single() {
             commands.entity(e).despawn();
         }
     }
     if mouse_position.pressed {
         let mut temp = VelloScene::default();
         draw_drag_indicator(&mut temp, mouse_position.last_pos, mouse_position.world_pos);
-        if let Ok((_, mut scene)) = q_indicator.get_single_mut() {
+        if let Ok((_, mut scene)) = q_indicator.single_mut() {
             *scene = temp;
         } else {
             commands.spawn((
