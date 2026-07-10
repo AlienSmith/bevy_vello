@@ -12,7 +12,7 @@ use crate::{
 pub struct VelloCharacterPlugin;
 pub use crate::{
     character::{
-        ArmConfig, CharacterController, LeftArmController, RightArmController, SpineConfig,
+        ArmConfig, CharacterController, IkMode, LeftArmController, RightArmController, SpineConfig,
         SpineController,
     },
     character_factory::CharacterRoot,

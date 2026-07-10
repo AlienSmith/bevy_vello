@@ -38,6 +38,27 @@ pub struct StringPool {
 }
 
 // ---------------------------------------------------------------------------
+// IK Mode
+// ---------------------------------------------------------------------------
+
+/// IK mode for the arm.
+#[derive(Clone, Default)]
+pub enum IkMode {
+    /// IK is disabled — no events emitted.
+    #[default]
+    Disabled,
+    /// Position-based IK: place wrist at target (law of cosines).
+    Reach,
+    /// Direction-based IK: aim forearm at target (least-action solver).
+    Aim {
+        /// Angular offset of the weapon barrel from the forearm direction (radians).
+        /// 0.0 = weapon aligned with forearm.
+        /// Positive = weapon rotated CCW from forearm.
+        weapon_offset_angle: f32,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Config structs (not Components)
 // ---------------------------------------------------------------------------
 
@@ -94,6 +115,8 @@ pub struct ArmConfig {
     /// -1.0 = bend downward (elbow below shoulder-wrist line, default for right arm).
     /// +1.0 = bend upward (elbow above shoulder-wrist line, default for left arm).
     pub bend_sign: f32,
+    /// IK mode for the arm.
+    pub ik_mode: IkMode,
 }
 
 impl Default for ArmConfig {
@@ -106,6 +129,7 @@ impl Default for ArmConfig {
             shape_matching_compliance: 0.01,
             shape_matching_damping: 0.1,
             bend_sign: -1.0,
+            ik_mode: IkMode::Reach,
         }
     }
 }

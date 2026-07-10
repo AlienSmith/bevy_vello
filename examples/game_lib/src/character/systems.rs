@@ -6,7 +6,7 @@ use bevy_vello::integrations::physics::{
 use vello_physics::utility::{cos_sin, BalancedCoreFrame};
 
 use crate::character::{
-    ArmConfig, LeftArmController, RightArmController, SpineConfig, SpineController,
+    ArmConfig, IkMode, LeftArmController, RightArmController, SpineConfig, SpineController,
 };
 
 #[inline]
@@ -126,6 +126,141 @@ fn claculate_velocity_spine(
     result
 }
 
+/// Law-of-cosines reach IK: place wrist at target position.
+///
+/// Returns `(desired_p13_local, desired_prla_local)`.
+fn solve_reach_ik(
+    local_target: Vec2,
+    p12_local: Vec2,
+    upper_len: f32,
+    forearm_len: f32,
+    bend_sign: f32,
+) -> (Vec2, Vec2) {
+    let reach = upper_len + forearm_len;
+    let mut target_pos_local = local_target;
+    let root_to_target = target_pos_local - p12_local;
+    let dist = root_to_target.length();
+    if dist > reach {
+        target_pos_local = p12_local + root_to_target.normalize() * (reach - 0.001);
+    }
+    let to_target = target_pos_local - p12_local;
+    let target_dist = to_target.length().max(f32::EPSILON);
+    let target_dir = to_target / target_dist;
+
+    // Law of cosines for shoulder offset
+    let cos_shoulder = (upper_len * upper_len + target_dist * target_dist
+        - forearm_len * forearm_len)
+        / (2.0 * upper_len * target_dist);
+    let cos_shoulder = cos_shoulder.clamp(-1.0, 1.0);
+    let shoulder_offset = cos_shoulder.acos();
+
+    // Rotate target direction by shoulder_offset * bend_sign to get the desired upper arm direction
+    let total_shoulder_angle = shoulder_offset * bend_sign;
+    let (sin_sh, cos_sh) = total_shoulder_angle.sin_cos();
+    let desired_upper_dir = Vec2::new(
+        target_dir.x * cos_sh - target_dir.y * sin_sh,
+        target_dir.x * sin_sh + target_dir.y * cos_sh,
+    );
+    let desired_p13_local = p12_local + desired_upper_dir * upper_len;
+    let desired_prla_local = target_pos_local;
+
+    (desired_p13_local, desired_prla_local)
+}
+
+/// Least-action forearm alignment IK: make the forearm point at the target.
+///
+/// Uses a Lagrange multiplier solve that constrains the forearm direction
+/// (not wrist position), finding the minimal-displacement joint angles.
+/// The weapon offset angle rotates the aim direction before solving.
+///
+/// Returns `(desired_p13_local, desired_prla_local)`.
+fn solve_aim_ik(
+    local_target: Vec2,
+    p12_local: Vec2,
+    p13_local: Vec2,
+    prla_local: Vec2,
+    upper_len: f32,
+    forearm_len: f32,
+    weapon_offset_angle: f32,
+) -> (Vec2, Vec2) {
+    // Current absolute shoulder angle (upper arm direction in local space)
+    let upper_dir = p13_local - p12_local;
+    let current_theta1 = upper_dir.y.atan2(upper_dir.x);
+
+    // Current relative elbow angle (signed angle from upper arm to forearm)
+    let forearm_dir = prla_local - p13_local;
+    let cross = upper_dir.x * forearm_dir.y - upper_dir.y * forearm_dir.x;
+    let dot = upper_dir.dot(forearm_dir);
+    let current_theta2 = cross.atan2(dot);
+
+    // Target in local space relative to shoulder
+    let target_local = local_target - p12_local;
+    let r = target_local.length();
+
+    // Apply weapon offset: rotate the target direction by -weapon_offset_angle
+    let (sin_off, cos_off) = (-weapon_offset_angle).sin_cos();
+    let aim_target_rotated = Vec2::new(
+        target_local.x * cos_off - target_local.y * sin_off,
+        target_local.x * sin_off + target_local.y * cos_off,
+    );
+
+    // Solve forearm alignment using Lagrange multipliers
+    // Constraint: f(θ1, θ2) = sin((θ1 + θ2 - α)/2) - (l1/r) * sin(θ2) = 0
+    // where α = angle of the (rotated) target from shoulder
+    //
+    // We use sin(Δ/2) instead of sin(Δ) to eliminate a spurious root. The equation
+    // sin(Δ) = 0 has two roots in [-π, π]: Δ = 0 (forearm points AT target) and
+    // Δ = π (forearm points AWAY). When the target is behind the elbow, the solver
+    // can settle on Δ = π, keeping the forearm pointing 180° away from the target.
+    // Using sin(Δ/2) = 0 has a single root at Δ = 0, since sin(π/2) = 1 ≠ 0.
+    let alpha = aim_target_rotated.y.atan2(aim_target_rotated.x);
+    let half_delta = (current_theta1 + current_theta2 - alpha) * 0.5;
+    let (sin_half, cos_half) = half_delta.sin_cos();
+    let f_val = if r > 1e-6 {
+        sin_half - (upper_len / r) * current_theta2.sin()
+    } else {
+        sin_half
+    };
+
+    // Jacobians: d(sin(Δ/2))/dθ = (1/2)·cos(Δ/2)
+    let j_half = 0.5 * cos_half;
+    let j1 = j_half;
+    let j2 = if r > 1e-6 {
+        j_half - (upper_len / r) * current_theta2.cos()
+    } else {
+        j_half
+    };
+
+    // Equal weights for both joints (principle of least action)
+    let w1 = 1.0;
+    let w2 = 1.0;
+
+    // Lagrange multiplier
+    let denominator = (j1 * j1) / w1 + (j2 * j2) / w2;
+    let (desired_theta1, desired_theta2) = if denominator.abs() > 1e-6 {
+        let lambda = -f_val / denominator;
+        let delta_theta1 = lambda * (j1 / w1);
+        let delta_theta2 = lambda * (j2 / w2);
+        (current_theta1 + delta_theta1, current_theta2 + delta_theta2)
+    } else {
+        (current_theta1, current_theta2)
+    };
+
+    // Compute desired positions from angles
+    let (sin1, cos1) = desired_theta1.sin_cos();
+    let desired_upper_dir = Vec2::new(cos1, sin1);
+    let desired_p13_local = p12_local + desired_upper_dir * upper_len;
+
+    let (sin2, cos2) = desired_theta2.sin_cos();
+    let desired_forearm_dir = Vec2::new(
+        desired_upper_dir.x * cos2 - desired_upper_dir.y * sin2,
+        desired_upper_dir.x * sin2 + desired_upper_dir.y * cos2,
+    );
+    let desired_prla_local = desired_p13_local + desired_forearm_dir * forearm_len;
+
+    (desired_p13_local, desired_prla_local)
+}
+
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
 ///
 /// # Arm topology
@@ -143,21 +278,20 @@ fn claculate_velocity_spine(
 /// character's local frame (via `blend_core`), so both constraint types operate
 /// in the same coordinate space and don't fight each other.
 ///
-/// 1. **Local-space IK**: All particle positions and the target are converted to
-///    local frame coordinates before solving. The IK result gives desired positions
-///    for shoulder, elbow, and wrist in local space.
+/// Two IK modes are supported, selected via `config.ik_mode`:
 ///
-/// 2. **Angular constraints with rotate-toward damping**: The rest angles are
-///    computed from local-space positions and clamped via `rotate_toward` using
-///    `config.max_angle_rate` to prevent sudden jumps.
+/// - **Reach** (default): Law-of-cosines position IK. Places the wrist at the target
+///   position. Good for grabbing objects, melee attacks.
 ///
-/// 3. **Shape matching position constraints**: The local targets for shoulder,
-///    elbow, and wrist are updated to match the IK solution, also damped via
-///    `rotate_toward` on the direction from each pivot. This prevents the shape
-///    matching from fighting the angular constraints.
+/// - **Aim**: Least-action forearm alignment IK. Constrains the forearm direction to
+///   point at the target. The weapon offset angle rotates the aim direction before
+///   solving, so a weapon attached at a fixed angle to the forearm still points at
+///   the target. The arm never goes fully straight even for out-of-range targets.
 ///
-/// 4. **Convergence dead zone**: When the wrist is within `convergence_threshold`
-///    of the true target, we stop emitting events.
+/// - **Disabled**: No events emitted. Use for death, ragdoll, cutscenes.
+///
+/// In both modes, the IK runs in local space and uses `rotate_toward` damping on
+/// the angular constraint rest angles to prevent sudden jumps that cause body wobble.
 fn calculate_arm_ik(
     target: Vec2,
     dt: f32,
@@ -177,7 +311,11 @@ fn calculate_arm_ik(
     let mut angular_events = vec![];
     let mut position_events = vec![];
 
-    if particles.len() < ARM_PARTICLE_COUNT || joints_entity.len() < ARM_JOINT_COUNT {
+    // Early exit if disabled or missing particles/joints
+    if matches!(config.ik_mode, IkMode::Disabled)
+        || particles.len() < ARM_PARTICLE_COUNT
+        || joints_entity.len() < ARM_JOINT_COUNT
+    {
         return (angular_events, position_events);
     }
 
@@ -206,35 +344,32 @@ fn calculate_arm_ik(
         return (angular_events, position_events);
     }
 
-    let reach = upper_len + forearm_len;
-    let mut target_pos_local = local_target;
-    let root_to_target = target_pos_local - p12_local;
-    let dist = root_to_target.length();
-    if dist > reach {
-        target_pos_local = p12_local + root_to_target.normalize() * (reach - 0.001);
-    }
-    let to_target = target_pos_local - p12_local;
-    let target_dist = to_target.length().max(f32::EPSILON);
-    let target_dir = to_target / target_dist;
-
-    // Law of cosines for shoulder offset
-    let cos_shoulder = (upper_len * upper_len + target_dist * target_dist
-        - forearm_len * forearm_len)
-        / (2.0 * upper_len * target_dist);
-    let cos_shoulder = cos_shoulder.clamp(-1.0, 1.0);
-    let shoulder_offset = cos_shoulder.acos();
-
-    // Rotate target direction by shoulder_offset * config.bend_sign to get the desired upper arm direction
-    let total_shoulder_angle = shoulder_offset * config.bend_sign;
-    let (sin_sh, cos_sh) = total_shoulder_angle.sin_cos();
-    let desired_upper_dir = Vec2::new(
-        target_dir.x * cos_sh - target_dir.y * sin_sh,
-        target_dir.x * sin_sh + target_dir.y * cos_sh,
-    );
-    let desired_p13_local = p12_local + desired_upper_dir * upper_len;
-
     // Compute the frame's max angular delta from the rate
     let max_delta = config.max_angle_rate * dt;
+    let character_entity = particles[0].root_entity;
+
+    // ---- Branch on IK mode ----
+    let (desired_p13_local, desired_prla_local) = match &config.ik_mode {
+        IkMode::Disabled => return (angular_events, position_events),
+        IkMode::Reach => solve_reach_ik(
+            local_target,
+            p12_local,
+            upper_len,
+            forearm_len,
+            config.bend_sign,
+        ),
+        IkMode::Aim {
+            weapon_offset_angle,
+        } => solve_aim_ik(
+            local_target,
+            p12_local,
+            p13_local,
+            prla_local,
+            upper_len,
+            forearm_len,
+            *weapon_offset_angle,
+        ),
+    };
 
     // ---- Shoulder constraint with rotate-toward damping (local space) ----
     let desired_shoulder_cs = cos_sin(p1_local, p12_local, desired_p13_local);
@@ -250,8 +385,6 @@ fn calculate_arm_ik(
         max_delta,
     );
 
-    let character_entity = particles[0].root_entity;
-
     angular_events.push(CharacterAngularConstraintEvent {
         character_entity,
         joint_entity: joints_entity[0],
@@ -263,7 +396,7 @@ fn calculate_arm_ik(
     });
 
     // ---- Elbow constraint with rotate-toward damping (local space) ----
-    let desired_elbow_cs = cos_sin(p12_local, desired_p13_local, target_pos_local);
+    let desired_elbow_cs = cos_sin(p12_local, desired_p13_local, desired_prla_local);
 
     // Compute the current actual elbow angle from local-space particle positions.
     let current_elbow_cs = cos_sin(p12_local, p13_local, prla_local);
@@ -327,7 +460,7 @@ fn calculate_arm_ik(
     // Elbow (particle index 2): local target is the desired wrist position
     let mut elbow_sm = particles[2].shape_matching;
     let desired_elbow_local =
-        damp_local_target(elbow_sm.local_target, desired_p13_local, target_pos_local);
+        damp_local_target(elbow_sm.local_target, desired_p13_local, desired_prla_local);
     elbow_sm.local_target = desired_elbow_local;
     elbow_sm.compliance = config.shape_matching_compliance;
     elbow_sm.damping = config.shape_matching_damping;

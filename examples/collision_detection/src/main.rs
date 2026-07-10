@@ -49,8 +49,8 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterController, CharacterRoot, LeftArmController, RightArmController, SpineController,
-    VelloCharacterPlugin,
+    CharacterController, CharacterRoot, IkMode, LeftArmController, RightArmController,
+    SpineController, VelloCharacterPlugin,
 };
 
 use crate::{
@@ -948,9 +948,13 @@ fn player_movement(
 
     let target = mouse_status.world_pos;
     if let Ok(mut arm) = right_arm_q.single_mut() {
+        arm.config.ik_mode = IkMode::Aim {
+            weapon_offset_angle: 0.0,
+        };
         arm.target = target;
     }
     if let Ok(mut arm) = left_arm_q.single_mut() {
+        arm.config.ik_mode = IkMode::Disabled;
         arm.target = target;
     }
 
