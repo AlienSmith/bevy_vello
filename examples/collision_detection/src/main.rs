@@ -436,6 +436,49 @@ fn update_from_ui(
                     collision_config,
                 );
             }
+            ColliderType::PISTOL => {
+                let index =
+                    (ui_state.current.collider_type as u32 - ColliderType::Star as u32) as usize;
+                let make_collider = || {
+                    let svg_collider = custom_assets
+                        .get(&svg_colliders.get_index(index).unwrap())
+                        .unwrap();
+                    (svg_collider.shape.clone(), svg_collider.aabb.clone())
+                };
+                let albedo = image_assets
+                    .get(&images.get_index(2 as usize).unwrap())
+                    .unwrap()
+                    .image
+                    .clone()
+                    .with_usage(peniko::ImageUsageType::MASKED);
+                let normals = image_assets
+                    .get(&images.get_index(3 as usize).unwrap())
+                    .unwrap()
+                    .image
+                    .clone()
+                    .with_usage(peniko::ImageUsageType::NORMAL);
+                let brush = bevy_vello::prelude::peniko::Brush::PBRImage(peniko::PBRImages::new(
+                    albedo, normals, 0.9, 0.2,
+                ));
+                // let image = image_assets
+                //     .get(&images.get_index(2 as usize).unwrap())
+                //     .unwrap()
+                //     .image
+                //     .clone()
+                //     .with_usage(peniko::ImageUsageType::TRANSPARENT);
+                // let brush = bevy_vello::prelude::peniko::Brush::Image(image);
+                ui_state.current.scale_modifier = scaler;
+                update_preview(&mut commands, &ui_state, &mut preview_query, make_collider);
+                spawn_collider(
+                    &mut commands,
+                    &ui_state,
+                    brush,
+                    scaler,
+                    make_collider,
+                    config,
+                    collision_config,
+                );
+            }
             _ => {
                 let index =
                     (ui_state.current.collider_type as u32 - ColliderType::Star as u32) as usize;
@@ -788,9 +831,11 @@ fn setup_resources(
     collider("colliders/knife.collider.svg");
     collider("colliders/capsule.collider.svg");
     collider("colliders/ammo.collider.svg");
+    collider("colliders/pistol.collider.svg");
     image("image/ammo_albedo.png");
     image("image/ammo_normal.png");
-    image("image/test.png");
+    image("image/pistol_albedo.png");
+    image("image/pistol_normal.png");
     c_svg("character/v6.character.svg");
     c_blueprint("character/v6.character.json");
 }

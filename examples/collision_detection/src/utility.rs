@@ -44,6 +44,7 @@ pub enum ColliderType {
     Knife = 6,
     Capsule = 7,
     Ammo = 8,
+    PISTOL = 9,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -68,6 +69,7 @@ pub fn get_default_parameters(collider: ColliderType) -> (peniko::Color, f32, i3
         ColliderType::Shield => (peniko::Color::CYAN, 0.1, 1),
         ColliderType::Knife => (peniko::Color::YELLOW, 0.3, 1),
         ColliderType::Ammo => (peniko::Color::GREEN, 0.1, 1),
+        ColliderType::PISTOL => (peniko::Color::GREEN, 0.1, 1),
         ColliderType::Capsule => (peniko::Color::PINK, 0.5, 1),
     }
 }
@@ -326,6 +328,11 @@ pub fn ui_example_system(
                     &mut ui_state.current.collider_type,
                     ColliderType::Ammo,
                     "Ammo",
+                );
+                ui.selectable_value(
+                    &mut ui_state.current.collider_type,
+                    ColliderType::PISTOL,
+                    "Pistol",
                 );
             });
 
