@@ -224,11 +224,8 @@ fn calculate_arm_ik(
     let cos_shoulder = cos_shoulder.clamp(-1.0, 1.0);
     let shoulder_offset = cos_shoulder.acos();
 
-    // Choose bend direction for the shoulder (negative = one branch, positive = the other)
-    let bend_sign = -1.0;
-
-    // Rotate target direction by shoulder_offset * bend_sign to get the desired upper arm direction
-    let total_shoulder_angle = shoulder_offset * bend_sign;
+    // Rotate target direction by shoulder_offset * config.bend_sign to get the desired upper arm direction
+    let total_shoulder_angle = shoulder_offset * config.bend_sign;
     let (sin_sh, cos_sh) = total_shoulder_angle.sin_cos();
     let desired_upper_dir = Vec2::new(
         target_dir.x * cos_sh - target_dir.y * sin_sh,

@@ -198,7 +198,10 @@ pub fn assemble_character(
     let right_arm = RightArmController {
         particles: [get("P1"), get("P12"), get("P13"), get("PRLA")],
         joints: [get("P1_P12_P13"), get("P12_P13_PRLA")],
-        config: ArmConfig::default(),
+        config: ArmConfig {
+            bend_sign: 1.0,
+            ..Default::default()
+        },
         target: Vec2::ZERO,
     };
 
@@ -207,7 +210,10 @@ pub fn assemble_character(
     let left_arm = LeftArmController {
         particles: [get("P1"), get("P11"), get("P10"), get("PLLA")],
         joints: [get("P1_P11_P10"), get("P11_P10_PLLA")],
-        config: ArmConfig::default(),
+        config: ArmConfig {
+            bend_sign: 1.0,
+            ..Default::default()
+        },
         target: Vec2::ZERO,
     };
 

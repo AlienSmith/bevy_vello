@@ -90,6 +90,10 @@ pub struct ArmConfig {
     /// Damping for shape matching position constraints on arm particles.
     /// Higher values = more damping, less waggle. 0.5 is a good default.
     pub shape_matching_damping: f32,
+    /// Bend direction for the arm IK.
+    /// -1.0 = bend downward (elbow below shoulder-wrist line, default for right arm).
+    /// +1.0 = bend upward (elbow above shoulder-wrist line, default for left arm).
+    pub bend_sign: f32,
 }
 
 impl Default for ArmConfig {
@@ -101,6 +105,7 @@ impl Default for ArmConfig {
             max_angle_rate: std::f32::consts::PI,
             shape_matching_compliance: 0.01,
             shape_matching_damping: 0.1,
+            bend_sign: -1.0,
         }
     }
 }
