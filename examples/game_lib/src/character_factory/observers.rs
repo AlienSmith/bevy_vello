@@ -27,34 +27,25 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Runtime part events handler
+// System 1: Spawn everything EXCEPT Connectivity
 // ---------------------------------------------------------------------------
 
-/// Handles [`CharacterPartEvent`] to add colliders and joints to an already-
-/// assembled character at runtime.
+/// Spawns colliders, particles, and joints from [`CharacterPartEvent`] events.
 ///
-/// Uses a two-pass strategy so that collider entities exist before joints
-/// that reference them are spawned. All spawned entities carry the proper
-/// [`Connectivity`] component and are registered in the character's
-/// [`ConnectivityRoot`].
-///
-/// The existing `generate_connection` / `generate_soft_body_for_collider`
-/// systems (in PostUpdate) pick up the `Added<T>` components on the same
-/// frame, so physics registration happens with at most one frame of delay.
-pub fn handle_character_part_events(
+/// Colliders, particles, and registered parts get their [`Connectivity`] component
+/// attached here (via deferred commands). Joints get their [`Connectivity`] in
+/// [`add_connectivity_to_parts`] (System 2), which runs after commands are flushed
+/// so that all entities exist and have their `Connectivity` when back-references
+/// are added.
+pub fn spawn_character_parts(
     mut events: EventReader<CharacterPartEvent>,
     mut commands: Commands,
-    mut string_pool: ResMut<StringPool>,
+    string_pool: ResMut<StringPool>,
     mut root_query: Query<&mut ConnectivityRoot>,
-    mut parts_query: Query<(Entity, &mut Connectivity)>,
 ) {
-    // Collect all events first so we can iterate twice (pass 1 = colliders,
-    // pass 2 = joints) without consuming the reader.
     let event_vec: Vec<&CharacterPartEvent> = events.read().collect();
 
-    // ── Pass 1: Spawn all colliders and particles ────────────────────────
-    // Colliders and particles must exist as entities before joints can
-    // reference them.
+    // ── Pass 1: Spawn colliders and particles ──────────────────────────
     for event in &event_vec {
         match event {
             CharacterPartEvent::AddCollider {
@@ -67,8 +58,7 @@ pub fn handle_character_part_events(
                 collision_config,
                 transform,
             } => {
-                info!("Pass 1: spawning collider '{path_id}' for character {character:?}");
-
+                info!("[spawn] spawning collider '{path_id}' for character {character:?}");
                 let collider_entity = spawn_collider(
                     &mut commands,
                     svg_path,
@@ -82,14 +72,8 @@ pub fn handle_character_part_events(
                 commands
                     .entity(collider_entity)
                     .insert(Connectivity::new(*character, true, name));
-
                 if let Ok(mut root) = root_query.get_mut(*character) {
                     root.parts.insert(name, collider_entity);
-                    info!(
-                        "Pass 1: registered collider '{path_id}' = {collider_entity:?} in ConnectivityRoot"
-                    );
-                } else {
-                    warn!("Pass 1: character {character:?} has no ConnectivityRoot yet");
                 }
             }
             CharacterPartEvent::AddParticle {
@@ -98,8 +82,7 @@ pub fn handle_character_part_events(
                 particle,
                 shape_matching,
             } => {
-                info!("Pass 1: spawning particle '{path_id}' for character {character:?}");
-
+                info!("[spawn] spawning particle '{path_id}' for character {character:?}");
                 let particle_entity = commands
                     .spawn(VelloParticle::new(
                         *particle,
@@ -111,112 +94,209 @@ pub fn handle_character_part_events(
                 commands
                     .entity(particle_entity)
                     .insert(Connectivity::new(*character, true, name));
-
                 if let Ok(mut root) = root_query.get_mut(*character) {
                     root.parts.insert(name, particle_entity);
-                    info!(
-                        "Pass 1: registered particle '{path_id}' = {particle_entity:?} in ConnectivityRoot"
-                    );
-                } else {
-                    warn!("Pass 1: character {character:?} has no ConnectivityRoot yet");
+                }
+            }
+            CharacterPartEvent::RegisterPart {
+                character,
+                entity,
+                path_id,
+            } => {
+                info!("[spawn] registering existing entity {entity:?} as '{path_id}'");
+                let name = string_pool.pool.intern(path_id);
+                commands
+                    .entity(*entity)
+                    .insert(Connectivity::new(*character, true, name));
+                if let Ok(mut root) = root_query.get_mut(*character) {
+                    root.parts.insert(name, *entity);
                 }
             }
             _ => {}
         }
     }
 
-    // ── Pass 2: Spawn all joints ─────────────────────────────────────────
+    // ── Pass 2: Spawn joints ───────────────────────────────────────────
     for event in &event_vec {
         let CharacterPartEvent::AddJoint {
             character,
             path_id,
-            connected_entities,
             config,
         } = event
         else {
             continue;
         };
-
-        info!("Pass 2: spawning joint '{path_id}' for character {character:?}");
-
+        info!("[spawn] spawning joint '{path_id}' for character {character:?}");
         let Ok(root) = root_query.get(*character) else {
-            warn!("AddJoint: character {character:?} has no ConnectivityRoot");
+            warn!("[spawn] AddJoint: character {character:?} has no ConnectivityRoot");
             continue;
         };
-
-        // Resolve string path_ids to entity handles from ConnectivityRoot.
         let resolve = |name: &str| -> Option<Entity> {
             let interned = string_pool.pool.intern(name);
             root.parts.get(&interned).copied()
         };
-
         let resolved_config = match config {
             ConnectionConstraintInitConfig::Bilinear(a, b, c) => {
                 let Some(pa) = resolve(a) else {
-                    warn!("AddJoint: character missing part '{a}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{a}' for joint '{path_id}'");
                     continue;
                 };
                 let Some(pb) = resolve(b) else {
-                    warn!("AddJoint: character missing part '{b}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{b}' for joint '{path_id}'");
                     continue;
                 };
-                info!("  resolved '{a}' -> {pa:?}, '{b}' -> {pb:?}");
                 ConnectionConstraintInitConfig::Bilinear(pa, pb, *c)
             }
             ConnectionConstraintInitConfig::Distance(a, b, c) => {
                 let Some(pa) = resolve(a) else {
-                    warn!("AddJoint: character missing part '{a}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{a}' for joint '{path_id}'");
                     continue;
                 };
                 let Some(pb) = resolve(b) else {
-                    warn!("AddJoint: character missing part '{b}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{b}' for joint '{path_id}'");
                     continue;
                 };
                 ConnectionConstraintInitConfig::Distance(pa, pb, *c)
             }
             ConnectionConstraintInitConfig::Angular(a, b, c, d) => {
                 let Some(pa) = resolve(a) else {
-                    warn!("AddJoint: character missing part '{a}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{a}' for joint '{path_id}'");
                     continue;
                 };
                 let Some(pb) = resolve(b) else {
-                    warn!("AddJoint: character missing part '{b}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{b}' for joint '{path_id}'");
                     continue;
                 };
                 let Some(pc) = resolve(c) else {
-                    warn!("AddJoint: character missing part '{c}' for joint '{path_id}'");
+                    warn!("[spawn] AddJoint: character missing part '{c}' for joint '{path_id}'");
                     continue;
                 };
                 ConnectionConstraintInitConfig::Angular(pa, pb, pc, *d)
             }
         };
-
-        let joint_name = string_pool.pool.intern(path_id);
-        let mut connectivity = Connectivity::new(*character, false, joint_name);
-        for &e in connected_entities {
-            connectivity.parts.insert(e);
-        }
-
         let joint_entity = commands
-            .spawn((VelloJoint::new(resolved_config, *character), connectivity))
+            .spawn(VelloJoint::new(resolved_config, *character))
             .id();
-
-        for &connected in connected_entities {
-            if let Ok((_, mut conn)) = parts_query.get_mut(connected) {
-                conn.parts.insert(joint_entity);
-            }
-        }
-
+        let joint_name = string_pool.pool.intern(path_id);
         if let Ok(mut root) = root_query.get_mut(*character) {
             root.parts.insert(joint_name, joint_entity);
         }
     }
 }
 
-/// Spawn a soft-body collider entity.
+// ---------------------------------------------------------------------------
+// System 2: Add Connectivity to joints spawned in System 1
+// ---------------------------------------------------------------------------
+
+/// Attaches [`Connectivity`] to joints spawned by [`spawn_character_parts`].
+/// Because commands are flushed between systems, all colliders, particles, and
+/// registered parts already have their [`Connectivity`] component (inserted in
+/// System 1), so back-references from those entities to the joint work correctly.
 ///
-/// This mirrors the logic in [`make_collision_shape`] but takes owned configs
-/// so it can be called from the event handler without borrowing issues.
+/// Joints get `death_propegate: false` and their `Connectivity.parts` is populated
+/// with the entities referenced in their [`VelloJoint.init_config`].
+pub fn add_connectivity_to_parts(
+    mut commands: Commands,
+    mut root_query: Query<(Entity, &mut ConnectivityRoot)>,
+    joint_query: Query<&VelloJoint>,
+    mut connectivity_query: Query<&mut Connectivity>,
+) {
+    for (character_entity, mut root) in root_query.iter_mut() {
+        // Collect joint entries that lack Connectivity.
+        let entries: Vec<(Interned<str>, Entity)> = root
+            .parts
+            .iter()
+            .filter(|(_, &entity)| {
+                joint_query.contains(entity) && !connectivity_query.contains(entity)
+            })
+            .map(|(name, &entity)| (*name, entity))
+            .collect();
+
+        for (name, entity) in entries {
+            let Ok(joint) = joint_query.get(entity) else {
+                continue;
+            };
+            let connected = connected_entities_from_config(&joint.init_config);
+            let mut connectivity = Connectivity::new(character_entity, false, name);
+            for &e in &connected {
+                connectivity.parts.insert(e);
+            }
+            commands.entity(entity).insert(connectivity);
+
+            // Add back-references from connected entities to this joint.
+            // These entities already have Connectivity (inserted in System 1).
+            for &e in &connected {
+                if let Ok(mut conn) = connectivity_query.get_mut(e) {
+                    conn.parts.insert(entity);
+                }
+            }
+        }
+    }
+}
+
+/// Extract all entity handles from a [`ConnectionConstraintInitConfig<Entity>`].
+fn connected_entities_from_config(config: &ConnectionConstraintInitConfig<Entity>) -> Vec<Entity> {
+    match config {
+        ConnectionConstraintInitConfig::Bilinear(a, b, _) => vec![*a, *b],
+        ConnectionConstraintInitConfig::Distance(a, b, _) => vec![*a, *b],
+        ConnectionConstraintInitConfig::Angular(a, b, c, _) => vec![*a, *b, *c],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System 3: Handle UnregisterPart
+// ---------------------------------------------------------------------------
+
+/// Handles [`CharacterPartEvent::UnregisterPart`] events.
+///
+/// Uses the [`Connectivity`] component's `parts` set (which contains
+/// back-references to dependent joints, added in
+/// [`add_connectivity_to_parts`]) to find and despawn joints before
+/// removing `Connectivity` from the unregistered entity.
+///
+/// The `on_remove_connectivity` observer then cleans up the
+/// [`ConnectivityRoot`] entry automatically.
+pub fn handle_unregister_part(
+    mut events: EventReader<CharacterPartEvent>,
+    mut commands: Commands,
+    string_pool: Res<StringPool>,
+    root_query: Query<&ConnectivityRoot>,
+) {
+    for event in events.read() {
+        let CharacterPartEvent::UnregisterPart { character, path_id } = event else {
+            continue;
+        };
+        info!("[unregister] looking up '{path_id}' on character {character:?}");
+
+        let interned = string_pool.pool.intern(path_id);
+        let entity = match root_query.get(*character) {
+            Ok(root) => match root.parts.get(&interned) {
+                Some(e) => *e,
+                None => {
+                    warn!("[unregister] character {character:?} has no part '{path_id}'");
+                    continue;
+                }
+            },
+            Err(_) => {
+                warn!("[unregister] character {character:?} has no ConnectivityRoot");
+                continue;
+            }
+        };
+
+        // Remove Connectivity from the entity so it becomes a free physics body.
+        // The on_remove_connectivity observer will clean up ConnectivityRoot.
+        if let Ok(mut entity_cmd) = commands.get_entity(entity) {
+            entity_cmd.remove::<Connectivity>();
+        } else {
+            warn!("[unregister] entity {entity:?} not found");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: spawn_collider
+// ---------------------------------------------------------------------------
+
 fn spawn_collider(
     commands: &mut Commands,
     svg_path: &BezPath,
@@ -237,7 +317,6 @@ fn spawn_collider(
         &shape,
     );
     let translation = transform.translation;
-
     commands
         .spawn((
             VelloSceneBundle {
@@ -258,16 +337,20 @@ fn spawn_collider(
                     glow: 1.0,
                 }),
                 inv_mass,
-                true, // is_soft_body
-                None, // uvs — no PBR images for now
+                true,
+                None,
                 Some(soft_body_config),
                 Some(collision_config),
-                1, // collision_group
+                1,
                 *transform,
             ),
         ))
         .id()
 }
+
+// ---------------------------------------------------------------------------
+// assemble_character (unchanged)
+// ---------------------------------------------------------------------------
 
 pub fn assemble_character(
     trigger: Trigger<OnAdd, CharacterRoot>,
@@ -280,17 +363,13 @@ pub fn assemble_character(
     string_pool: ResMut<StringPool>,
 ) {
     let root_entity = trigger.target();
-    // 1. Get the specific asset IDs for this character
     let (config, transform) = query.get(root_entity).unwrap();
-
     let affine = transform_to_affine(transform);
     let apply_transform_to_particle = |p: &mut Particle| {
         let point = kurbo::Point::new(p.pos.x as f64, p.pos.y as f64);
         let result = affine * point;
         p.pos = Vec2::new(result.x as f32, result.y as f32);
-        return;
     };
-
     let Some(blueprint_handle) = blueprint_manager.get_index_from_name(&config.blueprint_asset_id)
     else {
         warn!(
@@ -320,14 +399,11 @@ pub fn assemble_character(
             return;
         };
         let inv_mass = item.softbody.total_inv_mass;
-
-        //TODO: pass these info
         let color = bevy_vello::prelude::peniko::Brush::SolidGlow(GlowColor {
             color: peniko::Color::PINK,
             glow: 1.0,
         });
         let collision_group = 1;
-
         let entity = make_collision_shape(
             &mut commands,
             transform,
@@ -351,7 +427,7 @@ pub fn assemble_character(
     for item in blueprint.data.particles.iter() {
         let mut particle = item.particle.clone();
         apply_transform_to_particle(&mut particle);
-        let mut config = item.frame_conn.clone();
+        let config = item.frame_conn.clone();
         let entity = make_particle(&mut commands, particle, &root_entity, config);
         let particle_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
@@ -404,7 +480,6 @@ pub fn assemble_character(
             root_entity,
             joint_name,
         );
-
         for (s, _) in sibling.iter() {
             colliders_particle_entity
                 .get_mut(s)
@@ -413,7 +488,6 @@ pub fn assemble_character(
                 .parts
                 .insert(joint_entity);
         }
-
         character_connectivity
             .parts
             .insert(joint_name, joint_entity);
@@ -428,8 +502,6 @@ pub fn assemble_character(
             .unwrap_or_else(|| panic!("missing entity for {name}"))
     };
 
-    // Maybe make this into json file too.
-
     // Spine particles: [PH, P0, P1, P2, P3]
     let spine = SpineController {
         particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
@@ -438,7 +510,6 @@ pub fn assemble_character(
     };
 
     // Right arm particles: [P1, P12, P13, PRLA]
-    // Right arm joints:    [P1_P12_P13, P12_P13_PRLA]
     let right_arm = RightArmController {
         particles: [get("P1"), get("P12"), get("P13"), get("PRLA")],
         joints: [get("P1_P12_P13"), get("P12_P13_PRLA")],
@@ -450,7 +521,6 @@ pub fn assemble_character(
     };
 
     // Left arm particles: [P1, P11, P10, PLLA]
-    // Left arm joints:    [P1_P11_P10, P11_P10_PLLA]
     let left_arm = LeftArmController {
         particles: [get("P1"), get("P11"), get("P10"), get("PLLA")],
         joints: [get("P1_P11_P10"), get("P11_P10_PLLA")],
@@ -463,7 +533,6 @@ pub fn assemble_character(
 
     commands.entity(root_entity).insert(character_connectivity);
     let frame_config = blueprint.data.frame.init_config.clone();
-    //to do read these from the FrameConfig.
     let left_hip = colliders_particle_entity
         .get(&frame_config.left_hip)
         .unwrap()
@@ -497,8 +566,6 @@ pub fn assemble_character(
     for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);
     }
-
-    // The CharacterRoot remains on the entity as your permanent marker.
 }
 
 fn make_particle(
@@ -591,12 +658,7 @@ fn make_collision_shape(
 pub fn transform_to_affine(transform: &Transform) -> Affine {
     let mut model_matrix = transform.compute_matrix();
     model_matrix.w_axis.y *= -1.0;
-
     let transform: [f32; 16] = model_matrix.to_cols_array();
-
-    // | a c e |
-    // | b d f |
-    // | 0 0 1 |
     let transform: [f64; 6] = [
         transform[0] as f64,  // a
         -transform[1] as f64, // b

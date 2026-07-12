@@ -53,7 +53,7 @@ use game_lib::{
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
     CharacterController, CharacterPartEvent, CharacterRoot, ColliderFactoryPlugin,
-    ConnectivityRoot, IkMode, LeftArmController, RightArmController, SpineController, StringPool,
+    ConnectivityRoot, IkMode, LeftArmController, RightArmController, SpineController,
     VelloCharacterPlugin,
 };
 
@@ -81,6 +81,13 @@ struct ParticleState {
     speed: f32,
     size: f32,
     is_trace: bool,
+}
+
+/// Tracks whether the pistol collider has been registered to the character.
+/// Used to guard the UnregisterPart event so we don't try to unregister twice.
+#[derive(Resource, Default)]
+struct PistolState {
+    registered: bool,
 }
 
 #[derive(Resource, Default)]
@@ -199,7 +206,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // #[cfg(feature = "examples_world_inspector")]
     // app.add_plugins(WorldInspectorPlugin::default());
-    app.insert_resource(utility::MouseStatus::default())
+    app.insert_resource(PistolState::default())
+        .insert_resource(utility::MouseStatus::default())
         .insert_resource(utility::ColliderStatus::default())
         .insert_resource(connections::ConnectionStatus::default())
         .add_plugins(VelloPlugin)
@@ -584,24 +592,12 @@ fn setup_pistol(
     svg_colliders: Res<SvgColliderAssetManager>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
-    string_pool: ResMut<StringPool>,
+    mut pistol_state: ResMut<PistolState>,
 ) {
     // There is only one character — get its entity and ConnectivityRoot.
-    let (character_entity, root) = character_q
+    let (character_entity, _root) = character_q
         .single()
         .expect("expected exactly one character");
-
-    // Find the PRLA particle entity (right arm wrist/hand).
-    let prla = *root
-        .parts
-        .get(&string_pool.pool.intern("PRLA"))
-        .expect("character missing PRLA particle");
-
-    // Find the P13 particle entity (right arm elbow).
-    let p13 = *root
-        .parts
-        .get(&string_pool.pool.intern("P13"))
-        .expect("character missing P13 particle");
 
     // Look up the pistol collider SVG asset.
     let pistol_index = svg_colliders
@@ -633,10 +629,10 @@ fn setup_pistol(
     // The pistol collider entity is not yet known (it will be spawned by the
     // event handler in pass 1), so we use AddJoint which resolves
     // string path_ids ("PRLA", "pistol") from ConnectivityRoot in pass 2.
+    // The connected entities are derived from the config's string path_ids.
     events.write(CharacterPartEvent::AddJoint {
         character: character_entity,
         path_id: "pistol_prla".to_string(),
-        connected_entities: vec![prla],
         config: ConnectionConstraintInitConfig::Bilinear(
             "PRLA".to_string(),
             "pistol".to_string(),
@@ -649,13 +645,15 @@ fn setup_pistol(
     events.write(CharacterPartEvent::AddJoint {
         character: character_entity,
         path_id: "pistol_p13".to_string(),
-        connected_entities: vec![p13],
         config: ConnectionConstraintInitConfig::Bilinear(
             "P13".to_string(),
             "pistol".to_string(),
             0.0,
         ),
     });
+
+    // Mark the pistol as registered so UnregisterPart knows it exists.
+    pistol_state.registered = true;
 }
 
 fn make_static_scene(commands: &mut Commands) {
@@ -1015,6 +1013,9 @@ fn player_movement(
     mut right_arm_q: Query<&mut RightArmController>,
     mut left_arm_q: Query<&mut LeftArmController>,
     mut legacy_q: Query<&mut CharacterController>,
+    mut pistol_state: ResMut<PistolState>,
+    mut events: EventWriter<CharacterPartEvent>,
+    character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
 ) {
     let mut direction = Vec2::ZERO;
 
@@ -1056,5 +1057,21 @@ fn player_movement(
     if let Ok(mut item) = legacy_q.single_mut() {
         item.move_vector = direction;
         item.point_vector = target;
+    }
+
+    // ── V key: Unregister the pistol (throw/drop) ────────────────────────
+    if keyboard_input.just_pressed(KeyCode::KeyV) && pistol_state.registered {
+        info!("Player pressed V — unregistering pistol");
+
+        let (character_entity, _) = character_q
+            .single()
+            .expect("expected exactly one character");
+
+        events.write(CharacterPartEvent::UnregisterPart {
+            character: character_entity,
+            path_id: "pistol".to_string(),
+        });
+
+        pistol_state.registered = false;
     }
 }

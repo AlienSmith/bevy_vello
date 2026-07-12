@@ -50,14 +50,44 @@ pub enum CharacterPartEvent {
     /// The handler resolves them from the character's [`ConnectivityRoot`] in pass 2,
     /// which is useful when the collider/particle entity is not yet known at the
     /// call site (e.g. it was just created by an `AddCollider` event in pass 1).
+    ///
+    /// The entities the joint connects to are derived from the `config` field's
+    /// string path_ids, so there is no need to provide them separately.
     AddJoint {
         character: Entity,
         path_id: String,
-        /// The entities this joint connects to (already-resolved handles for
-        /// connectivity tracking).
-        connected_entities: Vec<Entity>,
         /// Connection config using string path_ids that will be resolved to
         /// entities from `ConnectivityRoot.parts`.
         config: ConnectionConstraintInitConfig<String>,
+    },
+    /// Register an existing free entity (e.g. a weapon collider) as a part of
+    /// a character by adding a [`Connectivity`] component and inserting it into
+    /// the character's [`ConnectivityRoot`].
+    ///
+    /// Use this for "pick up" — the entity already exists as a standalone
+    /// physics body and should now be attached to the character.
+    RegisterPart {
+        /// The character root entity.
+        character: Entity,
+        /// The existing entity to register.
+        entity: Entity,
+        /// Name for `ConnectivityRoot.parts` lookup.
+        path_id: String,
+    },
+    /// Unregister a part from its character by removing its [`Connectivity`]
+    /// component. The `on_remove_connectivity` observer will clean up the
+    /// [`ConnectivityRoot`] and despawn any dependent joints.
+    ///
+    /// Use this for "throw/drop" — the entity remains alive as a free physics
+    /// body, no longer connected to the character.
+    ///
+    /// The part is identified by its string `path_id` (e.g. "pistol") rather
+    /// than an entity handle, since the external world knows parts by name.
+    UnregisterPart {
+        /// The character root entity whose part to unregister.
+        character: Entity,
+        /// The string path_id of the part to unregister (e.g. "pistol").
+        /// This is looked up from [`ConnectivityRoot.parts`] to find the entity.
+        path_id: String,
     },
 }
