@@ -31,7 +31,10 @@ use bevy_vello::{
     },
     integrations::{
         particles::{self, ExplosionEffect},
-        physics::{ConnectionInitConfig, VelloConstraintWorld, VelloJoint, VelloParticle},
+        physics::{
+            ConnectionConstraintInitConfig, ConnectionInitConfig, VelloConstraintWorld, VelloJoint,
+            VelloParticle,
+        },
         svg_collider::{
             self, SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData,
             VelloImageAsset, VelloImageAssetManager, VelloImageAssetMetaData,
@@ -49,8 +52,9 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterController, CharacterRoot, ColliderFactoryPlugin, ColliderRoot, IkMode,
-    LeftArmController, RightArmController, SpineController, VelloCharacterPlugin,
+    CharacterController, CharacterPartEvent, CharacterRoot, ColliderFactoryPlugin,
+    ConnectivityRoot, IkMode, LeftArmController, RightArmController, SpineController, StringPool,
+    VelloCharacterPlugin,
 };
 
 use crate::{
@@ -208,7 +212,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),
         )
-        .add_systems(OnEnter(GameState::Game), setup_entity)
+        .add_systems(
+            OnEnter(GameState::Game),
+            (setup_entity, setup_pistol.after(setup_entity)),
+        )
         .add_systems(
             Update,
             (
@@ -567,6 +574,42 @@ fn setup_entity(mut commands: Commands) {
             ..Default::default()
         },
     ));
+}
+
+/// Spawn a pistol collider and connect it to the character's PRLA particle
+/// via a bilinear joint. Runs after [`setup_entity`] so the character and its
+/// particles are fully assembled.
+fn setup_pistol(
+    mut events: EventWriter<CharacterPartEvent>,
+    svg_colliders: Res<SvgColliderAssetManager>,
+    custom_assets: Res<Assets<SvgColliderAsset>>,
+    character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
+    string_pool: ResMut<StringPool>,
+) {
+    // There is only one character — get its entity and ConnectivityRoot.
+    let (character_entity, root) = character_q
+        .single()
+        .expect("expected exactly one character");
+
+    // Find the PRLA particle entity (right arm wrist/hand).
+    let prla = *root
+        .parts
+        .get(&string_pool.pool.intern("PRLA"))
+        .expect("character missing PRLA particle");
+
+    // Find the P13 particle entity (right arm elbow).
+    let p13 = *root
+        .parts
+        .get(&string_pool.pool.intern("P13"))
+        .expect("character missing P13 particle");
+
+    // Look up the pistol collider SVG asset.
+    let pistol_index = svg_colliders
+        .get_index_from_name("pistol.collider.svg")
+        .expect("pistol.collider.svg not loaded");
+    let pistol_asset = custom_assets.get(&pistol_index).unwrap();
+    let svg_path = pistol_asset.shape.clone();
+    let rect = pistol_asset.aabb.clone();
 
     let soft_body_init_transform = Transform {
         translation: Vec3::new(325.0, -90.0, 0.0),
@@ -574,21 +617,45 @@ fn setup_entity(mut commands: Commands) {
         scale: Vec3::new(0.1, 0.1, 1.0),
     };
 
-    commands.spawn((
-        VelloSceneBundle {
-            ..Default::default()
-        },
-        ColliderRoot {
-            svg_asset_id: "pistol.collider.svg".to_string(),
-            albedo_asset_id: "pistol_albedo.png".to_string(),
-            normal_asset_id: "pistol_normal.png".to_string(),
-            metallic: 0.9,
-            roughness: 0.2,
-            softbody_config: SoftBodyInitConfig::default(),
-            collision_config: CollisionConstraintConfig::default(),
-            soft_body_init_transform,
-        },
-    ));
+    // Spawn the pistol collider as a part of the character.
+    events.write(CharacterPartEvent::AddCollider {
+        character: character_entity,
+        path_id: "pistol".to_string(),
+        svg_path,
+        rect,
+        inv_mass: SoftBodyInitConfig::default().total_inv_mass,
+        soft_body_config: SoftBodyInitConfig::default(),
+        collision_config: CollisionConstraintConfig::default(),
+        transform: soft_body_init_transform,
+    });
+
+    // Connect the pistol collider to PRLA via a bilinear joint.
+    // The pistol collider entity is not yet known (it will be spawned by the
+    // event handler in pass 1), so we use AddJoint which resolves
+    // string path_ids ("PRLA", "pistol") from ConnectivityRoot in pass 2.
+    events.write(CharacterPartEvent::AddJoint {
+        character: character_entity,
+        path_id: "pistol_prla".to_string(),
+        connected_entities: vec![prla],
+        config: ConnectionConstraintInitConfig::Bilinear(
+            "PRLA".to_string(),
+            "pistol".to_string(),
+            0.0,
+        ),
+    });
+
+    // Also connect the pistol collider to P13 (right arm elbow) via a bilinear
+    // joint for additional stability.
+    events.write(CharacterPartEvent::AddJoint {
+        character: character_entity,
+        path_id: "pistol_p13".to_string(),
+        connected_entities: vec![p13],
+        config: ConnectionConstraintInitConfig::Bilinear(
+            "P13".to_string(),
+            "pistol".to_string(),
+            0.0,
+        ),
+    });
 }
 
 fn make_static_scene(commands: &mut Commands) {

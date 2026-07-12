@@ -45,10 +45,11 @@ pub use vello_physics::collision_response::Particle;
 pub use vello_physics::soft_body::ExternalForce;
 pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
+pub use vello_physics::ConnectionConstraintInitConfig;
 use vello_physics::{
     collision_response::PartcileShapeMatchingConfig, utility::BalancedCoreFrame,
-    AngularConstraintConfig, ConnectionConstraint, ConnectionConstraintInitConfig, ConstraintWorld,
-    FrameInitConfig, FramePositionConstraintConfig, FRAME_PARTICLES_COUNT,
+    AngularConstraintConfig, ConnectionConstraint, ConstraintWorld, FrameInitConfig,
+    FramePositionConstraintConfig, FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]

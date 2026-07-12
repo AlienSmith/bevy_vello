@@ -13,10 +13,10 @@ use crate::{
 pub struct VelloCharacterPlugin;
 pub use crate::{
     character::{
-        ArmConfig, CharacterController, IkMode, LeftArmController, RightArmController, SpineConfig,
-        SpineController,
+        ArmConfig, CharacterController, ConnectivityRoot, IkMode, LeftArmController,
+        RightArmController, SpineConfig, SpineController, StringPool,
     },
-    character_factory::CharacterRoot,
+    character_factory::{CharacterPartEvent, CharacterRoot},
 };
 
 impl Plugin for VelloCharacterPlugin {

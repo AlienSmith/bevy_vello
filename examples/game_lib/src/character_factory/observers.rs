@@ -10,8 +10,8 @@ use vello::{
 };
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
-    utility::bilinear_interpolate, CollisionConstraintConfig, ConnectionConstraintInitConfig,
-    FramePositionConstraintConfig, SoftBodyInitConfig, FRAME_PARTICLES_COUNT,
+    CollisionConstraintConfig, ConnectionConstraintInitConfig, FramePositionConstraintConfig,
+    SoftBodyInitConfig, FRAME_PARTICLES_COUNT,
 };
 
 use crate::{
@@ -23,8 +23,252 @@ use crate::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, SvgCharacterAsset,
         SvgCharacterAssetManager,
     },
-    character_factory::CharacterRoot,
+    character_factory::{CharacterPartEvent, CharacterRoot},
 };
+
+// ---------------------------------------------------------------------------
+// Runtime part events handler
+// ---------------------------------------------------------------------------
+
+/// Handles [`CharacterPartEvent`] to add colliders and joints to an already-
+/// assembled character at runtime.
+///
+/// Uses a two-pass strategy so that collider entities exist before joints
+/// that reference them are spawned. All spawned entities carry the proper
+/// [`Connectivity`] component and are registered in the character's
+/// [`ConnectivityRoot`].
+///
+/// The existing `generate_connection` / `generate_soft_body_for_collider`
+/// systems (in PostUpdate) pick up the `Added<T>` components on the same
+/// frame, so physics registration happens with at most one frame of delay.
+pub fn handle_character_part_events(
+    mut events: EventReader<CharacterPartEvent>,
+    mut commands: Commands,
+    mut string_pool: ResMut<StringPool>,
+    mut root_query: Query<&mut ConnectivityRoot>,
+    mut parts_query: Query<(Entity, &mut Connectivity)>,
+) {
+    // Collect all events first so we can iterate twice (pass 1 = colliders,
+    // pass 2 = joints) without consuming the reader.
+    let event_vec: Vec<&CharacterPartEvent> = events.read().collect();
+
+    // ── Pass 1: Spawn all colliders and particles ────────────────────────
+    // Colliders and particles must exist as entities before joints can
+    // reference them.
+    for event in &event_vec {
+        match event {
+            CharacterPartEvent::AddCollider {
+                character,
+                path_id,
+                svg_path,
+                rect,
+                inv_mass,
+                soft_body_config,
+                collision_config,
+                transform,
+            } => {
+                info!("Pass 1: spawning collider '{path_id}' for character {character:?}");
+
+                let collider_entity = spawn_collider(
+                    &mut commands,
+                    svg_path,
+                    rect,
+                    *inv_mass,
+                    soft_body_config.clone(),
+                    collision_config.clone(),
+                    transform,
+                );
+                let name = string_pool.pool.intern(path_id);
+                commands
+                    .entity(collider_entity)
+                    .insert(Connectivity::new(*character, true, name));
+
+                if let Ok(mut root) = root_query.get_mut(*character) {
+                    root.parts.insert(name, collider_entity);
+                    info!(
+                        "Pass 1: registered collider '{path_id}' = {collider_entity:?} in ConnectivityRoot"
+                    );
+                } else {
+                    warn!("Pass 1: character {character:?} has no ConnectivityRoot yet");
+                }
+            }
+            CharacterPartEvent::AddParticle {
+                character,
+                path_id,
+                particle,
+                shape_matching,
+            } => {
+                info!("Pass 1: spawning particle '{path_id}' for character {character:?}");
+
+                let particle_entity = commands
+                    .spawn(VelloParticle::new(
+                        *particle,
+                        *character,
+                        shape_matching.clone(),
+                    ))
+                    .id();
+                let name = string_pool.pool.intern(path_id);
+                commands
+                    .entity(particle_entity)
+                    .insert(Connectivity::new(*character, true, name));
+
+                if let Ok(mut root) = root_query.get_mut(*character) {
+                    root.parts.insert(name, particle_entity);
+                    info!(
+                        "Pass 1: registered particle '{path_id}' = {particle_entity:?} in ConnectivityRoot"
+                    );
+                } else {
+                    warn!("Pass 1: character {character:?} has no ConnectivityRoot yet");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ── Pass 2: Spawn all joints ─────────────────────────────────────────
+    for event in &event_vec {
+        let CharacterPartEvent::AddJoint {
+            character,
+            path_id,
+            connected_entities,
+            config,
+        } = event
+        else {
+            continue;
+        };
+
+        info!("Pass 2: spawning joint '{path_id}' for character {character:?}");
+
+        let Ok(root) = root_query.get(*character) else {
+            warn!("AddJoint: character {character:?} has no ConnectivityRoot");
+            continue;
+        };
+
+        // Resolve string path_ids to entity handles from ConnectivityRoot.
+        let resolve = |name: &str| -> Option<Entity> {
+            let interned = string_pool.pool.intern(name);
+            root.parts.get(&interned).copied()
+        };
+
+        let resolved_config = match config {
+            ConnectionConstraintInitConfig::Bilinear(a, b, c) => {
+                let Some(pa) = resolve(a) else {
+                    warn!("AddJoint: character missing part '{a}' for joint '{path_id}'");
+                    continue;
+                };
+                let Some(pb) = resolve(b) else {
+                    warn!("AddJoint: character missing part '{b}' for joint '{path_id}'");
+                    continue;
+                };
+                info!("  resolved '{a}' -> {pa:?}, '{b}' -> {pb:?}");
+                ConnectionConstraintInitConfig::Bilinear(pa, pb, *c)
+            }
+            ConnectionConstraintInitConfig::Distance(a, b, c) => {
+                let Some(pa) = resolve(a) else {
+                    warn!("AddJoint: character missing part '{a}' for joint '{path_id}'");
+                    continue;
+                };
+                let Some(pb) = resolve(b) else {
+                    warn!("AddJoint: character missing part '{b}' for joint '{path_id}'");
+                    continue;
+                };
+                ConnectionConstraintInitConfig::Distance(pa, pb, *c)
+            }
+            ConnectionConstraintInitConfig::Angular(a, b, c, d) => {
+                let Some(pa) = resolve(a) else {
+                    warn!("AddJoint: character missing part '{a}' for joint '{path_id}'");
+                    continue;
+                };
+                let Some(pb) = resolve(b) else {
+                    warn!("AddJoint: character missing part '{b}' for joint '{path_id}'");
+                    continue;
+                };
+                let Some(pc) = resolve(c) else {
+                    warn!("AddJoint: character missing part '{c}' for joint '{path_id}'");
+                    continue;
+                };
+                ConnectionConstraintInitConfig::Angular(pa, pb, pc, *d)
+            }
+        };
+
+        let joint_name = string_pool.pool.intern(path_id);
+        let mut connectivity = Connectivity::new(*character, false, joint_name);
+        for &e in connected_entities {
+            connectivity.parts.insert(e);
+        }
+
+        let joint_entity = commands
+            .spawn((VelloJoint::new(resolved_config, *character), connectivity))
+            .id();
+
+        for &connected in connected_entities {
+            if let Ok((_, mut conn)) = parts_query.get_mut(connected) {
+                conn.parts.insert(joint_entity);
+            }
+        }
+
+        if let Ok(mut root) = root_query.get_mut(*character) {
+            root.parts.insert(joint_name, joint_entity);
+        }
+    }
+}
+
+/// Spawn a soft-body collider entity.
+///
+/// This mirrors the logic in [`make_collision_shape`] but takes owned configs
+/// so it can be called from the event handler without borrowing issues.
+fn spawn_collider(
+    commands: &mut Commands,
+    svg_path: &BezPath,
+    rect: &kurbo::Rect,
+    inv_mass: f32,
+    soft_body_config: SoftBodyInitConfig,
+    collision_config: CollisionConstraintConfig,
+    transform: &Transform,
+) -> Entity {
+    let shape = path_to_ccw_quad_path(svg_path);
+    let frame_path = rect.to_path(0.1);
+    let mut scene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgba(0.0, 1.0, 0.0, 0.7),
+        None,
+        &shape,
+    );
+    let translation = transform.translation;
+
+    commands
+        .spawn((
+            VelloSceneBundle {
+                scene,
+                transform: Transform {
+                    translation: Vec3::new(translation.x, translation.y, 0.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            VelloCollider::new(
+                &shape,
+                &frame_path,
+                rect,
+                Vec2::ZERO,
+                peniko::Brush::SolidGlow(GlowColor {
+                    color: peniko::Color::PINK,
+                    glow: 1.0,
+                }),
+                inv_mass,
+                true, // is_soft_body
+                None, // uvs — no PBR images for now
+                Some(soft_body_config),
+                Some(collision_config),
+                1, // collision_group
+                *transform,
+            ),
+        ))
+        .id()
+}
+
 pub fn assemble_character(
     trigger: Trigger<OnAdd, CharacterRoot>,
     mut commands: Commands,
