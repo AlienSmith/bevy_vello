@@ -136,7 +136,7 @@ pub fn spawn_character_parts(
             root.parts.get(&interned).copied()
         };
         let resolved_config = match config {
-            ConnectionConstraintInitConfig::Bilinear(a, b, c) => {
+            ConnectionConstraintInitConfig::Bilinear(a, b, c, uv) => {
                 let Some(pa) = resolve(a) else {
                     warn!("[spawn] AddJoint: character missing part '{a}' for joint '{path_id}'");
                     continue;
@@ -145,7 +145,7 @@ pub fn spawn_character_parts(
                     warn!("[spawn] AddJoint: character missing part '{b}' for joint '{path_id}'");
                     continue;
                 };
-                ConnectionConstraintInitConfig::Bilinear(pa, pb, *c)
+                ConnectionConstraintInitConfig::Bilinear(pa, pb, *c, *uv)
             }
             ConnectionConstraintInitConfig::Distance(a, b, c) => {
                 let Some(pa) = resolve(a) else {
@@ -237,7 +237,7 @@ pub fn add_connectivity_to_parts(
 /// Extract all entity handles from a [`ConnectionConstraintInitConfig<Entity>`].
 fn connected_entities_from_config(config: &ConnectionConstraintInitConfig<Entity>) -> Vec<Entity> {
     match config {
-        ConnectionConstraintInitConfig::Bilinear(a, b, _) => vec![*a, *b],
+        ConnectionConstraintInitConfig::Bilinear(a, b, _, _) => vec![*a, *b],
         ConnectionConstraintInitConfig::Distance(a, b, _) => vec![*a, *b],
         ConnectionConstraintInitConfig::Angular(a, b, c, _) => vec![*a, *b, *c],
     }
@@ -456,10 +456,15 @@ pub fn assemble_character(
     for item in blueprint.data.joints.iter() {
         sibling.clear();
         let joint_config = match &item.config {
-            ConnectionInitConfig::Bilinear(s0, s1, compliance) => {
+            ConnectionInitConfig::Bilinear(s0, s1, compliance, uv) => {
                 let e0 = process_name(&colliders_particle_entity, &mut sibling, s0, &item.path_id);
                 let e1 = process_name(&colliders_particle_entity, &mut sibling, s1, &item.path_id);
-                ConnectionConstraintInitConfig::<Entity>::Bilinear(e0, e1, *compliance)
+                ConnectionConstraintInitConfig::<Entity>::Bilinear(
+                    e0,
+                    e1,
+                    *compliance,
+                    uv.map(|(u, v)| Vec2::new(u, v)),
+                )
             }
             ConnectionInitConfig::Distance(s0, s1, compliance) => {
                 let e0 = process_name(&colliders_particle_entity, &mut sibling, s0, &item.path_id);

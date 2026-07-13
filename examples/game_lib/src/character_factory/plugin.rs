@@ -4,6 +4,7 @@ use crate::character_factory::observers::{
     add_connectivity_to_parts, assemble_character, handle_unregister_part, spawn_character_parts,
 };
 use crate::character_factory::CharacterPartEvent;
+use crate::GameLabSystems;
 pub struct CharacterFactoryPlugin;
 
 impl Plugin for CharacterFactoryPlugin {
@@ -17,7 +18,8 @@ impl Plugin for CharacterFactoryPlugin {
                     add_connectivity_to_parts,
                     handle_unregister_part,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(GameLabSystems::ReadCharacterPartEvent),
             );
     }
 }

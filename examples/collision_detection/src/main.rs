@@ -53,8 +53,9 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterController, CharacterPartEvent, CharacterRoot, ColliderFactoryPlugin,
-    ConnectivityRoot, IkMode, LeftArmController, RightArmController, SpineController,
+    weapons::{AttachPistolToCharacterEvent, PistolControl},
+    CharacterController, CharacterPartEvent, CharacterRoot, ColliderRoot, ConnectivityRoot,
+    GameLabSystems, IkMode, LeftArmController, RightArmController, SpineController,
     VelloCharacterPlugin,
 };
 
@@ -151,8 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             enable_multipass_for_primary_context: false,
         })
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(VelloCharacterPlugin::default())
-        .add_plugins(ColliderFactoryPlugin::default());
+        .add_plugins(VelloCharacterPlugin::default());
     // Systems that create Egui widgets should be run during the `CoreSet::Update` set,
     // or after the `EguiSet::BeginPass` system (which belongs to the `CoreSet::PreUpdate` set).
 
@@ -174,7 +174,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .add_systems(
             OnEnter(GameState::Game),
-            (setup_entity, setup_pistol.after(setup_entity)),
+            (
+                setup_entity,
+                setup_pistol
+                    .after(setup_entity)
+                    .before(GameLabSystems::WriteCharacterPartEvent),
+            ),
         )
         .add_systems(
             Update,
@@ -534,7 +539,8 @@ fn setup_entity(mut commands: Commands) {
 /// via a bilinear joint. Runs after [`setup_entity`] so the character and its
 /// particles are fully assembled.
 fn setup_pistol(
-    mut events: EventWriter<CharacterPartEvent>,
+    mut commands: Commands,
+    mut events: EventWriter<AttachPistolToCharacterEvent>,
     svg_colliders: Res<SvgColliderAssetManager>,
     custom_assets: Res<Assets<SvgColliderAsset>>,
     character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
@@ -545,58 +551,66 @@ fn setup_pistol(
         .single()
         .expect("expected exactly one character");
 
-    // Look up the pistol collider SVG asset.
-    let pistol_index = svg_colliders
-        .get_index_from_name("pistol.collider.svg")
-        .expect("pistol.collider.svg not loaded");
-    let pistol_asset = custom_assets.get(&pistol_index).unwrap();
-    let svg_path = pistol_asset.shape.clone();
-    let rect = pistol_asset.aabb.clone();
-
     let soft_body_init_transform = Transform {
         translation: Vec3::new(325.0, -90.0, 0.0),
         rotation: Quat::from_rotation_z(0.0_f32.to_radians()),
         scale: Vec3::new(0.1, 0.1, 1.0),
     };
 
-    // Spawn the pistol collider as a part of the character.
-    events.write(CharacterPartEvent::AddCollider {
+    let pistol_entity = commands
+        .spawn((
+            VelloSceneBundle {
+                ..Default::default()
+            },
+            ColliderRoot {
+                svg_asset_id: "pistol.collider.svg".to_string(),
+                albedo_asset_id: "pistol_albedo.png".to_string(),
+                normal_asset_id: "pistol_normal.png".to_string(),
+                metallic: 0.9,
+                roughness: 0.2,
+                softbody_config: SoftBodyInitConfig::default(),
+                collision_config: CollisionConstraintConfig::default(),
+                soft_body_init_transform,
+            },
+            PistolControl::default(),
+        ))
+        .id();
+    events.write(AttachPistolToCharacterEvent {
         character: character_entity,
-        path_id: "pistol".to_string(),
-        svg_path,
-        rect,
-        inv_mass: SoftBodyInitConfig::default().total_inv_mass,
-        soft_body_config: SoftBodyInitConfig::default(),
-        collision_config: CollisionConstraintConfig::default(),
-        transform: soft_body_init_transform,
+        pistol: pistol_entity,
     });
+    // events.write(CharacterPartEvent::RegisterPart {
+    //     character: character_entity,
+    //     entity: pistol_entity,
+    //     path_id: "pistol".to_string(),
+    // });
 
-    // Connect the pistol collider to PRLA via a bilinear joint.
-    // The pistol collider entity is not yet known (it will be spawned by the
-    // event handler in pass 1), so we use AddJoint which resolves
-    // string path_ids ("PRLA", "pistol") from ConnectivityRoot in pass 2.
-    // The connected entities are derived from the config's string path_ids.
-    events.write(CharacterPartEvent::AddJoint {
-        character: character_entity,
-        path_id: "pistol_prla".to_string(),
-        config: ConnectionConstraintInitConfig::Bilinear(
-            "PRLA".to_string(),
-            "pistol".to_string(),
-            0.0,
-        ),
-    });
+    // // Connect the pistol collider to PRLA via a bilinear joint.
+    // // The pistol collider entity is not yet known (it will be spawned by the
+    // // event handler in pass 1), so we use AddJoint which resolves
+    // // string path_ids ("PRLA", "pistol") from ConnectivityRoot in pass 2.
+    // // The connected entities are derived from the config's string path_ids.
+    // events.write(CharacterPartEvent::AddJoint {
+    //     character: character_entity,
+    //     path_id: "pistol_prla".to_string(),
+    //     config: ConnectionConstraintInitConfig::Bilinear(
+    //         "PRLA".to_string(),
+    //         "pistol".to_string(),
+    //         0.0,
+    //     ),
+    // });
 
-    // Also connect the pistol collider to P13 (right arm elbow) via a bilinear
-    // joint for additional stability.
-    events.write(CharacterPartEvent::AddJoint {
-        character: character_entity,
-        path_id: "pistol_p13".to_string(),
-        config: ConnectionConstraintInitConfig::Bilinear(
-            "P13".to_string(),
-            "pistol".to_string(),
-            0.0,
-        ),
-    });
+    // // Also connect the pistol collider to P13 (right arm elbow) via a bilinear
+    // // joint for additional stability.
+    // events.write(CharacterPartEvent::AddJoint {
+    //     character: character_entity,
+    //     path_id: "pistol_p13".to_string(),
+    //     config: ConnectionConstraintInitConfig::Bilinear(
+    //         "P13".to_string(),
+    //         "pistol".to_string(),
+    //         0.0,
+    //     ),
+    // });
 
     // Mark the pistol as registered so UnregisterPart knows it exists.
     pistol_state.registered = true;
