@@ -5,6 +5,7 @@ use bevy::{
     math::{Vec2, Vec4},
 };
 pub use plugin::VelloCollisionPlugin;
+use vello::kurbo::Affine;
 use vello::{
     kurbo::{self, BezPath},
     peniko, CollisionResult, CollisionScene,
@@ -106,6 +107,7 @@ pub struct VelloCollider {
     pub(crate) shape: BezPath,
     pub(crate) shape_frame: BezPath,
     pub(crate) aabb: kurbo::Rect, //aabb will only take the effect of position ignoring entity rotation and scale.
+    pub(crate) initial_scale: Vec2,
     pub(crate) initial_velocity: Vec2,
     pub(crate) _inverse_mass: f32,
     pub(crate) debug_color: peniko::Brush,
@@ -139,6 +141,8 @@ impl VelloCollider {
         transform: Transform,
         collision_cooled_down: f32,
     ) -> Self {
+        let scale_x = (aabb.x1 - aabb.x0) as f32 * transform.scale.x;
+        let scale_y = (aabb.y1 - aabb.x1) as f32 * transform.scale.y;
         Self {
             shape: path.clone(),
             shape_frame: frame_path.clone(),
@@ -154,6 +158,7 @@ impl VelloCollider {
             collision_group,
             soft_body_global_transform: transform,
             collision_cooled_down,
+            initial_scale: Vec2::new(scale_x, scale_y),
         }
     }
 

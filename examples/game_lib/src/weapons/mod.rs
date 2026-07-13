@@ -29,16 +29,16 @@ mod system;
 #[derive(Component, Clone)]
 pub struct PistolControl {
     /// Attachment point of the wrist (PRLA) in pistol local space.
-    pub wrist_binding_point: Vec2,
+    pub wrist_binding_uv: Vec2,
     /// Muzzle/tip of the gun in pistol local space.
-    pub gun_point: Vec2,
+    pub gun_point_uv: Vec2,
 }
 
 impl Default for PistolControl {
     fn default() -> Self {
         Self {
-            wrist_binding_point: Vec2::ZERO,
-            gun_point: Vec2::ZERO,
+            wrist_binding_uv: Vec2::ZERO,
+            gun_point_uv: Vec2::ZERO,
         }
     }
 }
@@ -120,7 +120,7 @@ pub fn update_pistol_aim(
 
         // Gun point in world space (Vello coordinates)
         // The offset along the pistol X-axis from wrist_binding to gun_point
-        let barrel_offset = control.gun_point.x - control.wrist_binding_point.x;
+        let barrel_offset = control.gun_point_uv.x - control.wrist_binding_uv.x;
         let gun_point_world_vello = wrist_pos + pistol_dir * barrel_offset;
 
         // Convert to Bevy coordinates (y-up) for the IK system

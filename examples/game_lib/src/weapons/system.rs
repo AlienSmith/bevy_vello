@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_vello::VelloCollider;
 use vello_physics::ConnectionConstraintInitConfig;
 
 use crate::{
@@ -8,7 +9,7 @@ use crate::{
 pub fn attach_pistol(
     mut reader: EventReader<AttachPistolToCharacterEvent>,
     mut writer: EventWriter<CharacterPartEvent>,
-    query: Query<&PistolControl>,
+    query: Query<(&PistolControl, &VelloCollider)>,
 ) {
     for item in reader.read() {
         let pivot = query.get(item.pistol).unwrap();

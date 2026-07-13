@@ -35,6 +35,7 @@ pub fn generate_soft_body_for_collider(
                 Vec2::new(collider.initial_velocity.x, -collider.initial_velocity.y),
                 entity,
                 collider.soft_body_config.clone().unwrap(),
+                Some(collider.aabb),
             );
         }
     }

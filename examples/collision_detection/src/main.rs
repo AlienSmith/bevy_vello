@@ -572,7 +572,10 @@ fn setup_pistol(
                 collision_config: CollisionConstraintConfig::default(),
                 soft_body_init_transform,
             },
-            PistolControl::default(),
+            PistolControl {
+                wrist_binding_uv: Vec2::new(0.25, 0.75),
+                gun_point_uv: Vec2::new(1.0, 0.125),
+            },
         ))
         .id();
     events.write(AttachPistolToCharacterEvent {
