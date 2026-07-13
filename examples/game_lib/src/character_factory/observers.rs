@@ -1,6 +1,6 @@
 use bevy::{ecs::intern::Interned, platform::collections::HashMap, prelude::*};
 use bevy_vello::{
-    collision::path_to_ccw_quad_path,
+    collision::{path_to_ccw_quad_path, VELLO_COLLISION_COOL_DOWN_TIME},
     integrations::physics::{VelloCharacterPhysicsRoot, VelloJoint, VelloParticle},
     VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -343,6 +343,7 @@ fn spawn_collider(
                 Some(collision_config),
                 1,
                 *transform,
+                VELLO_COLLISION_COOL_DOWN_TIME,
             ),
         ))
         .id()
@@ -650,6 +651,7 @@ fn make_collision_shape(
                 collision_config,
                 collision_group,
                 soft_body_init_transform,
+                VELLO_COLLISION_COOL_DOWN_TIME,
             ),
         ))
         .id()

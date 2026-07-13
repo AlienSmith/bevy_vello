@@ -1,10 +1,12 @@
+use avian2d::collision::Collider;
 use bevy::prelude::*;
 use vello::{CollisionResult, CollisionScene};
 
 use crate::{
     collision::{
-        CollisionResults, CollisionSceneState, GpuDataChannel, RemovedColliders,
-        VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+        CollisionCoolDownPairManager, CollisionResults, CollisionSceneState, GpuDataChannel,
+        RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld,
+        VelloGameCollisionEvent, VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -106,10 +108,65 @@ pub fn collision_event_dispatch(
                 //valid surface normal means valid results other wise there are no collision.
                 //the normal would be invalid if broad phase detects overlaps but narrow phase does not.
                 if result.a_position_normal[2] != 0.0 || result.a_position_normal[3] != 0.0 {
-                    writer.send(make_collision_event(entity_a, entity_b, result, scaling));
+                    writer.write(make_collision_event(entity_a, entity_b, result, scaling));
                 }
             }
         }
         _ => {}
+    }
+}
+
+pub fn collision_event_redistribute(
+    mut reader: EventReader<VelloCollisionEvent>,
+    mut writer: EventWriter<VelloGameCollisionEvent>,
+    mut cool_down_manager: ResMut<CollisionCoolDownPairManager>,
+    query: Query<&VelloCollider>,
+    time: Res<Time>,
+) {
+    let now = time.elapsed_secs();
+    let mut results: Vec<VelloGameCollisionEvent> = vec![];
+    for event in reader.read() {
+        let pos_a = event.collision_point_a;
+        let pos_b = event.collision_point_b;
+        let normal_a = event.collision_normal_a;
+        let normal_b = event.collision_normal_b;
+        let diff = pos_b - pos_a;
+        if normal_a.dot(diff) > 0.0 || normal_b.dot(diff) < 0.0 {
+            continue;
+        }
+        let gap0 = query.get(event.entity_a).unwrap().collision_cooled_down;
+        let gap1 = query.get(event.entity_a).unwrap().collision_cooled_down;
+        let gap = gap0.min(gap1);
+        let key = CollisionCoolDownPairManager::pack_entity_pair(event.entity_a, event.entity_b);
+        if let Some(item) = cool_down_manager.pairs.get_mut(&key) {
+            if item.0 + item.1 < now {
+                item.0 = now;
+                item.1 = gap;
+            } else {
+                continue;
+            }
+        } else {
+            cool_down_manager.pairs.insert(key, (now, gap));
+        }
+        results.push(VelloGameCollisionEvent {
+            entity_a: event.entity_a,
+            entity_b: event.entity_b,
+            collision_point_a: pos_a,
+            collision_point_b: pos_b,
+            normal_a,
+            normal_b,
+        });
+    }
+    writer.write_batch(results);
+    //clean up the record where collision never happens again.
+    if cool_down_manager.last_purge_time == 0.0 {
+        cool_down_manager.last_purge_time = now;
+    } else {
+        if cool_down_manager.last_purge_time + cool_down_manager.purge_time_gaps < now {
+            cool_down_manager.last_purge_time = now;
+            cool_down_manager
+                .pairs
+                .retain(|_key, value| (value.0 + value.1) > now);
+        }
     }
 }

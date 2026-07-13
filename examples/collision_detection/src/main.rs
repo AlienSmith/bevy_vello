@@ -27,7 +27,8 @@ use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     collision::{
         generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
-        SoftBodyInitConfig, VelloCollisionEvent,
+        SoftBodyInitConfig, VelloCollisionEvent, VelloGameCollisionEvent,
+        VELLO_COLLISION_COOL_DOWN_TIME,
     },
     integrations::{
         particles::{self, ExplosionEffect},
@@ -90,54 +91,6 @@ struct PistolState {
     registered: bool,
 }
 
-#[derive(Resource, Default)]
-struct CollisionEventTracker {
-    data: HashMap<(Entity, Entity), f32>,
-    last_perge_time: f32,
-    time_threshold: f32,
-    distance_threshold_squre: f32,
-    filtered_events: Vec<VelloCollisionEvent>,
-}
-
-impl CollisionEventTracker {
-    pub fn new(time_threshold: f32, distance_threshold: f32) -> Self {
-        Self {
-            time_threshold,
-            distance_threshold_squre: distance_threshold * distance_threshold,
-            ..default()
-        }
-    }
-
-    pub fn insert(&mut self, event: VelloCollisionEvent, time: f32) {
-        let a = event.entity_a;
-        let b = event.entity_b;
-        let pair = if a < b { (a, b) } else { (b, a) };
-        let diff = event.collision_point_a - event.collision_point_b;
-        let dis_squre = diff.dot(diff);
-        if dis_squre < self.distance_threshold_squre {
-            return;
-        }
-        if let Some(last_time) = self.data.get_mut(&pair) {
-            let time_diff = time - *last_time;
-            (*last_time) = time;
-            if time_diff < self.time_threshold {
-                return;
-            }
-        } else {
-            self.data.insert(pair, time);
-        }
-        self.filtered_events.push(event);
-    }
-
-    pub fn try_purge(&mut self, time: f32) {
-        if time - self.last_perge_time > 10.0 * self.time_threshold + 5.0 {
-            self.data
-                .retain(|_, &mut last_frame| time - last_frame < 10.0 * self.time_threshold + 5.0);
-            self.last_perge_time = time;
-        }
-    }
-}
-
 impl Default for ParticleState {
     fn default() -> Self {
         Self {
@@ -194,7 +147,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init_state::<GameState>()
         .insert_resource(UiState::default())
-        .insert_resource(CollisionEventTracker::new(0.5, 1.1))
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
@@ -235,12 +187,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (update_mouse, update_collider_from_mouse).chain(), //update_blood_particles.after(ui_example_system),
                 collision_response,
             )
-                .run_if(in_state(GameState::Game)),
-        )
-        .add_systems(
-            FixedUpdate,
-            filter_collision_event
-                .in_set(CollisionSystems::CollisionResponsePhysics)
                 .run_if(in_state(GameState::Game)),
         )
         .run();
@@ -777,6 +723,7 @@ fn make_collision_shape(
                 collision_config,
                 collision_group,
                 soft_body_init_transform,
+                VELLO_COLLISION_COOL_DOWN_TIME,
             ),
         ))
         .id();
@@ -945,26 +892,13 @@ pub fn add_light(mut commands: Commands) {
     },));
 }
 
-fn filter_collision_event(
-    mut reader: EventReader<VelloCollisionEvent>,
-    mut c: ResMut<CollisionEventTracker>,
-    time: Res<Time>,
-) {
-    let t = time.elapsed_secs();
-    // notice you might recieved events from previous frame and this frame.
-    for item in reader.read() {
-        c.insert(item.clone(), t);
-    }
-    c.try_purge(t);
-}
-
 fn collision_response(
     mut commands: Commands,
-    mut c: ResMut<CollisionEventTracker>,
+    mut reader: EventReader<VelloGameCollisionEvent>,
     ui_state: Res<UiState>,
 ) {
     if ui_state.spawn_particle_effect {
-        for item in c.filtered_events.drain(..) {
+        for item in reader.read() {
             let pos = 0.5 * (item.collision_point_a + item.collision_point_b);
             let mut scene = VelloScene::default();
             scene.push_instance_with_transforms(&[]);
@@ -999,8 +933,8 @@ fn collision_response(
                 ),
             ));
             info!(
-                "spawn particles at {:?}, {:?}",
-                item.collision_point_a, item.collision_point_b
+                "spawn particles at {:?}, {:?}, normals {:?}, {:?}",
+                item.collision_point_a, item.collision_point_b, item.normal_a, item.normal_b
             );
         }
     }

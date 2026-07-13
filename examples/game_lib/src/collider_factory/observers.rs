@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy_vello::{
-    collision::path_to_ccw_quad_path,
+    collision::{path_to_ccw_quad_path, VELLO_COLLISION_COOL_DOWN_TIME},
     integrations::svg_collider::{
         SvgColliderAsset, SvgColliderAssetManager, VelloImageAsset, VelloImageAssetManager,
     },
@@ -78,5 +78,6 @@ pub fn assemble_collider(
         Some(config.collision_config),
         1,
         config.soft_body_init_transform,
+        VELLO_COLLISION_COOL_DOWN_TIME,
     ),));
 }

@@ -2,7 +2,9 @@ use crate::collision::broad_phase::update_broad_phase;
 use crate::collision::extract::extract_collision_scene;
 use crate::collision::systems::collect_removed_colliders;
 use crate::collision::systems::collision_event_dispatch;
+use crate::collision::systems::collision_event_redistribute;
 use crate::collision::systems::make_collision_scene;
+use crate::collision::CollisionCoolDownPairManager;
 use crate::collision::CollisionResults;
 use crate::collision::CollisionSystems;
 use crate::collision::ExtractedVelloCollisionScene;
@@ -12,6 +14,7 @@ use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionEvent;
 use crate::collision::VelloCollisionScene;
 use crate::collision::VelloCollisionWorld;
+use crate::collision::VelloGameCollisionEvent;
 use crate::integrations::svg_collider::SvgColliderPlugin;
 use bevy::prelude::*;
 use bevy::render::ExtractSchedule;
@@ -30,12 +33,14 @@ impl Plugin for VelloCollisionPlugin {
             .add_systems(ExtractSchedule, extract_collision_scene);
         app.add_plugins(SvgColliderPlugin)
             .add_event::<VelloCollisionEvent>()
+            .add_event::<VelloGameCollisionEvent>()
             .insert_resource(VelloCollisionWorld::default())
             .insert_resource(RemovedColliders::default())
             .insert_resource(VelloCollisionScene::default())
             .insert_resource(VelloCollisionBroadPhase::default())
             //.insert_resource(SimpleBroadPhase::default())
             .insert_resource(GpuDataChannel::<CollisionResults>::new(1))
+            .insert_resource(CollisionCoolDownPairManager::default())
             .configure_sets(
                 PostUpdate,
                 (
@@ -51,7 +56,10 @@ impl Plugin for VelloCollisionPlugin {
                 PostUpdate,
                 collect_removed_colliders.in_set(CollisionSystems::CollectRemovedColliders),
             )
-            .add_systems(PostUpdate, collision_event_dispatch)
+            .add_systems(
+                PostUpdate,
+                (collision_event_dispatch, collision_event_redistribute).chain(),
+            )
             .add_systems(
                 PostUpdate,
                 (

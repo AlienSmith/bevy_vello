@@ -1,3 +1,4 @@
+use avian2d::parry::utils::hashmap::HashMap;
 use bevy::prelude::*;
 use bevy::{
     ecs::{component::Component, entity::Entity, schedule::SystemSet},
@@ -15,6 +16,7 @@ mod plugin;
 mod systems;
 
 pub const VELLO_COLLISION_WORLD_RATIO: f32 = 4.0;
+pub const VELLO_COLLISION_COOL_DOWN_TIME: f32 = 0.5;
 
 use broad_phase::BroadPhaseQbvh;
 
@@ -113,6 +115,7 @@ pub struct VelloCollider {
     pub(crate) collision_config: Option<CollisionConstraintConfig>,
     pub(crate) soft_body_global_transform: Transform,
     pub(crate) collision_group: u32, //item in the same collision group won't collide against each other
+    pub collision_cooled_down: f32,
     pub is_selected: bool,
 }
 
@@ -134,6 +137,7 @@ impl VelloCollider {
         collision_constraint_config: Option<CollisionConstraintConfig>,
         collision_group: u32,
         transform: Transform,
+        collision_cooled_down: f32,
     ) -> Self {
         Self {
             shape: path.clone(),
@@ -149,6 +153,7 @@ impl VelloCollider {
             collision_config: collision_constraint_config,
             collision_group,
             soft_body_global_transform: transform,
+            collision_cooled_down,
         }
     }
 
@@ -209,4 +214,46 @@ pub struct VelloCollisionEvent {
     pub collision_normal_b: Vec2,
     pub curve_index_a: u32,
     pub curve_index_b: u32,
+}
+
+#[derive(Event, Debug, Clone)]
+pub struct VelloGameCollisionEvent {
+    pub entity_a: Entity,
+    pub entity_b: Entity,
+    pub collision_point_a: Vec2,
+    pub collision_point_b: Vec2,
+    pub normal_a: Vec2,
+    pub normal_b: Vec2,
+}
+
+#[derive(Resource)]
+pub struct CollisionCoolDownPairManager {
+    pairs: HashMap<u64, (f32, f32)>,
+    last_purge_time: f32,
+    purge_time_gaps: f32,
+}
+
+impl Default for CollisionCoolDownPairManager {
+    fn default() -> Self {
+        Self {
+            pairs: Default::default(),
+            last_purge_time: 0.0,
+            purge_time_gaps: 1.0,
+        }
+    }
+}
+
+impl CollisionCoolDownPairManager {
+    pub fn pack_entity_pair(entity_a: Entity, entity_b: Entity) -> u64 {
+        // Extract the raw u32 internal index numbers
+        let id_a = entity_a.index();
+        let id_b = entity_b.index();
+
+        // Sort them so that pack(A, B) yields the exact same key as pack(B, A)
+        let min = std::cmp::min(id_a, id_b) as u64;
+        let max = std::cmp::max(id_a, id_b) as u64;
+
+        // Shift the smaller ID to the left 32 bits, then merge it with the larger ID
+        (min << 32) | max
+    }
 }
