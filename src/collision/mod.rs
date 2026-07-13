@@ -216,6 +216,7 @@ pub struct VelloCollisionEvent {
     pub curve_index_b: u32,
 }
 
+//in bevy space use a y up x right coordinate.
 #[derive(Event, Debug, Clone)]
 pub struct VelloGameCollisionEvent {
     pub entity_a: Entity,
