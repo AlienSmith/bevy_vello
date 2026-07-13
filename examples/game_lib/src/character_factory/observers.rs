@@ -390,7 +390,6 @@ pub fn assemble_character(
     let svgs = svg_assets.get(svg_handle.id()).unwrap();
     let mut character_connectivity = ConnectivityRoot::default();
     let mut colliders_particle_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
-
     for item in blueprint.data.colliders.iter() {
         let Some((s, rect)) = svgs.data.get(&item.path_id) else {
             warn!(

@@ -1,18 +1,32 @@
 use bevy::prelude::*;
-use bevy_vello::VelloCollider;
+use bevy_vello::{integrations::physics::VelloParticle, VelloCollider};
 use vello_physics::ConnectionConstraintInitConfig;
 
 use crate::{
     weapons::{AttachPistolToCharacterEvent, PistolControl},
-    CharacterPartEvent,
+    CharacterPartEvent, ConnectivityRoot, LeftArmController, RightArmController,
 };
 pub fn attach_pistol(
     mut reader: EventReader<AttachPistolToCharacterEvent>,
     mut writer: EventWriter<CharacterPartEvent>,
     query: Query<(&PistolControl, &VelloCollider)>,
+    q_p: Query<&VelloParticle>,
+    q_controller: Query<(&LeftArmController, &RightArmController)>,
 ) {
     for item in reader.read() {
         let pivot = query.get(item.pistol).unwrap();
+        let (controller_left, controller_right) = q_controller.get(item.character).unwrap();
+        let pos_elbow = q_p
+            .get(controller_left.particles[2])
+            .unwrap()
+            .particle_init
+            .pos;
+        let pos_wrist = q_p
+            .get(controller_left.particles[3])
+            .unwrap()
+            .particle_init
+            .pos;
+        let length = (pos_wrist - pos_elbow).length();
         writer.write(CharacterPartEvent::RegisterPart {
             character: item.character,
             entity: item.pistol,
