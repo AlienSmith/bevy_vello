@@ -17,7 +17,10 @@ use vello::{
     kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
-use vello_physics::{utility::BalancedCoreFrame, FRAME_PARTICLES_COUNT};
+use vello_physics::{
+    utility::{vector2_to_kurbo_point, BalancedCoreFrame},
+    FRAME_PARTICLES_COUNT,
+};
 #[inline]
 fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vec2 {
     Vec2::new(v.x, -v.y)
@@ -55,7 +58,11 @@ pub fn update_collider_from_soft_body(
     constraint_world: Res<VelloConstraintWorld>,
 ) {
     constraint_world.data.get_colliders_from_soft_body(
-        |index: Entity, path: BezPath, affine: Affine, rect: kurbo::Rect, frame: BezPath| {
+        |index: Entity,
+         path: BezPath,
+         affine: Affine,
+         rect: kurbo::Rect,
+         frame: [Vec2; FRAME_PARTICLES_COUNT]| {
             if let Ok((mut collider, mut transform)) = query.get_mut(index) {
                 let target_matrix = affine_to_mat4(affine);
                 let temp = Transform::from_matrix(target_matrix);
@@ -63,7 +70,7 @@ pub fn update_collider_from_soft_body(
                 collider.soft_body_global_transform = temp;
                 collider.shape = path;
                 collider.aabb = rect;
-                collider.shape_frame = frame;
+                collider.pos_frame = frame;
             }
         },
     );
@@ -202,20 +209,32 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             &c.shape,
         );
 
+        let affine = mat4_to_affine(transform.compute_matrix());
+        let transform = Affine::translate(affine.translation()) * affine.inverse();
+
+        let mut frame = vec![];
+        let temp = c.pos_frame[0];
+        let point = vector2_to_kurbo_point(&temp);
+        let p0 = PathEl::MoveTo(point);
+        frame.push(p0);
+        for i in 1..c.pos_frame.len() {
+            let temp = c.pos_frame[i];
+            frame.push(PathEl::LineTo(vector2_to_kurbo_point(&temp)));
+        }
+        frame.push(PathEl::LineTo(point));
+
         s.stroke(
             &Stroke::new(1.0),
-            Affine::IDENTITY,
+            transform,
             GlowColor {
                 color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.9),
                 glow: 5.0,
             },
             None,
-            &c.shape_frame.to_path(0.1),
+            &frame.into_path(0.1),
         );
 
         if c.is_selected {
-            let affine = mat4_to_affine(transform.compute_matrix());
-            let transform = Affine::translate(affine.translation()) * affine.inverse();
             s.stroke(
                 &Stroke::new(1.0),
                 transform,

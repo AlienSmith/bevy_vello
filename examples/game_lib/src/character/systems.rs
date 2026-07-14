@@ -181,62 +181,58 @@ fn solve_aim_ik(
     prla_local: Vec2,
     upper_len: f32,
     forearm_len: f32,
-    weapon_offset_angle: f32,
+    weapon_offset_y: f32, // The parallel vertical offset
 ) -> (Vec2, Vec2) {
-    // Current absolute shoulder angle (upper arm direction in local space)
+    // 1. Get current angles to determine the current orientation of the offset
     let upper_dir = p13_local - p12_local;
     let current_theta1 = upper_dir.y.atan2(upper_dir.x);
 
-    // Current relative elbow angle (signed angle from upper arm to forearm)
     let forearm_dir = prla_local - p13_local;
     let cross = upper_dir.x * forearm_dir.y - upper_dir.y * forearm_dir.x;
     let dot = upper_dir.dot(forearm_dir);
     let current_theta2 = cross.atan2(dot);
 
-    // Target in local space relative to shoulder
-    let target_local = local_target - p12_local;
+    // Current absolute forearm pointing direction
+    let current_forearm_angle = current_theta1 + current_theta2;
+
+    // 2. Calculate the perpendicular normal vector to the forearm
+    // For a direction (cos, sin), the perpendicular normal is (-sin, cos)
+    let (sin_f, cos_f) = current_forearm_angle.sin_cos();
+    let forearm_normal = Vec2::new(-sin_f, cos_f);
+
+    // 3. Shift the target to create a "Virtual Target" for the forearm bone
+    // If the gun is offset up (+y), the forearm bone must aim down (-y) relative to the target
+    let virtual_target = local_target - forearm_normal * weapon_offset_y;
+
+    // =========================================================================
+    // 4. Run your exact working IK logic using `virtual_target` instead of `local_target`
+    // =========================================================================
+    let target_local = virtual_target - p12_local;
     let r = target_local.length();
+    let alpha = target_local.y.atan2(target_local.x);
 
-    // Apply weapon offset: rotate the target direction by -weapon_offset_angle
-    let (sin_off, cos_off) = (-weapon_offset_angle).sin_cos();
-    let aim_target_rotated = Vec2::new(
-        target_local.x * cos_off - target_local.y * sin_off,
-        target_local.x * sin_off + target_local.y * cos_off,
-    );
+    if r < 1e-4 {
+        return (p13_local, prla_local);
+    }
 
-    // Solve forearm alignment using Lagrange multipliers
-    // Constraint: f(θ1, θ2) = sin((θ1 + θ2 - α)/2) - (l1/r) * sin(θ2) = 0
-    // where α = angle of the (rotated) target from shoulder
-    //
-    // We use sin(Δ/2) instead of sin(Δ) to eliminate a spurious root. The equation
-    // sin(Δ) = 0 has two roots in [-π, π]: Δ = 0 (forearm points AT target) and
-    // Δ = π (forearm points AWAY). When the target is behind the elbow, the solver
-    // can settle on Δ = π, keeping the forearm pointing 180° away from the target.
-    // Using sin(Δ/2) = 0 has a single root at Δ = 0, since sin(π/2) = 1 ≠ 0.
-    let alpha = aim_target_rotated.y.atan2(aim_target_rotated.x);
-    let half_delta = (current_theta1 + current_theta2 - alpha) * 0.5;
+    let mut angle_diff = current_forearm_angle - alpha;
+    angle_diff = (angle_diff + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI)
+        - std::f32::consts::PI;
+
+    let half_delta = angle_diff * 0.5;
     let (sin_half, cos_half) = half_delta.sin_cos();
-    let f_val = if r > 1e-6 {
-        sin_half - (upper_len / r) * current_theta2.sin()
-    } else {
-        sin_half
-    };
+    let (sin_t2, cos_t2) = current_theta2.sin_cos();
 
-    // Jacobians: d(sin(Δ/2))/dθ = (1/2)·cos(Δ/2)
-    let j_half = 0.5 * cos_half;
-    let j1 = j_half;
-    let j2 = if r > 1e-6 {
-        j_half - (upper_len / r) * current_theta2.cos()
-    } else {
-        j_half
-    };
+    let f_val = sin_half - (upper_len / r) * sin_t2;
 
-    // Equal weights for both joints (principle of least action)
+    let j1 = 0.5 * cos_half;
+    let j2 = 0.5 * cos_half - (upper_len / r) * cos_t2;
+
     let w1 = 1.0;
     let w2 = 1.0;
 
-    // Lagrange multiplier
     let denominator = (j1 * j1) / w1 + (j2 * j2) / w2;
+
     let (desired_theta1, desired_theta2) = if denominator.abs() > 1e-6 {
         let lambda = -f_val / denominator;
         let delta_theta1 = lambda * (j1 / w1);
@@ -246,19 +242,14 @@ fn solve_aim_ik(
         (current_theta1, current_theta2)
     };
 
-    // Compute desired positions from angles
+    // 5. Reconstruct final positions
     let (sin1, cos1) = desired_theta1.sin_cos();
-    let desired_upper_dir = Vec2::new(cos1, sin1);
-    let desired_p13_local = p12_local + desired_upper_dir * upper_len;
+    let desired_p13 = p12_local + Vec2::new(cos1, sin1) * upper_len;
 
-    let (sin2, cos2) = desired_theta2.sin_cos();
-    let desired_forearm_dir = Vec2::new(
-        desired_upper_dir.x * cos2 - desired_upper_dir.y * sin2,
-        desired_upper_dir.x * sin2 + desired_upper_dir.y * cos2,
-    );
-    let desired_prla_local = desired_p13_local + desired_forearm_dir * forearm_len;
+    let (sin12, cos12) = (desired_theta1 + desired_theta2).sin_cos();
+    let desired_prla = desired_p13 + Vec2::new(cos12, sin12) * forearm_len;
 
-    (desired_p13_local, desired_prla_local)
+    (desired_p13, desired_prla)
 }
 
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
@@ -358,16 +349,14 @@ fn calculate_arm_ik(
             forearm_len,
             config.bend_sign,
         ),
-        IkMode::Aim {
-            weapon_offset_angle,
-        } => solve_aim_ik(
+        IkMode::Aim { weapon_offset_y } => solve_aim_ik(
             local_target,
             p12_local,
             p13_local,
             prla_local,
             upper_len,
             forearm_len,
-            *weapon_offset_angle,
+            *weapon_offset_y,
         ),
     };
 

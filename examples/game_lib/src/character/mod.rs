@@ -50,12 +50,8 @@ pub enum IkMode {
     /// Position-based IK: place wrist at target (law of cosines).
     Reach,
     /// Direction-based IK: aim forearm at target (least-action solver).
-    Aim {
-        /// Angular offset of the weapon barrel from the forearm direction (radians).
-        /// 0.0 = weapon aligned with forearm.
-        /// Positive = weapon rotated CCW from forearm.
-        weapon_offset_angle: f32,
-    },
+    /// the assumption is the aim direction and elbow to arm would be alined but offset vertically against the aim direction
+    Aim { weapon_offset_y: f32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +125,7 @@ impl Default for ArmConfig {
             shape_matching_compliance: 0.01,
             shape_matching_damping: 0.1,
             bend_sign: -1.0,
-            ik_mode: IkMode::Reach,
+            ik_mode: IkMode::Disabled,
         }
     }
 }

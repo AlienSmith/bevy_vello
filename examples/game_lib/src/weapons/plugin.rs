@@ -1,7 +1,10 @@
 use bevy::prelude::*;
 
 use crate::{
-    weapons::{system::attach_pistol, AttachPistolToCharacterEvent},
+    weapons::{
+        system::{attach_pistol, update_pistol_aim},
+        AttachPistolToCharacterEvent,
+    },
     GameLabSystems,
 };
 
@@ -14,6 +17,7 @@ impl Plugin for WeaponPlugin {
         app.add_systems(
             Update,
             attach_pistol.in_set(GameLabSystems::WriteCharacterPartEvent),
-        );
+        )
+        .add_systems(Update, update_pistol_aim);
     }
 }

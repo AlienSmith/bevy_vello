@@ -541,8 +541,6 @@ fn setup_entity(mut commands: Commands) {
 fn setup_pistol(
     mut commands: Commands,
     mut events: EventWriter<AttachPistolToCharacterEvent>,
-    svg_colliders: Res<SvgColliderAssetManager>,
-    custom_assets: Res<Assets<SvgColliderAsset>>,
     character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
     mut pistol_state: ResMut<PistolState>,
 ) {
@@ -573,8 +571,9 @@ fn setup_pistol(
                 soft_body_init_transform,
             },
             PistolControl {
-                wrist_binding_uv: Vec2::new(0.25, 0.75),
+                wrist_binding_uv: Vec2::new(0.15, 0.75),
                 gun_point_uv: Vec2::new(1.0, 0.125),
+                ..Default::default()
             },
         ))
         .id();
@@ -582,40 +581,6 @@ fn setup_pistol(
         character: character_entity,
         pistol: pistol_entity,
     });
-    // events.write(CharacterPartEvent::RegisterPart {
-    //     character: character_entity,
-    //     entity: pistol_entity,
-    //     path_id: "pistol".to_string(),
-    // });
-
-    // // Connect the pistol collider to PRLA via a bilinear joint.
-    // // The pistol collider entity is not yet known (it will be spawned by the
-    // // event handler in pass 1), so we use AddJoint which resolves
-    // // string path_ids ("PRLA", "pistol") from ConnectivityRoot in pass 2.
-    // // The connected entities are derived from the config's string path_ids.
-    // events.write(CharacterPartEvent::AddJoint {
-    //     character: character_entity,
-    //     path_id: "pistol_prla".to_string(),
-    //     config: ConnectionConstraintInitConfig::Bilinear(
-    //         "PRLA".to_string(),
-    //         "pistol".to_string(),
-    //         0.0,
-    //     ),
-    // });
-
-    // // Also connect the pistol collider to P13 (right arm elbow) via a bilinear
-    // // joint for additional stability.
-    // events.write(CharacterPartEvent::AddJoint {
-    //     character: character_entity,
-    //     path_id: "pistol_p13".to_string(),
-    //     config: ConnectionConstraintInitConfig::Bilinear(
-    //         "P13".to_string(),
-    //         "pistol".to_string(),
-    //         0.0,
-    //     ),
-    // });
-
-    // Mark the pistol as registered so UnregisterPart knows it exists.
     pistol_state.registered = true;
 }
 
@@ -961,8 +926,7 @@ fn player_movement(
     mouse_status: ResMut<MouseStatus>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut spine_q: Query<&mut SpineController>,
-    mut right_arm_q: Query<&mut RightArmController>,
-    mut left_arm_q: Query<&mut LeftArmController>,
+    mut pistol_q: Query<&mut PistolControl>,
     mut legacy_q: Query<&mut CharacterController>,
     mut pistol_state: ResMut<PistolState>,
     mut events: EventWriter<CharacterPartEvent>,
@@ -989,19 +953,12 @@ fn player_movement(
     }
 
     let target = mouse_status.world_pos;
-    if let Ok(mut arm) = right_arm_q.single_mut() {
-        arm.config.ik_mode = if keyboard_input.pressed(KeyCode::KeyC) {
-            IkMode::Aim {
-                weapon_offset_angle: 0.0,
-            }
+    if let Ok(mut arm) = pistol_q.single_mut() {
+        if keyboard_input.pressed(KeyCode::KeyC) {
+            arm.world_aim_trarget = Some(target);
         } else {
-            IkMode::Disabled
+            arm.world_aim_trarget = None;
         };
-        arm.target = target;
-    }
-    if let Ok(mut arm) = left_arm_q.single_mut() {
-        arm.config.ik_mode = IkMode::Disabled;
-        arm.target = target;
     }
 
     // Legacy: keep CharacterController in sync for any old systems still reading it.

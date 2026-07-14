@@ -105,9 +105,8 @@ pub struct SimpleBroadPhase {
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
-    pub(crate) shape_frame: BezPath,
+    pub(crate) pos_frame: [Vec2; FRAME_PARTICLES_COUNT],
     pub(crate) aabb: kurbo::Rect, //aabb will only take the effect of position ignoring entity rotation and scale.
-    pub(crate) initial_scale: Vec2,
     pub(crate) initial_velocity: Vec2,
     pub(crate) _inverse_mass: f32,
     pub(crate) debug_color: peniko::Brush,
@@ -119,6 +118,7 @@ pub struct VelloCollider {
     pub(crate) collision_group: u32, //item in the same collision group won't collide against each other
     pub collision_cooled_down: f32,
     pub is_selected: bool,
+    pub initial_scale: Vec2,
 }
 
 impl VelloCollider {
@@ -145,7 +145,7 @@ impl VelloCollider {
         let scale_y = (aabb.y1 - aabb.x1) as f32 * transform.scale.y;
         Self {
             shape: path.clone(),
-            shape_frame: frame_path.clone(),
+            pos_frame: Default::default(),
             aabb: *aabb,
             initial_velocity,
             _inverse_mass: inverse_mass,
@@ -175,6 +175,7 @@ impl VelloCollider {
 use crossbeam_channel::{bounded, Receiver, Sender};
 pub use vello_physics::CollisionConstraintConfig;
 pub use vello_physics::SoftBodyInitConfig;
+use vello_physics::FRAME_PARTICLES_COUNT;
 
 use crate::collision::broad_phase::BroadPhaseSimple;
 
