@@ -57,41 +57,40 @@ use vello_physics::{
 //     pub entity: Entity,
 //     pub impulse: Vec2,
 // }
-
+//in vello space
 #[derive(Event)]
 pub struct ColliderExternalImpulseEvent {
-    pub filter: fn(Vec<ParticleInfo>, FilterData) -> Vec<vello_physics::soft_body::ExternalForce>,
     pub entity: Entity,
-    pub filter_data: FilterData,
+    pub impulse: [Vec2; FRAME_PARTICLES_COUNT],
 }
-
+//in vello space
 #[derive(Event)]
 pub struct CharacterPivotForceEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,
     pub force: Vec2,
 }
-
+//in vello space
 #[derive(Event)]
 pub struct CharacterFrameForceEvent {
     pub character_entity: Entity,
     pub forces: Vec<Vec2>,
 }
-
+//in vello space
 #[derive(Event)]
 pub struct CharacterPivotVelocityEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,
     pub velocity: Vec2,
 }
-
+//in vello space
 #[derive(Event)]
 pub struct CharacterAngularConstraintEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,
     pub config: AngularConstraintConfig,
 }
-
+//in vello space
 #[derive(Event)]
 pub struct CharacterPivotPositionEvent {
     pub character_entity: Entity,

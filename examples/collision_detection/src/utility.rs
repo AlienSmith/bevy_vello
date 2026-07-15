@@ -13,8 +13,9 @@ use bevy_vello::{
     integrations::{
         particles::Particle,
         physics::{
-            ColliderExternalImpulseEvent, ConnectionInitConfig, ExternalForce, FilterData,
-            ParticleInfo, VelloJoint, VelloParticle,
+            ColliderExternalImpulseEvent, ConnectionInitConfig,
+            ExternalForce::{self, Impulse},
+            FilterData, ParticleInfo, VelloJoint, VelloParticle,
         },
     },
     vello::{
@@ -495,15 +496,12 @@ pub fn update_collider_from_mouse(
     if status.applied_impulse != Vec2::ZERO {
         match effect {
             ExteralEffectType::DragFrameAll => {
-                let drag_filter = drag_all_particles;
-
+                let impulse = status.applied_impulse * ui_state.e_config.scale;
+                let vello_impulse = Vec2::new(impulse.x, -impulse.y);
                 if let Some(entity) = &status.selected {
                     force_on_frame_events.write(ColliderExternalImpulseEvent {
-                        filter: drag_filter,
                         entity: *entity,
-                        filter_data: FilterData {
-                            impulse: status.applied_impulse * ui_state.e_config.scale,
-                        },
+                        impulse: [vello_impulse; 4],
                     });
                     status.applied_impulse = Vec2::ZERO
                 }

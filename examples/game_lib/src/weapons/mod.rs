@@ -40,6 +40,9 @@ pub struct PistolControl {
 
     pub last_fire_time: f32,
     pub fire_cool_down: f32,
+
+    pub recoil_kickup: f32,
+    pub recoil_kick_scale: f32,
 }
 
 impl Default for PistolControl {
@@ -51,6 +54,8 @@ impl Default for PistolControl {
             enable_aim_line: true,
             last_fire_time: 0.0,
             fire_cool_down: 0.5,
+            recoil_kickup: 0.5,
+            recoil_kick_scale: 300.0,
         }
     }
 }

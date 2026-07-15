@@ -212,7 +212,7 @@ pub struct CollisionResults {
 
 pub use vello_physics::utility::generate_uvs;
 pub use vello_physics::utility::path_to_ccw_quad_path;
-
+//in bevy space use a y up x right coordinate.
 #[derive(Event, Debug, Clone)]
 pub struct VelloCollisionEvent {
     pub entity_a: Entity,

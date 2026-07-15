@@ -85,9 +85,12 @@ pub fn apply_explicit_impulse_on_softbody(
             .data
             .get_all_frame_info(event.entity.clone())
         {
-            for item in (event.filter)(particles, event.filter_data) {
-                constraint_world.data.add_external_force(event.entity, item);
-            }
+            particles.iter().zip(event.impulse).for_each(|(p, i)| {
+                constraint_world.data.add_external_force(
+                    event.entity,
+                    vello_physics::soft_body::ExternalForce::Impulse(p.index, i.x, i.y),
+                );
+            });
         }
     }
 }

@@ -3,15 +3,15 @@ use std::ops::Mul;
 use bevy::{prelude::*, tasks::block_on, transform};
 use bevy_egui::egui::Key::W;
 use bevy_vello::{
-    integrations::physics::VelloParticle, mat4_to_affine, VelloCollider, VelloScene,
-    VelloSceneBundle,
+    integrations::physics::{ColliderExternalImpulseEvent, VelloParticle},
+    mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
 use vello::{
     kurbo::{Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
 use vello_physics::{
-    utility::{bilinear_reconstruct, vector2_to_kurbo_point},
+    utility::{bilinear_distribute, bilinear_reconstruct, vector2_to_kurbo_point},
     CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
 };
 
@@ -142,12 +142,13 @@ pub fn update_pistol_aim(
 pub fn process_fire_event(
     mut commands: Commands,
     mut reader: EventReader<FireEvent>,
-    mut pistol_q: Query<(&mut PistolControl, &VelloCollider)>,
+    mut pistol_q: Query<(Entity, &mut PistolControl, &VelloCollider)>,
+    mut writer: EventWriter<ColliderExternalImpulseEvent>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs();
     for fire in reader.read() {
-        if let Ok((mut control, collider)) = pistol_q.get_mut(fire.weapon) {
+        if let Ok((entity, mut control, collider)) = pistol_q.get_mut(fire.weapon) {
             if (control.last_fire_time + control.fire_cool_down) > now {
                 continue;
             }
@@ -191,6 +192,20 @@ pub fn process_fire_event(
                     Bullet,
                 ))
                 .observe(on_collision_bullet);
+            let back = -x_ray;
+            let up = Vec2::new(x_ray.y, -x_ray.x);
+            let recoil =
+                (back + control.recoil_kickup * up).normalize() * control.recoil_kick_scale;
+            let weights = bilinear_distribute(control.gun_point_uv);
+            writer.write(ColliderExternalImpulseEvent {
+                entity,
+                impulse: [
+                    recoil * weights.x,
+                    recoil * weights.y,
+                    recoil * weights.z,
+                    recoil * weights.w,
+                ],
+            });
         }
     }
 }
