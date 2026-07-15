@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_vello::integrations::physics::VelloParticle;
 
 use crate::{character::Connectivity, ConnectivityRoot, RightArmController, StringPool};
+mod observer;
 pub mod plugin;
 mod system;
 // ---------------------------------------------------------------------------

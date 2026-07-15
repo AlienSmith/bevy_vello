@@ -18,7 +18,10 @@ use vello_physics::{
 use crate::{
     character::Connectivity,
     utility::mat4_to_affine2,
-    weapons::{AttachPistolToCharacterEvent, Bullet, FireEvent, PistolControl},
+    weapons::{
+        observer::on_collision_bullet, AttachPistolToCharacterEvent, Bullet, FireEvent,
+        PistolControl,
+    },
     CharacterPartEvent, ColliderRoot, ConnectivityRoot, LeftArmController, RightArmController,
     StringPool,
 };
@@ -168,24 +171,26 @@ pub fn process_fire_event(
                 rotation: Quat::from_rotation_z(angle),
                 scale: Vec3::new(0.05, 0.05, 1.0),
             };
-            commands.spawn((
-                VelloSceneBundle {
-                    transform: init_bevy_transform,
-                    ..Default::default()
-                },
-                ColliderRoot {
-                    svg_asset_id: "ammo.collider.svg".to_string(),
-                    albedo_asset_id: "ammo_albedo.png".to_string(),
-                    normal_asset_id: "ammo_normal.png".to_string(),
-                    metallic: 0.9,
-                    roughness: 0.2,
-                    softbody_config: SoftBodyInitConfig::default(),
-                    collision_config: CollisionConstraintConfig::default(),
-                    soft_body_init_transform,
-                    initial_velocity: x_ray * 100.0,
-                },
-                Bullet,
-            ));
+            commands
+                .spawn((
+                    VelloSceneBundle {
+                        transform: init_bevy_transform,
+                        ..Default::default()
+                    },
+                    ColliderRoot {
+                        svg_asset_id: "ammo.collider.svg".to_string(),
+                        albedo_asset_id: "ammo_albedo.png".to_string(),
+                        normal_asset_id: "ammo_normal.png".to_string(),
+                        metallic: 0.9,
+                        roughness: 0.2,
+                        softbody_config: SoftBodyInitConfig::default(),
+                        collision_config: CollisionConstraintConfig::default(),
+                        soft_body_init_transform,
+                        initial_velocity: x_ray * 100.0,
+                    },
+                    Bullet,
+                ))
+                .observe(on_collision_bullet);
         }
     }
 }
