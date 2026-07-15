@@ -19,7 +19,7 @@ use vello::{
 };
 use vello_physics::{
     utility::{vector2_to_kurbo_point, BalancedCoreFrame},
-    FRAME_PARTICLES_COUNT,
+    Particle, FRAME_PARTICLES_COUNT,
 };
 #[inline]
 fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vec2 {
@@ -62,7 +62,7 @@ pub fn update_collider_from_soft_body(
          path: BezPath,
          affine: Affine,
          rect: kurbo::Rect,
-         frame: [Vec2; FRAME_PARTICLES_COUNT]| {
+         frame_particles: [Particle; FRAME_PARTICLES_COUNT]| {
             if let Ok((mut collider, mut transform)) = query.get_mut(index) {
                 let target_matrix = affine_to_mat4(affine);
                 let temp = Transform::from_matrix(target_matrix);
@@ -70,7 +70,7 @@ pub fn update_collider_from_soft_body(
                 collider.soft_body_global_transform = temp;
                 collider.shape = path;
                 collider.aabb = rect;
-                collider.pos_frame = frame;
+                collider.frame_particles = frame_particles;
             }
         },
     );
@@ -200,6 +200,7 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             true,
         );
 
+        //TODO: maybe move these visualize logic to visualizer instead of put them here.
         //draw a outline to make the body parts more obvious
         s.stroke(
             &Stroke::new(2.0),
@@ -210,22 +211,25 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
         );
 
         let affine = mat4_to_affine(transform.compute_matrix());
-        let transform = Affine::translate(affine.translation()) * affine.inverse();
+        //back to world space
+        let affine_inverse = affine.inverse();
+        //filtering out rotation
+        let transform = Affine::translate(affine.translation()) * affine_inverse;
 
         let mut frame = vec![];
-        let temp = c.pos_frame[0];
+        let temp = c.frame_particles[0].pos;
         let point = vector2_to_kurbo_point(&temp);
         let p0 = PathEl::MoveTo(point);
         frame.push(p0);
-        for i in 1..c.pos_frame.len() {
-            let temp = c.pos_frame[i];
+        for i in 1..c.frame_particles.len() {
+            let temp = c.frame_particles[i].pos;
             frame.push(PathEl::LineTo(vector2_to_kurbo_point(&temp)));
         }
         frame.push(PathEl::LineTo(point));
 
         s.stroke(
             &Stroke::new(1.0),
-            transform,
+            affine_inverse,
             GlowColor {
                 color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.9),
                 glow: 5.0,
@@ -250,12 +254,6 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
 }
 
 /////The following logic Works With softbody connection
-////
-///
-/// //
-///
-///
-
 pub fn generate_connection(
     query_r: Query<(Entity, &VelloCharacterPhysicsRoot), Added<VelloCharacterPhysicsRoot>>,
     query_p: Query<(Entity, &VelloParticle), Added<VelloParticle>>,
@@ -298,31 +296,6 @@ pub fn generate_connection(
             .unwrap();
     }
 }
-//deprecated and unsafe for not able to obtain component after removal.
-//use component hooks instead.
-// pub fn remove_connection(
-//     query_p: Query<&VelloParticle>,
-//     query_c: Query<&VelloJoint>,
-//     mut removed_r: RemovedComponents<VelloCharacterPhysicsRoot>,
-//     mut removed_c: RemovedComponents<VelloJoint>,
-//     mut removed_p: RemovedComponents<VelloParticle>,
-//     mut constraint_world: ResMut<VelloConstraintWorld>,
-// ) {
-//     removed_c.read().into_iter().for_each(|e| {
-//         let character = query_p.get(e).unwrap().root_entity;
-//         let group = constraint_world.data.get_group_mut(character).unwrap();
-//         group.remove_connect_constraint(&e);
-//     });
-//     removed_p.read().into_iter().for_each(|e| {
-//         let character = query_c.get(e).unwrap().root_entity;
-//         let group = constraint_world.data.get_group_mut(character).unwrap();
-//         group.remove_connect_particle(&e);
-//     });
-//     removed_r
-//         .read()
-//         .into_iter()
-//         .for_each(|e| constraint_world.data.remove_group(e));
-// }
 
 pub fn update_connection_particles(
     mut query: Query<(Entity, &mut VelloParticle)>,
