@@ -21,10 +21,10 @@ pub fn assemble_collider(
     images: Res<VelloImageAssetManager>,
     image_assets: Res<Assets<VelloImageAsset>>,
     svg_assets: Res<Assets<SvgColliderAsset>>,
-    mut query: Query<(&ColliderRoot, &Transform, &mut VelloScene)>,
+    mut query: Query<(&ColliderRoot, &mut VelloScene)>,
 ) {
     let root_entity = trigger.target();
-    let (config, transform, mut vllo_scene) = query.get_mut(root_entity).unwrap();
+    let (config, mut vllo_scene) = query.get_mut(root_entity).unwrap();
     //make brush
     let albedo = image_assets
         .get(&images.get_index_from_name(&config.albedo_asset_id).unwrap())
@@ -53,15 +53,7 @@ pub fn assemble_collider(
     let shape = path_to_ccw_quad_path(&p);
     let uvs = Some(generate_uvs(&shape, &rect));
     //make rendering sence
-    let mut scene: VelloScene = VelloScene::default();
-    scene.fill(
-        peniko::Fill::NonZero,
-        kurbo::Affine::default(),
-        &brush,
-        None,
-        &shape,
-    );
-    *vllo_scene = scene;
+    vllo_scene.reset();
     //make collider
     let frame_path = rect.to_path(0.1);
 
@@ -69,7 +61,7 @@ pub fn assemble_collider(
         &shape,
         &frame_path,
         &rect,
-        Vec2::new(0.0, 0.0),
+        config.initial_velocity,
         brush,
         config.softbody_config.total_inv_mass,
         true,

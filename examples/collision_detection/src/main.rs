@@ -53,7 +53,7 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    weapons::{AttachPistolToCharacterEvent, PistolControl},
+    weapons::{AttachPistolToCharacterEvent, FireEvent, PistolControl},
     CharacterController, CharacterPartEvent, CharacterRoot, ColliderRoot, ConnectivityRoot,
     GameLabSystems, IkMode, LeftArmController, RightArmController, SpineController,
     VelloCharacterPlugin,
@@ -569,6 +569,7 @@ fn setup_pistol(
                 softbody_config: SoftBodyInitConfig::default(),
                 collision_config: CollisionConstraintConfig::default(),
                 soft_body_init_transform,
+                initial_velocity: Vec2::ZERO,
             },
             PistolControl {
                 wrist_binding_uv: Vec2::new(0.15, 0.75),
@@ -926,10 +927,11 @@ fn player_movement(
     mouse_status: ResMut<MouseStatus>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut spine_q: Query<&mut SpineController>,
-    mut pistol_q: Query<&mut PistolControl>,
+    mut pistol_q: Query<(Entity, &mut PistolControl)>,
     mut legacy_q: Query<&mut CharacterController>,
     mut pistol_state: ResMut<PistolState>,
     mut events: EventWriter<CharacterPartEvent>,
+    mut fire: EventWriter<FireEvent>,
     character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
 ) {
     let mut direction = Vec2::ZERO;
@@ -953,12 +955,15 @@ fn player_movement(
     }
 
     let target = mouse_status.world_pos;
-    if let Ok(mut arm) = pistol_q.single_mut() {
+    if let Ok((entity, mut arm)) = pistol_q.single_mut() {
         if keyboard_input.pressed(KeyCode::KeyC) {
             arm.world_aim_trarget = Some(target);
         } else {
             arm.world_aim_trarget = None;
         };
+        if keyboard_input.pressed(KeyCode::KeyF) {
+            fire.write(FireEvent { weapon: entity });
+        }
     }
 
     // Legacy: keep CharacterController in sync for any old systems still reading it.

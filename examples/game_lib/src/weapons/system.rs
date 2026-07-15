@@ -1,21 +1,26 @@
 use std::ops::Mul;
 
-use bevy::{prelude::*, transform};
-use bevy_vello::{integrations::physics::VelloParticle, mat4_to_affine, VelloCollider, VelloScene};
+use bevy::{prelude::*, tasks::block_on, transform};
+use bevy_egui::egui::Key::W;
+use bevy_vello::{
+    integrations::physics::VelloParticle, mat4_to_affine, VelloCollider, VelloScene,
+    VelloSceneBundle,
+};
 use vello::{
     kurbo::{Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
 use vello_physics::{
     utility::{bilinear_reconstruct, vector2_to_kurbo_point},
-    ConnectionConstraintInitConfig,
+    CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
 };
 
 use crate::{
     character::Connectivity,
     utility::mat4_to_affine2,
-    weapons::{AttachPistolToCharacterEvent, PistolControl},
-    CharacterPartEvent, ConnectivityRoot, LeftArmController, RightArmController, StringPool,
+    weapons::{AttachPistolToCharacterEvent, Bullet, FireEvent, PistolControl},
+    CharacterPartEvent, ColliderRoot, ConnectivityRoot, LeftArmController, RightArmController,
+    StringPool,
 };
 pub fn attach_pistol(
     mut reader: EventReader<AttachPistolToCharacterEvent>,
@@ -114,7 +119,6 @@ pub fn update_pistol_aim(
             let l_r = affine.transform_point2(gun_rear_world_pos);
             let ray = (l_p - l_r).normalize();
             let end = l_p + ray * 1000.0;
-            info!("draw aim line {:?}, {:?}", l_p, l_r);
             let mut frame = vec![];
             frame.push(PathEl::MoveTo(vector2_to_kurbo_point(&l_p)));
             frame.push(PathEl::LineTo(vector2_to_kurbo_point(&end)));
@@ -128,6 +132,60 @@ pub fn update_pistol_aim(
                 None,
                 &frame.into_path(0.1),
             );
+        }
+    }
+}
+
+pub fn process_fire_event(
+    mut commands: Commands,
+    mut reader: EventReader<FireEvent>,
+    mut pistol_q: Query<(&mut PistolControl, &VelloCollider)>,
+    time: Res<Time>,
+) {
+    let now = time.elapsed_secs();
+    for fire in reader.read() {
+        if let Ok((mut control, collider)) = pistol_q.get_mut(fire.weapon) {
+            if (control.last_fire_time + control.fire_cool_down) > now {
+                continue;
+            }
+            control.last_fire_time = now;
+            let frame_position: Vec<Vec2> =
+                collider.frame_particles.iter().map(|p| p.pos).collect();
+            //interpolate the vello world position
+            let w_p = bilinear_reconstruct(control.gun_point_uv, &frame_position.as_slice());
+            let w_r = bilinear_reconstruct(
+                Vec2::new(control.wrist_binding_uv.x, control.gun_point_uv.y),
+                &frame_position.as_slice(),
+            );
+            // convert to bevy world position
+            let b_p = Vec2::new(w_p.x, -w_p.y);
+            let b_r = Vec2::new(w_r.x, -w_r.y);
+            let x_ray = (b_p - b_r).normalize();
+            let angle = x_ray.y.atan2(x_ray.x);
+            let init_bevy_transform = Transform::from_translation(b_p.extend(0.0));
+            let soft_body_init_transform = Transform {
+                translation: b_p.extend(0.0),
+                rotation: Quat::from_rotation_z(angle),
+                scale: Vec3::new(0.05, 0.05, 1.0),
+            };
+            commands.spawn((
+                VelloSceneBundle {
+                    transform: init_bevy_transform,
+                    ..Default::default()
+                },
+                ColliderRoot {
+                    svg_asset_id: "ammo.collider.svg".to_string(),
+                    albedo_asset_id: "ammo_albedo.png".to_string(),
+                    normal_asset_id: "ammo_normal.png".to_string(),
+                    metallic: 0.9,
+                    roughness: 0.2,
+                    softbody_config: SoftBodyInitConfig::default(),
+                    collision_config: CollisionConstraintConfig::default(),
+                    soft_body_init_transform,
+                    initial_velocity: x_ray * 100.0,
+                },
+                Bullet,
+            ));
         }
     }
 }

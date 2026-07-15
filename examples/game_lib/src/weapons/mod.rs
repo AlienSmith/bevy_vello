@@ -36,6 +36,9 @@ pub struct PistolControl {
     pub world_aim_trarget: Option<Vec2>,
     ///
     pub enable_aim_line: bool,
+
+    pub last_fire_time: f32,
+    pub fire_cool_down: f32,
 }
 
 impl Default for PistolControl {
@@ -45,6 +48,8 @@ impl Default for PistolControl {
             gun_point_uv: Vec2::ZERO,
             world_aim_trarget: None,
             enable_aim_line: true,
+            last_fire_time: 0.0,
+            fire_cool_down: 0.5,
         }
     }
 }
@@ -54,3 +59,11 @@ pub struct AttachPistolToCharacterEvent {
     pub character: Entity,
     pub pistol: Entity,
 }
+
+#[derive(Event)]
+pub struct FireEvent {
+    pub weapon: Entity,
+}
+
+#[derive(Component, Default, Clone, Copy)]
+pub struct Bullet;

@@ -102,6 +102,9 @@ pub struct SimpleBroadPhase {
 
 //Use the debug_color and soft_body_global_transform in here to initialize this entity, instead of using the transform and scene
 //in the VelloBundle.
+
+//at this point we only use the translation from bevy global transform. and since we are not allowed to modify the global transform
+//we need to make sure the item is initialized at the right location. otherwise the first frame of rendering is wrong.
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,

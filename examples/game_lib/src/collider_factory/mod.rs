@@ -14,4 +14,5 @@ pub struct ColliderRoot {
     pub softbody_config: SoftBodyInitConfig,
     pub collision_config: CollisionConstraintConfig,
     pub soft_body_init_transform: Transform,
+    pub initial_velocity: Vec2,
 }
