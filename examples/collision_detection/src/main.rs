@@ -27,7 +27,7 @@ use bevy::asset::AssetMetaCheck;
 use bevy_vello::{
     collision::{
         generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
-        SoftBodyInitConfig, VelloCollisionEvent, VelloGameCollisionEvent,
+        SoftBodyInitConfig, VelloCollisionEvent, VelloCollisionTrigger,
         VELLO_COLLISION_COOL_DOWN_TIME,
     },
     integrations::{
@@ -190,7 +190,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_from_ui.after(ui_example_system),
                 edge_pan_camera::update_edge_pan_camera,
                 (update_mouse, update_collider_from_mouse).chain(), //update_blood_particles.after(ui_example_system),
-                collision_response,
             )
                 .run_if(in_state(GameState::Game)),
         )
@@ -577,6 +576,7 @@ fn setup_pistol(
                 ..Default::default()
             },
         ))
+        .observe(on_collision_spawn_particle)
         .id();
     events.write(AttachPistolToCharacterEvent {
         character: character_entity,
@@ -875,52 +875,41 @@ pub fn add_light(mut commands: Commands) {
     },));
 }
 
-fn collision_response(
-    mut commands: Commands,
-    mut reader: EventReader<VelloGameCollisionEvent>,
-    ui_state: Res<UiState>,
-) {
-    if ui_state.spawn_particle_effect {
-        for item in reader.read() {
-            let pos = 0.5 * (item.collision_point_a + item.collision_point_b);
-            let mut scene = VelloScene::default();
-            scene.push_instance_with_transforms(&[]);
-            scene.fill(
-                peniko::Fill::NonZero,
-                kurbo::Affine::default(),
-                peniko::Color::rgba(1.0, 0.0, 0.0, 0.5),
-                None,
-                &kurbo::Circle::new((0.0, 0.0), 20.0),
-            );
-            scene.pop_instance();
+fn on_collision_spawn_particle(trigger: Trigger<VelloCollisionTrigger>, mut commands: Commands) {
+    let event = trigger.event();
+    let pos = event.collision_point;
+    let mut scene = VelloScene::default();
+    scene.push_instance_with_transforms(&[]);
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgba(1.0, 0.0, 0.0, 0.5),
+        None,
+        &kurbo::Circle::new((0.0, 0.0), 20.0),
+    );
+    scene.pop_instance();
 
-            commands.spawn((
-                VelloSceneBundle {
-                    scene,
-                    transform: Transform::from_translation(pos.extend(100.0)),
-                    ..Default::default()
-                },
-                ExplosionEffect::new(
-                    particles::GravityParticleConfig {
-                        gravity: Vec2::new(0.0, -98.0),
-                        drag: 0.0,
-                        persistent: false,
-                    },
-                    particles::BurstEmitterConfig {
-                        count: 100,
-                        speed_range: (10.0, 100.0),
-                        lifetime_range: (1.0, 1.2),
-                        origin: Vec2::new(0.0, 0.0),
-                    },
-                    500,
-                ),
-            ));
-            info!(
-                "spawn particles at {:?}, {:?}, normals {:?}, {:?}",
-                item.collision_point_a, item.collision_point_b, item.normal_a, item.normal_b
-            );
-        }
-    }
+    commands.spawn((
+        VelloSceneBundle {
+            scene,
+            transform: Transform::from_translation(pos.extend(100.0)),
+            ..Default::default()
+        },
+        ExplosionEffect::new(
+            particles::GravityParticleConfig {
+                gravity: Vec2::new(0.0, -98.0),
+                drag: 0.0,
+                persistent: false,
+            },
+            particles::BurstEmitterConfig {
+                count: 100,
+                speed_range: (10.0, 100.0),
+                lifetime_range: (1.0, 1.2),
+                origin: Vec2::new(0.0, 0.0),
+            },
+            500,
+        ),
+    ));
 }
 
 fn player_movement(

@@ -13,8 +13,8 @@ use crate::collision::RemovedColliders;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionEvent;
 use crate::collision::VelloCollisionScene;
+use crate::collision::VelloCollisionTrigger;
 use crate::collision::VelloCollisionWorld;
-use crate::collision::VelloGameCollisionEvent;
 use crate::integrations::svg_collider::SvgColliderPlugin;
 use bevy::prelude::*;
 use bevy::render::ExtractSchedule;
@@ -33,7 +33,7 @@ impl Plugin for VelloCollisionPlugin {
             .add_systems(ExtractSchedule, extract_collision_scene);
         app.add_plugins(SvgColliderPlugin)
             .add_event::<VelloCollisionEvent>()
-            .add_event::<VelloGameCollisionEvent>()
+            .add_event::<VelloCollisionTrigger>()
             .insert_resource(VelloCollisionWorld::default())
             .insert_resource(RemovedColliders::default())
             .insert_resource(VelloCollisionScene::default())

@@ -227,13 +227,12 @@ pub struct VelloCollisionEvent {
 
 //in bevy space use a y up x right coordinate.
 #[derive(Event, Debug, Clone)]
-pub struct VelloGameCollisionEvent {
-    pub entity_a: Entity,
-    pub entity_b: Entity,
-    pub collision_point_a: Vec2,
-    pub collision_point_b: Vec2,
-    pub normal_a: Vec2,
-    pub normal_b: Vec2,
+pub struct VelloCollisionTrigger {
+    pub entity_self: Entity,
+    pub entity_other: Entity,
+    pub collision_point: Vec2,
+    pub normal_self: Vec2,
+    pub normal_other: Vec2,
 }
 
 #[derive(Resource)]

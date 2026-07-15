@@ -5,8 +5,8 @@ use vello::{CollisionResult, CollisionScene};
 use crate::{
     collision::{
         CollisionCoolDownPairManager, CollisionResults, CollisionSceneState, GpuDataChannel,
-        RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld,
-        VelloGameCollisionEvent, VELLO_COLLISION_WORLD_RATIO,
+        RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionTrigger,
+        VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -118,13 +118,12 @@ pub fn collision_event_dispatch(
 
 pub fn collision_event_redistribute(
     mut reader: EventReader<VelloCollisionEvent>,
-    mut writer: EventWriter<VelloGameCollisionEvent>,
+    mut commands: Commands,
     mut cool_down_manager: ResMut<CollisionCoolDownPairManager>,
     query: Query<&VelloCollider>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs();
-    let mut results: Vec<VelloGameCollisionEvent> = vec![];
     for event in reader.read() {
         let pos_a = event.collision_point_a;
         let pos_b = event.collision_point_b;
@@ -148,16 +147,29 @@ pub fn collision_event_redistribute(
         } else {
             cool_down_manager.pairs.insert(key, (now, gap));
         }
-        results.push(VelloGameCollisionEvent {
-            entity_a: event.entity_a,
-            entity_b: event.entity_b,
-            collision_point_a: pos_a,
-            collision_point_b: pos_b,
-            normal_a,
-            normal_b,
-        });
+        let collision_point = (pos_a + pos_b) * 0.5;
+        commands.trigger_targets(
+            VelloCollisionTrigger {
+                entity_self: event.entity_a,
+                entity_other: event.entity_b,
+                collision_point,
+                normal_self: event.collision_normal_a,
+                normal_other: event.collision_normal_b,
+            },
+            event.entity_a,
+        );
+        commands.trigger_targets(
+            VelloCollisionTrigger {
+                entity_self: event.entity_b,
+                entity_other: event.entity_a,
+                collision_point,
+                normal_self: event.collision_normal_b,
+                normal_other: event.collision_normal_b,
+            },
+            event.entity_b,
+        );
     }
-    writer.write_batch(results);
+
     //clean up the record where collision never happens again.
     if cool_down_manager.last_purge_time == 0.0 {
         cool_down_manager.last_purge_time = now;
