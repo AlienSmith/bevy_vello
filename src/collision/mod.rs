@@ -105,7 +105,7 @@ pub struct SimpleBroadPhase {
 #[derive(Clone, Default, Component)]
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
-    pub(crate) frame_particles: [Particle; FRAME_PARTICLES_COUNT], //particles are always in world space.
+    pub frame_particles: [Particle; FRAME_PARTICLES_COUNT], //particles are always in world space.
     pub(crate) aabb: kurbo::Rect, //use for coarse collision detection and actually in local space.
     pub(crate) initial_velocity: Vec2,
     pub(crate) _inverse_mass: f32,

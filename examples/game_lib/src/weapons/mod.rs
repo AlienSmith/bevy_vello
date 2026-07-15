@@ -34,6 +34,8 @@ pub struct PistolControl {
     pub gun_point_uv: Vec2,
     ///
     pub world_aim_trarget: Option<Vec2>,
+    ///
+    pub enable_aim_line: bool,
 }
 
 impl Default for PistolControl {
@@ -42,6 +44,7 @@ impl Default for PistolControl {
             wrist_binding_uv: Vec2::ZERO,
             gun_point_uv: Vec2::ZERO,
             world_aim_trarget: None,
+            enable_aim_line: true,
         }
     }
 }

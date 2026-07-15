@@ -187,9 +187,14 @@ pub fn update_constraint_world(
     }
 }
 
+pub fn reset_visuzlie_colliders(mut q: Query<&mut VelloScene, With<VelloCollider>>) {
+    for mut s in q.iter_mut() {
+        s.reset()
+    }
+}
+
 pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &GlobalTransform)>) {
     for (mut s, c, transform) in q.iter_mut() {
-        s.reset();
         s.fill_with_shadow_impl(
             peniko::Fill::NonZero,
             Affine::IDENTITY,
@@ -210,11 +215,7 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
             &c.shape,
         );
 
-        let affine = mat4_to_affine(transform.compute_matrix());
-        //back to world space
-        let affine_inverse = affine.inverse();
-        //filtering out rotation
-        let transform = Affine::translate(affine.translation()) * affine_inverse;
+        let affine = mat4_to_affine(transform.compute_matrix()).inverse();
 
         let mut frame = vec![];
         let temp = c.frame_particles[0].pos;
@@ -229,7 +230,7 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
 
         s.stroke(
             &Stroke::new(1.0),
-            affine_inverse,
+            affine,
             GlowColor {
                 color: peniko::Color::rgba(0.0, 1.0, 0.0, 0.9),
                 glow: 5.0,
@@ -241,7 +242,7 @@ pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &Globa
         if c.is_selected {
             s.stroke(
                 &Stroke::new(1.0),
-                transform,
+                Affine::IDENTITY,
                 GlowColor {
                     color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
                     glow: 5.0,

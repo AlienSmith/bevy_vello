@@ -1,5 +1,5 @@
 use bevy::{
-    app::{FixedUpdate, Plugin, PostUpdate},
+    app::{First, FixedUpdate, Plugin, PostUpdate},
     ecs::schedule::IntoScheduleConfigs,
     math::Vec2,
     time::{Fixed, Time},
@@ -11,8 +11,9 @@ use crate::{
         systems::{
             apply_explicit_impulse_on_connection_particle, apply_explicit_impulse_on_softbody,
             create_update_pivot_visualizer, generate_connection, generate_soft_body_for_collider,
-            make_collision_constraints, remove_soft_body, update_collider_from_soft_body,
-            update_connection_particles, update_constraint_world, visualize_colliders,
+            make_collision_constraints, remove_soft_body, reset_visuzlie_colliders,
+            update_collider_from_soft_body, update_connection_particles, update_constraint_world,
+            visualize_colliders,
         },
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
         CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
@@ -49,6 +50,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                 )
                     .chain()
                     .in_set(CollisionSystems::CollisionResponsePhysics),
-            );
+            )
+            .add_systems(First, reset_visuzlie_colliders);
     }
 }
