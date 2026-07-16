@@ -403,7 +403,7 @@ pub fn assemble_character(
             color: peniko::Color::PINK,
             glow: 1.0,
         });
-        let collision_group = 1;
+
         let entity = make_collision_shape(
             &mut commands,
             transform,
@@ -414,8 +414,9 @@ pub fn assemble_character(
             true,
             Some(item.softbody),
             Some(item.collision),
-            collision_group,
+            config.collision_group,
         );
+
         let collider_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
             item.path_id.to_string(),

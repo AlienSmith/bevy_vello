@@ -172,6 +172,7 @@ pub fn process_fire_event(
                 rotation: Quat::from_rotation_z(angle),
                 scale: Vec3::new(0.05, 0.05, 1.0),
             };
+            let softbody_config = SoftBodyInitConfig::default();
             commands
                 .spawn((
                     VelloSceneBundle {
@@ -184,10 +185,12 @@ pub fn process_fire_event(
                         normal_asset_id: "ammo_normal.png".to_string(),
                         metallic: 0.9,
                         roughness: 0.2,
-                        softbody_config: SoftBodyInitConfig::default(),
+                        softbody_config,
                         collision_config: CollisionConstraintConfig::default(),
                         soft_body_init_transform,
-                        initial_velocity: x_ray * 100.0,
+                        initial_velocity: x_ray * 500.0,
+                        collision_group: fire.projectile_collision_group,
+                        collision_inverse_mass: softbody_config.total_inv_mass,
                     },
                     Bullet,
                 ))

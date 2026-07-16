@@ -63,7 +63,7 @@ pub fn assemble_collider(
         &rect,
         config.initial_velocity,
         brush,
-        config.softbody_config.total_inv_mass,
+        config.collision_inverse_mass,
         true,
         uvs,
         Some(config.softbody_config),

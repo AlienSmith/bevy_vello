@@ -111,7 +111,7 @@ pub struct VelloCollider {
     pub frame_particles: [Particle; FRAME_PARTICLES_COUNT], //particles are always in world space.
     pub(crate) aabb: kurbo::Rect, //use for coarse collision detection and actually in local space.
     pub(crate) initial_velocity: Vec2,
-    pub(crate) _inverse_mass: f32,
+    pub(crate) collision_inverse_mass: f32,
     pub(crate) debug_color: peniko::Brush,
     pub(crate) is_soft_body: bool,
     pub(crate) uvs: Option<Vec<f32>>,
@@ -135,7 +135,7 @@ impl VelloCollider {
         aabb: &kurbo::Rect,
         initial_velocity: Vec2,
         color: peniko::Brush,
-        inverse_mass: f32,
+        collision_inverse_mass: f32,
         is_soft_body: bool,
         uvs: Option<Vec<f32>>,
         soft_body_init_config: Option<SoftBodyInitConfig>,
@@ -151,7 +151,7 @@ impl VelloCollider {
             frame_particles: Default::default(),
             aabb: *aabb,
             initial_velocity,
-            _inverse_mass: inverse_mass,
+            collision_inverse_mass,
             debug_color: color,
             is_soft_body,
             uvs,

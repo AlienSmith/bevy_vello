@@ -12,6 +12,7 @@ pub mod plugin;
 pub struct CharacterRoot {
     pub svg_asset_id: String,
     pub blueprint_asset_id: String,
+    pub collision_group: u32,
 }
 
 /// Events for runtime modification of a character's physics parts.

@@ -67,6 +67,15 @@ use crate::{
     },
 };
 
+const PLAYER_COLLISION_GROUP: u32 = 1;
+const ENEMY_COLLISION_GROUP: u32 = 2;
+
+#[derive(Component)]
+pub struct Player;
+
+#[derive(Component)]
+pub struct Enemy;
+
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum GameState {
     #[default]
@@ -528,15 +537,39 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                 CharacterRoot {
                     svg_asset_id: "v6.character.svg".to_owned(),
                     blueprint_asset_id: "v6.character.json".to_owned(),
+                    collision_group: PLAYER_COLLISION_GROUP,
                 },
                 CharacterController {
                     move_vector: Vec2::ZERO,
                     point_vector: Vec2::ZERO,
                     ..Default::default()
                 },
+                Player,
             ))
             .id(),
     );
+
+    commands.spawn((
+        VelloSceneBundle {
+            transform: Transform {
+                translation: Vec3::new(300.0, 0.0, 100.0),
+                scale: Vec3::new(0.5, 0.5, 1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        CharacterRoot {
+            svg_asset_id: "v6.character.svg".to_owned(),
+            blueprint_asset_id: "v6.character.json".to_owned(),
+            collision_group: ENEMY_COLLISION_GROUP,
+        },
+        CharacterController {
+            move_vector: Vec2::ZERO,
+            point_vector: Vec2::ZERO,
+            ..Default::default()
+        },
+        Enemy,
+    ));
 }
 
 /// Spawn a pistol collider and connect it to the character's PRLA particle
@@ -549,15 +582,15 @@ fn setup_pistol(
     mut pistol_state: ResMut<PistolState>,
 ) {
     // There is only one character — get its entity and ConnectivityRoot.
-    let (character_entity, _root) = character_q
-        .single()
-        .expect("expected exactly one character");
+    let (character_entity, _root) = character_q.get(pistol_state.character.unwrap()).unwrap();
 
     let soft_body_init_transform = Transform {
         translation: Vec3::new(325.0, -90.0, 0.0),
         rotation: Quat::from_rotation_z(0.0_f32.to_radians()),
         scale: Vec3::new(0.1, 0.1, 1.0),
     };
+
+    let softbody_config = SoftBodyInitConfig::default();
 
     let pistol_entity = commands
         .spawn((
@@ -570,10 +603,12 @@ fn setup_pistol(
                 normal_asset_id: "pistol_normal.png".to_string(),
                 metallic: 0.9,
                 roughness: 0.2,
-                softbody_config: SoftBodyInitConfig::default(),
+                softbody_config,
                 collision_config: CollisionConstraintConfig::default(),
                 soft_body_init_transform,
                 initial_velocity: Vec2::ZERO,
+                collision_group: PLAYER_COLLISION_GROUP,
+                collision_inverse_mass: softbody_config.total_inv_mass,
             },
             PistolControl {
                 wrist_binding_uv: Vec2::new(0.15, 0.75),
@@ -958,7 +993,10 @@ fn player_movement(
             pistol.world_aim_trarget = None;
         };
         if keyboard_input.pressed(KeyCode::KeyF) {
-            fire.write(FireEvent { weapon: entity });
+            fire.write(FireEvent {
+                weapon: entity,
+                projectile_collision_group: PLAYER_COLLISION_GROUP,
+            });
         }
     }
 
@@ -972,12 +1010,8 @@ fn player_movement(
     if keyboard_input.just_pressed(KeyCode::KeyV) && pistol_state.registered {
         info!("Player pressed V — unregistering pistol");
 
-        let (character_entity, _) = character_q
-            .single()
-            .expect("expected exactly one character");
-
         events.write(CharacterPartEvent::UnregisterPart {
-            character: character_entity,
+            character: pistol_state.character.unwrap(),
             path_id: "pistol".to_string(),
         });
         if let Ok(mut right) = arm_q.get_mut(pistol_state.character.unwrap()) {

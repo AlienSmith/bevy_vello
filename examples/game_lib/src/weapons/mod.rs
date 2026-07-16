@@ -69,6 +69,7 @@ pub struct AttachPistolToCharacterEvent {
 #[derive(Event)]
 pub struct FireEvent {
     pub weapon: Entity,
+    pub projectile_collision_group: u32, //this should be consistent with the user
 }
 
 #[derive(Component, Default, Clone, Copy)]

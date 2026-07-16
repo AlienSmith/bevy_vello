@@ -15,4 +15,7 @@ pub struct ColliderRoot {
     pub collision_config: CollisionConstraintConfig,
     pub soft_body_init_transform: Transform,
     pub initial_velocity: Vec2,
+
+    pub collision_group: u32,
+    pub collision_inverse_mass: f32, //this could be heavier to make collision more significient.
 }

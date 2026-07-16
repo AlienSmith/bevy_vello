@@ -118,7 +118,7 @@ pub fn make_collision_constraints(
             let mut inv_mass = 0.0;
             let mut velocity = Vec2::new(0.0, 0.0);
             if let Ok(item) = query.get(entity) {
-                inv_mass = item._inverse_mass;
+                inv_mass = item.collision_inverse_mass;
                 if item.is_soft_body() {
                     velocity = constraint_world
                         .data
