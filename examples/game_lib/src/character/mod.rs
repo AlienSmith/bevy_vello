@@ -210,6 +210,18 @@ impl Default for ArmController {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum WhichArm {
+    Left,
+    Right,
+}
+
+#[derive(Event)]
+pub struct ResetArmControlConstraintsEvent {
+    pub arm: WhichArm,
+    pub character: Entity,
+}
+
 #[derive(Component, Clone)]
 pub struct CharacterController {
     pub move_vector: Vec2,

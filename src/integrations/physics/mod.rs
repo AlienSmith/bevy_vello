@@ -106,6 +106,7 @@ pub struct VelloJoint {
     pub init_config: ConnectionConstraintInitConfig<Entity>,
     pub root_entity: Entity,
     pub constraint: ConnectionConstraint,
+    pub init_constrats: Option<ConnectionConstraint>,
 }
 
 impl VelloJoint {
@@ -124,6 +125,7 @@ impl VelloJoint {
             init_config: connection_config,
             root_entity: character,
             constraint,
+            init_constrats: None,
         }
     }
 }
@@ -161,6 +163,7 @@ pub struct VelloParticle {
     pub particle_init: Particle,
     pub particle: Particle,
     pub shape_matching_init: FramePositionConstraintConfig,
+    pub shape_matching_init_local_pos: Option<Vec2>, //remove this and use PartcileShapeMatchingConfig in the character json
     pub shape_matching: PartcileShapeMatchingConfig,
     pub root_entity: Entity,
 }
@@ -177,6 +180,7 @@ impl VelloParticle {
             shape_matching_init,
             shape_matching: Default::default(),
             root_entity: entity,
+            shape_matching_init_local_pos: None,
         }
     }
 }

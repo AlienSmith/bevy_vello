@@ -55,8 +55,8 @@ use game_lib::{
     },
     weapons::{AttachPistolToCharacterEvent, FireEvent, PistolControl},
     CharacterController, CharacterPartEvent, CharacterRoot, ColliderRoot, ConnectivityRoot,
-    GameLabSystems, IkMode, LeftArmController, RightArmController, SpineController,
-    VelloCharacterPlugin,
+    GameLabSystems, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
+    SpineController, VelloCharacterPlugin, WhichArm,
 };
 
 use crate::{
@@ -90,6 +90,7 @@ struct ParticleState {
 #[derive(Resource, Default)]
 struct PistolState {
     registered: bool,
+    character: Option<Entity>,
 }
 
 impl Default for ParticleState {
@@ -501,7 +502,7 @@ fn setup_back_ground(mut commands: Commands) {
     },));
 }
 
-fn setup_entity(mut commands: Commands) {
+fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
     make_static_scene(&mut commands);
     let mut scene: VelloScene = VelloScene::default();
     scene.fill(
@@ -512,26 +513,30 @@ fn setup_entity(mut commands: Commands) {
         &kurbo::Rect::new(-10.0, -10.0, 10.0, 10.0),
     );
 
-    commands.spawn((
-        VelloSceneBundle {
-            transform: Transform {
-                translation: Vec3::new(0.0, 0.0, 100.0),
-                scale: Vec3::new(0.5, 0.5, 1.0),
-                ..Default::default()
-            },
-            scene,
-            ..Default::default()
-        },
-        CharacterRoot {
-            svg_asset_id: "v6.character.svg".to_owned(),
-            blueprint_asset_id: "v6.character.json".to_owned(),
-        },
-        CharacterController {
-            move_vector: Vec2::ZERO,
-            point_vector: Vec2::ZERO,
-            ..Default::default()
-        },
-    ));
+    pistol_state.character = Some(
+        commands
+            .spawn((
+                VelloSceneBundle {
+                    transform: Transform {
+                        translation: Vec3::new(0.0, 0.0, 100.0),
+                        scale: Vec3::new(0.5, 0.5, 1.0),
+                        ..Default::default()
+                    },
+                    scene,
+                    ..Default::default()
+                },
+                CharacterRoot {
+                    svg_asset_id: "v6.character.svg".to_owned(),
+                    blueprint_asset_id: "v6.character.json".to_owned(),
+                },
+                CharacterController {
+                    move_vector: Vec2::ZERO,
+                    point_vector: Vec2::ZERO,
+                    ..Default::default()
+                },
+            ))
+            .id(),
+    );
 }
 
 /// Spawn a pistol collider and connect it to the character's PRLA particle
@@ -917,10 +922,12 @@ fn player_movement(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut spine_q: Query<&mut SpineController>,
     mut pistol_q: Query<(Entity, &mut PistolControl)>,
+    mut arm_q: Query<&mut RightArmController>,
     mut legacy_q: Query<&mut CharacterController>,
     mut pistol_state: ResMut<PistolState>,
     mut events: EventWriter<CharacterPartEvent>,
     mut fire: EventWriter<FireEvent>,
+    mut reset_event: EventWriter<ResetArmControlConstraintsEvent>,
     character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
 ) {
     let mut direction = Vec2::ZERO;
@@ -939,16 +946,16 @@ fn player_movement(
         direction.x += 50.0;
     }
 
-    if let Ok(mut spine) = spine_q.single_mut() {
+    if let Ok(mut spine) = spine_q.get_mut(pistol_state.character.unwrap()) {
         spine.move_vector = direction;
     }
 
     let target = mouse_status.world_pos;
-    if let Ok((entity, mut arm)) = pistol_q.single_mut() {
+    if let Ok((entity, mut pistol)) = pistol_q.single_mut() {
         if keyboard_input.pressed(KeyCode::KeyC) {
-            arm.world_aim_trarget = Some(target);
+            pistol.world_aim_trarget = Some(target);
         } else {
-            arm.world_aim_trarget = None;
+            pistol.world_aim_trarget = None;
         };
         if keyboard_input.pressed(KeyCode::KeyF) {
             fire.write(FireEvent { weapon: entity });
@@ -956,7 +963,7 @@ fn player_movement(
     }
 
     // Legacy: keep CharacterController in sync for any old systems still reading it.
-    if let Ok(mut item) = legacy_q.single_mut() {
+    if let Ok(mut item) = legacy_q.get_mut(pistol_state.character.unwrap()) {
         item.move_vector = direction;
         item.point_vector = target;
     }
@@ -973,6 +980,13 @@ fn player_movement(
             character: character_entity,
             path_id: "pistol".to_string(),
         });
+        if let Ok(mut right) = arm_q.get_mut(pistol_state.character.unwrap()) {
+            right.config.ik_mode = IkMode::Disabled;
+            reset_event.write(ResetArmControlConstraintsEvent {
+                arm: WhichArm::Right,
+                character: pistol_state.character.unwrap(),
+            });
+        }
 
         pistol_state.registered = false;
     }

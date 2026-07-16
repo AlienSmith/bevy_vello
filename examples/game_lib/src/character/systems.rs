@@ -1,12 +1,17 @@
-use bevy::prelude::*;
+use bevy::{gizmos::config, prelude::*};
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
     VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
 };
-use vello_physics::utility::{cos_sin, BalancedCoreFrame};
+use vello_physics::{
+    collision_response::PartcileShapeMatchingConfig,
+    utility::{cos_sin, BalancedCoreFrame},
+    ConnectionConstraint,
+};
 
 use crate::character::{
-    ArmConfig, IkMode, LeftArmController, RightArmController, SpineConfig, SpineController,
+    ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
+    SpineConfig, SpineController,
 };
 
 #[inline]
@@ -604,4 +609,50 @@ pub fn update_character_movement(
             claculate_velocity_spine(&entities, &particles, spine.move_vector, &spine.config);
         velocity_events.write_batch(velocities);
     }
+}
+
+pub fn reset_arm_constraint_event(
+    mut reader: EventReader<ResetArmControlConstraintsEvent>,
+    query_control: Query<(&LeftArmController, &RightArmController)>,
+    query_p: Query<&VelloParticle>,
+    query_a: Query<&VelloJoint>,
+    mut angular_writer: EventWriter<CharacterAngularConstraintEvent>,
+    mut position_writer: EventWriter<CharacterPivotPositionEvent>,
+) {
+    let mut pos_events = vec![];
+    let mut angular_events = vec![];
+    for item in reader.read() {
+        let (left, right) = query_control.get(item.character).unwrap();
+        let (particles, angulars) = match item.arm {
+            super::WhichArm::Left => (left.particles, left.joints),
+            super::WhichArm::Right => (right.particles, right.joints),
+        };
+        particles.iter().for_each(|e| {
+            let c = query_p.get(*e).unwrap();
+
+            pos_events.push(CharacterPivotPositionEvent {
+                character_entity: item.character,
+                joint_entity: *e,
+                target: PartcileShapeMatchingConfig {
+                    local_target: c.shape_matching_init_local_pos.expect(
+                        "please don't drop the weapon the same frame character being assembled",
+                    ),
+                    compliance: c.shape_matching_init.compliance,
+                    damping: c.shape_matching_init.damping,
+                },
+            });
+        });
+        angulars.iter().for_each(|e| {
+            let j = query_a.get(*e).unwrap();
+            if let ConnectionConstraint::Angular(config) = j.init_constrats.unwrap() {
+                angular_events.push(CharacterAngularConstraintEvent {
+                    character_entity: item.character,
+                    joint_entity: *e,
+                    config,
+                });
+            }
+        });
+    }
+    angular_writer.write_batch(angular_events);
+    position_writer.write_batch(pos_events);
 }

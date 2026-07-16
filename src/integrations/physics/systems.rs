@@ -314,6 +314,9 @@ pub fn update_connection_particles(
             joint.particle = item;
         }
         if let Some(item) = group.get_connect_particle_shape_matching_config(&e) {
+            if joint.shape_matching_init_local_pos.is_none() {
+                joint.shape_matching_init_local_pos = Some(item.local_target);
+            }
             joint.shape_matching = item;
         }
     }
@@ -338,6 +341,10 @@ pub fn update_connection_particles(
             vello_physics::ConnectionConstraint::Angular(angular_constraint_config) => {
                 if let Some(item) = group.get_connect_angular_config(&e) {
                     *angular_constraint_config = item;
+                    if joint.init_constrats.is_none() {
+                        joint.init_constrats =
+                            Some(vello_physics::ConnectionConstraint::Angular(item));
+                    }
                 }
             }
         }

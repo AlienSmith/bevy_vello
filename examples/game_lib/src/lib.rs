@@ -15,7 +15,8 @@ pub struct VelloCharacterPlugin;
 pub use crate::{
     character::{
         ArmConfig, CharacterController, ConnectivityRoot, IkMode, LeftArmController,
-        RightArmController, SpineConfig, SpineController, StringPool,
+        ResetArmControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
+        StringPool, WhichArm,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
 };
