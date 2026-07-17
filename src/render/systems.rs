@@ -397,6 +397,15 @@ impl VelloRenderNode {
             render_query: QueryState::new(world),
         }
     }
+
+    /// Create a new node that shares an existing renderer with the collision system.
+    /// This avoids duplicating GPU buffer allocations.
+    pub fn new_with_renderer(world: &mut World, renderer: Arc<Mutex<vello::Renderer>>) -> Self {
+        Self {
+            renderer,
+            render_query: QueryState::new(world),
+        }
+    }
 }
 
 impl bevy::render::render_graph::Node for VelloRenderNode {

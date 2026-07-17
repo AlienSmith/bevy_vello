@@ -177,8 +177,9 @@ use vello_physics::{Particle, FRAME_PARTICLES_COUNT};
 use crate::collision::broad_phase::BroadPhaseSimple;
 
 /// Runs GPU collision detection synchronously from the main world.
-/// Holds its own `vello::Renderer` instance (separate from the rendering pipeline).
-#[derive(Resource)]
+/// Shares the `vello::Renderer` with the rendering pipeline via `Arc<Mutex<>>`
+/// to avoid duplicating GPU buffer allocations.
+#[derive(Resource, Clone)]
 pub struct GpuCollisionRunner {
     renderer: Arc<Mutex<vello::Renderer>>,
     device: Arc<wgpu::Device>,
@@ -186,18 +187,13 @@ pub struct GpuCollisionRunner {
 }
 
 impl GpuCollisionRunner {
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        let renderer = vello::Renderer::new(
-            &device,
-            &RendererOptions {
-                surface_format: None,
-                timestamp_period: queue.get_timestamp_period(),
-                use_cpu: false,
-            },
-        )
-        .unwrap();
+    pub fn new(
+        renderer: Arc<Mutex<vello::Renderer>>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Self {
         Self {
-            renderer: Arc::new(Mutex::new(renderer)),
+            renderer,
             device: Arc::new(device),
             queue: Arc::new(queue),
         }

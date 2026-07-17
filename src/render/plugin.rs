@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use super::extract::{self, ExtractedPixelScale, SSRenderTarget};
 use super::systems::{VelloRenderDriverNode, VelloRenderNode};
 use super::{prepare, systems};
@@ -19,6 +21,7 @@ use bevy::{
     },
     sprite::Material2dPlugin,
 };
+use vello::RendererOptions;
 pub struct VelloRenderPlugin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
@@ -126,24 +129,45 @@ impl Plugin for VelloRenderPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        // Step 1: Create the GPU collision runner from render world resources
-        let collision_runner = {
+        // Step 1: Create a SINGLE vello::Renderer shared between rendering and collision.
+        // Using Arc<Mutex<>> because Bevy's render world and main world run on separate threads.
+        // The Mutex serializes access: collision in FixedUpdate, rendering in render graph.
+        let shared_renderer = {
             let render_app = app.sub_app_mut(RenderApp);
             let device = render_app.world().resource::<RenderDevice>();
             let queue = render_app.world().resource::<RenderQueue>();
-            crate::collision::GpuCollisionRunner::new(
+            Arc::new(Mutex::new(
+                vello::Renderer::new(
+                    device.wgpu_device(),
+                    &(RendererOptions {
+                        surface_format: None,
+                        timestamp_period: queue.0.get_timestamp_period(),
+                        use_cpu: false,
+                    }),
+                )
+                .unwrap(),
+            ))
+        };
+
+        // Step 2: Create GpuCollisionRunner with a cloned Arc (same renderer, same GPU buffers)
+        let (device, queue) = {
+            let render_app = app.sub_app_mut(RenderApp);
+            let device = render_app.world().resource::<RenderDevice>();
+            let queue = render_app.world().resource::<RenderQueue>();
+            (
                 device.wgpu_device().clone(),
                 queue.0.as_ref().clone().into_inner(),
             )
         };
-
-        // Insert the collision runner into the main world so FixedUpdate can use it
+        let collision_runner =
+            crate::collision::GpuCollisionRunner::new(shared_renderer.clone(), device, queue);
         app.world_mut().insert_resource(collision_runner);
 
-        // Step 2: Set up the render graph
+        // Step 3: Set up the render graph with the SAME shared renderer
         let render_app = app.sub_app_mut(RenderApp);
         let mut simulate_graph = RenderGraph::default();
-        let simulate_node = VelloRenderNode::new(&mut render_app.world_mut());
+        let simulate_node =
+            VelloRenderNode::new_with_renderer(&mut render_app.world_mut(), shared_renderer);
         simulate_graph.add_node(simulate_graph::node::VelloSimulateNode, simulate_node);
         let mut graph = render_app
             .world_mut()
