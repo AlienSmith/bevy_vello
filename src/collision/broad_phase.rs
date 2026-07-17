@@ -120,12 +120,40 @@ impl BroadPhaseQbvh {
         removed_collider: &Res<RemovedColliders>,
         collision_world: &mut ResMut<VelloCollisionWorld>,
     ) {
-        collision_world.collision_pairs_bvh.clear();
         let margin = 0.01;
+        let is_empty = self.qbvh.raw_nodes().is_empty();
 
+        // If BVH is empty, always do a full rebuild
+        if is_empty {
+            self.qbvh.clear_and_rebuild(
+                all_colliders.iter().map(|(index, collider)| {
+                    (
+                        ColliderHandle(index),
+                        compute_aabb_from_collider(collider, &collider.soft_body_global_transform),
+                    )
+                }),
+                margin,
+            );
+            collision_world.collision_pairs_bvh.clear();
+            let mut visitor = BoundingVolumeIntersectionsSimultaneousVisitor::new(
+                |co1: &ColliderHandle, co2: &ColliderHandle| {
+                    if *co1 != *co2 {
+                        collision_world.collision_pairs_bvh.push((co1.0, co2.0));
+                    }
+                    true
+                },
+            );
+            self.qbvh
+                .traverse_bvtt_with_stack(&self.qbvh, &mut visitor, &mut self.stack);
+            return;
+        }
+
+        // If nothing changed, keep existing pairs from the last frame
         if modified_colliders.iter().count() == 0 {
             return;
         }
+
+        collision_world.collision_pairs_bvh.clear();
 
         let mut visitor = BoundingVolumeIntersectionsSimultaneousVisitor::new(
             |co1: &ColliderHandle, co2: &ColliderHandle| {
@@ -244,7 +272,7 @@ impl BroadPhaseSimple {
             let aabb = compute_aabb(collider, &collider.soft_body_global_transform);
             for j in 0..static_colliders.len() {
                 let (item1, collider1) = all_colliders.get(static_colliders[j]).unwrap();
-                let aabb1 = compute_aabb(collider1, &collider.soft_body_global_transform);
+                let aabb1 = compute_aabb(collider1, &collider1.soft_body_global_transform);
                 if check_overlaps(aabb, aabb1) {
                     collision_world.collision_pairs_bvh.push((item, item1));
                 }

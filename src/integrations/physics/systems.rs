@@ -3,7 +3,7 @@ use std::cmp::max;
 use crate::{
     affine_to_mat4,
     collision::{
-        GpuCollisionRunner, RemovedColliders, VelloCollisionEvent, VelloCollisionScene,
+        GpuCollisionRunner, RemovedColliders, VelloCollisionBroadPhase, VelloCollisionEvent,
         VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
     },
     integrations::physics::{
@@ -205,29 +205,53 @@ fn make_collision_event(
     }
 }
 
+/// Runs the broad phase (BVH overlap detection) in FixedUpdate.
+/// Populates `collision_pairs_bvh` with candidate pairs.
+/// Runs as a separate system before `update_constraint_world` to avoid query conflicts.
+pub fn run_broad_phase(
+    all_colliders: Query<(Entity, &VelloCollider)>,
+    modified_colliders: Query<
+        (Entity, &VelloCollider),
+        Or<(Changed<VelloCollider>, Changed<GlobalTransform>)>,
+    >,
+    removed_collider: Res<RemovedColliders>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
+    mut broad_phase: ResMut<VelloCollisionBroadPhase>,
+) {
+    broad_phase.broad_phase.update(
+        &all_colliders,
+        &modified_colliders,
+        &removed_collider,
+        &mut collision_world,
+    );
+}
+
+/// Steps physics, syncs transforms, filters broad-phase pairs, runs GPU collision.
+/// Uses ParamSet to resolve the conflict between mutable and immutable VelloCollider access.
 pub fn update_constraint_world(
-    mut collision_scene: ResMut<VelloCollisionScene>,
-    collision_world: Res<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
     collision_runner: Res<GpuCollisionRunner>,
-    mut collider_query: Query<(&mut VelloCollider, &mut Transform)>,
     mut collision_event_writer: EventWriter<VelloCollisionEvent>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
     time: Res<Time>,
+    mut params: ParamSet<(
+        Query<(&mut VelloCollider, &mut Transform)>, // p0: sync + scene building
+        Query<(Entity, &VelloCollider)>,             // p1: pair filtering
+    )>,
 ) {
     let delta = time.delta_secs();
     let substep = max(collision_world.substeps, 1);
     constraint_world.data.step(delta, substep);
 
-    // Sync physics deformation back to Entity transforms BEFORE building collision scene.
-    // This ensures the collision detection uses the CURRENT soft body positions,
-    // not stale transforms from the previous PostUpdate.
+    // Step 1: Sync physics deformation back to Entity transforms (p0: mutable)
+    let mut p0 = params.p0();
     constraint_world.data.get_colliders_from_soft_body(
         |index: Entity,
          path: BezPath,
          affine: Affine,
          rect: kurbo::Rect,
          frame_particles: [Particle; FRAME_PARTICLES_COUNT]| {
-            if let Ok((mut collider, mut transform)) = collider_query.get_mut(index) {
+            if let Ok((mut collider, mut transform)) = p0.get_mut(index) {
                 let target_matrix = affine_to_mat4(affine);
                 let temp = Transform::from_matrix(target_matrix);
                 *transform = temp;
@@ -238,19 +262,34 @@ pub fn update_constraint_world(
             }
         },
     );
+    drop(p0);
 
-    // Build collision scene from current transforms using broad-phase pairs
-    // (the broad phase runs in PostUpdate, so pairs are from the last frame)
-    let pairs: Vec<(Entity, Entity)> = collision_world.collision_pairs.clone();
-    let mut temp = vello::CollisionScene::default();
+    // Step 2: Filter broad-phase pairs (p1: immutable)
+    let pairs: Vec<(Entity, Entity)> = {
+        let p1 = params.p1();
+        let mut temp = vec![];
+        for (e0, e1) in &collision_world.collision_pairs_bvh {
+            if let (Ok((_, c)), Ok((_, c1))) = (p1.get(*e0), p1.get(*e1)) {
+                if (c.is_soft_body() || c1.is_soft_body())
+                    && (c.collision_group == 0 || (c.collision_group != c1.collision_group))
+                {
+                    temp.push((*e0, *e1));
+                }
+            }
+        }
+        temp
+    };
+
+    // Step 3: Build collision scene (p0 again: mutable, for transforms)
+    let mut scene = vello::CollisionScene::default();
+    let mut p0 = params.p0();
     for (a, b) in &pairs {
-        if let (Ok((c_a, t_a)), Ok((c_b, t_b))) = (collider_query.get(*a), collider_query.get(*b)) {
-            // Use soft_body_global_transform (freshly synced) for consistent positioning
+        if let (Ok((c_a, t_a)), Ok((c_b, t_b))) = (p0.get(*a), p0.get(*b)) {
             let affine_a =
                 mat4_to_affine(t_a.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
             let affine_b =
                 mat4_to_affine(t_b.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
-            temp.encode_colliders(
+            scene.encode_colliders(
                 (0.0, 1.0).into(),
                 &c_a.shape,
                 affine_a,
@@ -259,15 +298,13 @@ pub fn update_constraint_world(
             );
         }
     }
+    drop(p0);
 
-    // Run GPU collision synchronously — blocks until results are available.
-    // Since GPU collision is faster than the fixed timestep (11ms at 90Hz),
-    // this completes within the same FixedUpdate tick.
+    // Step 4: Run GPU collision synchronously
     if !pairs.is_empty() {
-        let results = collision_runner.run_collision(&temp);
+        let results = collision_runner.run_collision(&scene);
         let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
         for ((entity_a, entity_b), result) in pairs.iter().zip(results.iter()) {
-            // valid surface normal means valid collision result
             if result.a_position_normal[2] != 0.0 || result.a_position_normal[3] != 0.0 {
                 collision_event_writer
                     .write(make_collision_event(entity_a, entity_b, result, scaling));
@@ -275,7 +312,7 @@ pub fn update_constraint_world(
         }
     }
 
-    collision_scene.state = crate::collision::CollisionSceneState::Created;
+    collision_world.collision_pairs_bvh.clear();
 }
 
 pub fn reset_visuzlie_colliders(mut q: Query<&mut VelloScene, With<VelloCollider>>) {
