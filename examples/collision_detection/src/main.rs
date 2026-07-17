@@ -552,7 +552,7 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
     commands.spawn((
         VelloSceneBundle {
             transform: Transform {
-                translation: Vec3::new(300.0, 0.0, 100.0),
+                translation: Vec3::new(400.0, 0.0, 100.0),
                 scale: Vec3::new(0.5, 0.5, 1.0),
                 ..Default::default()
             },

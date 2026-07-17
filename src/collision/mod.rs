@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use avian2d::parry::utils::hashmap::HashMap;
 use bevy::prelude::*;
 use bevy::{
@@ -8,7 +10,7 @@ pub use plugin::VelloCollisionPlugin;
 use vello::kurbo::Affine;
 use vello::{
     kurbo::{self, BezPath},
-    peniko, CollisionResult, CollisionScene,
+    peniko, CollisionResult, CollisionScene, RendererOptions,
 };
 
 mod broad_phase;
@@ -36,13 +38,6 @@ pub enum CollisionSceneState {
     NeedExtract,
     #[default]
     Extracted, // if it is extracted don't extract it again.
-}
-
-#[derive(Default, Resource, Clone)]
-pub struct ExtractedVelloCollisionScene {
-    pub(crate) scene: CollisionScene,
-    pub(crate) pairs: Vec<(Entity, Entity)>,
-    pub(crate) sender: Option<Sender<CollisionResults>>,
 }
 
 #[derive(Default, Resource, Clone)]
@@ -175,24 +170,49 @@ impl VelloCollider {
     }
 }
 
-use crossbeam_channel::{bounded, Receiver, Sender};
 pub use vello_physics::CollisionConstraintConfig;
 pub use vello_physics::SoftBodyInitConfig;
 use vello_physics::{Particle, FRAME_PARTICLES_COUNT};
 
 use crate::collision::broad_phase::BroadPhaseSimple;
 
-// Thread-safe channel for GPU → Main thread communication
+/// Runs GPU collision detection synchronously from the main world.
+/// Holds its own `vello::Renderer` instance (separate from the rendering pipeline).
 #[derive(Resource)]
-pub struct GpuDataChannel<T: Send + 'static> {
-    pub sender: Sender<T>,
-    pub receiver: Receiver<T>,
+pub struct GpuCollisionRunner {
+    renderer: Arc<Mutex<vello::Renderer>>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
 }
 
-impl<T: Send + 'static> GpuDataChannel<T> {
-    pub fn new(capacity: usize) -> Self {
-        let (sender, receiver) = bounded(capacity);
-        Self { sender, receiver }
+impl GpuCollisionRunner {
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let renderer = vello::Renderer::new(
+            &device,
+            &RendererOptions {
+                surface_format: None,
+                timestamp_period: queue.get_timestamp_period(),
+                use_cpu: false,
+            },
+        )
+        .unwrap();
+        Self {
+            renderer: Arc::new(Mutex::new(renderer)),
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+        }
+    }
+
+    /// Run GPU collision detection synchronously.
+    /// Blocks until the GPU results are available.
+    pub fn run_collision(&self, scene: &CollisionScene) -> Vec<CollisionResult> {
+        let mut renderer = self.renderer.lock().unwrap();
+        vello::util::block_on_wgpu(
+            &self.device,
+            renderer.render_collision_async(&self.device, &self.queue, scene),
+        )
+        .unwrap()
+        .unwrap_or_default()
     }
 }
 

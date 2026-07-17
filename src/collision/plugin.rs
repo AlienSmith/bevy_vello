@@ -1,14 +1,10 @@
 use crate::collision::broad_phase::update_broad_phase;
-use crate::collision::extract::extract_collision_scene;
 use crate::collision::systems::collect_removed_colliders;
-use crate::collision::systems::collision_event_dispatch;
 use crate::collision::systems::collision_event_redistribute;
 use crate::collision::systems::make_collision_scene;
 use crate::collision::CollisionCoolDownPairManager;
 use crate::collision::CollisionResults;
 use crate::collision::CollisionSystems;
-use crate::collision::ExtractedVelloCollisionScene;
-use crate::collision::GpuDataChannel;
 use crate::collision::RemovedColliders;
 use crate::collision::VelloCollisionBroadPhase;
 use crate::collision::VelloCollisionEvent;
@@ -24,13 +20,6 @@ pub struct VelloCollisionPlugin;
 
 impl Plugin for VelloCollisionPlugin {
     fn build(&self, app: &mut App) {
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        render_app
-            .insert_resource(ExtractedVelloCollisionScene::default())
-            .add_systems(ExtractSchedule, extract_collision_scene);
         app.add_plugins(SvgColliderPlugin)
             .add_event::<VelloCollisionEvent>()
             .add_event::<VelloCollisionTrigger>()
@@ -38,8 +27,6 @@ impl Plugin for VelloCollisionPlugin {
             .insert_resource(RemovedColliders::default())
             .insert_resource(VelloCollisionScene::default())
             .insert_resource(VelloCollisionBroadPhase::default())
-            //.insert_resource(SimpleBroadPhase::default())
-            .insert_resource(GpuDataChannel::<CollisionResults>::new(1))
             .insert_resource(CollisionCoolDownPairManager::default())
             .configure_sets(
                 PostUpdate,
@@ -58,16 +45,11 @@ impl Plugin for VelloCollisionPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (collision_event_dispatch, collision_event_redistribute).chain(),
+                collision_event_redistribute.in_set(CollisionSystems::SendCollisionEvent),
             )
             .add_systems(
                 PostUpdate,
-                (
-                    update_broad_phase,
-                    //update_broad_phase_simple,
-                    make_collision_scene,
-                    //print_collision_results,
-                )
+                (update_broad_phase, make_collision_scene)
                     .chain()
                     .in_set(CollisionSystems::MakeCollisionScene),
             );

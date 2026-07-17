@@ -2,7 +2,10 @@ use std::cmp::max;
 
 use crate::{
     affine_to_mat4,
-    collision::{RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionWorld},
+    collision::{
+        GpuCollisionRunner, RemovedColliders, VelloCollisionEvent, VelloCollisionScene,
+        VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+    },
     integrations::physics::{
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
         CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
@@ -16,6 +19,7 @@ use bevy::{ecs::error::info, prelude::*};
 use vello::{
     kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
+    CollisionScene,
 };
 use vello_physics::{
     utility::{vector2_to_kurbo_point, BalancedCoreFrame},
@@ -176,18 +180,102 @@ pub fn make_collision_constraints(
     }
 }
 
+// Helper to build a VelloCollisionEvent from a raw GPU collision result
+fn make_collision_event(
+    entity_a: &Entity,
+    entity_b: &Entity,
+    result: &vello::CollisionResult,
+    scaling: f32,
+) -> VelloCollisionEvent {
+    VelloCollisionEvent {
+        entity_a: *entity_a,
+        entity_b: *entity_b,
+        collision_point_a: Vec2::new(
+            result.a_position_normal[0] * scaling,
+            result.a_position_normal[1] * -scaling,
+        ),
+        collision_point_b: Vec2::new(
+            result.b_position_normal[0] * scaling,
+            result.b_position_normal[1] * -scaling,
+        ),
+        collision_normal_a: Vec2::new(result.a_position_normal[2], -result.a_position_normal[3]),
+        collision_normal_b: Vec2::new(-result.a_position_normal[2], result.a_position_normal[3]),
+        curve_index_a: result.b_position_normal[3] as u32,
+        curve_index_b: result.b_position_normal[2] as u32,
+    }
+}
+
 pub fn update_constraint_world(
     mut collision_scene: ResMut<VelloCollisionScene>,
     collision_world: Res<VelloCollisionWorld>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
+    collision_runner: Res<GpuCollisionRunner>,
+    mut collider_query: Query<(&mut VelloCollider, &mut Transform)>,
+    mut collision_event_writer: EventWriter<VelloCollisionEvent>,
     time: Res<Time>,
 ) {
-    if !collision_world.paused {
-        let delta = time.delta_secs();
-        let substep = max(collision_world.substeps, 1);
-        constraint_world.data.step(delta, substep);
-        collision_scene.state = crate::collision::CollisionSceneState::Created;
+    let delta = time.delta_secs();
+    let substep = max(collision_world.substeps, 1);
+    constraint_world.data.step(delta, substep);
+
+    // Sync physics deformation back to Entity transforms BEFORE building collision scene.
+    // This ensures the collision detection uses the CURRENT soft body positions,
+    // not stale transforms from the previous PostUpdate.
+    constraint_world.data.get_colliders_from_soft_body(
+        |index: Entity,
+         path: BezPath,
+         affine: Affine,
+         rect: kurbo::Rect,
+         frame_particles: [Particle; FRAME_PARTICLES_COUNT]| {
+            if let Ok((mut collider, mut transform)) = collider_query.get_mut(index) {
+                let target_matrix = affine_to_mat4(affine);
+                let temp = Transform::from_matrix(target_matrix);
+                *transform = temp;
+                collider.soft_body_global_transform = temp;
+                collider.shape = path;
+                collider.aabb = rect;
+                collider.frame_particles = frame_particles;
+            }
+        },
+    );
+
+    // Build collision scene from current transforms using broad-phase pairs
+    // (the broad phase runs in PostUpdate, so pairs are from the last frame)
+    let pairs: Vec<(Entity, Entity)> = collision_world.collision_pairs.clone();
+    let mut temp = vello::CollisionScene::default();
+    for (a, b) in &pairs {
+        if let (Ok((c_a, t_a)), Ok((c_b, t_b))) = (collider_query.get(*a), collider_query.get(*b)) {
+            // Use soft_body_global_transform (freshly synced) for consistent positioning
+            let affine_a =
+                mat4_to_affine(t_a.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
+            let affine_b =
+                mat4_to_affine(t_b.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
+            temp.encode_colliders(
+                (0.0, 1.0).into(),
+                &c_a.shape,
+                affine_a,
+                &c_b.shape,
+                affine_b,
+            );
+        }
     }
+
+    // Run GPU collision synchronously — blocks until results are available.
+    // Since GPU collision is faster than the fixed timestep (11ms at 90Hz),
+    // this completes within the same FixedUpdate tick.
+    if !pairs.is_empty() {
+        let results = collision_runner.run_collision(&temp);
+        let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
+        for ((entity_a, entity_b), result) in pairs.iter().zip(results.iter()) {
+            // valid surface normal means valid collision result
+            if result.a_position_normal[2] != 0.0 || result.a_position_normal[3] != 0.0 {
+                collision_event_writer
+                    .write(make_collision_event(entity_a, entity_b, result, scaling));
+            }
+        }
+    }
+
+    collision_scene.state = crate::collision::CollisionSceneState::Created;
 }
 
 pub fn reset_visuzlie_colliders(mut q: Query<&mut VelloScene, With<VelloCollider>>) {

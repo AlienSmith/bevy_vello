@@ -1,7 +1,6 @@
 use super::extract::{ExtractedRenderAsset, ExtractedRenderText, SSRenderTarget};
 use super::plugin::simulate_graph::VelloSimulateGraph;
 use super::prepare::PreparedAffine;
-use crate::collision::{CollisionResults, ExtractedVelloCollisionScene};
 use crate::render::extract::ExtractedRenderScene;
 use crate::render::VelloCanvasMaterialSource;
 use crate::{CoordinateSpace, VelloCanvasMaterial, VelloFont};
@@ -21,18 +20,12 @@ use bevy::window::{WindowResized, WindowResolution};
 use vello::kurbo::Affine;
 use vello::{RenderParams, RendererOptions, Scene};
 
-use crossbeam_channel::Sender;
-
 use std::sync::{Arc, Mutex};
 #[derive(Component)]
 pub struct VelloRenderBatches {
     should_render: bool,
-    should_render_collision: bool,
     scene: vello::Scene,
-    collision_scene: vello::CollisionScene,
-    pairs: Vec<(Entity, Entity)>,
     image: Option<Handle<Image>>,
-    sender: Option<Sender<CollisionResults>>,
 }
 
 pub fn setup_image(images: &mut Assets<Image>, window: &WindowResolution) -> Handle<Image> {
@@ -78,7 +71,6 @@ pub fn prepare_scene(
     mut font_render_assets: ResMut<RenderAssets<VelloFont>>,
     #[cfg(feature = "lottie")] mut velato_renderer: ResMut<super::VelatoRenderer>,
     render_batches_query: Query<Entity, With<VelloRenderBatches>>,
-    collision_scene: Res<ExtractedVelloCollisionScene>,
 ) {
     for item in render_batches_query.iter() {
         if let Ok(mut entity_commands) = commands.get_entity(item) {
@@ -87,12 +79,8 @@ pub fn prepare_scene(
     }
     let mut batch = VelloRenderBatches {
         should_render: false,
-        should_render_collision: false,
         scene: vello::Scene::default(),
-        collision_scene: vello::CollisionScene::default(),
-        pairs: Default::default(),
         image: None,
-        sender: None,
     };
     if let Ok(SSRenderTarget(render_target_image)) = ss_render_target.get_single() {
         //let gpu_image = gpu_images.get(render_target_image).unwrap();
@@ -215,7 +203,6 @@ pub fn prepare_scene(
             .count()
             == render_queue.len();
         let should_render = !render_queue.is_empty() && !empty_encodings;
-        let should_render_collision = !collision_scene.scene.encoding().is_empty();
 
         if let Ok((camera, view)) = camera.get_single() {
             let size_pixels: UVec2 = camera.physical_viewport_size.unwrap();
@@ -254,12 +241,8 @@ pub fn prepare_scene(
 
         batch = VelloRenderBatches {
             should_render,
-            should_render_collision,
             scene: scene_buffer,
-            collision_scene: collision_scene.scene.clone(),
             image: Some(render_target_image.clone()),
-            pairs: collision_scene.pairs.clone(),
-            sender: collision_scene.sender.clone(),
         };
     }
     commands.spawn(batch);
@@ -458,31 +441,6 @@ impl bevy::render::render_graph::Node for VelloRenderNode {
                             }),
                         )
                         .unwrap();
-                }
-
-                if batches.should_render_collision && batches.sender.is_some() {
-                    if let Some(collision_result) = vello::util::block_on_wgpu(
-                        device.wgpu_device(),
-                        self.renderer.lock().unwrap().render_collision_async(
-                            device.wgpu_device(),
-                            &queue,
-                            &batches.collision_scene,
-                        ),
-                    )
-                    .unwrap()
-                    {
-                        //notice the pairs lenght could be inconsistent with results length due to alignment issue.
-                        assert!(
-                            batches.pairs.len() <= collision_result.len(),
-                            "pairs count {}, results count {}",
-                            batches.pairs.len(),
-                            collision_result.len()
-                        );
-                        let _ = batches.sender.as_ref().unwrap().send(CollisionResults {
-                            pairs: batches.pairs.clone(),
-                            results: collision_result,
-                        });
-                    }
                 }
             }
         }

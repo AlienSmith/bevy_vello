@@ -13,7 +13,7 @@ use bevy::{
     render::{
         extract_component::ExtractComponentPlugin,
         render_asset::RenderAssetPlugin,
-        renderer::RenderDevice,
+        renderer::{RenderDevice, RenderQueue},
         view::{check_visibility, VisibilitySystems},
         Render, RenderApp, RenderSet,
     },
@@ -126,8 +126,21 @@ impl Plugin for VelloRenderPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        // Add the simulation sub-graph. This render graph runs once per frame no matter
-        // how many cameras/views are active (view-independent).
+        // Step 1: Create the GPU collision runner from render world resources
+        let collision_runner = {
+            let render_app = app.sub_app_mut(RenderApp);
+            let device = render_app.world().resource::<RenderDevice>();
+            let queue = render_app.world().resource::<RenderQueue>();
+            crate::collision::GpuCollisionRunner::new(
+                device.wgpu_device().clone(),
+                queue.0.as_ref().clone().into_inner(),
+            )
+        };
+
+        // Insert the collision runner into the main world so FixedUpdate can use it
+        app.world_mut().insert_resource(collision_runner);
+
+        // Step 2: Set up the render graph
         let render_app = app.sub_app_mut(RenderApp);
         let mut simulate_graph = RenderGraph::default();
         let simulate_node = VelloRenderNode::new(&mut render_app.world_mut());

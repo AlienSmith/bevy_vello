@@ -4,9 +4,9 @@ use vello::{CollisionResult, CollisionScene};
 
 use crate::{
     collision::{
-        CollisionCoolDownPairManager, CollisionResults, CollisionSceneState, GpuDataChannel,
-        RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionTrigger,
-        VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+        CollisionCoolDownPairManager, CollisionSceneState, RemovedColliders, VelloCollisionEvent,
+        VelloCollisionScene, VelloCollisionTrigger, VelloCollisionWorld,
+        VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -23,7 +23,7 @@ pub fn make_collision_scene(
     mut r: ResMut<VelloCollisionWorld>,
     mut scene: ResMut<VelloCollisionScene>,
 ) {
-    if r.paused || scene.state == CollisionSceneState::Extracted {
+    if scene.state == CollisionSceneState::Extracted {
         scene.scene.reset();
         scene.pair.clear();
         scene.state = super::CollisionSceneState::Extracted;
@@ -31,10 +31,6 @@ pub fn make_collision_scene(
     }
     // only inite a new collision test if the previous one has been consumed
     if r.update_collision_pairs_if_previous_one_has_been_consumed(&query) {
-        // info!(
-        //     "last collision_pairs registered count {}",
-        //     r.collision_pairs.len()
-        // );
         let mut temp = CollisionScene::default();
         for (a, b) in &r.collision_pairs {
             let (c_a, t_a) = query.get(*a).unwrap();
@@ -86,33 +82,6 @@ fn make_collision_event(
         collision_normal_b: Vec2::new(-result.a_position_normal[2], result.a_position_normal[3]),
         curve_index_a: result.b_position_normal[3] as u32,
         curve_index_b: result.b_position_normal[2] as u32,
-    }
-}
-
-pub fn collision_event_dispatch(
-    collision_channel: Res<GpuDataChannel<CollisionResults>>,
-    mut writer: EventWriter<VelloCollisionEvent>,
-    collision_world: Res<VelloCollisionWorld>,
-) {
-    if collision_world.collision_pairs.len() == 0 {
-        return;
-    }
-    //the following line would force a sync point between game thread and render thread.
-    //match collision_channel.receiver.recv() {
-    //notice the default behavious of the channel would consume the collision results.
-    // Assumption is frame rate slower that fixed update we might not get a result, which is okay.
-    match collision_channel.receiver.try_recv() {
-        Ok(data) => {
-            let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
-            for ((entity_a, entity_b), result) in data.pairs.iter().zip(data.results.iter()) {
-                //valid surface normal means valid results other wise there are no collision.
-                //the normal would be invalid if broad phase detects overlaps but narrow phase does not.
-                if result.a_position_normal[2] != 0.0 || result.a_position_normal[3] != 0.0 {
-                    writer.write(make_collision_event(entity_a, entity_b, result, scaling));
-                }
-            }
-        }
-        _ => {}
     }
 }
 

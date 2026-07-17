@@ -1,12 +1,16 @@
 use bevy::prelude::*;
 use bevy_vello::{
-    collision::VelloCollisionTrigger,
+    collision::{VelloCollisionTrigger, VelloCollisionWorld},
     integrations::particles::{self, ExplosionEffect},
     VelloScene, VelloSceneBundle,
 };
 use vello::{kurbo, peniko};
 
-pub(crate) fn on_collision_bullet(trigger: Trigger<VelloCollisionTrigger>, mut commands: Commands) {
+pub(crate) fn on_collision_bullet(
+    trigger: Trigger<VelloCollisionTrigger>,
+    mut commands: Commands,
+    mut r: ResMut<VelloCollisionWorld>,
+) {
     // let event = trigger.event();
     // let pos = event.collision_point;
     // let mut scene = VelloScene::default();
@@ -41,5 +45,5 @@ pub(crate) fn on_collision_bullet(trigger: Trigger<VelloCollisionTrigger>, mut c
     //         500,
     //     ),
     // ));
-    commands.entity(trigger.target()).despawn();
+    //commands.entity(trigger.target()).despawn();
 }
