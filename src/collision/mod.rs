@@ -104,6 +104,7 @@ pub struct SimpleBroadPhase {
 pub struct VelloCollider {
     pub(crate) shape: BezPath,
     pub frame_particles: [Particle; FRAME_PARTICLES_COUNT], //particles are always in world space.
+    pub(crate) initilized_by_physics: bool, //some data are calculated in engine for softbody, this marks the entity is ready.
     pub(crate) aabb: kurbo::Rect, //use for coarse collision detection and actually in local space.
     pub(crate) initial_velocity: Vec2,
     pub(crate) collision_inverse_mass: f32,
@@ -157,6 +158,7 @@ impl VelloCollider {
             soft_body_global_transform: transform,
             collision_cooled_down,
             initial_scale: Vec2::new(scale_x, scale_y),
+            initilized_by_physics: !is_soft_body,
         }
     }
 

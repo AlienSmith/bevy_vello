@@ -47,6 +47,7 @@ impl Plugin for VelloCollisionResponsePlugin {
                     apply_explicit_impulse_on_connection_particle,
                     // 4. Process collision constraints from previous tick's events
                     make_collision_constraints,
+                    update_collider_from_soft_body,
                     // 5. Broad phase: BVH + AABB overlap
                     run_broad_phase,
                     // 6. Physics step + sync + GPU narrow phase
@@ -59,11 +60,7 @@ impl Plugin for VelloCollisionResponsePlugin {
             // Pure visualization systems stay in PostUpdate
             .add_systems(
                 PostUpdate,
-                (
-                    update_collider_from_soft_body,
-                    visualize_colliders,
-                    create_update_pivot_visualizer,
-                )
+                (visualize_colliders, create_update_pivot_visualizer)
                     .chain()
                     .in_set(CollisionSystems::CollisionResponsePhysics),
             )

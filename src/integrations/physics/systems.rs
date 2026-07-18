@@ -75,6 +75,7 @@ pub fn update_collider_from_soft_body(
                 collider.shape = path;
                 collider.aabb = rect;
                 collider.frame_particles = frame_particles;
+                collider.initilized_by_physics = true;
             }
         },
     );
@@ -226,50 +227,27 @@ pub fn run_broad_phase(
     );
 }
 
-/// Steps physics, syncs transforms, filters broad-phase pairs, runs GPU collision.
-/// Uses ParamSet to resolve the conflict between mutable and immutable VelloCollider access.
+/// Steps physics, filters broad-phase pairs, runs GPU collision.
 pub fn update_constraint_world(
     mut constraint_world: ResMut<VelloConstraintWorld>,
     collision_runner: Res<GpuCollisionRunner>,
     mut collision_event_writer: EventWriter<VelloCollisionEvent>,
     mut collision_world: ResMut<VelloCollisionWorld>,
     time: Res<Time>,
-    mut params: ParamSet<(
-        Query<(&mut VelloCollider, &mut Transform)>, // p0: sync + scene building
-        Query<(Entity, &VelloCollider)>,             // p1: pair filtering
-    )>,
+    query: Query<(&VelloCollider, &Transform)>,
 ) {
+    if collision_world.paused {
+        return;
+    }
     let delta = time.delta_secs();
     let substep = max(collision_world.substeps, 1);
     constraint_world.data.step(delta, substep);
 
-    // Step 1: Sync physics deformation back to Entity transforms (p0: mutable)
-    let mut p0 = params.p0();
-    constraint_world.data.get_colliders_from_soft_body(
-        |index: Entity,
-         path: BezPath,
-         affine: Affine,
-         rect: kurbo::Rect,
-         frame_particles: [Particle; FRAME_PARTICLES_COUNT]| {
-            if let Ok((mut collider, mut transform)) = p0.get_mut(index) {
-                let target_matrix = affine_to_mat4(affine);
-                let temp = Transform::from_matrix(target_matrix);
-                *transform = temp;
-                collider.soft_body_global_transform = temp;
-                collider.shape = path;
-                collider.aabb = rect;
-                collider.frame_particles = frame_particles;
-            }
-        },
-    );
-    drop(p0);
-
-    // Step 2: Filter broad-phase pairs (p1: immutable)
+    // Step 1: Filter broad-phase pairs
     let pairs: Vec<(Entity, Entity)> = {
-        let p1 = params.p1();
         let mut temp = vec![];
         for (e0, e1) in &collision_world.collision_pairs_bvh {
-            if let (Ok((_, c)), Ok((_, c1))) = (p1.get(*e0), p1.get(*e1)) {
+            if let (Ok((c, _)), Ok((c1, _))) = (query.get(*e0), query.get(*e1)) {
                 if (c.is_soft_body() || c1.is_soft_body())
                     && (c.collision_group == 0 || (c.collision_group != c1.collision_group))
                 {
@@ -280,11 +258,10 @@ pub fn update_constraint_world(
         temp
     };
 
-    // Step 3: Build collision scene (p0 again: mutable, for transforms)
+    // Step 2: Build collision scene
     let mut scene = vello::CollisionScene::default();
-    let mut p0 = params.p0();
     for (a, b) in &pairs {
-        if let (Ok((c_a, t_a)), Ok((c_b, t_b))) = (p0.get(*a), p0.get(*b)) {
+        if let (Ok((c_a, t_a)), Ok((c_b, t_b))) = (query.get(*a), query.get(*b)) {
             let affine_a =
                 mat4_to_affine(t_a.compute_matrix()).then_scale(VELLO_COLLISION_WORLD_RATIO as f64);
             let affine_b =
@@ -298,9 +275,8 @@ pub fn update_constraint_world(
             );
         }
     }
-    drop(p0);
 
-    // Step 4: Run GPU collision synchronously
+    // Step 3: Run GPU collision synchronously
     if !pairs.is_empty() {
         let results = collision_runner.run_collision(&scene);
         let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
@@ -323,6 +299,9 @@ pub fn reset_visuzlie_colliders(mut q: Query<&mut VelloScene, With<VelloCollider
 
 pub fn visualize_colliders(mut q: Query<(&mut VelloScene, &VelloCollider, &GlobalTransform)>) {
     for (mut s, c, transform) in q.iter_mut() {
+        if !c.initilized_by_physics {
+            continue;
+        }
         s.fill_with_shadow_impl(
             peniko::Fill::NonZero,
             Affine::IDENTITY,
