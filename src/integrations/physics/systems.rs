@@ -208,7 +208,7 @@ fn make_collision_event(
 
 /// Runs the broad phase (BVH overlap detection) in FixedUpdate.
 /// Populates `collision_pairs_bvh` with candidate pairs.
-/// Runs as a separate system before `update_constraint_world` to avoid query conflicts.
+/// Runs as a separate system before `run_gpu_collision` to avoid query conflicts.
 pub fn run_broad_phase(
     all_colliders: Query<(Entity, &VelloCollider)>,
     modified_colliders: Query<
@@ -227,14 +227,13 @@ pub fn run_broad_phase(
     );
 }
 
-/// Steps physics, filters broad-phase pairs, runs GPU collision.
+/// Steps the physics simulation (XPBD solver).
+/// GPU collision detection has been extracted into [`run_gpu_collision`] so that
+/// collision constraints are created from the current frame's results.
 pub fn update_constraint_world(
     mut constraint_world: ResMut<VelloConstraintWorld>,
-    collision_runner: Res<GpuCollisionRunner>,
-    mut collision_event_writer: EventWriter<VelloCollisionEvent>,
     mut collision_world: ResMut<VelloCollisionWorld>,
     time: Res<Time>,
-    query: Query<(&VelloCollider, &Transform)>,
 ) {
     if collision_world.paused {
         return;
@@ -242,6 +241,23 @@ pub fn update_constraint_world(
     let delta = time.delta_secs();
     let substep = max(collision_world.substeps, 1);
     constraint_world.data.step(delta, substep);
+}
+
+/// Filters broad-phase pairs, builds the collision scene, runs GPU collision
+/// synchronously, and writes [`VelloCollisionEvent`]s for the **current** frame.
+///
+/// This runs **before** [`make_collision_constraints`] so that collision
+/// constraints are created from the same frame's results, eliminating the
+/// one-frame pipeline delay.
+pub fn run_gpu_collision(
+    collision_runner: Res<GpuCollisionRunner>,
+    mut collision_event_writer: EventWriter<VelloCollisionEvent>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
+    query: Query<(&VelloCollider, &Transform)>,
+) {
+    if collision_world.paused {
+        return;
+    }
 
     // Step 1: Filter broad-phase pairs
     let pairs: Vec<(Entity, Entity)> = {

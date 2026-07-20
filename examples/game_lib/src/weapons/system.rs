@@ -188,7 +188,7 @@ pub fn process_fire_event(
                         softbody_config,
                         collision_config: CollisionConstraintConfig::default(),
                         soft_body_init_transform,
-                        initial_velocity: x_ray * 700.0,
+                        initial_velocity: x_ray * 1000.0,
                         collision_group: fire.projectile_collision_group,
                         collision_inverse_mass: 0.0,
                     },

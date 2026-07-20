@@ -49,7 +49,7 @@ pub(crate) fn on_collision_bullet(
     //         500,
     //     ),
     // ));
-    //commands.entity(trigger.target()).despawn();
+    commands.entity(trigger.target()).despawn();
     if let Ok(c) = quey_c.get(event.entity_other) {
         events.write(CharacterPartEvent::UnregisterPart {
             character: c.character,

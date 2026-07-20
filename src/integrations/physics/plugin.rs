@@ -12,8 +12,8 @@ use crate::{
             apply_explicit_impulse_on_connection_particle, apply_explicit_impulse_on_softbody,
             create_update_pivot_visualizer, generate_connection, generate_soft_body_for_collider,
             make_collision_constraints, remove_soft_body, reset_visuzlie_colliders,
-            run_broad_phase, update_collider_from_soft_body, update_connection_particles,
-            update_constraint_world, visualize_colliders,
+            run_broad_phase, run_gpu_collision, update_collider_from_soft_body,
+            update_connection_particles, update_constraint_world, visualize_colliders,
         },
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
         CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
@@ -33,7 +33,10 @@ impl Plugin for VelloCollisionResponsePlugin {
             .add_event::<CharacterAngularConstraintEvent>()
             .add_event::<CharacterPivotPositionEvent>()
             .add_event::<CharacterFrameForceEvent>()
-            // All physics-affecting systems run in FixedUpdate, ordered correctly
+            // All physics-affecting systems run in FixedUpdate, ordered correctly.
+            // GPU collision runs BEFORE make_collision_constraints so that
+            // collision constraints are created from the current frame's results,
+            // eliminating the one-frame pipeline delay.
             .add_systems(
                 FixedUpdate,
                 (
@@ -45,14 +48,17 @@ impl Plugin for VelloCollisionResponsePlugin {
                     // 3. Apply external impulses from events
                     apply_explicit_impulse_on_softbody,
                     apply_explicit_impulse_on_connection_particle,
-                    // 4. Process collision constraints from previous tick's events
-                    make_collision_constraints,
+                    // 4. Sync physics shapes back to Bevy transforms
                     update_collider_from_soft_body,
                     // 5. Broad phase: BVH + AABB overlap
                     run_broad_phase,
-                    // 6. Physics step + sync + GPU narrow phase
+                    // 6. GPU narrow-phase collision detection (synchronous)
+                    run_gpu_collision,
+                    // 7. Create collision constraints from CURRENT frame's results
+                    make_collision_constraints,
+                    // 8. Step the physics simulation (XPBD solver)
                     update_constraint_world,
-                    // 7. Sync physics state back to connection particles
+                    // 9. Sync physics state back to connection particles
                     update_connection_particles,
                 )
                     .chain(),
