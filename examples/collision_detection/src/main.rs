@@ -100,6 +100,7 @@ struct ParticleState {
 struct PistolState {
     registered: bool,
     character: Option<Entity>,
+    pistol: Option<Entity>,
 }
 
 impl Default for ParticleState {
@@ -623,6 +624,7 @@ fn setup_pistol(
         pistol: pistol_entity,
     });
     pistol_state.registered = true;
+    pistol_state.pistol = Some(pistol_entity);
 }
 
 fn make_static_scene(commands: &mut Commands) {
@@ -1012,7 +1014,7 @@ fn player_movement(
 
         events.write(CharacterPartEvent::UnregisterPart {
             character: pistol_state.character.unwrap(),
-            path_id: "pistol".to_string(),
+            part: pistol_state.pistol.unwrap(),
         });
         if let Ok(mut right) = arm_q.get_mut(pistol_state.character.unwrap()) {
             right.config.ik_mode = IkMode::Disabled;

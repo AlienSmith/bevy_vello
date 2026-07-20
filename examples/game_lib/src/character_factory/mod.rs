@@ -89,6 +89,6 @@ pub enum CharacterPartEvent {
         character: Entity,
         /// The string path_id of the part to unregister (e.g. "pistol").
         /// This is looked up from [`ConnectivityRoot.parts`] to find the entity.
-        path_id: String,
+        part: Entity,
     },
 }

@@ -259,21 +259,21 @@ fn connected_entities_from_config(config: &ConnectionConstraintInitConfig<Entity
 pub fn handle_unregister_part(
     mut events: EventReader<CharacterPartEvent>,
     mut commands: Commands,
-    string_pool: Res<StringPool>,
     root_query: Query<&ConnectivityRoot>,
+    connectivity_query: Query<&Connectivity>,
 ) {
     for event in events.read() {
-        let CharacterPartEvent::UnregisterPart { character, path_id } = event else {
+        let CharacterPartEvent::UnregisterPart { character, part } = event else {
             continue;
         };
-        info!("[unregister] looking up '{path_id}' on character {character:?}");
+        info!("[unregister] looking up '{part:?}' on character {character:?}");
 
-        let interned = string_pool.pool.intern(path_id);
+        let interned = connectivity_query.get(*part).unwrap().name;
         let entity = match root_query.get(*character) {
             Ok(root) => match root.parts.get(&interned) {
                 Some(e) => *e,
                 None => {
-                    warn!("[unregister] character {character:?} has no part '{path_id}'");
+                    warn!("[unregister] character {character:?} has no part '{part:?}'");
                     continue;
                 }
             },

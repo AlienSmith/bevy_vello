@@ -6,12 +6,16 @@ use bevy_vello::{
 };
 use vello::{kurbo, peniko};
 
+use crate::{character::Connectivity, CharacterPartEvent};
+
 pub(crate) fn on_collision_bullet(
     trigger: Trigger<VelloCollisionTrigger>,
     mut commands: Commands,
     mut r: ResMut<VelloCollisionWorld>,
+    quey_c: Query<&Connectivity>,
+    mut events: EventWriter<CharacterPartEvent>,
 ) {
-    // let event = trigger.event();
+    let event = trigger.event();
     // let pos = event.collision_point;
     // let mut scene = VelloScene::default();
     // scene.push_instance_with_transforms(&[]);
@@ -46,4 +50,10 @@ pub(crate) fn on_collision_bullet(
     //     ),
     // ));
     //commands.entity(trigger.target()).despawn();
+    if let Ok(c) = quey_c.get(event.entity_other) {
+        events.write(CharacterPartEvent::UnregisterPart {
+            character: c.character,
+            part: event.entity_other,
+        });
+    }
 }
