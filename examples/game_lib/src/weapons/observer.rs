@@ -1,19 +1,24 @@
 use bevy::prelude::*;
-use bevy_vello::{
-    collision::{VelloCollisionTrigger, VelloCollisionWorld},
-    integrations::particles::{self, ExplosionEffect},
-    VelloScene, VelloSceneBundle,
-};
-use vello::{kurbo, peniko};
+use bevy_vello::collision::VelloCollisionTrigger;
 
-use crate::{character::Connectivity, CharacterPartEvent};
+use crate::{
+    character::Connectivity,
+    utility::{DelayedEvent, DelayedEventTrigger},
+    CharacterPartEvent,
+};
+
+/// Payload attached to a delayed-event entity. Read by the observer
+/// when the timer fires to know which part to unregister.
+#[derive(Component)]
+pub(crate) struct UnregisterPartPayload {
+    character: Entity,
+    part: Entity,
+}
 
 pub(crate) fn on_collision_bullet(
     trigger: Trigger<VelloCollisionTrigger>,
     mut commands: Commands,
-    mut r: ResMut<VelloCollisionWorld>,
     quey_c: Query<&Connectivity>,
-    mut events: EventWriter<CharacterPartEvent>,
 ) {
     let event = trigger.event();
     // let pos = event.collision_point;
@@ -51,9 +56,28 @@ pub(crate) fn on_collision_bullet(
     // ));
     commands.entity(trigger.target()).despawn();
     if let Ok(c) = quey_c.get(event.entity_other) {
-        events.write(CharacterPartEvent::UnregisterPart {
-            character: c.character,
-            part: event.entity_other,
-        });
+        commands
+            .spawn((
+                DelayedEvent::new(0.05),
+                UnregisterPartPayload {
+                    character: c.character,
+                    part: event.entity_other,
+                },
+            ))
+            .observe(on_delayed_unregister);
     }
+}
+
+pub(crate) fn on_delayed_unregister(
+    trigger: Trigger<DelayedEventTrigger>,
+    q: Query<&UnregisterPartPayload>,
+    mut events: EventWriter<CharacterPartEvent>,
+) {
+    let Ok(payload) = q.get(trigger.target()) else {
+        return;
+    };
+    events.write(CharacterPartEvent::UnregisterPart {
+        character: payload.character,
+        part: payload.part,
+    });
 }

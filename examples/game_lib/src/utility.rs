@@ -1,5 +1,44 @@
 use bevy::math::{Affine2, Mat2, Mat4, Vec2};
+use bevy::prelude::*;
 use bevy_vello::vello::kurbo::{BezPath, Rect, Shape};
+
+/// A one-shot timer component. When the timer expires, a [`DelayedEventTrigger`]
+/// is fired on the same entity, then the entity is despawned.
+///
+/// Attach payload components to the same entity and observe
+/// [`DelayedEventTrigger`] to react when the timer fires.
+#[derive(Component)]
+pub struct DelayedEvent {
+    pub timer: Timer,
+}
+
+impl DelayedEvent {
+    pub fn new(seconds: f32) -> Self {
+        Self {
+            timer: Timer::from_seconds(seconds, TimerMode::Once),
+        }
+    }
+}
+
+/// Fired on an entity when its [`DelayedEvent`] timer expires.
+#[derive(Event)]
+pub struct DelayedEventTrigger;
+
+/// Ticks all [`DelayedEvent`] timers. When a timer finishes, triggers
+/// [`DelayedEventTrigger`] on the entity and despawns it.
+pub fn tick_delayed_events(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut q: Query<(Entity, &mut DelayedEvent)>,
+) {
+    for (entity, mut delayed) in q.iter_mut() {
+        delayed.timer.tick(time.delta());
+        if delayed.timer.just_finished() {
+            commands.trigger_targets(DelayedEventTrigger, entity);
+            commands.entity(entity).despawn();
+        }
+    }
+}
 
 pub fn crate_capsuele(distance: f32, radius: f32) -> (BezPath, Rect) {
     let half_distance = distance * 0.5;

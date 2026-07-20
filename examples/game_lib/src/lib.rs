@@ -7,8 +7,11 @@ pub mod weapons;
 use bevy::prelude::*;
 
 use crate::{
-    character::plugin::GameCharacterPlugin, character_asset::plugin::CharacterLoaderPlugin,
-    character_factory::plugin::CharacterFactoryPlugin, weapons::plugin::WeaponPlugin,
+    character::plugin::GameCharacterPlugin,
+    character_asset::plugin::CharacterLoaderPlugin,
+    character_factory::plugin::CharacterFactoryPlugin,
+    utility::{tick_delayed_events, DelayedEventTrigger},
+    weapons::plugin::WeaponPlugin,
 };
 #[derive(Default)]
 pub struct VelloCharacterPlugin;
@@ -34,6 +37,7 @@ impl Plugin for VelloCharacterPlugin {
             .add_plugins(CharacterLoaderPlugin)
             .add_plugins(ColliderFactoryPlugin)
             .add_plugins(WeaponPlugin)
+            .add_event::<DelayedEventTrigger>()
             .configure_sets(
                 Update,
                 (
@@ -41,6 +45,10 @@ impl Plugin for VelloCharacterPlugin {
                     GameLabSystems::ReadCharacterPartEvent,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                tick_delayed_events.in_set(GameLabSystems::WriteCharacterPartEvent),
             );
     }
 }
