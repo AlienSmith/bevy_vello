@@ -20,3 +20,5 @@ vello_physics = {workspace = true}
 bevy_egui = "0.34.0"
 thiserror = "1.0.61"
 serde_json = {workspace = true}
+leafwing-input-manager = "0.17"
+seldom_state = { version = "0.14", features = ["leafwing_input"] }
