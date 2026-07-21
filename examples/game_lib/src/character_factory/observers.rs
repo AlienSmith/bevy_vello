@@ -443,12 +443,10 @@ pub fn assemble_character(
                         name: &String,
                         path_name: &String|
      -> Entity {
-        let Some((entity_a, _)) = colliders_particle_entity.get(name) else {
-            panic!(
-                "could not found collider {:?}, constraint {:?}, in {:?}",
-                name, path_name, config.svg_asset_id
-            );
-        };
+        let (entity_a, _) = colliders_particle_entity.get(name).expect(&format!(
+            "could not found collider {:?}, constraint {:?}, in {:?}",
+            name, path_name, config.svg_asset_id
+        ));
         sibling.push((name.clone(), *entity_a));
         *entity_a
     };
