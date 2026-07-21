@@ -3,6 +3,7 @@ use bevy_vello::collision::VelloCollisionTrigger;
 
 use crate::{
     character::Connectivity,
+    health::Health,
     utility::{DelayedEvent, DelayedEventTrigger},
     CharacterPartEvent,
 };
@@ -19,6 +20,7 @@ pub(crate) fn on_collision_bullet(
     trigger: Trigger<VelloCollisionTrigger>,
     mut commands: Commands,
     quey_c: Query<&Connectivity>,
+    mut health_q: Query<&mut Health>,
 ) {
     let event = trigger.event();
     // let pos = event.collision_point;
@@ -55,6 +57,16 @@ pub(crate) fn on_collision_bullet(
     //     ),
     // ));
     commands.entity(trigger.target()).despawn();
+    // Colliders are spawned with Health of 2 in assemble_character. Each bullet
+    // hit reduces health by 1. This must happen regardless of Connectivity:
+    // after the first hit detaches the collider (via UnregisterPart) its
+    // Connectivity is removed, but Health stays, so the second hit can still
+    // drive health to zero and fire the Die event that despawns the entity.
+    if let Ok(mut health) = health_q.get_mut(event.entity_other) {
+        health.current -= 1.0;
+    }
+    // Only detach the collider from its character on the first hit (while it
+    // still has Connectivity). After this it becomes a free body.
     if let Ok(c) = quey_c.get(event.entity_other) {
         commands
             .spawn((

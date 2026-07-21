@@ -24,6 +24,7 @@ use crate::{
         SvgCharacterAssetManager,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
+    health::{Die, Health},
 };
 
 // ---------------------------------------------------------------------------
@@ -345,7 +346,9 @@ fn spawn_collider(
                 *transform,
                 VELLO_COLLISION_COOL_DOWN_TIME,
             ),
+            Health::new(2.0),
         ))
+        .observe(on_character_die)
         .id()
 }
 
@@ -656,8 +659,22 @@ fn make_collision_shape(
                 soft_body_init_transform,
                 VELLO_COLLISION_COOL_DOWN_TIME,
             ),
+            Health::new(2.0),
         ))
+        .observe(on_character_die)
         .id()
+}
+
+/// Despawns the entity when it dies (its `Health` drops to/below zero and the
+/// `Die` event is fired by `check_health`).
+///
+/// Attached as an observer to every collider entity spawned by
+/// `assemble_character`. Colliders start with `Health` of 2; the bullet
+/// collision observer reduces health by 1 per hit, so the first hit detaches
+/// the collider (it flies away as a free body via `UnregisterPart`) while the
+/// second hit drops health to zero and despawns the entity here.
+pub fn on_character_die(trigger: Trigger<Die>, mut commands: Commands) {
+    commands.entity(trigger.target()).despawn();
 }
 
 pub fn transform_to_affine(transform: &Transform) -> Affine {

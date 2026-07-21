@@ -2,6 +2,7 @@ mod character;
 pub mod character_asset;
 mod character_factory;
 mod collider_factory;
+mod health;
 mod utility;
 pub mod weapons;
 use bevy::prelude::*;
@@ -10,6 +11,7 @@ use crate::{
     character::plugin::GameCharacterPlugin,
     character_asset::plugin::CharacterLoaderPlugin,
     character_factory::plugin::CharacterFactoryPlugin,
+    health::HealthPlugin,
     utility::{tick_delayed_events, DelayedEventTrigger},
     weapons::plugin::WeaponPlugin,
 };
@@ -22,12 +24,14 @@ pub use crate::{
         StringPool, WhichArm,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
+    health::{Die, Health},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 pub enum GameLabSystems {
     WriteCharacterPartEvent,
     ReadCharacterPartEvent,
+    CheckHealth,
 }
 
 impl Plugin for VelloCharacterPlugin {
@@ -37,12 +41,14 @@ impl Plugin for VelloCharacterPlugin {
             .add_plugins(CharacterLoaderPlugin)
             .add_plugins(ColliderFactoryPlugin)
             .add_plugins(WeaponPlugin)
+            .add_plugins(HealthPlugin)
             .add_event::<DelayedEventTrigger>()
             .configure_sets(
                 Update,
                 (
                     GameLabSystems::WriteCharacterPartEvent,
                     GameLabSystems::ReadCharacterPartEvent,
+                    GameLabSystems::CheckHealth,
                 )
                     .chain(),
             )
