@@ -495,7 +495,11 @@ fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32)
     // sin(θ_b - θ_a) = -cross
     let error = -cross / (1.0 + dot);
     let max_error = (max_delta * 0.5).tan();
-    let clamped_error = error.clamp(-max_error, max_error);
+    // Soft saturation instead of a hard clamp: `tanh` keeps large errors near the
+    // max rate (so a moving target is tracked immediately) but smoothly tapers the
+    // step as the error shrinks, removing the square-wave feel of the previous hard
+    // clamp. Equivalent energy behaviour, just a smooth velocity profile.
+    let clamped_error = max_error * (error / max_error).tanh();
 
     // Convert back: cos(Δ) = (1 - t²) / (1 + t²), sin(Δ) = 2t / (1 + t²)
     let error_sq = clamped_error * clamped_error;
