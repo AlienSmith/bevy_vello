@@ -224,28 +224,19 @@ fn solve_aim_ik(
     angle_diff = (angle_diff + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI)
         - std::f32::consts::PI;
 
-    let half_delta = angle_diff * 0.5;
-    let (sin_half, cos_half) = half_delta.sin_cos();
-    let (sin_t2, cos_t2) = current_theta2.sin_cos();
-
-    let f_val = sin_half - (upper_len / r) * sin_t2;
-
-    let j1 = 0.5 * cos_half;
-    let j2 = 0.5 * cos_half - (upper_len / r) * cos_t2;
-
-    let w1 = 1.0;
-    let w2 = 1.0;
-
-    let denominator = (j1 * j1) / w1 + (j2 * j2) / w2;
-
-    let (desired_theta1, desired_theta2) = if denominator.abs() > 1e-6 {
-        let lambda = -f_val / denominator;
-        let delta_theta1 = lambda * (j1 / w1);
-        let delta_theta2 = lambda * (j2 / w2);
-        (current_theta1 + delta_theta1, current_theta2 + delta_theta2)
-    } else {
-        (current_theta1, current_theta2)
-    };
+    // Least-action aim: rotate the whole arm so the forearm aligns with the target.
+    //
+    // The forearm angle is `current_theta1 + current_theta2`; the shortest wrapped
+    // angular error to the desired direction `alpha` is `angle_diff`. Splitting that
+    // error equally across the two joints (equal weights => minimal total motion =>
+    // elbow bend preserved) gives `Δt1 = Δt2 = -angle_diff/2`.
+    //
+    // This closed-form step supersedes the previous `f = sin((t1+t2-alpha)/2)` Lagrange
+    // solve, which was ambiguous at exactly 180 degrees (sin zeroes at both alignment
+    // and anti-alignment) and whose Newton/tan step overshot near 180 degrees, leaving
+    // the arm aiming at the opposite position. The closed form is exact for every angle.
+    let desired_theta1 = current_theta1 - angle_diff * 0.5;
+    let desired_theta2 = current_theta2 - angle_diff * 0.5;
 
     // 5. Reconstruct final positions
     let (sin1, cos1) = desired_theta1.sin_cos();
