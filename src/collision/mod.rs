@@ -141,7 +141,7 @@ impl VelloCollider {
         collision_cooled_down: f32,
     ) -> Self {
         let scale_x = (aabb.x1 - aabb.x0) as f32 * transform.scale.x;
-        let scale_y = (aabb.y1 - aabb.x1) as f32 * transform.scale.y;
+        let scale_y = (aabb.y1 - aabb.y0) as f32 * transform.scale.y;
         Self {
             shape: path.clone(),
             frame_particles: Default::default(),
