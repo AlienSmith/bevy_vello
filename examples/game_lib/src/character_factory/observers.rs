@@ -525,6 +525,9 @@ pub fn assemble_character(
             ..Default::default()
         },
         target: Vec2::ZERO,
+        cached_target: None,
+        cached_p13: Vec2::ZERO,
+        cached_prla: Vec2::ZERO,
     };
 
     // Left arm particles: [P1, P11, P10, PLLA]
@@ -536,6 +539,9 @@ pub fn assemble_character(
             ..Default::default()
         },
         target: Vec2::ZERO,
+        cached_target: None,
+        cached_p13: Vec2::ZERO,
+        cached_prla: Vec2::ZERO,
     };
 
     commands.entity(root_entity).insert(character_connectivity);

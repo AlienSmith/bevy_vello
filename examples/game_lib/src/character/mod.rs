@@ -154,6 +154,11 @@ pub struct RightArmController {
     pub config: ArmConfig,
     /// Aim target in world space. Written by weapon system, AI, player input, etc.
     pub target: Vec2,
+    /// Cache: when target hasn't changed, reuse the last IK result to avoid
+    /// recomputation drift and isolate feedback-loop effects.
+    pub cached_target: Option<Vec2>,
+    pub cached_p13: Vec2,
+    pub cached_prla: Vec2,
 }
 
 /// Left arm controller with pre-cached entity handles + per-frame input.
@@ -166,6 +171,11 @@ pub struct LeftArmController {
     pub config: ArmConfig,
     /// Aim target in world space. Written by weapon system, AI, player input, etc.
     pub target: Vec2,
+    /// Cache: when target hasn't changed, reuse the last IK result to avoid
+    /// recomputation drift and isolate feedback-loop effects.
+    pub cached_target: Option<Vec2>,
+    pub cached_p13: Vec2,
+    pub cached_prla: Vec2,
 }
 
 // ---------------------------------------------------------------------------
