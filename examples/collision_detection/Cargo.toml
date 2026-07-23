@@ -15,3 +15,4 @@ bevy = { workspace = true}
 bevy_vello = { path = "../../"}
 bevy_egui = "0.34.0"
 game_lib ={ path = "../game_lib" }
+leafwing-input-manager = "0.17"

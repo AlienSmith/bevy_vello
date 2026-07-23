@@ -3,6 +3,7 @@ pub mod character_asset;
 mod character_factory;
 mod collider_factory;
 mod health;
+mod input_management;
 mod utility;
 pub mod weapons;
 use bevy::prelude::*;
@@ -25,6 +26,12 @@ pub use crate::{
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     health::{Die, Health},
+    input_management::{
+        actions::{default_input_map, PlayerAction},
+        mouse::MouseWorldPosition,
+        systems::Player as PlayerMarker,
+        InputPlugin,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
@@ -36,7 +43,8 @@ pub enum GameLabSystems {
 
 impl Plugin for VelloCharacterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(GameCharacterPlugin)
+        app.add_plugins(InputPlugin)
+            .add_plugins(GameCharacterPlugin)
             .add_plugins(CharacterFactoryPlugin)
             .add_plugins(CharacterLoaderPlugin)
             .add_plugins(ColliderFactoryPlugin)

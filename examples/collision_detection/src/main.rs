@@ -53,11 +53,12 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
+    default_input_map,
     weapons::{AttachPistolToCharacterEvent, FireEvent, PistolControl},
     CharacterController, CharacterPartEvent, CharacterRoot, ColliderRoot, ConnectivityRoot,
-    GameLabSystems, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
-    SpineController, VelloCharacterPlugin, WhichArm,
+    GameLabSystems, PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
 };
+use leafwing_input_manager::prelude::*;
 
 use crate::{
     connections::ConnectionStatus,
@@ -195,7 +196,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(
             Update,
             (
-                player_movement,
                 utility::update_mouse_position,
                 ui_example_system,
                 update_from_ui.after(ui_example_system),
@@ -546,6 +546,11 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                     ..Default::default()
                 },
                 Player,
+                PlayerMarker,
+                InputManagerBundle::<PlayerAction> {
+                    input_map: default_input_map(),
+                    action_state: ActionState::default(),
+                },
             ))
             .id(),
     );
@@ -952,78 +957,4 @@ fn on_collision_spawn_particle(trigger: Trigger<VelloCollisionTrigger>, mut comm
             500,
         ),
     ));
-}
-
-fn player_movement(
-    mouse_status: ResMut<MouseStatus>,
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut spine_q: Query<&mut SpineController>,
-    mut pistol_q: Query<(Entity, &mut PistolControl)>,
-    mut arm_q: Query<&mut RightArmController>,
-    mut legacy_q: Query<&mut CharacterController>,
-    mut pistol_state: ResMut<PistolState>,
-    mut events: EventWriter<CharacterPartEvent>,
-    mut fire: EventWriter<FireEvent>,
-    mut reset_event: EventWriter<ResetArmControlConstraintsEvent>,
-    character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
-) {
-    let mut direction = Vec2::ZERO;
-
-    // Check for key presses
-    if keyboard_input.pressed(KeyCode::KeyW) {
-        direction.y += 50.0;
-    }
-    if keyboard_input.pressed(KeyCode::KeyS) {
-        direction.y -= 50.0;
-    }
-    if keyboard_input.pressed(KeyCode::KeyA) {
-        direction.x -= 50.0;
-    }
-    if keyboard_input.pressed(KeyCode::KeyD) {
-        direction.x += 50.0;
-    }
-
-    if let Ok(mut spine) = spine_q.get_mut(pistol_state.character.unwrap()) {
-        spine.move_vector = direction;
-    }
-
-    let target = mouse_status.world_pos;
-    if let Ok((entity, mut pistol)) = pistol_q.single_mut() {
-        if keyboard_input.pressed(KeyCode::KeyC) {
-            pistol.world_aim_trarget = Some(target);
-        } else {
-            pistol.world_aim_trarget = None;
-        };
-        if keyboard_input.pressed(KeyCode::KeyF) {
-            fire.write(FireEvent {
-                weapon: entity,
-                projectile_collision_group: PLAYER_COLLISION_GROUP,
-            });
-        }
-    }
-
-    // Legacy: keep CharacterController in sync for any old systems still reading it.
-    if let Ok(mut item) = legacy_q.get_mut(pistol_state.character.unwrap()) {
-        item.move_vector = direction;
-        item.point_vector = target;
-    }
-
-    // ── V key: Unregister the pistol (throw/drop) ────────────────────────
-    if keyboard_input.just_pressed(KeyCode::KeyV) && pistol_state.registered {
-        info!("Player pressed V — unregistering pistol");
-
-        events.write(CharacterPartEvent::UnregisterPart {
-            character: pistol_state.character.unwrap(),
-            part: pistol_state.pistol.unwrap(),
-        });
-        if let Ok(mut right) = arm_q.get_mut(pistol_state.character.unwrap()) {
-            right.config.ik_mode = IkMode::Disabled;
-            reset_event.write(ResetArmControlConstraintsEvent {
-                arm: WhichArm::Right,
-                character: pistol_state.character.unwrap(),
-            });
-        }
-
-        pistol_state.registered = false;
-    }
 }
