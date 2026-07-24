@@ -547,10 +547,8 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                 },
                 Player,
                 PlayerMarker,
-                InputManagerBundle::<PlayerAction> {
-                    input_map: default_input_map(),
-                    action_state: ActionState::default(),
-                },
+                default_input_map(),
+                ActionState::<PlayerAction>::default(),
             ))
             .id(),
     );

@@ -2,6 +2,7 @@ mod character;
 pub mod character_asset;
 mod character_factory;
 mod collider_factory;
+mod damage;
 mod health;
 mod input_management;
 mod utility;
@@ -12,6 +13,7 @@ use crate::{
     character::plugin::GameCharacterPlugin,
     character_asset::plugin::CharacterLoaderPlugin,
     character_factory::plugin::CharacterFactoryPlugin,
+    damage::DamagePlugin,
     health::HealthPlugin,
     utility::{tick_delayed_events, DelayedEventTrigger},
     weapons::plugin::WeaponPlugin,
@@ -25,6 +27,7 @@ pub use crate::{
         StringPool, WhichArm,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
+    damage::{AttackStats, Damageable, PartKind, TotalHealth},
     health::{Die, Health},
     input_management::{
         actions::{default_input_map, PlayerAction},
@@ -50,6 +53,7 @@ impl Plugin for VelloCharacterPlugin {
             .add_plugins(ColliderFactoryPlugin)
             .add_plugins(WeaponPlugin)
             .add_plugins(HealthPlugin)
+            .add_plugins(DamagePlugin)
             .add_event::<DelayedEventTrigger>()
             .configure_sets(
                 Update,

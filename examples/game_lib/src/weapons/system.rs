@@ -1,5 +1,13 @@
 use std::ops::Mul;
 
+use bevy::ecs::intern::Interned;
+
+/// Default bullet damage profile. `cut_damage` applies uniformly to armor/part;
+/// `blunt_damage` is gated by `penetration` vs the target's `protection_level`.
+const BULLET_BLUNT_DAMAGE: f32 = 20.0;
+const BULLET_CUT_DAMAGE: f32 = 8.0;
+const BULLET_PENETRATION: f32 = 3.0;
+
 use bevy::{prelude::*, tasks::block_on, transform};
 use bevy_egui::egui::Key::W;
 use bevy_vello::{
@@ -17,6 +25,7 @@ use vello_physics::{
 
 use crate::{
     character::Connectivity,
+    damage::components::AttackStats,
     utility::mat4_to_affine2,
     weapons::{
         observer::on_collision_bullet, AttachPistolToCharacterEvent, Bullet, FireEvent,
@@ -25,6 +34,7 @@ use crate::{
     CharacterPartEvent, ColliderRoot, ConnectivityRoot, LeftArmController, RightArmController,
     StringPool,
 };
+
 pub fn attach_pistol(
     mut reader: EventReader<AttachPistolToCharacterEvent>,
     mut writer: EventWriter<CharacterPartEvent>,
@@ -193,6 +203,9 @@ pub fn process_fire_event(
                         collision_inverse_mass: 0.0,
                     },
                     Bullet,
+                    // Tunable bullet damage profile. Cut applies uniformly to
+                    // armor/part; blunt is gated by penetration vs protection.
+                    AttackStats::new(BULLET_BLUNT_DAMAGE, BULLET_CUT_DAMAGE, BULLET_PENETRATION),
                 ))
                 .observe(on_collision_bullet);
             let back = -x_ray;
