@@ -33,3 +33,6 @@ dist/
 **/unsupported.js
 /examples/tankgame_bin/*.scene
 /examples/tankgame_bin/assets/scenes/*.scene
+
+# Design plans — temp files, code is the source of truth
+/plans/
