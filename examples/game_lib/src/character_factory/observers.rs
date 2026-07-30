@@ -1,4 +1,100 @@
 use bevy::{ecs::intern::Interned, platform::collections::HashMap, prelude::*};
+
+// ---------------------------------------------------------------------------
+// Payload component for delayed detach
+// ---------------------------------------------------------------------------
+
+/// Payload attached to a delayed-event entity. When the timer fires,
+/// [`on_delayed_detach`] writes a [`ChannelMessage<Detach>`] targeting
+/// the original body-part entity.
+#[derive(Component)]
+pub struct DelayedDetachPayload {
+    pub character: Entity,
+    pub part: Entity,
+}
+
+// ---------------------------------------------------------------------------
+// Body-part observers: 3 observers attached to each body-part entity
+// ---------------------------------------------------------------------------
+
+/// Observer on [`Trigger<Die>`] for a body part that is NOT yet detached
+/// (first hit). Spawns a [`DelayedEvent`] entity that will later write a
+/// [`ChannelMessage<Detach>`], giving a visual flying-off effect before
+/// the part becomes a free physics body with Health(1) + Detached.
+pub fn on_bodypart_first_hit(
+    trigger: Trigger<Die>,
+    mut commands: Commands,
+    part_query: Query<&Connectivity>,
+) {
+    let part_entity = trigger.target();
+
+    // Look up the character root from Connectivity (still present on first hit).
+    let Ok(connectivity) = part_query.get(part_entity) else {
+        return;
+    };
+    let character = connectivity.character;
+
+    // Spawn a delayed-event entity that will write ChannelMessage<Detach>
+    // after 0.05s, mirroring the delayed-unregister logic that was previously
+    // in on_collision_bullet.
+    commands
+        .spawn((
+            DelayedEvent::new(0.05),
+            DelayedDetachPayload {
+                character,
+                part: part_entity,
+            },
+        ))
+        .observe(on_delayed_detach);
+}
+
+/// Observer on [`Trigger<Die>`] for a body part that IS already detached
+/// (second hit). Despawns the entity.
+///
+/// NOTE: Observer system params do NOT filter execution — this function runs
+/// for EVERY Trigger<Die> on the entity. We must explicitly check for the
+/// Detached marker before despawning.
+pub fn on_bodypart_second_hit(
+    trigger: Trigger<Die>,
+    mut commands: Commands,
+    detached_q: Query<(), With<Detached>>,
+) {
+    if detached_q.get(trigger.target()).is_err() {
+        return; // Not detached — this is a first hit, skip.
+    }
+    commands.entity(trigger.target()).despawn();
+}
+
+/// Observer on [`Trigger<Detach>`] for a body part. Inserts [`Health`]`{1,1}`
+/// and the [`Detached`] marker, making it a free physics body that can be
+/// killed with a second hit.
+pub fn on_bodypart_detach(trigger: Trigger<Detach>, mut commands: Commands) {
+    let part_entity = trigger.target();
+    commands
+        .entity(part_entity)
+        .insert((Health::new(1.0), Detached));
+}
+
+/// Observer on [`DelayedEventTrigger`]: writes a [`ChannelMessage<Detach>`]
+/// via [`EventWriter`] so the `process_channel_system<Detach>` can dispatch
+/// it in the correct schedule order.
+pub fn on_delayed_detach(
+    trigger: Trigger<DelayedEventTrigger>,
+    q: Query<&DelayedDetachPayload>,
+    mut writer: EventWriter<ChannelMessage<Detach>>,
+) {
+    let Ok(payload) = q.get(trigger.target()) else {
+        return;
+    };
+    // The delayed-event entity is about to be despawned by tick_delayed_events,
+    // but we still have access to its components during the observer call.
+    writer.write(ChannelMessage {
+        target: payload.part, // the original body-part entity
+        payload: Detach {
+            character: payload.character,
+        },
+    });
+}
 use bevy_vello::{
     collision::{path_to_ccw_quad_path, VELLO_COLLISION_COOL_DOWN_TIME},
     integrations::physics::{VelloCharacterPhysicsRoot, VelloJoint, VelloParticle},
@@ -28,7 +124,9 @@ use crate::{
         components::{Damageable, PartKind},
         TotalHealth,
     },
+    death_channel::{channel::ChannelMessage, components::Detached, Detach},
     health::{Die, Health},
+    utility::{DelayedEvent, DelayedEventTrigger},
 };
 
 // ---------------------------------------------------------------------------
@@ -273,7 +371,13 @@ pub fn handle_unregister_part(
         };
         info!("[unregister] looking up '{part:?}' on character {character:?}");
 
-        let interned = connectivity_query.get(*part).unwrap().name;
+        let Ok(connectivity) = connectivity_query.get(*part) else {
+            warn!(
+                "[unregister] part entity {part:?} no longer has Connectivity (already unregistered or despawned?); skipping"
+            );
+            continue;
+        };
+        let interned = connectivity.name;
         let entity = match root_query.get(*character) {
             Ok(root) => match root.parts.get(&interned) {
                 Some(e) => *e,
@@ -290,6 +394,8 @@ pub fn handle_unregister_part(
 
         // Remove Connectivity from the entity so it becomes a free physics body.
         // The on_remove_connectivity observer will clean up ConnectivityRoot.
+        // NOTE: This runs AFTER process_channel_system<Die> so the Die observer
+        // (on_bodypart_first_hit) still sees Connectivity.
         if let Ok(mut entity_cmd) = commands.get_entity(entity) {
             entity_cmd.remove::<Connectivity>();
         } else {
@@ -352,6 +458,9 @@ fn spawn_collider(
             ),
             Damageable::part(2.0, PartKind::NonVital, 1.0),
         ))
+        .observe(on_bodypart_first_hit)
+        .observe(on_bodypart_second_hit)
+        .observe(on_bodypart_detach)
         .id()
 }
 
@@ -592,6 +701,9 @@ fn make_particle(
             *root_entity,
             frame_connect_config,
         ))
+        .observe(on_bodypart_first_hit)
+        .observe(on_bodypart_second_hit)
+        .observe(on_bodypart_detach)
         .id()
 }
 
@@ -667,6 +779,9 @@ fn make_collision_shape(
             ),
             Damageable::part(2.0, PartKind::NonVital, 1.0),
         ))
+        .observe(on_bodypart_first_hit)
+        .observe(on_bodypart_second_hit)
+        .observe(on_bodypart_detach)
         .id()
 }
 

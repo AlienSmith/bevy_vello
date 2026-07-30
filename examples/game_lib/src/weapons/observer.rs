@@ -7,76 +7,70 @@ use crate::{
         components::{AttackStats, Damageable, TotalHealth},
         resolve::resolve_damage,
     },
-    utility::{DelayedEvent, DelayedEventTrigger},
+    death_channel::{channel::ChannelMessage, components::Detached},
+    health::{Die, Health},
     CharacterPartEvent,
 };
 
-/// Payload attached to a delayed-event entity. Read by the observer
-/// when the timer fires to know which part to unregister.
-#[derive(Component)]
-pub(crate) struct UnregisterPartPayload {
-    character: Entity,
-    part: Entity,
-}
-
+/// Observer fired when a bullet collides with something.
+///
+/// Reduces [`Damageable`] on the hit entity via `resolve_damage` when it is
+/// still connected to a character (has [`Connectivity`] — the character's
+/// [`TotalHealth`] is drained as well).  For detached body parts (with
+/// [`Health`]) the damage is applied directly to both `Damageable` and `Health`;
+/// [`check_health`] then handles writing `ChannelMessage<Die>` when `Health`
+/// reaches zero, which triggers the second-hit observer.
+///
+/// This keeps the damage *math* unified — the cut/blunt channel model is
+/// applied in both cases via [`resolve_damage`] or the inline path, but the
+/// fan-out (character‑level death, unregister commands) only happens in the
+/// connected path.
 pub(crate) fn on_collision_bullet(
     trigger: Trigger<VelloCollisionTrigger>,
-    mut commands: Commands,
-    mut part_q: Query<(Entity, &mut Damageable, &Connectivity)>,
+    mut part_q: Query<&mut Damageable>,
     mut total_q: Query<&mut TotalHealth>,
+    connectivity_q: Query<&Connectivity>,
+    mut detached_q: Query<&mut Health, (With<Detached>, Without<Connectivity>)>,
     bullet_q: Query<&AttackStats>,
+    mut die_writer: EventWriter<ChannelMessage<Die>>,
+    mut unreg_writer: EventWriter<CharacterPartEvent>,
 ) {
     let event = trigger.event();
-    // The bullet entity that triggered the collision carries the attack stats.
     let Ok(attack_stats) = bullet_q.get(event.entity_self) else {
         return;
     };
-    // The part entity that was hit (entity_other).
-    let Ok((part_entity, mut part, connectivity)) = part_q.get_mut(event.entity_other) else {
+    let target = event.entity_other;
+
+    let Ok(mut part) = part_q.get_mut(target) else {
         return;
     };
-    // The character this part belongs to — TotalHealth lives on the root.
-    let Ok(mut total) = total_q.get_mut(connectivity.character) else {
+
+    // ── Connected path ──────────────────────────────────────────────────
+    if let Ok(connectivity) = connectivity_q.get(target) {
+        let Ok(mut total) = total_q.get_mut(connectivity.character) else {
+            return;
+        };
+        resolve_damage(
+            connectivity.character,
+            target,
+            *attack_stats,
+            None,
+            &mut part,
+            &mut total,
+            &mut die_writer,
+            &mut unreg_writer,
+        );
         return;
-    };
-    let character_root = connectivity.character;
+    }
 
-    // Resolve damage through the unified two-channel model. `resolve_damage`
-    // handles the Die event on the CharacterRoot and part detachment. Armor is
-    // not yet attached (pending the particle-binding design), so pass `None`.
-    resolve_damage(
-        &mut commands,
-        character_root,
-        part_entity,
-        *attack_stats,
-        None,
-        &mut part,
-        &mut total,
-    );
-
-    // Detach the collider from its character after the hit so it becomes a free
-    // body (it will fly away via UnregisterPart).
-    commands
-        .spawn((
-            DelayedEvent::new(0.05),
-            UnregisterPartPayload {
-                character: character_root,
-                part: part_entity,
-            },
-        ))
-        .observe(on_delayed_unregister);
-}
-
-pub(crate) fn on_delayed_unregister(
-    trigger: Trigger<DelayedEventTrigger>,
-    q: Query<&UnregisterPartPayload>,
-    mut events: EventWriter<CharacterPartEvent>,
-) {
-    let Ok(payload) = q.get(trigger.target()) else {
-        return;
-    };
-    events.write(CharacterPartEvent::UnregisterPart {
-        character: payload.character,
-        part: payload.part,
-    });
+    // ── Detached path ───────────────────────────────────────────────────
+    // No Connectivity → free physics body with its own Health.
+    // Simple cut‑only reduction; blunt/protection gating is skipped for
+    // detached parts.  `check_health` will fire `ChannelMessage<Die>`
+    // when `Health.current <= 0`.
+    if let Ok(mut health) = detached_q.get_mut(target) {
+        let cut = attack_stats.cut_damage.min(part.current);
+        part.current -= cut;
+        health.current -= attack_stats.cut_damage - cut;
+    }
 }

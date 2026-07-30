@@ -3,7 +3,9 @@ pub mod resolve;
 
 use bevy::prelude::*;
 
-use crate::{character_factory::CharacterRoot, health::Die};
+use crate::{
+    character_factory::CharacterRoot, death_channel::channel::ChannelMessage, health::Die,
+};
 
 pub use self::components::{AttackStats, Damageable, PartKind, TotalHealth};
 pub use self::resolve::resolve_damage;
@@ -27,12 +29,15 @@ impl Plugin for DamagePlugin {
 /// `VelloCharacterPhysicsRoot` + controllers), mirroring the single-death
 /// design: parts/armor never fire `Die`; they detach via `UnregisterPart`.
 pub fn check_total_health(
-    mut commands: Commands,
     total_q: Query<(Entity, &TotalHealth), With<CharacterRoot>>,
+    mut die_writer: EventWriter<ChannelMessage<Die>>,
 ) {
     for (entity, total) in total_q.iter() {
         if total.current <= 0.0 {
-            commands.trigger_targets(Die, entity);
+            die_writer.write(ChannelMessage {
+                target: entity,
+                payload: Die,
+            });
         }
     }
 }

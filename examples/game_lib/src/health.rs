@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::GameLabSystems;
+use crate::{death_channel::channel::ChannelMessage, GameLabSystems};
 
 /// Tracks an entity's current and maximum health.
 ///
@@ -28,7 +28,7 @@ impl Health {
 /// died, letting different entities hook different death logic without a
 /// shared payload. This mirrors the existing `Trigger`/`.observe()` idiom
 /// used for `VelloCollisionTrigger` and `DelayedEventTrigger`.
-#[derive(Event)]
+#[derive(Event, Clone)]
 pub struct Die;
 
 /// Watches every entity with [`Health`]. When `current <= 0`, removes
@@ -40,11 +40,18 @@ pub struct Die;
 /// performed by a `Die` observer runs after this command in the same flush,
 /// avoiding a "entity does not exist" error from a redundant separate
 /// `remove` command executing after the despawn.
-pub fn check_health(mut commands: Commands, health_q: Query<(Entity, &Health)>) {
+pub fn check_health(
+    mut commands: Commands,
+    health_q: Query<(Entity, &Health)>,
+    mut die_writer: EventWriter<ChannelMessage<Die>>,
+) {
     for (entity, health) in health_q.iter() {
         if health.current <= 0.0 {
             commands.entity(entity).remove::<Health>();
-            commands.trigger_targets(Die, entity);
+            die_writer.write(ChannelMessage {
+                target: entity,
+                payload: Die,
+            });
         }
     }
 }

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::{
     character_factory::CharacterPartEvent,
     damage::components::{AttackStats, Damageable, PartKind, TotalHealth},
+    death_channel::channel::ChannelMessage,
     health::Die,
 };
 
@@ -73,32 +74,50 @@ pub fn apply_damage_math(
     }
 }
 
-/// Resolves a single damage application and issues the appropriate commands
-/// (Die on the `CharacterRoot`, or UnregisterPart for a detached nonvital part).
+/// Resolves a single damage application and writes deferred channel messages
+/// (ChannelMessage<Die> on the `CharacterRoot` when total HP hits zero, and
+/// ChannelMessage<Die> on the part when it detaches).
 ///
 /// Wraps [`apply_damage_math`]; parts/armor never fire `Die` themselves.
+/// The channel messages are dispatched by `process_channel_system<T>`
+/// in the `ProcessDeathEvents` schedule set.
+///
+/// Detach also writes a `CharacterPartEvent::UnregisterPart` so the part is
+/// disconnected from the character **after** the `Die` observer has a chance
+/// to spawn the delayed detach entity.
+/// Because `ReadCharacterPartEvent` runs **after** `ProcessDeathEvents` in the
+/// schedule, `Connectivity` is still present when the `Die` observer fires.
 pub fn resolve_damage(
-    commands: &mut Commands,
     character_root: Entity,
     target_part: Entity,
     attacker_stats: AttackStats,
     armor: Option<&mut Damageable>,
     part: &mut Damageable,
     total: &mut TotalHealth,
+    die_writer: &mut EventWriter<ChannelMessage<Die>>,
+    unreg_writer: &mut EventWriter<CharacterPartEvent>,
 ) {
     let resolution = apply_damage_math(attacker_stats, armor, part, total);
 
     if resolution.dies {
-        commands.trigger_targets(Die, character_root);
+        die_writer.write(ChannelMessage {
+            target: character_root,
+            payload: Die,
+        });
     }
     if resolution.detaches {
-        commands.trigger_targets(
-            CharacterPartEvent::UnregisterPart {
-                character: character_root,
-                part: target_part,
-            },
-            character_root,
-        );
+        // Fire Die on the body part itself so its observer can handle the first hit.
+        die_writer.write(ChannelMessage {
+            target: target_part,
+            payload: Die,
+        });
+        // Schedule the part for unregistering AFTER the Die observer fires.
+        // ReadCharacterPartEvent runs after ProcessDeathEvents in the schedule,
+        // so Connectivity is still present when the observer runs.
+        unreg_writer.write(CharacterPartEvent::UnregisterPart {
+            character: character_root,
+            part: target_part,
+        });
     }
 }
 
