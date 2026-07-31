@@ -12,6 +12,7 @@ ron = "0.8"
 #particle won't work with multi-threaded
 bevy = { workspace = true}
 
+bevy_behave = { git = "https://github.com/AlienSmith/bevy_behave", branch = "bevy-0.16-fix" }
 bevy_vello = { path = "../../"}
 bevy_egui = "0.34.0"
 game_lib ={ path = "../game_lib" }

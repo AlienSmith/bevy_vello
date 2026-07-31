@@ -1,3 +1,4 @@
+mod ai;
 mod character;
 pub mod character_asset;
 mod character_factory;
@@ -11,6 +12,7 @@ pub mod weapons;
 use bevy::prelude::*;
 
 use crate::{
+    ai::AiPlugin,
     character::plugin::GameCharacterPlugin,
     character_asset::plugin::CharacterLoaderPlugin,
     character_factory::plugin::CharacterFactoryPlugin,
@@ -23,6 +25,7 @@ use crate::{
 #[derive(Default)]
 pub struct VelloCharacterPlugin;
 pub use crate::{
+    ai::{build_enemy_ai_tree, Chase, Flee},
     character::{
         ArmConfig, CharacterController, ConnectivityRoot, IkMode, LeftArmController,
         ResetArmControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
@@ -50,6 +53,7 @@ pub enum GameLabSystems {
 impl Plugin for VelloCharacterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(InputPlugin)
+            .add_plugins(AiPlugin)
             .add_plugins(GameCharacterPlugin)
             .add_plugins(CharacterFactoryPlugin)
             .add_plugins(CharacterLoaderPlugin)

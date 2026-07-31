@@ -24,6 +24,7 @@ use bevy::{
 use bevy_egui::EguiPlugin;
 
 use bevy::asset::AssetMetaCheck;
+use bevy_behave::prelude::*;
 use bevy_vello::{
     collision::{
         generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
@@ -49,6 +50,7 @@ use bevy_vello::{
 };
 use bevy_vello::{prelude::*, VelloPlugin};
 use game_lib::{
+    build_enemy_ai_tree,
     character_asset::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
@@ -553,27 +555,36 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
             .id(),
     );
 
-    commands.spawn((
-        VelloSceneBundle {
-            transform: Transform {
-                translation: Vec3::new(400.0, 0.0, 100.0),
-                scale: Vec3::new(0.5, 0.5, 1.0),
+    let player_entity = pistol_state
+        .character
+        .expect("player must be spawned first");
+
+    commands
+        .spawn((
+            VelloSceneBundle {
+                transform: Transform {
+                    translation: Vec3::new(400.0, 0.0, 100.0),
+                    scale: Vec3::new(0.5, 0.5, 1.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
-        },
-        CharacterRoot {
-            svg_asset_id: "v6.character.svg".to_owned(),
-            blueprint_asset_id: "v6.character.json".to_owned(),
-            collision_group: ENEMY_COLLISION_GROUP,
-        },
-        CharacterController {
-            move_vector: Vec2::ZERO,
-            point_vector: Vec2::ZERO,
-            ..Default::default()
-        },
-        Enemy,
-    ));
+            CharacterRoot {
+                svg_asset_id: "v6.character.svg".to_owned(),
+                blueprint_asset_id: "v6.character.json".to_owned(),
+                collision_group: ENEMY_COLLISION_GROUP,
+            },
+            CharacterController {
+                move_vector: Vec2::ZERO,
+                point_vector: Vec2::ZERO,
+                ..Default::default()
+            },
+            Enemy,
+        ))
+        .with_child((
+            Name::new("Enemy AI"),
+            BehaveTree::new(build_enemy_ai_tree(player_entity)),
+        ));
 }
 
 /// Spawn a pistol collider and connect it to the character's PRLA particle
