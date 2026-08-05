@@ -95,6 +95,56 @@ pub struct SimpleBroadPhase {
     pub(crate) broad_phase: BroadPhaseSimple,
 }
 
+/// Describes the *intent* of a collision response modification.
+/// Game systems write this directly on VelloCollider (in PostUpdate or any schedule).
+/// `make_collision_constraints` (in FixedUpdate) resolves this intent
+/// into actual `other_inv_mass` and `other_velocity` values using the
+/// physics state it has access to.
+///
+/// This separation exists because game systems do NOT have access to
+/// the constraint world's internal physics state (inv_mass, frame_velocity
+/// of the soft body). Only `make_collision_constraints` does.
+#[derive(Clone, Debug, Default)]
+pub struct CollisionOverride {
+    /// Desired "explosion" impulse applied to the soft body side of the collision.
+    /// This is a non-physical energy injection — like a tiny explosion at the
+    /// contact point. Specified as a world-space impulse vector (force * time).
+    ///
+    /// `make_collision_constraints` will compute appropriate `other_inv_mass`
+    /// and `other_velocity` to achieve this impulse, given the actual physics
+    /// state of the soft body.
+    ///
+    /// None = no explosion effect (use default collision params).
+    pub explosion_impulse: Option<Vec2>,
+
+    /// Scale factor for the opponent's velocity contribution.
+    /// 1.0 = use actual opponent velocity (default behavior).
+    /// 0.0 = treat opponent as static (no velocity transfer).
+    /// >1.0 = amplify opponent velocity (makes hit feel heavier).
+    ///
+    /// This is multiplied with the opponent's actual physics velocity
+    /// before being passed as `other_velocity`.
+    pub velocity_scale: Option<f32>,
+
+    /// Scale factor for the opponent's inverse mass.
+    /// 1.0 = use actual opponent inv_mass (default behavior).
+    /// 0.0 = treat opponent as infinitely heavy (like bullet hack).
+    /// >1.0 = treat opponent as lighter (less reaction).
+    ///
+    /// This is multiplied with the opponent's actual physics inv_mass
+    /// before being passed as `other_inv_mass`.
+    pub inv_mass_scale: Option<f32>,
+}
+
+impl CollisionOverride {
+    /// Returns true if this override has any non-default values set.
+    pub fn is_active(&self) -> bool {
+        self.explosion_impulse.is_some()
+            || self.velocity_scale.is_some()
+            || self.inv_mass_scale.is_some()
+    }
+}
+
 //Use the debug_color and soft_body_global_transform in here to initialize this entity, instead of using the transform and scene
 //in the VelloBundle.
 
@@ -118,6 +168,10 @@ pub struct VelloCollider {
     pub collision_cooled_down: f32,
     pub is_selected: bool,
     pub initial_scale: Vec2,
+    /// Game-level collision response override.
+    /// Written by game systems in PostUpdate, consumed by make_collision_constraints
+    /// in the next FixedUpdate, then cleared by clear_collision_overrides.
+    pub collision_override: CollisionOverride,
 }
 
 impl VelloCollider {
@@ -159,6 +213,7 @@ impl VelloCollider {
             collision_cooled_down,
             initial_scale: Vec2::new(scale_x, scale_y),
             initilized_by_physics: !is_soft_body,
+            collision_override: CollisionOverride::default(),
         }
     }
 

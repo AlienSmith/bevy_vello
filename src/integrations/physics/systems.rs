@@ -3,8 +3,8 @@ use std::cmp::max;
 use crate::{
     affine_to_mat4,
     collision::{
-        GpuCollisionRunner, RemovedColliders, VelloCollisionBroadPhase, VelloCollisionEvent,
-        VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+        CollisionOverride, GpuCollisionRunner, RemovedColliders, VelloCollisionBroadPhase,
+        VelloCollisionEvent, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
     },
     integrations::physics::{
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
@@ -99,6 +99,58 @@ pub fn apply_explicit_impulse_on_softbody(
         }
     }
 }
+/// Resolve a `CollisionOverride` (game-level intent) into actual physics
+/// parameters for `add_one_time_collision_constraint`.
+///
+/// # How it works
+///
+/// The solver computes:
+/// ```text
+/// total_inv_mass = inv_mass + other_inv_mass
+/// frame_velocity = (frame_velocity - other_velocity) * inv_mass / total_inv_mass
+/// ```
+///
+/// Given a desired `explosion_impulse` (non-physical energy injection), we solve
+/// for `other_inv_mass` and `other_velocity` that produce that impulse.
+///
+/// With `other_inv_mass ≈ 0` (infinitely heavy opponent):
+///   frame_velocity' ≈ frame_velocity - other_velocity
+///   delta_v ≈ -other_velocity
+///   impulse ≈ -other_velocity / inv_mass
+///
+/// So: other_velocity ≈ -explosion_impulse * inv_mass
+fn resolve_collision_intent(
+    intent: &CollisionOverride,
+    actual_inv_mass: f32,
+    _actual_frame_velocity: Vec2,
+    opponent_actual_inv_mass: f32,
+    opponent_actual_velocity: Vec2,
+) -> (f32, Vec2) {
+    // Start with opponent's actual physics values as base
+    let base_inv_mass = opponent_actual_inv_mass;
+    let base_velocity = opponent_actual_velocity;
+
+    // Apply scale factors (default = 1.0 = use actual physics values)
+    let inv_mass_scale = intent.inv_mass_scale.unwrap_or(1.0);
+    let velocity_scale = intent.velocity_scale.unwrap_or(1.0);
+
+    let mut other_inv_mass = base_inv_mass * inv_mass_scale;
+    let mut other_velocity = base_velocity * velocity_scale;
+
+    // If there's an explosion impulse, compute other_velocity to produce it.
+    // Uses the "heavy opponent" hack (other_inv_mass = 0.0) so the explosion
+    // impulse dominates the collision response.
+    if let Some(explosion) = intent.explosion_impulse {
+        other_inv_mass = 0.0;
+        // Negative because other_velocity is subtracted in the solver:
+        //   frame_velocity' = (frame_velocity - other_velocity) * ...
+        // So to push the soft body in direction D, set other_velocity = -D * scale.
+        other_velocity = -explosion * actual_inv_mass;
+    }
+
+    (other_inv_mass, other_velocity)
+}
+
 //consume the collision result togather with the collision pairs.
 //notice the collision results are from last frame so some entity could already been removed,
 //hence we don't need to add collision constraints to them anymore.
@@ -139,6 +191,42 @@ pub fn make_collision_constraints(
             let (inv_mass_a, vel_a) = get_info(a_index);
             let (inv_mass_b, vel_b) = get_info(b_index);
 
+            // For side A: check if collider A has an override.
+            // The override on A describes how A wants B (the "other") to behave.
+            let (effective_inv_mass_b, effective_vel_b) = if let Ok(item_a) = query.get(a_index) {
+                if item_a.collision_override.is_active() {
+                    resolve_collision_intent(
+                        &item_a.collision_override,
+                        inv_mass_a,
+                        vel_a,
+                        inv_mass_b,
+                        vel_b,
+                    )
+                } else {
+                    (inv_mass_b, vel_b)
+                }
+            } else {
+                (inv_mass_b, vel_b)
+            };
+
+            // For side B: check if collider B has an override.
+            // The override on B describes how B wants A (the "other") to behave.
+            let (effective_inv_mass_a, effective_vel_a) = if let Ok(item_b) = query.get(b_index) {
+                if item_b.collision_override.is_active() {
+                    resolve_collision_intent(
+                        &item_b.collision_override,
+                        inv_mass_b,
+                        vel_b,
+                        inv_mass_a,
+                        vel_a,
+                    )
+                } else {
+                    (inv_mass_a, vel_a)
+                }
+            } else {
+                (inv_mass_a, vel_a)
+            };
+
             if let Ok(item) = query.get(a_index) {
                 if item.is_soft_body() {
                     let collider_index = a_index;
@@ -152,8 +240,8 @@ pub fn make_collision_constraints(
                         current_position,
                         target_position,
                         b_normal,
-                        vel_b,
-                        inv_mass_b,
+                        effective_vel_b,
+                        effective_inv_mass_b,
                         collision_config,
                     );
                 }
@@ -171,13 +259,21 @@ pub fn make_collision_constraints(
                         current_position,
                         target_position,
                         a_normal,
-                        vel_a,
-                        inv_mass_a,
+                        effective_vel_a,
+                        effective_inv_mass_a,
                         collision_config,
                     );
                 }
             }
         }
+    }
+}
+
+/// Clear collision overrides on all VelloColliders after they've been consumed
+/// by make_collision_constraints.
+pub fn clear_collision_overrides(mut query: Query<&mut VelloCollider>) {
+    for mut collider in query.iter_mut() {
+        collider.collision_override = CollisionOverride::default();
     }
 }
 

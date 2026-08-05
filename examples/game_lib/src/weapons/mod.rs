@@ -1,10 +1,58 @@
 use bevy::prelude::*;
 use bevy_vello::integrations::physics::VelloParticle;
 
-use crate::{character::Connectivity, ConnectivityRoot, RightArmController, StringPool};
+use crate::{
+    character::Connectivity, damage::components::AttackStats, ConnectivityRoot, RightArmController,
+    StringPool,
+};
 mod observer;
 pub mod plugin;
 mod system;
+
+// ---------------------------------------------------------------------------
+// MeleeWeapon Component
+// ---------------------------------------------------------------------------
+
+/// Component for melee weapon entities.
+/// Carries the game-level intent for collision response modification.
+///
+/// The intent fields (`explosion_impulse`, `velocity_scale`, `inv_mass_scale`)
+/// are written to `VelloCollider.collision_override` by the melee collision
+/// observer, then consumed by `make_collision_constraints` in the next FixedUpdate.
+#[derive(Component, Clone)]
+pub struct MeleeWeapon {
+    /// Desired "explosion" impulse at the contact point.
+    /// This is a non-physical energy injection — like a tiny explosion
+    /// that pushes the body part away from the weapon.
+    /// Specified as a world-space impulse vector (force * time).
+    pub explosion_impulse: Vec2,
+
+    /// Scale factor for the opponent's velocity contribution.
+    /// 1.0 = use actual opponent velocity.
+    /// 0.0 = treat opponent as static.
+    /// >1.0 = amplify opponent velocity (heavier feel).
+    pub velocity_scale: f32,
+
+    /// Scale factor for the opponent's inverse mass.
+    /// 0.0 = treat opponent as infinitely heavy (like bullet hack).
+    /// 1.0 = use actual opponent inv_mass.
+    pub inv_mass_scale: f32,
+
+    /// Attack stats for damage resolution.
+    pub attack_stats: AttackStats,
+}
+
+impl Default for MeleeWeapon {
+    fn default() -> Self {
+        Self {
+            explosion_impulse: Vec2::ZERO,
+            velocity_scale: 1.0,
+            inv_mass_scale: 0.0, // default: heavy hit like bullet
+            attack_stats: AttackStats::new(30.0, 10.0, 5.0),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PistolControl Component
 // ---------------------------------------------------------------------------

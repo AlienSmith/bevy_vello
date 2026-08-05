@@ -29,7 +29,7 @@ use crate::{
     utility::mat4_to_affine2,
     weapons::{
         observer::on_collision_bullet, AttachPistolToCharacterEvent, Bullet, FireEvent,
-        PistolControl,
+        MeleeWeapon, PistolControl,
     },
     CharacterPartEvent, ColliderRoot, ConnectivityRoot, LeftArmController, RightArmController,
     StringPool,
@@ -222,6 +222,25 @@ pub fn process_fire_event(
                     recoil * weights.w,
                 ],
             });
+        }
+    }
+}
+
+/// Update melee weapon impulse based on swing state.
+/// Runs in Update, before collision observers fire in PostUpdate.
+/// Computes the explosion impulse from the weapon's frame particle velocities.
+pub fn update_melee_weapon_impulse(mut melee_q: Query<(&mut MeleeWeapon, &VelloCollider)>) {
+    for (mut melee, collider) in melee_q.iter_mut() {
+        // Compute swing direction from frame particle velocities
+        let frame_velocity: Vec2 = collider.frame_particles.iter().map(|p| p.velocity).sum();
+        let speed = frame_velocity.length();
+
+        if speed > 10.0 {
+            // Weapon is swinging — set explosion impulse in swing direction
+            let direction = frame_velocity.normalize();
+            melee.explosion_impulse = direction * speed * 50.0; // tunable scale
+        } else {
+            melee.explosion_impulse = Vec2::ZERO;
         }
     }
 }
