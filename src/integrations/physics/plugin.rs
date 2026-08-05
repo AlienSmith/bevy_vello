@@ -6,15 +6,14 @@ use bevy::{
 };
 
 use crate::{
-    collision::CollisionSystems,
+    collision::{CollisionEventBatch, CollisionSystems},
     integrations::physics::{
         systems::{
             apply_explicit_impulse_on_connection_particle, apply_explicit_impulse_on_softbody,
-            clear_collision_overrides, create_update_pivot_visualizer, generate_connection,
-            generate_soft_body_for_collider, make_collision_constraints, remove_soft_body,
-            reset_visuzlie_colliders, run_broad_phase, run_gpu_collision,
-            update_collider_from_soft_body, update_connection_particles, update_constraint_world,
-            visualize_colliders,
+            create_update_pivot_visualizer, generate_connection, generate_soft_body_for_collider,
+            make_collision_constraints, remove_soft_body, reset_visuzlie_colliders,
+            run_broad_phase, run_gpu_collision, update_collider_from_soft_body,
+            update_connection_particles, update_constraint_world, visualize_colliders,
         },
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
         CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
@@ -28,6 +27,7 @@ impl Plugin for VelloCollisionResponsePlugin {
     fn build(&self, app: &mut bevy::app::App) {
         app.insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, 0.0)))
             .insert_resource(Time::<Fixed>::from_hz(90.0))
+            .insert_resource(CollisionEventBatch::default())
             .add_event::<ColliderExternalImpulseEvent>()
             .add_event::<CharacterPivotForceEvent>()
             .add_event::<CharacterPivotVelocityEvent>()
@@ -39,34 +39,35 @@ impl Plugin for VelloCollisionResponsePlugin {
             // response, giving game systems (PostUpdate observers) time to write
             // CollisionOverride before the next frame's physics tick.
             //
-            // Frame N:   run_gpu_collision detects collisions; PostUpdate observers
-            //            write CollisionOverride to VelloCollider.
-            // Frame N+1: make_collision_constraints reads overrides; physics ticks.
+            // Frame N:   run_gpu_collision detects collisions and populates
+            //            CollisionEventBatch; PostUpdate observers modify
+            //            per-pair overrides in the batch.
+            // Frame N+1: make_collision_constraints reads overrides from the
+            //            batch and creates physics constraints.
             .add_systems(
                 FixedUpdate,
                 (
-                    // 1. Create collision constraints from PREVIOUS frame's results.
-                    //    Reads CollisionOverride set by PostUpdate observers.
+                    // 1. Create collision constraints from PREVIOUS frame's batch.
+                    //    Reads per-pair overrides written by PostUpdate observers.
                     make_collision_constraints,
-                    // 2. Clear consumed overrides so stale intent doesn't persist.
-                    clear_collision_overrides,
-                    // 3. Step the physics simulation (XPBD solver) with constraints.
+                    // 2. Step the physics simulation (XPBD solver) with constraints.
                     update_constraint_world,
-                    // 4. Sync physics state back to connection particles.
+                    // 3. Sync physics state back to connection particles.
                     update_connection_particles,
-                    // 5. Remove soft bodies for despawned entities.
+                    // 4. Remove soft bodies for despawned entities.
                     remove_soft_body,
-                    // 6. Initialize new soft bodies from newly added colliders.
+                    // 5. Initialize new soft bodies from newly added colliders.
                     generate_soft_body_for_collider,
                     generate_connection,
-                    // 7. Apply external impulses from events.
+                    // 6. Apply external impulses from events.
                     apply_explicit_impulse_on_softbody,
                     apply_explicit_impulse_on_connection_particle,
-                    // 8. Sync physics shapes back to Bevy transforms.
+                    // 7. Sync physics shapes back to Bevy transforms.
                     update_collider_from_soft_body,
-                    // 9. Broad phase: BVH + AABB overlap.
+                    // 8. Broad phase: BVH + AABB overlap.
                     run_broad_phase,
-                    // 10. GPU narrow-phase collision detection; fires PostUpdate observers.
+                    // 9. GPU narrow-phase collision detection; populates
+                    //    CollisionEventBatch with physics snapshots.
                     run_gpu_collision,
                 )
                     .chain(),

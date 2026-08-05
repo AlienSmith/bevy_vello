@@ -17,8 +17,9 @@ mod system;
 /// Carries the game-level intent for collision response modification.
 ///
 /// The intent fields (`explosion_impulse`, `velocity_scale`, `inv_mass_scale`)
-/// are written to `VelloCollider.collision_override` by the melee collision
-/// observer, then consumed by `make_collision_constraints` in the next FixedUpdate.
+/// are written to the [`CollisionEventBatch`] resource (indexed by `batch_index`
+/// on the [`VelloCollisionTrigger`]) by the melee collision observer,
+/// then consumed by `make_collision_constraints` in the next FixedUpdate.
 #[derive(Component, Clone)]
 pub struct MeleeWeapon {
     /// Desired "explosion" impulse at the contact point.

@@ -96,23 +96,20 @@ pub struct SimpleBroadPhase {
 }
 
 /// Describes the *intent* of a collision response modification.
-/// Game systems write this directly on VelloCollider (in PostUpdate or any schedule).
-/// `make_collision_constraints` (in FixedUpdate) resolves this intent
-/// into actual `other_inv_mass` and `other_velocity` values using the
-/// physics state it has access to.
+/// Game systems write per-pair overrides into `CollisionEventBatch`
+/// (in PostUpdate observers). `make_collision_constraints` (in the next
+/// FixedUpdate) resolves this intent into actual `other_inv_mass` and
+/// `other_velocity` values using the physics state captured at detection time.
 ///
 /// This separation exists because game systems do NOT have access to
 /// the constraint world's internal physics state (inv_mass, frame_velocity
-/// of the soft body). Only `make_collision_constraints` does.
+/// of the soft body). The physics snapshot is captured once by
+/// `run_gpu_collision` and stored in `VelloCollisionEvent`.
 #[derive(Clone, Debug, Default)]
 pub struct CollisionOverride {
     /// Desired "explosion" impulse applied to the soft body side of the collision.
-    /// This is a non-physical energy injection — like a tiny explosion at the
+    /// This is a non-physical energy injection -- like a tiny explosion at the
     /// contact point. Specified as a world-space impulse vector (force * time).
-    ///
-    /// `make_collision_constraints` will compute appropriate `other_inv_mass`
-    /// and `other_velocity` to achieve this impulse, given the actual physics
-    /// state of the soft body.
     ///
     /// None = no explosion effect (use default collision params).
     pub explosion_impulse: Option<Vec2>,
@@ -121,18 +118,12 @@ pub struct CollisionOverride {
     /// 1.0 = use actual opponent velocity (default behavior).
     /// 0.0 = treat opponent as static (no velocity transfer).
     /// >1.0 = amplify opponent velocity (makes hit feel heavier).
-    ///
-    /// This is multiplied with the opponent's actual physics velocity
-    /// before being passed as `other_velocity`.
     pub velocity_scale: Option<f32>,
 
     /// Scale factor for the opponent's inverse mass.
     /// 1.0 = use actual opponent inv_mass (default behavior).
     /// 0.0 = treat opponent as infinitely heavy (like bullet hack).
     /// >1.0 = treat opponent as lighter (less reaction).
-    ///
-    /// This is multiplied with the opponent's actual physics inv_mass
-    /// before being passed as `other_inv_mass`.
     pub inv_mass_scale: Option<f32>,
 }
 
@@ -143,6 +134,28 @@ impl CollisionOverride {
             || self.velocity_scale.is_some()
             || self.inv_mass_scale.is_some()
     }
+}
+
+// ── Collision Event Batch ──────────────────────────────────────────────────
+/// A single entry in the collision event batch, pairing a raw collision event
+/// with per-pair game-level overrides. Game systems modify `override_a` and
+/// `override_b` via the batch resource (indexed by `batch_index` on the trigger).
+#[derive(Clone, Debug)]
+pub struct CollisionEventEntry {
+    pub event: VelloCollisionEvent,
+    /// Override for how entity_a wants entity_b to respond.
+    pub override_a: CollisionOverride,
+    /// Override for how entity_b wants entity_a to respond.
+    pub override_b: CollisionOverride,
+}
+
+/// Resource holding all collision events and their per-pair overrides for the
+/// current frame. Populated by `run_gpu_collision` at the end of FixedUpdate,
+/// read by game observers in PostUpdate, and consumed by
+/// `make_collision_constraints` at the start of the next FixedUpdate.
+#[derive(Resource, Default, Clone)]
+pub struct CollisionEventBatch {
+    pub entries: Vec<CollisionEventEntry>,
 }
 
 //Use the debug_color and soft_body_global_transform in here to initialize this entity, instead of using the transform and scene
@@ -168,10 +181,6 @@ pub struct VelloCollider {
     pub collision_cooled_down: f32,
     pub is_selected: bool,
     pub initial_scale: Vec2,
-    /// Game-level collision response override.
-    /// Written by game systems in PostUpdate, consumed by make_collision_constraints
-    /// in the next FixedUpdate, then cleared by clear_collision_overrides.
-    pub collision_override: CollisionOverride,
 }
 
 impl VelloCollider {
@@ -213,7 +222,6 @@ impl VelloCollider {
             collision_cooled_down,
             initial_scale: Vec2::new(scale_x, scale_y),
             initilized_by_physics: !is_soft_body,
-            collision_override: CollisionOverride::default(),
         }
     }
 
@@ -296,6 +304,14 @@ pub struct VelloCollisionEvent {
     pub collision_normal_b: Vec2,
     pub curve_index_a: u32,
     pub curve_index_b: u32,
+    /// Physics snapshot: velocity of entity_a at collision detection time.
+    pub velocity_a: Vec2,
+    /// Physics snapshot: velocity of entity_b at collision detection time.
+    pub velocity_b: Vec2,
+    /// Physics snapshot: inverse mass of entity_a.
+    pub inv_mass_a: f32,
+    /// Physics snapshot: inverse mass of entity_b.
+    pub inv_mass_b: f32,
 }
 
 //in bevy space use a y up x right coordinate.
@@ -306,6 +322,16 @@ pub struct VelloCollisionTrigger {
     pub collision_point: Vec2,
     pub normal_self: Vec2,
     pub normal_other: Vec2,
+    /// Index into `CollisionEventBatch.entries` for this collision pair.
+    pub batch_index: usize,
+    /// Physics snapshot: velocity of self at detection time.
+    pub self_velocity: Vec2,
+    /// Physics snapshot: velocity of other at detection time.
+    pub other_velocity: Vec2,
+    /// Physics snapshot: inverse mass of self.
+    pub self_inv_mass: f32,
+    /// Physics snapshot: inverse mass of other.
+    pub other_inv_mass: f32,
 }
 
 #[derive(Resource)]

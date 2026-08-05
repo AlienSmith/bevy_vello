@@ -3,8 +3,9 @@ use std::cmp::max;
 use crate::{
     affine_to_mat4,
     collision::{
-        CollisionOverride, GpuCollisionRunner, RemovedColliders, VelloCollisionBroadPhase,
-        VelloCollisionEvent, VelloCollisionWorld, VELLO_COLLISION_WORLD_RATIO,
+        CollisionEventBatch, CollisionEventEntry, CollisionOverride, GpuCollisionRunner,
+        RemovedColliders, VelloCollisionBroadPhase, VelloCollisionEvent, VelloCollisionWorld,
+        VELLO_COLLISION_WORLD_RATIO,
     },
     integrations::physics::{
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
@@ -151,16 +152,21 @@ fn resolve_collision_intent(
     (other_inv_mass, other_velocity)
 }
 
-//consume the collision result togather with the collision pairs.
-//notice the collision results are from last frame so some entity could already been removed,
-//hence we don't need to add collision constraints to them anymore.
+/// Create collision constraints from the [`CollisionEventBatch`].
+/// Reads per-pair overrides written by game observers in PostUpdate,
+/// resolves intent into physics parameters, and creates constraints
+/// for the XPBD solver.
+///
+/// Uses physics snapshots captured at detection time (stored in the event)
+/// rather than querying current physics state, since overrides may have
+/// modified the intent based on those snapshots.
 pub fn make_collision_constraints(
     query: Query<&VelloCollider>,
     mut constraint_world: ResMut<VelloConstraintWorld>,
-    mut events: EventReader<VelloCollisionEvent>,
+    batch: Res<CollisionEventBatch>,
 ) {
-    for item in events.read() {
-        //info!("{:?}", item);
+    for entry in batch.entries.iter() {
+        let item = &entry.event;
         let a_index = item.entity_a;
         let b_index = item.entity_b;
         let a_position = vec2_to_vector2_inverse_y(&item.collision_point_a);
@@ -171,58 +177,24 @@ pub fn make_collision_constraints(
         let b_normal = vec2_to_vector2_inverse_y(&item.collision_normal_b);
         let diff = a_position - b_position;
 
-        let get_info = |entity: Entity| -> (f32, Vec2) {
-            let mut inv_mass = 0.0;
-            let mut velocity = Vec2::new(0.0, 0.0);
-            if let Ok(item) = query.get(entity) {
-                inv_mass = item.collision_inverse_mass;
-                if item.is_soft_body() {
-                    velocity = constraint_world
-                        .data
-                        .get_velocity_of_softbody(entity)
-                        .unwrap();
-                }
-            }
-            return (inv_mass, velocity);
-        };
+        // Use physics snapshots from detection time as defaults,
+        // then apply per-pair overrides if set.
+        let inv_mass_a = item.inv_mass_a;
+        let vel_a = item.velocity_a;
+        let inv_mass_b = item.inv_mass_b;
+        let vel_b = item.velocity_b;
 
-        //consistent with COLLISION_MARGIN
         if diff.dot(a_normal) > 0.0 {
-            let (inv_mass_a, vel_a) = get_info(a_index);
-            let (inv_mass_b, vel_b) = get_info(b_index);
-
-            // For side A: check if collider A has an override.
-            // The override on A describes how A wants B (the "other") to behave.
-            let (effective_inv_mass_b, effective_vel_b) = if let Ok(item_a) = query.get(a_index) {
-                if item_a.collision_override.is_active() {
-                    resolve_collision_intent(
-                        &item_a.collision_override,
-                        inv_mass_a,
-                        vel_a,
-                        inv_mass_b,
-                        vel_b,
-                    )
-                } else {
-                    (inv_mass_b, vel_b)
-                }
+            // For side A: check override_a (how A wants B to behave)
+            let (effective_inv_mass_b, effective_vel_b) = if entry.override_a.is_active() {
+                resolve_collision_intent(&entry.override_a, inv_mass_a, vel_a, inv_mass_b, vel_b)
             } else {
                 (inv_mass_b, vel_b)
             };
 
-            // For side B: check if collider B has an override.
-            // The override on B describes how B wants A (the "other") to behave.
-            let (effective_inv_mass_a, effective_vel_a) = if let Ok(item_b) = query.get(b_index) {
-                if item_b.collision_override.is_active() {
-                    resolve_collision_intent(
-                        &item_b.collision_override,
-                        inv_mass_b,
-                        vel_b,
-                        inv_mass_a,
-                        vel_a,
-                    )
-                } else {
-                    (inv_mass_a, vel_a)
-                }
+            // For side B: check override_b (how B wants A to behave)
+            let (effective_inv_mass_a, effective_vel_a) = if entry.override_b.is_active() {
+                resolve_collision_intent(&entry.override_b, inv_mass_b, vel_b, inv_mass_a, vel_a)
             } else {
                 (inv_mass_a, vel_a)
             };
@@ -269,63 +241,7 @@ pub fn make_collision_constraints(
     }
 }
 
-/// Clear collision overrides on all VelloColliders after they've been consumed
-/// by make_collision_constraints.
-pub fn clear_collision_overrides(mut query: Query<&mut VelloCollider>) {
-    for mut collider in query.iter_mut() {
-        collider.collision_override = CollisionOverride::default();
-    }
-}
-
-// Helper to build a VelloCollisionEvent from a raw GPU collision result
-fn make_collision_event(
-    entity_a: &Entity,
-    entity_b: &Entity,
-    result: &vello::CollisionResult,
-    scaling: f32,
-) -> VelloCollisionEvent {
-    VelloCollisionEvent {
-        entity_a: *entity_a,
-        entity_b: *entity_b,
-        collision_point_a: Vec2::new(
-            result.a_position_normal[0] * scaling,
-            result.a_position_normal[1] * -scaling,
-        ),
-        collision_point_b: Vec2::new(
-            result.b_position_normal[0] * scaling,
-            result.b_position_normal[1] * -scaling,
-        ),
-        collision_normal_a: Vec2::new(result.a_position_normal[2], -result.a_position_normal[3]),
-        collision_normal_b: Vec2::new(-result.a_position_normal[2], result.a_position_normal[3]),
-        curve_index_a: result.b_position_normal[3] as u32,
-        curve_index_b: result.b_position_normal[2] as u32,
-    }
-}
-
-/// Runs the broad phase (BVH overlap detection) in FixedUpdate.
-/// Populates `collision_pairs_bvh` with candidate pairs.
-/// Runs as a separate system before `run_gpu_collision` to avoid query conflicts.
-pub fn run_broad_phase(
-    all_colliders: Query<(Entity, &VelloCollider)>,
-    modified_colliders: Query<
-        (Entity, &VelloCollider),
-        Or<(Changed<VelloCollider>, Changed<GlobalTransform>)>,
-    >,
-    removed_collider: Res<RemovedColliders>,
-    mut collision_world: ResMut<VelloCollisionWorld>,
-    mut broad_phase: ResMut<VelloCollisionBroadPhase>,
-) {
-    broad_phase.broad_phase.update(
-        &all_colliders,
-        &modified_colliders,
-        &removed_collider,
-        &mut collision_world,
-    );
-}
-
 /// Steps the physics simulation (XPBD solver).
-/// GPU collision detection has been extracted into [`run_gpu_collision`] so that
-/// collision constraints are created from the current frame's results.
 pub fn update_constraint_world(
     mut constraint_world: ResMut<VelloConstraintWorld>,
     mut collision_world: ResMut<VelloCollisionWorld>,
@@ -340,16 +256,17 @@ pub fn update_constraint_world(
 }
 
 /// Filters broad-phase pairs, builds the collision scene, runs GPU collision
-/// synchronously, and writes [`VelloCollisionEvent`]s for the **current** frame.
+/// synchronously, and populates [`CollisionEventBatch`] with entries that
+/// include physics snapshots and empty per-pair overrides.
 ///
-/// This runs **before** [`make_collision_constraints`] so that collision
-/// constraints are created from the same frame's results, eliminating the
-/// one-frame pipeline delay.
+/// The batch is consumed by `make_collision_constraints` at the start of the
+/// **next** FixedUpdate, giving PostUpdate observers time to write overrides.
 pub fn run_gpu_collision(
     collision_runner: Res<GpuCollisionRunner>,
-    mut collision_event_writer: EventWriter<VelloCollisionEvent>,
+    mut batch: ResMut<CollisionEventBatch>,
     mut collision_world: ResMut<VelloCollisionWorld>,
     query: Query<(&VelloCollider, &Transform)>,
+    constraint_world: Res<VelloConstraintWorld>,
 ) {
     if collision_world.paused {
         return;
@@ -388,19 +305,98 @@ pub fn run_gpu_collision(
         }
     }
 
-    // Step 3: Run GPU collision synchronously
+    // Step 3: Clear old batch and populate with fresh entries
+    batch.entries.clear();
+
+    // Step 4: Run GPU collision synchronously
     if !pairs.is_empty() {
         let results = collision_runner.run_collision(&scene);
         let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
         for ((entity_a, entity_b), result) in pairs.iter().zip(results.iter()) {
             if result.a_position_normal[2] != 0.0 || result.a_position_normal[3] != 0.0 {
-                collision_event_writer
-                    .write(make_collision_event(entity_a, entity_b, result, scaling));
+                // Capture physics snapshot at detection time
+                let (inv_mass_a, vel_a) = get_physics_state(*entity_a, &query, &constraint_world);
+                let (inv_mass_b, vel_b) = get_physics_state(*entity_b, &query, &constraint_world);
+
+                batch.entries.push(CollisionEventEntry {
+                    event: VelloCollisionEvent {
+                        entity_a: *entity_a,
+                        entity_b: *entity_b,
+                        collision_point_a: Vec2::new(
+                            result.a_position_normal[0] * scaling,
+                            result.a_position_normal[1] * -scaling,
+                        ),
+                        collision_point_b: Vec2::new(
+                            result.b_position_normal[0] * scaling,
+                            result.b_position_normal[1] * -scaling,
+                        ),
+                        collision_normal_a: Vec2::new(
+                            result.a_position_normal[2],
+                            -result.a_position_normal[3],
+                        ),
+                        collision_normal_b: Vec2::new(
+                            -result.a_position_normal[2],
+                            result.a_position_normal[3],
+                        ),
+                        curve_index_a: result.b_position_normal[3] as u32,
+                        curve_index_b: result.b_position_normal[2] as u32,
+                        velocity_a: vel_a,
+                        velocity_b: vel_b,
+                        inv_mass_a,
+                        inv_mass_b,
+                    },
+                    override_a: CollisionOverride::default(),
+                    override_b: CollisionOverride::default(),
+                });
             }
         }
     }
 
     collision_world.collision_pairs_bvh.clear();
+}
+
+/// Helper to get the physics state (inv_mass, velocity) for a collider at
+/// collision detection time. For soft bodies, queries the constraint world;
+/// for static bodies, uses the collider's stored inverse mass.
+fn get_physics_state(
+    entity: Entity,
+    query: &Query<(&VelloCollider, &Transform)>,
+    constraint_world: &Res<VelloConstraintWorld>,
+) -> (f32, Vec2) {
+    if let Ok((collider, _)) = query.get(entity) {
+        let inv_mass = collider.collision_inverse_mass;
+        let velocity = if collider.is_soft_body() {
+            constraint_world
+                .data
+                .get_velocity_of_softbody(entity)
+                .unwrap_or(Vec2::ZERO)
+        } else {
+            Vec2::ZERO
+        };
+        (inv_mass, velocity)
+    } else {
+        (0.0, Vec2::ZERO)
+    }
+}
+
+/// Runs the broad phase (BVH overlap detection) in FixedUpdate.
+/// Populates `collision_pairs_bvh` with candidate pairs.
+pub fn run_broad_phase(
+    all_colliders: Query<(Entity, &VelloCollider)>,
+    modified_colliders: Query<
+        (Entity, &VelloCollider),
+        Or<(Changed<VelloCollider>, Changed<GlobalTransform>)>,
+    >,
+    removed_collider: Res<RemovedColliders>,
+    mut collision_world: ResMut<VelloCollisionWorld>,
+    mut broad_phase: ResMut<VelloCollisionBroadPhase>,
+) {
+    broad_phase.broad_phase.update(
+        &all_colliders,
+        &modified_colliders,
+        &removed_collider,
+        &mut collision_world,
+    );
 }
 
 pub fn reset_visuzlie_colliders(mut q: Query<&mut VelloScene, With<VelloCollider>>) {

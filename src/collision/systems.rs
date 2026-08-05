@@ -4,8 +4,8 @@ use vello::{CollisionResult, CollisionScene};
 
 use crate::{
     collision::{
-        CollisionCoolDownPairManager, CollisionSceneState, RemovedColliders, VelloCollisionEvent,
-        VelloCollisionScene, VelloCollisionTrigger, VelloCollisionWorld,
+        CollisionCoolDownPairManager, CollisionEventBatch, CollisionSceneState, RemovedColliders,
+        VelloCollisionEvent, VelloCollisionScene, VelloCollisionTrigger, VelloCollisionWorld,
         VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
@@ -61,11 +61,16 @@ pub fn make_collision_scene(
     r.collision_pairs_bvh.clear();
 }
 
-fn make_collision_event(
+/// Build a [`VelloCollisionEvent`] with physics snapshot fields.
+pub fn make_collision_event(
     entity_a: &Entity,
     entity_b: &Entity,
     result: &CollisionResult,
     scaling: f32,
+    velocity_a: Vec2,
+    velocity_b: Vec2,
+    inv_mass_a: f32,
+    inv_mass_b: f32,
 ) -> VelloCollisionEvent {
     VelloCollisionEvent {
         entity_a: *entity_a,
@@ -82,18 +87,25 @@ fn make_collision_event(
         collision_normal_b: Vec2::new(-result.a_position_normal[2], result.a_position_normal[3]),
         curve_index_a: result.b_position_normal[3] as u32,
         curve_index_b: result.b_position_normal[2] as u32,
+        velocity_a,
+        velocity_b,
+        inv_mass_a,
+        inv_mass_b,
     }
 }
 
+/// Read collision events from [`CollisionEventBatch`] and trigger per-entity
+/// [`VelloCollisionTrigger`] observers with physics snapshots and batch indices.
 pub fn collision_event_redistribute(
-    mut reader: EventReader<VelloCollisionEvent>,
+    batch: Res<CollisionEventBatch>,
     mut commands: Commands,
     mut cool_down_manager: ResMut<CollisionCoolDownPairManager>,
     query: Query<&VelloCollider>,
     time: Res<Time>,
 ) {
     let now = time.elapsed_secs();
-    for event in reader.read() {
+    for (batch_index, entry) in batch.entries.iter().enumerate() {
+        let event = &entry.event;
         let pos_a = event.collision_point_a;
         let pos_b = event.collision_point_b;
         let normal_a = event.collision_normal_a;
@@ -103,7 +115,7 @@ pub fn collision_event_redistribute(
             continue;
         }
         let gap0 = query.get(event.entity_a).unwrap().collision_cooled_down;
-        let gap1 = query.get(event.entity_a).unwrap().collision_cooled_down;
+        let gap1 = query.get(event.entity_b).unwrap().collision_cooled_down;
         let gap = gap0.min(gap1);
         let key = CollisionCoolDownPairManager::pack_entity_pair(event.entity_a, event.entity_b);
         if let Some(item) = cool_down_manager.pairs.get_mut(&key) {
@@ -124,6 +136,11 @@ pub fn collision_event_redistribute(
                 collision_point,
                 normal_self: event.collision_normal_a,
                 normal_other: event.collision_normal_b,
+                batch_index,
+                self_velocity: event.velocity_a,
+                other_velocity: event.velocity_b,
+                self_inv_mass: event.inv_mass_a,
+                other_inv_mass: event.inv_mass_b,
             },
             event.entity_a,
         );
@@ -133,7 +150,12 @@ pub fn collision_event_redistribute(
                 entity_other: event.entity_a,
                 collision_point,
                 normal_self: event.collision_normal_b,
-                normal_other: event.collision_normal_b,
+                normal_other: event.collision_normal_a,
+                batch_index,
+                self_velocity: event.velocity_b,
+                other_velocity: event.velocity_a,
+                self_inv_mass: event.inv_mass_b,
+                other_inv_mass: event.inv_mass_a,
             },
             event.entity_b,
         );

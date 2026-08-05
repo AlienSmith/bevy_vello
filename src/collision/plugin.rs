@@ -1,6 +1,7 @@
 use crate::collision::systems::collect_removed_colliders;
 use crate::collision::systems::collision_event_redistribute;
 use crate::collision::CollisionCoolDownPairManager;
+use crate::collision::CollisionEventBatch;
 use crate::collision::CollisionSystems;
 use crate::collision::RemovedColliders;
 use crate::collision::VelloCollisionBroadPhase;
@@ -20,6 +21,7 @@ impl Plugin for VelloCollisionPlugin {
             .insert_resource(VelloCollisionWorld::default())
             .insert_resource(RemovedColliders::default())
             .insert_resource(VelloCollisionBroadPhase::default())
+            .insert_resource(CollisionEventBatch::default())
             .insert_resource(CollisionCoolDownPairManager::default())
             .configure_sets(
                 PostUpdate,
