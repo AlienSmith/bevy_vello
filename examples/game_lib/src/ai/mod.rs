@@ -169,24 +169,19 @@ pub fn on_remove_flee(
 ///
 /// Particle positions (P3 = spine base) are read from `VelloParticle` in
 /// vello y-down space and converted to bevy y-up.
+///
+/// A single `Query<&mut SpineController>` is used for both the player's and
+/// the enemies' spines (readable via `Query::get`), avoiding the B0001
+/// read/write conflict of two separate `SpineController` queries.
 pub fn ai_steer_system(
     ai_q: Query<
         (Entity, Option<&AiChaseTarget>, Option<&AiFleeTarget>),
         Or<(With<AiChaseTarget>, With<AiFleeTarget>)>,
     >,
     particle_q: Query<&VelloParticle>,
-    player_spine_q: Query<&SpineController>,
     mut all_spines: Query<&mut SpineController>,
 ) {
     for (enemy, chase_target, flee_target) in &ai_q {
-        let Ok(mut spine) = all_spines.get_mut(enemy) else {
-            continue;
-        };
-
-        let Some(enemy_pos) = get_bevy_pos(&spine, &particle_q) else {
-            continue;
-        };
-
         // Determine player entity and whether we chase (true) or flee (false).
         let (player, toward_player) = if let Some(chase) = chase_target {
             (chase.player, true)
@@ -196,7 +191,16 @@ pub fn ai_steer_system(
             continue;
         };
 
-        let Some(player_pos) = get_player_bevy_pos(player, &player_spine_q, &particle_q) else {
+        // Read positions first while the mutable spine borrow is not held.
+        let Some(enemy_pos) = all_spines
+            .get(enemy)
+            .ok()
+            .and_then(|spine| get_bevy_pos(&spine, &particle_q))
+        else {
+            continue;
+        };
+
+        let Some(player_pos) = get_player_bevy_pos(player, &all_spines, &particle_q) else {
             continue;
         };
 
@@ -207,6 +211,10 @@ pub fn ai_steer_system(
         };
 
         let avoid = compute_wall_avoidance(enemy_pos);
+
+        let Ok(mut spine) = all_spines.get_mut(enemy) else {
+            continue;
+        };
         spine.move_vector = dir * AI_SPEED + avoid * AVOID_FORCE;
     }
 }
@@ -223,11 +231,11 @@ fn get_bevy_pos(spine: &SpineController, particle_q: &Query<&VelloParticle>) -> 
 /// Read the P3 position of the player entity.
 fn get_player_bevy_pos(
     player: Entity,
-    player_spine_q: &Query<&SpineController>,
+    player_spine_q: &Query<&mut SpineController>,
     particle_q: &Query<&VelloParticle>,
 ) -> Option<Vec2> {
     let spine = player_spine_q.get(player).ok()?;
-    get_bevy_pos(spine, particle_q)
+    get_bevy_pos(&spine, particle_q)
 }
 
 // ---------------------------------------------------------------------------

@@ -114,6 +114,10 @@ pub fn collision_event_redistribute(
         if normal_a.dot(diff) > 0.0 || normal_b.dot(diff) < 0.0 {
             continue;
         }
+        //the entity has been despawn
+        if query.get(event.entity_a).is_err() || query.get(event.entity_b).is_err() {
+            continue;
+        }
         let gap0 = query.get(event.entity_a).unwrap().collision_cooled_down;
         let gap1 = query.get(event.entity_b).unwrap().collision_cooled_down;
         let gap = gap0.min(gap1);

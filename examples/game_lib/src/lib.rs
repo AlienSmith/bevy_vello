@@ -53,7 +53,7 @@ pub enum GameLabSystems {
 impl Plugin for VelloCharacterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(InputPlugin)
-            .add_plugins(AiPlugin)
+            //.add_plugins(AiPlugin)
             .add_plugins(GameCharacterPlugin)
             .add_plugins(CharacterFactoryPlugin)
             .add_plugins(CharacterLoaderPlugin)

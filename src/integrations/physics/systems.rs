@@ -521,41 +521,44 @@ pub fn update_connection_particles(
 ) {
     for (e, mut joint) in query.iter_mut() {
         let character = joint.root_entity;
-        let group = constraint_world.data.get_group_ref(character).unwrap();
-        if let Some(item) = group.get_connect_particle(&e) {
-            joint.particle = item;
-        }
-        if let Some(item) = group.get_connect_particle_shape_matching_config(&e) {
-            if joint.shape_matching_init_local_pos.is_none() {
-                joint.shape_matching_init_local_pos = Some(item.local_target);
+        if let Ok(group) = constraint_world.data.get_group_ref(character) {
+            if let Some(item) = group.get_connect_particle(&e) {
+                joint.particle = item;
             }
-            joint.shape_matching = item;
+            if let Some(item) = group.get_connect_particle_shape_matching_config(&e) {
+                if joint.shape_matching_init_local_pos.is_none() {
+                    joint.shape_matching_init_local_pos = Some(item.local_target);
+                }
+                joint.shape_matching = item;
+            }
         }
     }
     for (character, mut joint) in query_c.iter_mut() {
-        let group = constraint_world.data.get_group_ref(character).unwrap();
-        let item = group.get_frame_connect_particle();
-        if item.len() == FRAME_PARTICLES_COUNT {
-            let frame_coordinates =
-                BalancedCoreFrame::new(item[0].pos, item[1].pos, item[2].pos, item[3].pos);
-            if joint.initial_frame_coordinates.is_none() {
-                joint.initial_frame_coordinates = Some(frame_coordinates.clone());
+        if let Ok(group) = constraint_world.data.get_group_ref(character) {
+            let item = group.get_frame_connect_particle();
+            if item.len() == FRAME_PARTICLES_COUNT {
+                let frame_coordinates =
+                    BalancedCoreFrame::new(item[0].pos, item[1].pos, item[2].pos, item[3].pos);
+                if joint.initial_frame_coordinates.is_none() {
+                    joint.initial_frame_coordinates = Some(frame_coordinates.clone());
+                }
+                joint.frame_coordinates = frame_coordinates;
             }
-            joint.frame_coordinates = frame_coordinates;
         }
     }
     for (e, mut joint) in query_j.iter_mut() {
         let character = joint.root_entity;
-        let group = constraint_world.data.get_group_ref(character).unwrap();
-        match &mut joint.constraint {
-            vello_physics::ConnectionConstraint::Bilinear => {}
-            vello_physics::ConnectionConstraint::Distance => {}
-            vello_physics::ConnectionConstraint::Angular(angular_constraint_config) => {
-                if let Some(item) = group.get_connect_angular_config(&e) {
-                    *angular_constraint_config = item;
-                    if joint.init_constrats.is_none() {
-                        joint.init_constrats =
-                            Some(vello_physics::ConnectionConstraint::Angular(item));
+        if let Ok(group) = constraint_world.data.get_group_ref(character) {
+            match &mut joint.constraint {
+                vello_physics::ConnectionConstraint::Bilinear => {}
+                vello_physics::ConnectionConstraint::Distance => {}
+                vello_physics::ConnectionConstraint::Angular(angular_constraint_config) => {
+                    if let Some(item) = group.get_connect_angular_config(&e) {
+                        *angular_constraint_config = item;
+                        if joint.init_constrats.is_none() {
+                            joint.init_constrats =
+                                Some(vello_physics::ConnectionConstraint::Angular(item));
+                        }
                     }
                 }
             }
