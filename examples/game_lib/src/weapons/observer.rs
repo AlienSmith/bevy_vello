@@ -149,6 +149,7 @@ pub(crate) fn on_raytrace_hit(
     let event = trigger.event();
     let entity = event.source_entity;
     if let Some(hit_entity) = event.hit_entity {
+        let _ = hit_entity; // keep for clarity
         hit_points.0.insert(entity, event.hit_point);
     } else {
         hit_points.0.remove(&entity);

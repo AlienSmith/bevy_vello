@@ -93,7 +93,7 @@ pub fn run_gpu_raytrace(
 
     let mut ray_candidates: Vec<RayCandidates> = Vec::with_capacity(commands.len());
 
-    for cmd in commands {
+    for (ray_idx, cmd) in commands.into_iter().enumerate() {
         let mut candidates: Vec<(Entity, f32)> = Vec::new();
         for (entity, collider) in collider_query.iter() {
             let aabb = collider.get_aabb(); // (x0, y0, x1, y1) in local space
@@ -152,12 +152,24 @@ pub fn run_gpu_raytrace(
         }
     }
 
-    // GPU execution
-    let results = ray_runner.run_raytrace(&scene);
+    // GPU execution.
+    //
+    // Guard against an empty scene: when no ray has any collider candidate,
+    // `scene` encodes zero bytes and the buffer pool quantizes size 0 up to a
+    // 2-byte buffer (`size_class(0, 1) == 2`). Binding that to a
+    // `var<storage> scene: array<u32>` binding (which needs at least 4 bytes)
+    // trips wgpu validation ("Buffer is bound with size 2 where the shader
+    // expects 4 in group[0] compact index 1"). Skip the GPU entirely in that
+    // case; every ray simply misses.
+    let num_rays = ray_candidates.len();
+    let results: Vec<vello::RayTraceResult> = if pair_ray_indices.is_empty() {
+        Vec::new()
+    } else {
+        ray_runner.run_raytrace(&scene)
+    };
 
     // results.len() == number of encoded (ray, shape) pairs.
     // For each ray, pick the closest positive t.
-    let num_rays = ray_candidates.len();
     let mut best_per_ray: Vec<Option<(f32, Entity, vello::RayTraceResult)>> = vec![None; num_rays];
 
     for (pair_idx, result) in results.iter().enumerate() {
@@ -185,7 +197,7 @@ pub fn run_gpu_raytrace(
     for (ray_idx, rc) in ray_candidates.iter().enumerate() {
         let cmd = rc.cmd.clone();
         match &best_per_ray[ray_idx] {
-            Some((_t, entity, result)) => {
+            Some((t, entity, result)) => {
                 batch.entries.push(RayTraceBatchEntry {
                     command: cmd,
                     result: *result,
