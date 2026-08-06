@@ -121,6 +121,8 @@ pub struct VelloTextBundle {
 pub struct VelloScene(vello::Scene);
 
 pub use collision::VelloCollider;
+pub use collision::VelloRayTraceCommand;
+pub use collision::VelloRayTraceTrigger;
 
 pub use integrations::physics::VelloCollisionResponsePlugin;
 

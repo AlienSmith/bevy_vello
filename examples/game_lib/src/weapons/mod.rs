@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use bevy_vello::integrations::physics::VelloParticle;
 
@@ -8,6 +10,11 @@ use crate::{
 mod observer;
 pub mod plugin;
 mod system;
+
+/// Stores the latest ray trace hit point per pistol entity.
+/// Written by [`observer::on_raytrace_hit`], read by [`system::update_pistol_aim`].
+#[derive(Resource, Default)]
+pub(crate) struct RayTraceHitPoints(pub HashMap<Entity, Vec2>);
 
 // ---------------------------------------------------------------------------
 // MeleeWeapon Component

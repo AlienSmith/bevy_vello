@@ -6,7 +6,11 @@ use bevy::{
 };
 
 use crate::{
-    collision::{CollisionEventBatch, CollisionSystems},
+    collision::{
+        raytrace::{collect_raytrace_commands, run_gpu_raytrace, RayTraceCommandQueue},
+        systems::redistribute_raytrace_results,
+        CollisionEventBatch, CollisionSystems, RayTraceBatch, VelloRayTraceCommand,
+    },
     integrations::physics::{
         systems::{
             apply_explicit_impulse_on_connection_particle, apply_explicit_impulse_on_softbody,
@@ -28,12 +32,15 @@ impl Plugin for VelloCollisionResponsePlugin {
         app.insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, 0.0)))
             .insert_resource(Time::<Fixed>::from_hz(90.0))
             .insert_resource(CollisionEventBatch::default())
+            .insert_resource(RayTraceBatch::default())
+            .insert_resource(RayTraceCommandQueue::default())
             .add_event::<ColliderExternalImpulseEvent>()
             .add_event::<CharacterPivotForceEvent>()
             .add_event::<CharacterPivotVelocityEvent>()
             .add_event::<CharacterAngularConstraintEvent>()
             .add_event::<CharacterPivotPositionEvent>()
             .add_event::<CharacterFrameForceEvent>()
+            .add_event::<VelloRayTraceCommand>()
             // Collision response runs FIRST, then collision detection runs LAST.
             // This introduces a one-frame pipeline delay between detection and
             // response, giving game systems (PostUpdate observers) time to write
@@ -69,13 +76,21 @@ impl Plugin for VelloCollisionResponsePlugin {
                     // 9. GPU narrow-phase collision detection; populates
                     //    CollisionEventBatch with physics snapshots.
                     run_gpu_collision,
+                    // 10. Collect ray trace commands emitted this frame.
+                    collect_raytrace_commands,
+                    // 11. Run GPU ray trace (broad phase scan + GPU).
+                    run_gpu_raytrace,
                 )
                     .chain(),
             )
-            // Pure visualization systems stay in PostUpdate
+            // PostUpdate: redistribute collision + raytrace results as observers
             .add_systems(
                 PostUpdate,
-                (visualize_colliders, create_update_pivot_visualizer)
+                (
+                    visualize_colliders,
+                    create_update_pivot_visualizer,
+                    redistribute_raytrace_results,
+                )
                     .chain()
                     .in_set(CollisionSystems::CollisionResponsePhysics),
             )

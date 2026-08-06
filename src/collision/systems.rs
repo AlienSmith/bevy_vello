@@ -4,9 +4,9 @@ use vello::{CollisionResult, CollisionScene};
 
 use crate::{
     collision::{
-        CollisionCoolDownPairManager, CollisionEventBatch, CollisionSceneState, RemovedColliders,
-        VelloCollisionEvent, VelloCollisionScene, VelloCollisionTrigger, VelloCollisionWorld,
-        VELLO_COLLISION_WORLD_RATIO,
+        CollisionCoolDownPairManager, CollisionEventBatch, CollisionSceneState, RayTraceBatch,
+        RemovedColliders, VelloCollisionEvent, VelloCollisionScene, VelloCollisionTrigger,
+        VelloCollisionWorld, VelloRayTraceTrigger, VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -175,5 +175,36 @@ pub fn collision_event_redistribute(
                 .pairs
                 .retain(|_key, value| (value.0 + value.1) > now);
         }
+    }
+}
+
+/// Reads [`RayTraceBatch`] populated by `run_gpu_raytrace` and triggers
+/// [`VelloRayTraceTrigger`] on each source entity.
+pub fn redistribute_raytrace_results(batch: Res<RayTraceBatch>, mut commands: Commands) {
+    for entry in &batch.entries {
+        let (hit_point, hit_normal, distance) = if entry.hit_entity.is_some() {
+            // Convert from vello space back to bevy space
+            let scaling = 1.0 / VELLO_COLLISION_WORLD_RATIO;
+            let bx = entry.result.point_x * scaling;
+            let by = -entry.result.point_y * scaling;
+            // Normal: GPU doesn't return normal data from RayTraceResult,
+            // so use ray direction as an approximation.
+            let normal = entry.command.direction;
+            (Vec2::new(bx, by), normal, entry.result.t * scaling)
+        } else {
+            (Vec2::ZERO, Vec2::ZERO, -1.0)
+        };
+
+        commands.trigger_targets(
+            VelloRayTraceTrigger {
+                source_entity: entry.command.source_entity,
+                hit_entity: entry.hit_entity,
+                hit_point,
+                hit_normal,
+                distance,
+                cubic_index: entry.result.cubic_index,
+            },
+            entry.command.source_entity,
+        );
     }
 }

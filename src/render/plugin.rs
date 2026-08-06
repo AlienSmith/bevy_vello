@@ -159,9 +159,17 @@ impl Plugin for VelloRenderPlugin {
                 queue.0.as_ref().clone().into_inner(),
             )
         };
-        let collision_runner =
-            crate::collision::GpuCollisionRunner::new(shared_renderer.clone(), device, queue);
+        let collision_runner = crate::collision::GpuCollisionRunner::new(
+            shared_renderer.clone(),
+            device.clone(),
+            queue.clone(),
+        );
         app.world_mut().insert_resource(collision_runner);
+
+        // Step 2b: Create GpuRayTraceRunner with the same cloned renderer
+        let raytrace_runner =
+            crate::collision::GpuRayTraceRunner::new(shared_renderer.clone(), device, queue);
+        app.world_mut().insert_resource(raytrace_runner);
 
         // Step 3: Set up the render graph with the SAME shared renderer
         let render_app = app.sub_app_mut(RenderApp);

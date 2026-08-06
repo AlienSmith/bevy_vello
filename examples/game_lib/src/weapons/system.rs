@@ -12,10 +12,10 @@ use bevy::{prelude::*, tasks::block_on, transform};
 use bevy_egui::egui::Key::W;
 use bevy_vello::{
     integrations::physics::{ColliderExternalImpulseEvent, VelloParticle},
-    mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
+    mat4_to_affine, VelloCollider, VelloRayTraceCommand, VelloScene, VelloSceneBundle,
 };
 use vello::{
-    kurbo::{Affine, BezPath, PathEl, Shape, Stroke},
+    kurbo::{Affine, BezPath, Circle, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
 };
 use vello_physics::{
@@ -29,7 +29,7 @@ use crate::{
     utility::mat4_to_affine2,
     weapons::{
         observer::on_collision_bullet, AttachPistolToCharacterEvent, Bullet, FireEvent,
-        MeleeWeapon, PistolControl,
+        MeleeWeapon, PistolControl, RayTraceHitPoints,
     },
     CharacterPartEvent, ColliderRoot, ConnectivityRoot, LeftArmController, RightArmController,
     StringPool,
@@ -93,6 +93,7 @@ pub fn attach_pistol(
 
 pub fn update_pistol_aim(
     mut pistol_q: Query<(
+        Entity,
         &PistolControl,
         &Connectivity,
         &VelloCollider,
@@ -100,9 +101,11 @@ pub fn update_pistol_aim(
         &GlobalTransform,
     )>,
     mut arm_q: Query<(&mut LeftArmController, &mut RightArmController)>,
+    mut raytrace_writer: EventWriter<VelloRayTraceCommand>,
+    hit_points: Res<RayTraceHitPoints>,
 ) {
     // the connectivity component means we are connected to some character
-    for (control, connectivity, collider, mut scene, transform) in pistol_q.iter_mut() {
+    for (entity, control, connectivity, collider, mut scene, transform) in pistol_q.iter_mut() {
         let character = connectivity.character;
         let y_scale = collider.initial_scale.y;
         let y_offset = (control.gun_point_uv.y - control.wrist_binding_uv.y) * y_scale;
@@ -131,6 +134,8 @@ pub fn update_pistol_aim(
             let l_p = affine.transform_point2(gun_point_world_pos);
             let l_r = affine.transform_point2(gun_rear_world_pos);
             let ray = (l_p - l_r).normalize();
+
+            // Draw the aim line
             let end = l_p + ray * 1000.0;
             let mut frame = vec![];
             frame.push(PathEl::MoveTo(vector2_to_kurbo_point(&l_p)));
@@ -145,6 +150,34 @@ pub fn update_pistol_aim(
                 None,
                 &frame.into_path(0.1),
             );
+
+            // Draw a red dot at the ray trace hit point (from the previous frame).
+            // The hit point is in bevy world space (y-up); convert to vello local
+            // space (y-down) for drawing in the pistol's scene.
+            if let Some(&hit_point_bevy) = hit_points.0.get(&entity) {
+                let hit_point_vello = Vec2::new(hit_point_bevy.x, -hit_point_bevy.y);
+                let local_hit = affine.transform_point2(hit_point_vello);
+                let circle = Circle::new((local_hit.x as f64, local_hit.y as f64), 2.0);
+                scene.fill(
+                    peniko::Fill::NonZero,
+                    Affine::IDENTITY,
+                    peniko::Color::rgba(1.0, 0.0, 0.0, 0.95),
+                    None,
+                    &circle,
+                );
+            }
+
+            // Emit a ray trace command every frame for hitscan detection.
+            // Convert vello-space (y-down) to bevy-space (y-up).
+            let origin = Vec2::new(gun_point_world_pos.x, -gun_point_world_pos.y);
+            let vello_dir = (gun_point_world_pos - gun_rear_world_pos).normalize();
+            let direction = Vec2::new(vello_dir.x, -vello_dir.y);
+            raytrace_writer.write(VelloRayTraceCommand {
+                source_entity: entity,
+                origin,
+                direction,
+                max_distance: 1000.0,
+            });
         }
     }
 }

@@ -16,7 +16,8 @@ use vello::{
 mod broad_phase;
 mod extract;
 mod plugin;
-mod systems;
+pub mod raytrace;
+pub mod systems;
 
 pub const VELLO_COLLISION_WORLD_RATIO: f32 = 4.0;
 pub const VELLO_COLLISION_COOL_DOWN_TIME: f32 = 0.5;
@@ -353,15 +354,107 @@ impl Default for CollisionCoolDownPairManager {
 
 impl CollisionCoolDownPairManager {
     pub fn pack_entity_pair(entity_a: Entity, entity_b: Entity) -> u64 {
-        // Extract the raw u32 internal index numbers
         let id_a = entity_a.index();
         let id_b = entity_b.index();
-
-        // Sort them so that pack(A, B) yields the exact same key as pack(B, A)
         let min = std::cmp::min(id_a, id_b) as u64;
         let max = std::cmp::max(id_a, id_b) as u64;
-
-        // Shift the smaller ID to the left 32 bits, then merge it with the larger ID
         (min << 32) | max
+    }
+}
+
+// ── Ray Trace Pipeline ────────────────────────────────────────────────────
+
+/// A GPU ray trace command emitted by game systems.
+///
+/// Collected in `FixedUpdate`, run through BVH broad phase + GPU raytrace,
+/// and results are redistributed as [`VelloRayTraceTrigger`] in `PostUpdate`.
+#[derive(Event, Clone)]
+pub struct VelloRayTraceCommand {
+    /// The entity that emitted this ray (e.g., a gun).
+    pub source_entity: Entity,
+    /// Ray origin in bevy world space (y-up, x-right).
+    pub origin: Vec2,
+    /// Normalized ray direction in bevy world space (y-up, x-right).
+    pub direction: Vec2,
+    /// Maximum ray length; intersections beyond this are culled at broad phase.
+    pub max_distance: f32,
+}
+
+/// Triggered on the source entity after GPU raytrace completes.
+///
+/// Game systems observe this to react to ray hits (e.g., apply damage).
+/// `hit_entity` is `None` when the ray missed all geometry.
+#[derive(Event, Clone)]
+pub struct VelloRayTraceTrigger {
+    /// The entity that emitted the ray.
+    pub source_entity: Entity,
+    /// The entity that was hit, or `None` if the ray missed.
+    pub hit_entity: Option<Entity>,
+    /// Hit point in bevy world space (y-up, x-right).
+    pub hit_point: Vec2,
+    /// Hit normal in bevy world space (y-up, x-right).
+    pub hit_normal: Vec2,
+    /// Distance along the ray to the hit point. Negative if miss.
+    pub distance: f32,
+    /// Index of the cubic segment that was hit.
+    pub cubic_index: u32,
+}
+
+/// A single entry in the ray trace batch, pairing a command with its GPU result.
+#[derive(Clone)]
+pub struct RayTraceBatchEntry {
+    /// The original ray trace command.
+    pub command: VelloRayTraceCommand,
+    /// The GPU ray trace result (one per (ray, candidate_shape) pair submitted).
+    pub result: vello::RayTraceResult,
+    /// The entity that was hit, resolved from the BVH candidate list.
+    pub hit_entity: Option<Entity>,
+}
+
+/// Resource holding all ray trace results for the current frame.
+///
+/// Populated by `run_gpu_raytrace` in `FixedUpdate`, read by
+/// `redistribute_raytrace_results` in `PostUpdate`.
+#[derive(Resource, Default, Clone)]
+pub struct RayTraceBatch {
+    /// Per-ray entries with GPU results.
+    pub entries: Vec<RayTraceBatchEntry>,
+}
+
+/// Runs GPU ray tracing synchronously from the main world.
+///
+/// Shares the `vello::Renderer` with the rendering pipeline via `Arc<Mutex<>>`
+/// (same renderer used by [`GpuCollisionRunner`]).
+#[derive(Resource, Clone)]
+pub struct GpuRayTraceRunner {
+    renderer: Arc<Mutex<vello::Renderer>>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+}
+
+impl GpuRayTraceRunner {
+    pub fn new(
+        renderer: Arc<Mutex<vello::Renderer>>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Self {
+        Self {
+            renderer,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+        }
+    }
+
+    /// Run GPU ray tracing synchronously on the given scene.
+    /// Blocks until the GPU results are available.
+    /// Returns one [`vello::RayTraceResult`] per encoded (ray, shape) pair.
+    pub fn run_raytrace(&self, scene: &vello::RayTraceScene) -> Vec<vello::RayTraceResult> {
+        let mut renderer = self.renderer.lock().unwrap();
+        vello::util::block_on_wgpu(
+            &self.device,
+            renderer.render_raytrace_async(&self.device, &self.queue, scene.data()),
+        )
+        .unwrap()
+        .unwrap_or_default()
     }
 }

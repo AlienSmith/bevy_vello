@@ -1,5 +1,8 @@
 use bevy::prelude::*;
-use bevy_vello::collision::{CollisionEventBatch, CollisionOverride, VelloCollisionTrigger};
+use bevy_vello::{
+    collision::{CollisionEventBatch, CollisionOverride, VelloCollisionTrigger},
+    VelloRayTraceTrigger,
+};
 
 use crate::{
     character::Connectivity,
@@ -9,7 +12,7 @@ use crate::{
     },
     death_channel::{channel::ChannelMessage, components::Detached},
     health::{Die, Health},
-    weapons::MeleeWeapon,
+    weapons::{MeleeWeapon, RayTraceHitPoints},
     CharacterPartEvent,
 };
 
@@ -133,5 +136,21 @@ pub(crate) fn on_collision_melee(
             &mut die_writer,
             &mut unreg_writer,
         );
+    }
+}
+
+/// Observer fired when a [`VelloRayTraceTrigger`] is triggered on a pistol entity.
+/// Stores the hit point so that [`update_pistol_aim`] can draw a red dot in the
+/// pistol's own [`VelloScene`] on the next frame.
+pub(crate) fn on_raytrace_hit(
+    trigger: Trigger<VelloRayTraceTrigger>,
+    mut hit_points: ResMut<RayTraceHitPoints>,
+) {
+    let event = trigger.event();
+    let entity = event.source_entity;
+    if let Some(hit_entity) = event.hit_entity {
+        hit_points.0.insert(entity, event.hit_point);
+    } else {
+        hit_points.0.remove(&entity);
     }
 }
