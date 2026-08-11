@@ -220,6 +220,7 @@ impl BroadPhaseQbvh {
     }
 }
 
+#[allow(dead_code)]
 pub fn update_broad_phase(
     all_colliders: Query<(Entity, &VelloCollider)>,
     modified_colliders: Query<
@@ -417,6 +418,100 @@ impl SimdBestFirstVisitor<ColliderHandle, SimdAabb> for RayCastVisitor {
             weights: SimdReal::from(weights_arr),
             mask: parry2d::math::SimdBool::from(hit_mask),
             results: [None; SIMD_WIDTH],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `BroadPhaseQbvh` populated with the given (entity, aabb) colliders.
+    fn build_qbvh(colliders: Vec<(Entity, Aabb)>) -> BroadPhaseQbvh {
+        let mut broad_phase = BroadPhaseQbvh::new();
+        broad_phase.qbvh.clear_and_rebuild(
+            colliders
+                .into_iter()
+                .map(|(entity, aabb)| (ColliderHandle(entity), aabb)),
+            0.0,
+        );
+        broad_phase
+    }
+
+    /// Axis-aligned box centered at (cx, cy) with the given half-extent.
+    fn aabb_centered(cx: f32, cy: f32, half: f32) -> Aabb {
+        Aabb::new(
+            Point::new(cx - half, cy - half),
+            Point::new(cx + half, cy + half),
+        )
+    }
+
+    #[test]
+    fn ray_cast_hits_box() {
+        let entity = Entity::from_raw(1);
+        let bp = build_qbvh(vec![(entity, aabb_centered(5.0, 5.0, 1.0))]);
+        // Ray from (0,5) along +x enters the box [4,6]x[4,6] at t = 4.
+        let hits = bp.ray_cast(Vec2::new(0.0, 5.0), Vec2::new(1.0, 0.0), 100.0);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, entity);
+        assert!((hits[0].1 - 4.0).abs() < 1e-3, "t_entry = {}", hits[0].1);
+    }
+
+    #[test]
+    fn ray_cast_miss() {
+        let entity = Entity::from_raw(1);
+        let bp = build_qbvh(vec![(entity, aabb_centered(5.0, 5.0, 1.0))]);
+        // Ray along +x at y = 0 never intersects the box centered at y = 5.
+        let hits = bp.ray_cast(Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), 100.0);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn ray_cast_respects_max_distance() {
+        let entity = Entity::from_raw(1);
+        let bp = build_qbvh(vec![(entity, aabb_centered(5.0, 5.0, 1.0))]);
+        // The box is at t = 4, but max_distance = 2 cuts the ray short.
+        let hits = bp.ray_cast(Vec2::new(0.0, 5.0), Vec2::new(1.0, 0.0), 2.0);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn ray_cast_empty_bvh() {
+        let bp = build_qbvh(vec![]);
+        let hits = bp.ray_cast(Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), 100.0);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn ray_cast_multiple_hits() {
+        let e1 = Entity::from_raw(1);
+        let e2 = Entity::from_raw(2);
+        let e3 = Entity::from_raw(3);
+        let bp = build_qbvh(vec![
+            (e1, aabb_centered(5.0, 5.0, 1.0)),
+            (e2, aabb_centered(10.0, 5.0, 1.0)),
+            (e3, aabb_centered(20.0, 5.0, 1.0)),
+        ]);
+        // Ray along +x at y = 5 passes through all three boxes.
+        let hits = bp.ray_cast(Vec2::new(0.0, 5.0), Vec2::new(1.0, 0.0), 100.0);
+        assert_eq!(hits.len(), 3);
+
+        // Results are documented as unsorted, so compare as sets.
+        let mut entities: Vec<Entity> = hits.iter().map(|(e, _)| *e).collect();
+        entities.sort();
+        let mut expected = vec![e1, e2, e3];
+        expected.sort();
+        assert_eq!(entities, expected);
+
+        // Each hit's t_entry should be >= 0 and match the box's entry distance.
+        let mut ts: Vec<f32> = hits.iter().map(|(_, t)| *t).collect();
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let expected_ts = [4.0, 9.0, 19.0];
+        for (got, want) in ts.iter().zip(expected_ts.iter()) {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "t_entry = {got}, expected {want}"
+            );
         }
     }
 }
