@@ -135,8 +135,17 @@ pub fn update_pistol_aim(
             let l_r = affine.transform_point2(gun_rear_world_pos);
             let ray = (l_p - l_r).normalize();
 
-            // Draw the aim line
-            let end = l_p + ray * 1000.0;
+            // Convert the stored hit point (bevy world space, y-up) to vello
+            // local space (y-down) so we can draw the aim line up to the contact
+            // point and mark it.
+            let local_hit = hit_points.0.get(&entity).map(|&hit_point_bevy| {
+                let hit_point_vello = Vec2::new(hit_point_bevy.x, -hit_point_bevy.y);
+                affine.transform_point2(hit_point_vello)
+            });
+
+            // Draw the aim line: up to the contact point when we have a hit,
+            // otherwise the full max ray distance.
+            let end = local_hit.unwrap_or(l_p + ray * 1000.0);
             let mut frame = vec![];
             frame.push(PathEl::MoveTo(vector2_to_kurbo_point(&l_p)));
             frame.push(PathEl::LineTo(vector2_to_kurbo_point(&end)));
@@ -151,20 +160,27 @@ pub fn update_pistol_aim(
                 &frame.into_path(0.1),
             );
 
-            // Draw a red dot at the ray trace hit point (from the previous frame).
-            // The hit point is in bevy world space (y-up); convert to vello local
-            // space (y-down) for drawing in the pistol's scene.
-            if let Some(&hit_point_bevy) = hit_points.0.get(&entity) {
-                let hit_point_vello = Vec2::new(hit_point_bevy.x, -hit_point_bevy.y);
-                let local_hit = affine.transform_point2(hit_point_vello);
-                let circle = Circle::new((local_hit.x as f64, local_hit.y as f64), 2.0);
+            // Prominent marker at the hit point: yellow outline ring + bright
+            // red core, drawn after the line so it stays on top.
+            if let Some(local_hit) = local_hit {
+                let center = (local_hit.x as f64, local_hit.y as f64);
+                scene.stroke(
+                    &Stroke::new(2.0),
+                    Affine::IDENTITY,
+                    peniko::Color::rgba(1.0, 1.0, 0.0, 0.95),
+                    None,
+                    &Circle::new(center, 6.0),
+                );
                 scene.fill(
                     peniko::Fill::NonZero,
                     Affine::IDENTITY,
-                    peniko::Color::rgba(1.0, 0.0, 0.0, 0.95),
+                    peniko::Color::rgba(1.0, 0.0, 0.0, 1.0),
                     None,
-                    &circle,
+                    &Circle::new(center, 3.0),
                 );
+            } else {
+                // No hit this frame; the hit point from last frame is
+                // cleared by the observer.
             }
 
             // Emit a ray trace command every frame for hitscan detection.

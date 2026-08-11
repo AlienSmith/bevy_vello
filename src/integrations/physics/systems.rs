@@ -16,7 +16,7 @@ use crate::{
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
 
-use bevy::{ecs::error::info, prelude::*};
+use bevy::prelude::*;
 use vello::{
     kurbo::{self, Affine, BezPath, PathEl, Shape, Stroke},
     peniko::{self, GlowColor},
