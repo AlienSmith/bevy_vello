@@ -2,8 +2,8 @@ use bevy::prelude::*;
 
 use crate::{
     collision::{
-        GpuRayTraceRunner, RayTraceBatch, RayTraceBatchEntry, VelloRayTraceCommand,
-        VELLO_COLLISION_WORLD_RATIO,
+        GpuRayTraceRunner, RayTraceBatch, RayTraceBatchEntry, VelloCollisionBroadPhase,
+        VelloRayTraceCommand, VELLO_COLLISION_WORLD_RATIO,
     },
     mat4_to_affine, VelloCollider,
 };
@@ -25,56 +25,12 @@ pub struct RayTraceCommandQueue {
     pub commands: Vec<VelloRayTraceCommand>,
 }
 
-/// Ray-vs-AABB intersection test using the slab method (Kay & Kajiya).
-/// Returns the entry distance (t_entry) if the ray hits the AABB, or `None` if it misses.
-/// `aabb` uses bevy y-up coordinates where: (x0, y0) = min, (x1, y1) = max.
-fn ray_aabb_intersect(
-    origin: Vec2,
-    direction: Vec2,
-    max_distance: f32,
-    aabb_min: Vec2,
-    aabb_max: Vec2,
-) -> Option<f32> {
-    let epsilon = 1e-10f32;
-
-    // Precompute inverse direction
-    let inv_x = if direction.x.abs() < epsilon {
-        f32::MAX
-    } else {
-        1.0 / direction.x
-    };
-    let inv_y = if direction.y.abs() < epsilon {
-        f32::MAX
-    } else {
-        1.0 / direction.y
-    };
-
-    let t1_x = (aabb_min.x - origin.x) * inv_x;
-    let t2_x = (aabb_max.x - origin.x) * inv_x;
-    let t1_y = (aabb_min.y - origin.y) * inv_y;
-    let t2_y = (aabb_max.y - origin.y) * inv_y;
-
-    let t_entry_x = t1_x.min(t2_x);
-    let t_exit_x = t1_x.max(t2_x);
-    let t_entry_y = t1_y.min(t2_y);
-    let t_exit_y = t1_y.max(t2_y);
-
-    let t_entry = t_entry_x.max(t_entry_y);
-    let t_exit = t_exit_x.min(t_exit_y);
-
-    // Valid hit: t_entry <= t_exit, t_exit >= 0, t_entry <= max_distance
-    if t_entry <= t_exit && t_exit >= 0.0 && t_entry <= max_distance {
-        Some(t_entry.max(0.0))
-    } else {
-        None
-    }
-}
-
 /// Runs broad phase ray-AABB scan for each queued ray against all colliders,
 /// builds a [`vello::RayTraceScene`], executes GPU ray tracing synchronously,
 /// and populates [`RayTraceBatch`] with the closest hit per ray.
 pub fn run_gpu_raytrace(
     ray_runner: Res<GpuRayTraceRunner>,
+    broad_phase: Res<VelloCollisionBroadPhase>,
     mut queue: ResMut<RayTraceCommandQueue>,
     mut batch: ResMut<RayTraceBatch>,
     collider_query: Query<(Entity, &VelloCollider)>,
@@ -84,7 +40,8 @@ pub fn run_gpu_raytrace(
         return;
     }
 
-    // For each ray, collect all collider AABB candidates with entry distances.
+    // For each ray, collect all collider AABB candidates with entry distances
+    // via BVH traversal instead of O(n) linear scan.
     // Sorted by t so the closest is first.
     struct RayCandidates {
         cmd: VelloRayTraceCommand,
@@ -94,30 +51,10 @@ pub fn run_gpu_raytrace(
     let mut ray_candidates: Vec<RayCandidates> = Vec::with_capacity(commands.len());
 
     for cmd in commands {
-        let mut candidates: Vec<(Entity, f32)> = Vec::new();
-        for (entity, collider) in collider_query.iter() {
-            let aabb = collider.get_aabb(); // (x0, y0, x1, y1) in local space
-            let transform = &collider.soft_body_global_transform;
-            // Convert local AABB to world-space AABB (using translation only for
-            // conservative broad phase)
-            let world_min = Vec2::new(
-                aabb.x + transform.translation.x,
-                aabb.y + transform.translation.y,
-            );
-            let world_max = Vec2::new(
-                aabb.z + transform.translation.x,
-                aabb.w + transform.translation.y,
-            );
-            if let Some(t_entry) = ray_aabb_intersect(
-                cmd.origin,
-                cmd.direction,
-                cmd.max_distance,
-                world_min,
-                world_max,
-            ) {
-                candidates.push((entity, t_entry));
-            }
-        }
+        // BVH is built in world space (compute_aabb_from_collider adds
+        // soft_body_global_transform.translation), so the ray can be passed
+        // directly in bevy world space.
+        let mut candidates = broad_phase.ray_cast(cmd.origin, cmd.direction, cmd.max_distance);
         // Sort by entry distance (ascending)
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         ray_candidates.push(RayCandidates { cmd, candidates });

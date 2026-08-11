@@ -89,6 +89,12 @@ impl VelloCollisionBroadPhase {
         self.broad_phase
             .find_first_constains_point(world_position.x, world_position.y)
     }
+
+    /// Ray-cast against the BVH, returning all (Entity, t_entry) pairs for AABBs
+    /// intersected by the ray. Unsorted; caller should sort by t_entry ascending.
+    pub fn ray_cast(&self, origin: Vec2, direction: Vec2, max_distance: f32) -> Vec<(Entity, f32)> {
+        self.broad_phase.ray_cast(origin, direction, max_distance)
+    }
 }
 
 #[derive(Default, Resource, Clone)]

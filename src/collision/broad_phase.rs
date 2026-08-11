@@ -110,6 +110,20 @@ impl BroadPhaseQbvh {
         }
     }
 
+    /// Ray-cast against all colliders in the BVH, returning all (Entity, t_entry)
+    /// pairs whose world-space AABB is intersected by the ray.
+    ///
+    /// Results are NOT sorted; the caller should sort by t_entry ascending.
+    /// The ray parameters are in bevy world space (y-up).
+    pub fn ray_cast(&self, origin: Vec2, direction: Vec2, max_distance: f32) -> Vec<(Entity, f32)> {
+        if self.qbvh.raw_nodes().is_empty() {
+            return Vec::new();
+        }
+        let mut visitor = RayCastVisitor::new(origin, direction, max_distance);
+        self.qbvh.traverse_best_first(&mut visitor);
+        visitor.hits
+    }
+
     pub fn update(
         &mut self,
         all_colliders: &Query<(Entity, &VelloCollider)>,
@@ -307,6 +321,101 @@ impl SimdBestFirstVisitor<ColliderHandle, SimdAabb> for FindFirstContainsPointVi
         SimdBestFirstVisitStatus::MaybeContinue {
             weights: SimdReal::splat(0.0),
             mask: contains_mask,
+            results: [None; SIMD_WIDTH],
+        }
+    }
+}
+
+/// Visitor that collects ALL collider handles whose AABBs intersect the ray,
+/// along with the entry distance (t_entry) along the ray.
+/// Uses the slab method (Kay & Kajiya) per SIMD lane for efficient traversal.
+pub struct RayCastVisitor {
+    /// Collected hits: (Entity, t_entry). Entry distance is clamped to >= 0.
+    pub hits: Vec<(Entity, f32)>,
+    origin: Vec2,
+    inv_dir: Vec2,
+    max_dist: f32,
+}
+
+impl RayCastVisitor {
+    pub fn new(origin: Vec2, direction: Vec2, max_distance: f32) -> Self {
+        let epsilon = 1e-10f32;
+        let inv_x = if direction.x.abs() < epsilon {
+            f32::MAX
+        } else {
+            1.0 / direction.x
+        };
+        let inv_y = if direction.y.abs() < epsilon {
+            f32::MAX
+        } else {
+            1.0 / direction.y
+        };
+        Self {
+            hits: Vec::new(),
+            origin,
+            inv_dir: Vec2::new(inv_x, inv_y),
+            max_dist: max_distance,
+        }
+    }
+
+    /// Slab test for a single aabb pair (min, max) returning `Some(t_entry)` or `None`.
+    fn ray_aabb_slab(&self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Option<f32> {
+        let t1_x = (min_x - self.origin.x) * self.inv_dir.x;
+        let t2_x = (max_x - self.origin.x) * self.inv_dir.x;
+        let t1_y = (min_y - self.origin.y) * self.inv_dir.y;
+        let t2_y = (max_y - self.origin.y) * self.inv_dir.y;
+
+        let t_entry_x = t1_x.min(t2_x);
+        let t_exit_x = t1_x.max(t2_x);
+        let t_entry_y = t1_y.min(t2_y);
+        let t_exit_y = t1_y.max(t2_y);
+
+        let t_entry = t_entry_x.max(t_entry_y);
+        let t_exit = t_exit_x.min(t_exit_y);
+
+        if t_entry <= t_exit && t_exit >= 0.0 && t_entry <= self.max_dist {
+            Some(t_entry.max(0.0))
+        } else {
+            None
+        }
+    }
+}
+
+impl SimdBestFirstVisitor<ColliderHandle, SimdAabb> for RayCastVisitor {
+    type Result = ();
+
+    fn visit(
+        &mut self,
+        _best_cost_so_far: parry2d::math::Real,
+        bv: &SimdAabb,
+        value: Option<[Option<&ColliderHandle>; SIMD_WIDTH]>,
+    ) -> SimdBestFirstVisitStatus<Self::Result> {
+        let mut hit_mask = [false; SIMD_WIDTH];
+        let mut weights_arr = [0.0f32; SIMD_WIDTH];
+
+        // Test each SIMD lane individually using scalar slab method
+        for i in 0..SIMD_WIDTH {
+            let min_x = bv.mins.coords.x.extract(i);
+            let min_y = bv.mins.coords.y.extract(i);
+            let max_x = bv.maxs.coords.x.extract(i);
+            let max_y = bv.maxs.coords.y.extract(i);
+
+            if let Some(t_entry) = self.ray_aabb_slab(min_x, min_y, max_x, max_y) {
+                hit_mask[i] = true;
+                weights_arr[i] = t_entry;
+
+                // Collect leaf entity handles that intersect the ray
+                if let Some(leaves) = &value {
+                    if let Some(handle) = leaves[i] {
+                        self.hits.push((handle.0, t_entry));
+                    }
+                }
+            }
+        }
+
+        SimdBestFirstVisitStatus::MaybeContinue {
+            weights: SimdReal::from(weights_arr),
+            mask: parry2d::math::SimdBool::from(hit_mask),
             results: [None; SIMD_WIDTH],
         }
     }
