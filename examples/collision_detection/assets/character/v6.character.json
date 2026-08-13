@@ -7,7 +7,9 @@
       "right_hip": "P31",
       "spine_base": "P3",
       "spine_mid": "P2",
-      "frame_particles_damping": 0.1
+      "frame_particles_damping": 0.1,
+      "depth_compliance_scaler": 0.0,
+      "depth_damping_scaler": 0.0
     }
   },
   "colliders": [
