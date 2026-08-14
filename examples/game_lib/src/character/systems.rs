@@ -50,6 +50,8 @@ const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
 fn claculate_velocity_spine(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
+    frame_entities: &[Entity; 4],
+    frame_particles: &Vec<VelloParticle>,
     vec: Vec2,
     config: &SpineConfig,
 ) -> Vec<CharacterPivotVelocityEvent> {
@@ -95,14 +97,33 @@ fn claculate_velocity_spine(
 
     let spine_dir = spine_vec / spine_len;
 
+    // Rotation pivot: P2 (spine_mid, index 3). P2 is a frame particle, so the
+    // whole rigid frame rotates about it instead of shearing. The old code
+    // rotated about P1, which is NOT a frame particle (it lives above the frame)
+    // — that applied a shear to the frame every substep.
+    let pivot = positions[3];
+
+    // Reference lever arm: distance from the pivot to the head (PH). Each
+    // particle's rotational velocity is scaled by its own lever arm projected
+    // on the spine, giving a true rigid rotation about the pivot.
+    let lever_ref = (positions[0] - pivot).length().max(1e-3);
+
     // Unit tangent perpendicular to spine_dir (90° CCW in y-down).
     let tangent = Vec2::new(-spine_dir.y, spine_dir.x);
 
     // Signed rotation between spine_dir and desired_dir.
     let dot_val = spine_dir.dot(desired_dir);
     let cross_val = cross(spine_dir, desired_dir);
-    let rotation_error = if dot_val < -0.99 {
-        config.rotation_gain * 2.0
+
+    // Smooth, sign-correct rotation command in [-1, 1].
+    // - Heading toward desired (dot >= 0): proportional to cross_val.
+    // - Heading away (dot < 0): cross_val shrinks to ~0 near anti-parallel,
+    //   which would stall the turn. Ramp the corrective rotation up smoothly
+    //   in the correct turn direction instead of the old constant
+    //   `rotation_gain * 2.0` kick (unbounded and always pushed the same
+    //   rotational direction regardless of which way the character should turn).
+    let rotation_error = if dot_val < 0.0 {
+        (cross_val.signum() * (1.0 - dot_val).sqrt()).clamp(-1.0, 1.0)
     } else {
         cross_val
     };
@@ -111,34 +132,54 @@ fn claculate_velocity_spine(
     // the spine aligns with desired_dir.
     let alignment = dot_val.clamp(0.0, 1.0);
 
-    for i in 0..SPINE_PARTICLE_COUNT {
-        // Normalized position along the spine: +1 at PH (head, index 0),
-        // -1 at P3 (tail, index 4).
-        let t = 1.0 - 2.0 * (i as f32 / (SPINE_PARTICLE_COUNT - 1) as f32);
+    // Compute the blended + clamped target velocity for a particle at `pos`:
+    // a rigid rotation about the pivot plus forward translation.
+    let rigid_velocity = |pos: Vec2, current_vel: Vec2| -> Vec2 {
+        // Lever arm projected onto the spine, normalized → [-1, 1] along the body.
+        let r = pos - pivot;
+        let signed_lever = r.dot(spine_dir) / lever_ref;
 
         // 1. Translational component: scaled by alignment.
         let translational = desired_dir * length * config.velocity_scale * alignment;
 
-        // 2. Rotational component: tangential velocity creating pure torque.
-        let pivot = tangent * t * rotation_error * config.rotation_gain * length;
+        // 2. Rotational component: tangential velocity about the pivot,
+        //    proportional to each particle's own lever arm (rigid rotation).
+        let rotational = tangent * signed_lever * rotation_error * config.rotation_gain * length;
 
-        let target_velocity = translational + pivot;
+        let target_velocity = translational + rotational;
 
         // 3. Smooth blend from current physics velocity toward target.
-        let current_vel = particles[i].particle.velocity;
         let blended = current_vel + config.velocity_blending * (target_velocity - current_vel);
 
         // 4. Hard clamp to max speed.
         let speed = blended.length();
-        let velocity = if speed > config.max_speed && speed > f32::EPSILON {
+        if speed > config.max_speed && speed > f32::EPSILON {
             blended / speed * config.max_speed
         } else {
             blended
-        };
+        }
+    };
 
+    // Spine particles.
+    for i in 0..SPINE_PARTICLE_COUNT {
+        let velocity = rigid_velocity(positions[i], particles[i].particle.velocity);
         result.push(CharacterPivotVelocityEvent {
             character_entity: particles[i].root_entity,
             joint_entity: entities[i],
+            velocity,
+        });
+    }
+
+    // Frame particles: [P30, P31, P3, P2]. Driving all four with the same rigid
+    // velocity field keeps the frame rigid under the controller (the old code
+    // left the hips untouched, shearing the frame every substep). With a rigid
+    // frame, the shape-matching `-drag` correction can cleanly undo the motion.
+    for (i, entity) in frame_entities.iter().enumerate() {
+        let f = &frame_particles[i];
+        let velocity = rigid_velocity(f.particle.pos, f.particle.velocity);
+        result.push(CharacterPivotVelocityEvent {
+            character_entity: f.root_entity,
+            joint_entity: *entity,
             velocity,
         });
     }
@@ -526,8 +567,19 @@ pub fn update_character_movement(
             .iter()
             .map(|e| p_q.get(*e).unwrap().clone())
             .collect();
-        let velocities =
-            claculate_velocity_spine(&entities, &particles, spine.move_vector, &spine.config);
+        let frame_entities = p_root.frame_entities;
+        let frame_particles: Vec<VelloParticle> = frame_entities
+            .iter()
+            .map(|e| p_q.get(*e).unwrap().clone())
+            .collect();
+        let velocities = claculate_velocity_spine(
+            &entities,
+            &particles,
+            &frame_entities,
+            &frame_particles,
+            spine.move_vector,
+            &spine.config,
+        );
         velocity_events.write_batch(velocities);
     }
 }
