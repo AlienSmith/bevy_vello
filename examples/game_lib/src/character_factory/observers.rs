@@ -116,7 +116,7 @@ use crate::{
         SpineConfig, SpineController, StringPool,
     },
     character_asset::{
-        BlueprintCharacterAsset, BlueprintCharacterAssetManager, SvgCharacterAsset,
+        BlueprintCharacterAsset, BlueprintCharacterAssetManager, ColliderData, SvgCharacterAsset,
         SvgCharacterAssetManager,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
@@ -506,7 +506,7 @@ pub fn assemble_character(
     let mut character_connectivity = ConnectivityRoot::default();
     let mut colliders_particle_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
     for item in blueprint.data.colliders.iter() {
-        let Some((s, rect)) = svgs.data.get(&item.path_id) else {
+        let Some(collider) = svgs.data.get(&item.path_id) else {
             warn!(
                 "could not found character svg path {:?}, {:?}",
                 config.svg_asset_id, item.path_id
@@ -523,14 +523,15 @@ pub fn assemble_character(
             &mut commands,
             &item.path_id,
             transform,
-            s,
-            rect,
+            &collider.shape,
+            &collider.aabb,
             color,
             inv_mass,
             true,
             Some(item.softbody),
             Some(item.collision),
             config.collision_group,
+            collider.image.as_ref(),
         );
 
         let collider_name = string_pool.pool.intern(&item.path_id);
@@ -735,6 +736,7 @@ fn make_collision_shape(
     soft_body_init_config: Option<SoftBodyInitConfig>,
     collision_config: Option<CollisionConstraintConfig>,
     collision_group: u32,
+    image: Option<&peniko::Image>,
 ) -> Entity {
     let mut scene: VelloScene = VelloScene::default();
     let shape = path_to_ccw_quad_path(&s);
@@ -745,7 +747,12 @@ fn make_collision_shape(
         None,
         &shape,
     );
-    let uvs = match &color {
+    let brush = if let Some(img) = image {
+        peniko::Brush::Image(img.clone().with_usage(peniko::ImageUsageType::MASKED))
+    } else {
+        color
+    };
+    let uvs = match &brush {
         peniko::Brush::Image(_) | peniko::Brush::PBRImage(_) => Some(generate_uvs(&shape, rect)),
         _ => None,
     };
@@ -767,7 +774,7 @@ fn make_collision_shape(
                 &frame_path,
                 &rect,
                 Vec2::new(0.0, 0.0),
-                color,
+                brush,
                 inverse_mass,
                 is_soft_body,
                 uvs,

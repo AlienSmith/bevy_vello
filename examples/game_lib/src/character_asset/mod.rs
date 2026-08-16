@@ -4,12 +4,27 @@ pub mod plugin;
 use bevy::{platform::collections::HashMap, prelude::*};
 use bevy_vello::{
     integrations::{AssetWithMeta, VelloAssetManager},
-    vello::kurbo::BezPath,
+    vello::kurbo::{BezPath, Shape},
     vello_svg::{self, usvg},
 };
 use thiserror::Error;
 use vello::kurbo;
 use vello_physics::CharacterBlueprint;
+
+/// A single collider extracted from the character SVG.
+#[derive(Clone)]
+pub struct ColliderData {
+    /// The collider boundary shape, in world space (transforms applied).
+    pub shape: BezPath,
+    /// The collider AABB, in world space (transforms applied).
+    pub aabb: kurbo::Rect,
+    /// Optional texture raster embedded in the SVG, decoded to a Vello image.
+    /// None for the legacy flat format or colliders without a texture.
+    pub image: Option<vello::peniko::Image>,
+    /// True when the aabb came from an explicit `rect` path rather than
+    /// being computed by point iteration. Kept for validation/debugging.
+    pub aabb_from_rect_path: bool,
+}
 #[derive(Asset, TypePath, Clone)]
 pub struct BlueprintCharacterAsset {
     pub data: CharacterBlueprint,
@@ -48,7 +63,7 @@ pub fn load_character_blueprint_from_bytes(
 
 #[derive(Asset, TypePath, Clone)]
 pub struct SvgCharacterAsset {
-    pub data: HashMap<String, (BezPath, kurbo::Rect)>,
+    pub data: HashMap<String, ColliderData>,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -79,11 +94,20 @@ pub fn load_character_svg_from_bytes(
 ) -> Result<SvgCharacterAsset, SvgCharacterLoaderError> {
     let svg_str = std::str::from_utf8(bytes)?;
     //this svg won't contain fonts
-    let mut map: HashMap<String, (BezPath, kurbo::Rect)> = HashMap::new();
+    let mut map: HashMap<String, ColliderData> = HashMap::new();
     let usvg = usvg::Tree::from_str(svg_str, &usvg::Options::default(), &Default::default())?;
     if let Ok(mut result) = vello_svg::extract_shape_in_colliders(&usvg) {
-        for (name, path) in result.drain(..) {
-            if map.insert(name.clone(), path).is_some() {
+        for (name, collider) in result.drain(..) {
+            let aabb = collider
+                .explicit_aabb
+                .unwrap_or_else(|| collider.shape.bounding_box());
+            let data = ColliderData {
+                shape: collider.shape,
+                aabb,
+                image: collider.image,
+                aabb_from_rect_path: collider.explicit_aabb.is_some(),
+            };
+            if map.insert(name.clone(), data).is_some() {
                 return Err(SvgCharacterLoaderError::DuplicateContent(name));
             }
         }
