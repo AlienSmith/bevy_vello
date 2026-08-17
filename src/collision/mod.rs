@@ -176,6 +176,12 @@ pub struct VelloCollider {
     pub frame_particles: [Particle; FRAME_PARTICLES_COUNT], //particles are always in world space.
     pub(crate) initilized_by_physics: bool, //some data are calculated in engine for softbody, this marks the entity is ready.
     pub(crate) aabb: kurbo::Rect, //use for coarse collision detection and actually in local space.
+    /// Optional explicit frame (Quad) for the XPBD coarse layer, in local space.
+    /// When `Some`, the engine builds the initial frame particles from the
+    /// quad's corners (preserving orientation/skew). When `None`, it computes an
+    /// OBB from the path points. This is independent of [`Self::aabb`], which is
+    /// purely the world-space axis-aligned bound used by the broad-phase BVH.
+    pub(crate) initial_frame: Option<vello::Quad>,
     pub(crate) initial_velocity: Vec2,
     pub(crate) collision_inverse_mass: f32,
     pub(crate) debug_color: peniko::Brush,
@@ -197,7 +203,7 @@ impl VelloCollider {
 
     pub fn new(
         path: &BezPath,
-        frame_path: &BezPath,
+        frame: Option<vello::Quad>,
         aabb: &kurbo::Rect,
         initial_velocity: Vec2,
         color: peniko::Brush,
@@ -216,6 +222,7 @@ impl VelloCollider {
             shape: path.clone(),
             frame_particles: Default::default(),
             aabb: *aabb,
+            initial_frame: frame,
             initial_velocity,
             collision_inverse_mass,
             debug_color: color,

@@ -418,7 +418,6 @@ fn spawn_collider(
     transform: &Transform,
 ) -> Entity {
     let shape = path_to_ccw_quad_path(svg_path);
-    let frame_path = rect.to_path(0.1);
     let mut scene = VelloScene::default();
     scene.fill(
         peniko::Fill::NonZero,
@@ -440,7 +439,7 @@ fn spawn_collider(
             },
             VelloCollider::new(
                 &shape,
-                &frame_path,
+                None,
                 rect,
                 Vec2::ZERO,
                 peniko::Brush::SolidGlow(GlowColor {
@@ -756,7 +755,6 @@ fn make_collision_shape(
         peniko::Brush::Image(_) | peniko::Brush::PBRImage(_) => Some(generate_uvs(&shape, rect)),
         _ => None,
     };
-    let frame_path = rect.to_path(0.1);
     let soft_body_init_transform = *transform;
     let translation = transform.translation;
     commands
@@ -771,7 +769,7 @@ fn make_collision_shape(
             },
             VelloCollider::new(
                 &shape,
-                &frame_path,
+                None,
                 &rect,
                 Vec2::new(0.0, 0.0),
                 brush,

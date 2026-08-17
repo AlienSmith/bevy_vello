@@ -8,7 +8,7 @@ use bevy_vello::{
 };
 use vello::{
     kurbo::{self, Shape},
-    peniko,
+    peniko, Quad,
 };
 use vello_physics::generate_uvs;
 
@@ -52,14 +52,16 @@ pub fn assemble_collider(
     let rect = svg_collider.aabb.clone();
     let shape = path_to_ccw_quad_path(&p);
     let uvs = Some(generate_uvs(&shape, &rect));
+    // The pistol/weapon asset only carries an axis-aligned `Rect` (no engine
+    // quad), but its frame must NOT fall back to an OBB. Derive a quad from
+    // the rect so the engine builds an AABB-style (non-OBB) coarse frame.
+    let frame = Some(Quad::from_rect(rect));
     //make rendering sence
     vllo_scene.reset();
     //make collider
-    let frame_path = rect.to_path(0.1);
-
     commands.entity(root_entity).insert((VelloCollider::new(
         &shape,
-        &frame_path,
+        frame,
         &rect,
         config.initial_velocity,
         brush,

@@ -98,8 +98,13 @@ pub fn load_character_svg_from_bytes(
     let usvg = usvg::Tree::from_str(svg_str, &usvg::Options::default(), &Default::default())?;
     if let Ok(mut result) = vello_svg::extract_shape_in_colliders(&usvg) {
         for (name, collider) in result.drain(..) {
+            // `explicit_aabb` is an `Option<Quad>`; derive the axis-aligned
+            // AABB from it in character space (the engine refreshes this each
+            // frame anyway), falling back to the shape's bounding box when the
+            // collider had no explicit `rect` path.
             let aabb = collider
                 .explicit_aabb
+                .map(|q| q.to_rect())
                 .unwrap_or_else(|| collider.shape.bounding_box());
             let data = ColliderData {
                 shape: collider.shape,
