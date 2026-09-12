@@ -127,6 +127,7 @@ use crate::{
     death_channel::{channel::ChannelMessage, components::Detached, Detach},
     health::{Die, Health},
     utility::{DelayedEvent, DelayedEventTrigger},
+    weapons::{observer::on_collision_character, MeleeWeapon},
 };
 
 // ---------------------------------------------------------------------------
@@ -457,9 +458,6 @@ fn spawn_collider(
             ),
             Damageable::part(2.0, PartKind::NonVital, 1.0),
         ))
-        .observe(on_bodypart_first_hit)
-        .observe(on_bodypart_second_hit)
-        .observe(on_bodypart_detach)
         .id()
 }
 
@@ -701,9 +699,6 @@ fn make_particle(
             *root_entity,
             frame_connect_config,
         ))
-        .observe(on_bodypart_first_hit)
-        .observe(on_bodypart_second_hit)
-        .observe(on_bodypart_detach)
         .id()
 }
 
@@ -783,10 +778,12 @@ fn make_collision_shape(
                 VELLO_COLLISION_COOL_DOWN_TIME,
             ),
             Damageable::part(2.0, PartKind::NonVital, 1.0),
+            MeleeWeapon::new(10.0),
         ))
         .observe(on_bodypart_first_hit)
         .observe(on_bodypart_second_hit)
         .observe(on_bodypart_detach)
+        .observe(on_collision_character)
         .id()
 }
 

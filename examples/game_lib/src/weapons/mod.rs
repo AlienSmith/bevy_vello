@@ -7,7 +7,7 @@ use crate::{
     character::Connectivity, damage::components::AttackStats, ConnectivityRoot, RightArmController,
     StringPool,
 };
-mod observer;
+pub(crate) mod observer;
 pub mod plugin;
 mod system;
 
@@ -23,28 +23,27 @@ pub(crate) struct RayTraceHitPoints(pub HashMap<Entity, Vec2>);
 /// Component for melee weapon entities.
 /// Carries the game-level intent for collision response modification.
 ///
-/// The intent fields (`explosion_impulse`, `velocity_scale`, `inv_mass_scale`)
-/// are written to the [`CollisionEventBatch`] resource (indexed by `batch_index`
-/// on the [`VelloCollisionTrigger`]) by the melee collision observer,
-/// then consumed by `make_collision_constraints` in the next FixedUpdate.
+/// A melee hit is modelled as a single, intuitive `striking_force` scalar:
+/// how hard this weapon shoves its target on contact.
+///   * 0.0  = no push (target feels the blow physically but isn't knocked).
+///   * 1.0  = neutral: the push is exactly proportional to the target's motion.
+///   * >1.0 = extra-hard knockback.
+///
+/// It is applied purely on the VELOCITY channel of the collision override
+/// (`velocity_scale = Some(striking_force)`) with real mass kept on both sides
+/// (`inv_mass_scale = Some(1.0)`) and no explosion hack — so it never
+/// launches a target instantly. Because it scales existing momentum, a
+/// stationary target reacts less than a moving one; that is the documented
+/// trade-off of the single-scale model.
+///
+/// The override is written to the [`CollisionEventBatch`] resource (indexed by
+/// `batch_index` on the [`VelloCollisionTrigger`]) by the melee collision
+/// observer, then consumed by `make_collision_constraints` in the next
+/// FixedUpdate.
 #[derive(Component, Clone)]
 pub struct MeleeWeapon {
-    /// Desired "explosion" impulse at the contact point.
-    /// This is a non-physical energy injection — like a tiny explosion
-    /// that pushes the body part away from the weapon.
-    /// Specified as a world-space impulse vector (force * time).
-    pub explosion_impulse: Vec2,
-
-    /// Scale factor for the opponent's velocity contribution.
-    /// 1.0 = use actual opponent velocity.
-    /// 0.0 = treat opponent as static.
-    /// >1.0 = amplify opponent velocity (heavier feel).
-    pub velocity_scale: f32,
-
-    /// Scale factor for the opponent's inverse mass.
-    /// 0.0 = treat opponent as infinitely heavy (like bullet hack).
-    /// 1.0 = use actual opponent inv_mass.
-    pub inv_mass_scale: f32,
+    /// How hard this weapon shoves its target. See the type-level docs.
+    pub striking_force: f32,
 
     /// Attack stats for damage resolution.
     pub attack_stats: AttackStats,
@@ -52,11 +51,18 @@ pub struct MeleeWeapon {
 
 impl Default for MeleeWeapon {
     fn default() -> Self {
+        Self::new(1.0)
+    }
+}
+
+impl MeleeWeapon {
+    /// Build a melee weapon with the given knockback scale and a default
+    /// attack profile (`blunt 30, cut 0, penetration 5`).
+    #[must_use]
+    pub fn new(striking_force: f32) -> Self {
         Self {
-            explosion_impulse: Vec2::ZERO,
-            velocity_scale: 1.0,
-            inv_mass_scale: 0.0, // default: heavy hit like bullet
-            attack_stats: AttackStats::new(30.0, 10.0, 5.0),
+            striking_force,
+            attack_stats: AttackStats::new(30.0, 0.0, 5.0),
         }
     }
 }

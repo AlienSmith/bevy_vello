@@ -3,9 +3,7 @@ use bevy::prelude::*;
 use crate::{
     weapons::{
         observer::on_raytrace_hit,
-        system::{
-            attach_pistol, process_fire_event, update_melee_weapon_impulse, update_pistol_aim,
-        },
+        system::{attach_pistol, process_fire_event, update_pistol_aim},
         AttachPistolToCharacterEvent, FireEvent, RayTraceHitPoints,
     },
     GameLabSystems,
@@ -26,6 +24,6 @@ impl Plugin for WeaponPlugin {
                     .chain()
                     .in_set(GameLabSystems::WriteCharacterPartEvent),
             )
-            .add_systems(Update, (update_pistol_aim, update_melee_weapon_impulse));
+            .add_systems(Update, update_pistol_aim);
     }
 }

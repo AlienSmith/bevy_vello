@@ -5,7 +5,7 @@ use bevy::ecs::intern::Interned;
 /// Default bullet damage profile. `cut_damage` applies uniformly to armor/part;
 /// `blunt_damage` is gated by `penetration` vs the target's `protection_level`.
 const BULLET_BLUNT_DAMAGE: f32 = 20.0;
-const BULLET_CUT_DAMAGE: f32 = 8.0;
+const BULLET_CUT_DAMAGE: f32 = 0.0;
 const BULLET_PENETRATION: f32 = 3.0;
 
 use bevy::{prelude::*, tasks::block_on, transform};
@@ -29,7 +29,7 @@ use crate::{
     utility::mat4_to_affine2,
     weapons::{
         observer::on_collision_bullet, AttachPistolToCharacterEvent, Bullet, FireEvent,
-        MeleeWeapon, PistolControl, RayTraceHitPoints,
+        PistolControl, RayTraceHitPoints,
     },
     CharacterPartEvent, ColliderRoot, ConnectivityRoot, LeftArmController, RightArmController,
     StringPool,
@@ -271,25 +271,6 @@ pub fn process_fire_event(
                     recoil * weights.w,
                 ],
             });
-        }
-    }
-}
-
-/// Update melee weapon impulse based on swing state.
-/// Runs in Update, before collision observers fire in PostUpdate.
-/// Computes the explosion impulse from the weapon's frame particle velocities.
-pub fn update_melee_weapon_impulse(mut melee_q: Query<(&mut MeleeWeapon, &VelloCollider)>) {
-    for (mut melee, collider) in melee_q.iter_mut() {
-        // Compute swing direction from frame particle velocities
-        let frame_velocity: Vec2 = collider.frame_particles.iter().map(|p| p.velocity).sum();
-        let speed = frame_velocity.length();
-
-        if speed > 10.0 {
-            // Weapon is swinging — set explosion impulse in swing direction
-            let direction = frame_velocity.normalize();
-            melee.explosion_impulse = direction * speed * 50.0; // tunable scale
-        } else {
-            melee.explosion_impulse = Vec2::ZERO;
         }
     }
 }
