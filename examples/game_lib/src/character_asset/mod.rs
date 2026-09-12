@@ -64,6 +64,13 @@ pub fn load_character_blueprint_from_bytes(
 #[derive(Asset, TypePath, Clone)]
 pub struct SvgCharacterAsset {
     pub data: HashMap<String, ColliderData>,
+    /// Authored decoration geometry from `Decoration` groups, keyed by the
+    /// decoration's sub-group id (e.g. `"Hp_LLA"`).
+    ///
+    /// These are raw world/author-space shapes **only** — no uv/offset is
+    /// computed here. Bake-time offset handling lives in the character factory,
+    /// which knows each decoration's host collider frame.
+    pub decoration_shapes: HashMap<String, BezPath>,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -95,7 +102,18 @@ pub fn load_character_svg_from_bytes(
     let svg_str = std::str::from_utf8(bytes)?;
     //this svg won't contain fonts
     let mut map: HashMap<String, ColliderData> = HashMap::new();
+    let mut decoration_shapes: HashMap<String, BezPath> = HashMap::new();
     let usvg = usvg::Tree::from_str(svg_str, &usvg::Options::default(), &Default::default())?;
+    // Authored `Decoration` geometry (raw world-space shapes only; no uv/offset —
+    // that is computed in the factory where the host collider frame is known).
+    if let Ok(result) = vello_svg::extract_decoration_shapes_in_tree(&usvg) {
+        for (name, shape) in result {
+            if decoration_shapes.insert(name.clone(), shape).is_some() {
+                // Duplicate decoration name; leave the first and warn-free.
+                // (Kept lenient: decorations are cosmetic and optional.)
+            }
+        }
+    }
     if let Ok(mut result) = vello_svg::extract_shape_in_colliders(&usvg) {
         for (name, collider) in result.drain(..) {
             // `explicit_aabb` is an `Option<Quad>`; derive the axis-aligned
@@ -119,5 +137,8 @@ pub fn load_character_svg_from_bytes(
     } else {
         return Err(SvgCharacterLoaderError::WrongSvgContent);
     }
-    Ok(SvgCharacterAsset { data: map })
+    Ok(SvgCharacterAsset {
+        data: map,
+        decoration_shapes,
+    })
 }

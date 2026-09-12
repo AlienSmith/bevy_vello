@@ -538,8 +538,8 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                     ..Default::default()
                 },
                 CharacterRoot {
-                    svg_asset_id: "v6.character.svg".to_owned(),
-                    blueprint_asset_id: "v6.character.json".to_owned(),
+                    svg_asset_id: "V8.character.svg".to_owned(),
+                    blueprint_asset_id: "v8.character.json".to_owned(),
                     collision_group: PLAYER_COLLISION_GROUP,
                 },
                 CharacterController {
@@ -570,8 +570,8 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                 ..Default::default()
             },
             CharacterRoot {
-                svg_asset_id: "v6.character.svg".to_owned(),
-                blueprint_asset_id: "v6.character.json".to_owned(),
+                svg_asset_id: "V8.character.svg".to_owned(),
+                blueprint_asset_id: "v8.character.json".to_owned(),
                 collision_group: ENEMY_COLLISION_GROUP,
             },
             CharacterController {
@@ -909,8 +909,8 @@ fn setup_resources(
     image("image/ammo_normal.png");
     image("image/pistol_albedo.png");
     image("image/pistol_normal.png");
-    c_svg("character/v6.character.svg");
-    c_blueprint("character/v6.character.json");
+    c_svg("character/V8.character.svg");
+    c_blueprint("character/v8.character.json");
 }
 
 //fn update_blood_instances()

@@ -32,8 +32,9 @@
 
 use bevy::prelude::*;
 use bevy_vello::{affine_to_mat4, CoordinateSpace, VelloCollider, VelloScene, VelloSceneBundle};
-use vello::kurbo::Affine;
-use vello_physics::{Particle, FRAME_PARTICLES_COUNT};
+use vello::kurbo::{Affine, BezPath, Rect, Shape};
+use vello::peniko;
+use vello_physics::{DecorationAnchorMode, Particle, FRAME_PARTICLES_COUNT};
 
 /// A rendering-only decoration riding a host [`VelloCollider`]'s frame.
 ///
@@ -80,6 +81,132 @@ pub enum DecorationAnchor {
         /// Extra local pose offset applied on top of the constructed point.
         pose: Affine,
     },
+}
+
+impl DecorationAnchor {
+    /// Map a blueprint anchor mode to a runtime [`DecorationAnchor`] using the
+    /// default local pose (identity). This lets the character factory spawn
+    /// decorations straight from `CharacterBlueprint.decorations` without
+    /// needing per-entry pose/uv authored at load time.
+    pub fn from_mode(mode: &DecorationAnchorMode) -> Self {
+        match mode {
+            DecorationAnchorMode::Rigid => DecorationAnchor::Rigid {
+                local_pose: Affine::IDENTITY,
+            },
+            DecorationAnchorMode::RigidRotation => DecorationAnchor::RigidRotation {
+                local_pose: Affine::IDENTITY,
+            },
+            DecorationAnchorMode::Bilinear => DecorationAnchor::Bilinear {
+                uv: Vec2::splat(0.5),
+                pose: Affine::IDENTITY,
+            },
+        }
+    }
+}
+
+/// Bakes an authored decoration shape so that, at rest, it renders at exactly
+/// the position it was authored at in the character SVG — it does **not** center
+/// on the host.
+///
+/// `shape` is the raw world/author-space geometry extracted by the loader
+/// (e.g. `"Hp_LLA"` from `SvgCharacterAsset.decoration_shapes`). `host_aabb` is
+/// the host collider's rest AABB in the same author space. `mode` is the anchor
+/// mode from the blueprint decoration config.
+///
+/// The scene is authored in the host frame's local space. Each frame the engine
+/// builds a single frame→world affine from the host's `frame_particles` and the
+/// GPU applies it to the scene. To reproduce the authored world position at
+/// rest, we pre-apply the **inverse of the host's rest frame** so that
+/// `frame_affine * bake(scene) == authored`:
+/// - **Rigid** (raw basis): the frame spans the host AABB, so the inverse is
+///   `scale(1/w, 1/h) · translate(-p0)` where `p0` is the host's min corner.
+/// - **RigidRotation** (normalized, unit-vector basis): the inverse is just
+///   `translate(-p0)` — the decoration keeps its authored pixel size and
+///   position, following the host's rotation each frame.
+/// - **Bilinear**: reconstructs a single world point from `uv`, then places the
+///   scene there; center the shape on the local origin and let `uv` carry the
+///   frame-relative placement.
+///
+/// `p0` is the host's rest AABB min corner — the frame origin for these
+/// axis-aligned body parts. No uv/offset ever appears in the loader — the bake
+/// is the factory's job.
+/// `host_scale` is the character root's world scale. `frame_particles` live in
+/// world (scaled) space, while `host_aabb` is in author space.
+///
+/// - **Rigid** folds the world scale into its raw basis (`p1-p0` is the scaled
+///   diagonal), so the bake only needs the author→frame local offset.
+/// - **Bilinear** interpolates world corners at an author-normalized `uv`, so it
+///   too is scale-correct with just the author offset.
+/// - **RigidRotation** rides a **unit** (normalized) basis that carries no
+///   scale, so the local scene must be pre-scaled by `host_scale` to land at the
+///   authored world position (and size) over the character's frame.
+pub fn bake_authored_decoration(
+    shape: &BezPath,
+    host_aabb: &Rect,
+    mode: &DecorationAnchorMode,
+    host_scale: f32,
+) -> (VelloScene, DecorationAnchor) {
+    let shape_center = shape.bounding_box().center();
+    // TEMP-DIAG: print the actual bake inputs so we can see the real numbers.
+    info!(
+        "DECORATION bake inputs: shape_bbox={:?} (x0={:.1},y0={:.1},x1={:.1},y1={:.1}) \
+         host_aabb={:?} host_scale={:.3} mode={:?}",
+        shape.bounding_box(),
+        shape.bounding_box().x0,
+        shape.bounding_box().y0,
+        shape.bounding_box().x1,
+        shape.bounding_box().y1,
+        host_aabb,
+        host_scale,
+        mode
+    );
+    // The host frame spans its rest AABB, so the frame origin is its min corner.
+    // Bring the authored shape into host-frame-local space by applying the
+    // inverse: subtract that corner (and, for the raw/rigid basis, divide by the
+    // size so the raw unit-span frame maps back to world pixels).
+    let (bake_affine, anchor) = match mode {
+        DecorationAnchorMode::Rigid => (
+            Affine::scale_non_uniform(1.0 / host_aabb.width(), 1.0 / host_aabb.height())
+                * Affine::translate((-host_aabb.x0, -host_aabb.y0)),
+            DecorationAnchor::Rigid {
+                local_pose: Affine::IDENTITY,
+            },
+        ),
+        DecorationAnchorMode::RigidRotation => (
+            Affine::scale_non_uniform(host_scale as f64, host_scale as f64)
+                * Affine::translate((-host_aabb.x0, -host_aabb.y0)),
+            DecorationAnchor::RigidRotation {
+                local_pose: Affine::IDENTITY,
+            },
+        ),
+        // Bilinear reconstructs a single world point `bilinear_reconstruct(uv)`
+        // from the four corners and places the scene centered there. To land the
+        // shape back at its authored position at rest, bake its center onto the
+        // local origin and encode the authored offset as `uv` in the rest frame's
+        // bilinear coords (axis-aligned over the host AABB at rest).
+        DecorationAnchorMode::Bilinear => {
+            let uv = Vec2::new(
+                ((shape_center.x - host_aabb.x0) / host_aabb.width()) as f32,
+                ((shape_center.y - host_aabb.y0) / host_aabb.height()) as f32,
+            );
+            (
+                Affine::translate((-shape_center.x, -shape_center.y)),
+                DecorationAnchor::Bilinear {
+                    uv,
+                    pose: Affine::IDENTITY,
+                },
+            )
+        }
+    };
+    let mut scene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        bake_affine,
+        peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+        None,
+        shape,
+    );
+    (scene, anchor)
 }
 
 /// Builds the frame→world affine from the host's `frame_particles` using the raw
@@ -131,7 +258,12 @@ fn bilinear_reconstruct(uv: Vec2, corners: &[Particle; FRAME_PARTICLES_COUNT]) -
 }
 
 fn affine_to_transform(affine: Affine) -> Transform {
-    Transform::from_matrix(affine_to_mat4(affine))
+    let mut transform = Transform::from_matrix(affine_to_mat4(affine));
+    // Draw decorations above the body parts they overlap (which sit at z=0).
+    // The render queues items by z, so a positive offset ensures the decoration
+    // is composited on top and not hidden behind an arm.
+    transform.translation.z = 100.0;
+    transform
 }
 
 /// Spawns a decoration riding `host`'s frame.
@@ -210,6 +342,26 @@ pub fn resolve_decoration_anchors(
             continue;
         };
         *transform = decorate_transform(&decoration.anchor, &collider.frame_particles);
+        // TEMP-DIAG: print the actual frame particles and computed world transform
+        // so we can see where the decoration is really landing.
+        let v = transform.translation;
+        info!(
+            "DECORATION runtime host={:?} frame_p0=({:.1},{:.1}) p1=({:.1},{:.1}) \
+             p2=({:.1},{:.1}) p3=({:.1},{:.1}) -> world=({:.2},{:.2},{:.2}) anchor={:?}",
+            decoration.host,
+            collider.frame_particles[0].pos.x,
+            collider.frame_particles[0].pos.y,
+            collider.frame_particles[1].pos.x,
+            collider.frame_particles[1].pos.y,
+            collider.frame_particles[2].pos.x,
+            collider.frame_particles[2].pos.y,
+            collider.frame_particles[3].pos.x,
+            collider.frame_particles[3].pos.y,
+            v.x,
+            v.y,
+            v.z,
+            std::mem::discriminant(&decoration.anchor),
+        );
     }
     for orphan in orphans.drain(..) {
         commands.entity(orphan).despawn();

@@ -125,7 +125,7 @@ use crate::{
         TotalHealth,
     },
     death_channel::{channel::ChannelMessage, components::Detached, Detach},
-    decorations::{spawn_decoration, DecorationAnchor},
+    decorations::{bake_authored_decoration, spawn_decoration},
     health::{Die, Health},
     utility::{DelayedEvent, DelayedEventTrigger},
     weapons::{observer::on_collision_character, MeleeWeapon},
@@ -503,6 +503,7 @@ pub fn assemble_character(
     let svgs = svg_assets.get(svg_handle.id()).unwrap();
     let mut character_connectivity = ConnectivityRoot::default();
     let mut colliders_particle_entity: HashMap<String, (Entity, Connectivity)> = HashMap::new();
+    let mut collider_aabb: HashMap<String, kurbo::Rect> = HashMap::new();
     for item in blueprint.data.colliders.iter() {
         let Some(collider) = svgs.data.get(&item.path_id) else {
             warn!(
@@ -533,33 +534,61 @@ pub fn assemble_character(
         );
 
         let collider_name = string_pool.pool.intern(&item.path_id);
+        collider_aabb.insert(item.path_id.to_string(), collider.aabb);
         colliders_particle_entity.insert(
             item.path_id.to_string(),
             (entity, Connectivity::new(root_entity, true, collider_name)),
         );
         character_connectivity.parts.insert(collider_name, entity);
+    }
 
-        // TEMP: attach a small rect decoration to the right forearm collider (RLA)
-        // to validate the frame-based decoration logic before making it blueprint-official.
-        if item.path_id == "RLA" {
-            let mut deco_scene: VelloScene = VelloScene::default();
-            let rect = kurbo::Rect::new(-8.0, -8.0, 8.0, 8.0);
-            deco_scene.fill(
-                peniko::Fill::NonZero,
-                kurbo::Affine::default(),
-                peniko::Color::rgba(1.0, 0.2, 0.2, 0.9),
-                None,
-                &rect,
+    // Process blueprint-driven decorations. Each decoration declares a `host`
+    // body part (a collider from the loop above) whose frame it rides, plus an
+    // anchor mode. The loader extracted the authored `Decoration` geometry
+    // (raw world/author-space shape, no uv/offset); the bake utility here
+    // re-centers it onto the host AABB and produces a frame-local scene plus a
+    // runtime anchor. We spawn a rendering-only decoration (no mass, collision,
+    // or connectivity).
+    for decoration in blueprint.data.decorations.iter() {
+        let host = &decoration.config.host;
+        let Some((host_entity, _)) = colliders_particle_entity.get(host) else {
+            warn!(
+                "decoration '{}' host '{}' is not a known body part; skipped",
+                decoration.path_id, host
             );
-            spawn_decoration(
-                &mut commands,
-                entity,
-                deco_scene,
-                DecorationAnchor::Rigid {
-                    local_pose: Affine::IDENTITY,
-                },
+            continue;
+        };
+        // `decoration_shapes` is keyed by the decoration's short id (the
+        // `Decoration/<name>` sub-group), equal to the blueprint's `path_id`.
+        // The host's rest AABB is needed by the bake: RigidRotation rides the
+        // normalized (unit) frame basis where the host center is at its rest
+        // half-extents from the frame origin.
+        let Some(shape) = svgs.decoration_shapes.get(&decoration.path_id) else {
+            warn!(
+                "decoration '{}' has no authored SVG shape; skipped",
+                decoration.path_id
             );
-        }
+            continue;
+        };
+        let Some(host_aabb) = collider_aabb.get(host) else {
+            warn!(
+                "decoration '{}' host '{}' has no known AABB; skipped",
+                decoration.path_id, host
+            );
+            continue;
+        };
+        // RigidRotation's unit basis carries no scale, so the baked local
+        // geometry must be pre-scaled by the character's world scale to match
+        // the (scaled) frame_particles space.
+        let host_scale = transform.scale.truncate().x;
+        // TEMP-DIAG: confirm which host/decoration map together + root scale.
+        info!(
+            "DECO-ASSEMBLE decoration={} host={} host_aabb={:?} host_scale={:.3} anchor={:?}",
+            decoration.path_id, host, host_aabb, host_scale, decoration.config.anchor
+        );
+        let (deco_scene, anchor) =
+            bake_authored_decoration(shape, host_aabb, &decoration.config.anchor, host_scale);
+        spawn_decoration(&mut commands, *host_entity, deco_scene, anchor);
     }
 
     for item in blueprint.data.particles.iter() {

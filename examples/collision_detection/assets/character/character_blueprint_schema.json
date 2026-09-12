@@ -9,6 +9,14 @@
         "$ref": "#/$defs/ColliderConfig"
       }
     },
+    "decorations": {
+      "description": "Cosmetic decorations riding body-part frames. Defaults to empty so older\nblueprints without a `decorations` field still deserialize.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Decoration"
+      }
+    },
     "frame": {
       "$ref": "#/$defs/ShapeMatchingConfig"
     },
@@ -84,8 +92,8 @@
           "properties": {
             "Bilinear": {
               "type": "array",
-              "maxItems": 3,
-              "minItems": 3,
+              "maxItems": 4,
+              "minItems": 4,
               "prefixItems": [
                 {
                   "type": "string"
@@ -96,6 +104,24 @@
                 {
                   "type": "number",
                   "format": "float"
+                },
+                {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "number",
+                      "format": "float"
+                    },
+                    {
+                      "type": "number",
+                      "format": "float"
+                    }
+                  ]
                 }
               ]
             }
@@ -162,7 +188,119 @@
         }
       ]
     },
-    "FrameBilinearConstraintConfig": {
+    "Decoration": {
+      "description": "A blueprint decoration entry. Follows the old convention of carrying\n`svg_id`/`path_id`, plus the decoration-specific [`DecorationConfig`].",
+      "type": "object",
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/DecorationConfig"
+        },
+        "path_id": {
+          "type": "string"
+        },
+        "svg_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "svg_id",
+        "path_id",
+        "config"
+      ]
+    },
+    "DecorationAnchorMode": {
+      "description": "How a cosmetic decoration follows the frame of its host body part each frame.",
+      "oneOf": [
+        {
+          "description": "Rigid parallelogram affine (R1): shape + frame scale follow.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "rigid"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "Rigid orientation-follow (R2): rotation follows, constant size. Default.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "rigid_rotation"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "Bilinear shear-follow: uses all four frame corners.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "bilinear"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      ]
+    },
+    "DecorationConfig": {
+      "description": "Decoration-specific blueprint data: which body part it attaches to and how it\nanchors to that part's frame. Offset/uv values are derived at load time from\nthe drawn AABB, so they are not stored here.",
+      "type": "object",
+      "properties": {
+        "anchor": {
+          "description": "Anchor mode (defaults to `RigidRotation` when omitted).",
+          "$ref": "#/$defs/DecorationAnchorMode",
+          "default": {
+            "mode": "rigid_rotation"
+          }
+        },
+        "host": {
+          "description": "Name of the host body part (`path_id` of the collider it rides).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host"
+      ]
+    },
+    "FrameInitConfig": {
+      "type": "object",
+      "properties": {
+        "frame_particles_damping": {
+          "type": "number",
+          "format": "float"
+        },
+        "left_hip": {
+          "type": "string"
+        },
+        "right_hip": {
+          "type": "string"
+        },
+        "spine_base": {
+          "type": "string"
+        },
+        "spine_mid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "left_hip",
+        "right_hip",
+        "spine_base",
+        "spine_mid",
+        "frame_particles_damping"
+      ]
+    },
+    "FramePositionConstraintConfig": {
       "type": "object",
       "properties": {
         "compliance": {
@@ -172,62 +310,11 @@
         "damping": {
           "type": "number",
           "format": "float"
-        },
-        "uv": {
-          "type": "array",
-          "maxItems": 2,
-          "minItems": 2,
-          "prefixItems": [
-            {
-              "type": "number",
-              "format": "float"
-            },
-            {
-              "type": "number",
-              "format": "float"
-            }
-          ]
         }
       },
       "required": [
-        "uv",
         "compliance",
         "damping"
-      ]
-    },
-    "FrameInitConfig": {
-      "type": "object",
-      "properties": {
-        "area_compliance": {
-          "type": "number",
-          "format": "float"
-        },
-        "distance_compliance": {
-          "type": "number",
-          "format": "float"
-        },
-        "frame_particles": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Particle"
-          },
-          "maxItems": 4,
-          "minItems": 4
-        },
-        "reference_particles": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 8,
-          "minItems": 8
-        }
-      },
-      "required": [
-        "frame_particles",
-        "reference_particles",
-        "distance_compliance",
-        "area_compliance"
       ]
     },
     "JointConfig": {
@@ -275,7 +362,7 @@
       "type": "object",
       "properties": {
         "frame_conn": {
-          "$ref": "#/$defs/FrameBilinearConstraintConfig"
+          "$ref": "#/$defs/FramePositionConstraintConfig"
         },
         "particle": {
           "$ref": "#/$defs/Particle"
