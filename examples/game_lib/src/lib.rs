@@ -5,6 +5,7 @@ mod character_factory;
 mod collider_factory;
 mod damage;
 mod death_channel;
+mod decorations;
 mod health;
 mod input_management;
 mod utility;
@@ -18,6 +19,7 @@ use crate::{
     character_factory::plugin::CharacterFactoryPlugin,
     damage::DamagePlugin,
     death_channel::plugin::DeathChannelPlugin,
+    decorations::DecorationPlugin,
     health::HealthPlugin,
     utility::{tick_delayed_events, DelayedEventTrigger},
     weapons::plugin::WeaponPlugin,
@@ -33,6 +35,7 @@ pub use crate::{
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},
+    decorations::{Decoration, DecorationAnchor},
     health::{Die, Health},
     input_management::{
         actions::{default_input_map, PlayerAction},
@@ -61,6 +64,7 @@ impl Plugin for VelloCharacterPlugin {
             .add_plugins(WeaponPlugin)
             .add_plugins(HealthPlugin)
             .add_plugins(DamagePlugin)
+            .add_plugins(DecorationPlugin)
             .add_plugins(DeathChannelPlugin)
             .add_event::<DelayedEventTrigger>()
             .configure_sets(

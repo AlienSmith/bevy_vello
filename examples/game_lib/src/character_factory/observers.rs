@@ -125,6 +125,7 @@ use crate::{
         TotalHealth,
     },
     death_channel::{channel::ChannelMessage, components::Detached, Detach},
+    decorations::{spawn_decoration, DecorationAnchor},
     health::{Die, Health},
     utility::{DelayedEvent, DelayedEventTrigger},
     weapons::{observer::on_collision_character, MeleeWeapon},
@@ -537,6 +538,28 @@ pub fn assemble_character(
             (entity, Connectivity::new(root_entity, true, collider_name)),
         );
         character_connectivity.parts.insert(collider_name, entity);
+
+        // TEMP: attach a small rect decoration to the right forearm collider (RLA)
+        // to validate the frame-based decoration logic before making it blueprint-official.
+        if item.path_id == "RLA" {
+            let mut deco_scene: VelloScene = VelloScene::default();
+            let rect = kurbo::Rect::new(-8.0, -8.0, 8.0, 8.0);
+            deco_scene.fill(
+                peniko::Fill::NonZero,
+                kurbo::Affine::default(),
+                peniko::Color::rgba(1.0, 0.2, 0.2, 0.9),
+                None,
+                &rect,
+            );
+            spawn_decoration(
+                &mut commands,
+                entity,
+                deco_scene,
+                DecorationAnchor::Rigid {
+                    local_pose: Affine::IDENTITY,
+                },
+            );
+        }
     }
 
     for item in blueprint.data.particles.iter() {
