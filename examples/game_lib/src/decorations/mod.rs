@@ -36,6 +36,8 @@ use vello::kurbo::{Affine, BezPath, Rect, Shape};
 use vello::peniko;
 use vello_physics::{DecorationAnchorMode, Particle, FRAME_PARTICLES_COUNT};
 
+use crate::{character_factory::CharacterRoot, damage::TotalHealth};
+
 /// A rendering-only decoration riding a host [`VelloCollider`]'s frame.
 ///
 /// The decoration's scene is authored in the host frame's local space once, and
@@ -47,6 +49,27 @@ pub struct Decoration {
     pub host: Entity,
     /// How the frame particles are mapped to the decoration each frame.
     pub anchor: DecorationAnchor,
+}
+
+/// Marks a [`Decoration`] as an HP/health bar driven by the host character's
+/// [`TotalHealth`] (read off the [`CharacterRoot`]).
+///
+/// Stores the authored shape plus the bake affine so [`fade_hp_decorations`] can
+/// re-fill the scene each frame with an opacity tied to remaining health —
+/// transparent at full health, fully-red when health runs out.
+#[derive(Component, Clone)]
+pub struct HealthDecoration {
+    /// The authored shape in the host frame's local space.
+    pub shape: BezPath,
+    /// The bake affine (author → host-frame-local) re-applied on each refill.
+    pub bake_affine: Affine,
+}
+
+/// Attached to a character root; lists the entities of that character's HP
+/// decorations so the fade system can find them in O(1) when health changes.
+#[derive(Component, Clone, Default)]
+pub struct HealthDecorations {
+    pub hp_decorations: Vec<Entity>,
 }
 
 /// Describes how a [`Decoration`] follows its host frame each frame.
@@ -145,21 +168,8 @@ pub fn bake_authored_decoration(
     host_aabb: &Rect,
     mode: &DecorationAnchorMode,
     host_scale: f32,
-) -> (VelloScene, DecorationAnchor) {
+) -> (VelloScene, DecorationAnchor, Affine) {
     let shape_center = shape.bounding_box().center();
-    // TEMP-DIAG: print the actual bake inputs so we can see the real numbers.
-    info!(
-        "DECORATION bake inputs: shape_bbox={:?} (x0={:.1},y0={:.1},x1={:.1},y1={:.1}) \
-         host_aabb={:?} host_scale={:.3} mode={:?}",
-        shape.bounding_box(),
-        shape.bounding_box().x0,
-        shape.bounding_box().y0,
-        shape.bounding_box().x1,
-        shape.bounding_box().y1,
-        host_aabb,
-        host_scale,
-        mode
-    );
     // The host frame spans its rest AABB, so the frame origin is its min corner.
     // Bring the authored shape into host-frame-local space by applying the
     // inverse: subtract that corner (and, for the raw/rigid basis, divide by the
@@ -202,11 +212,14 @@ pub fn bake_authored_decoration(
     scene.fill(
         peniko::Fill::NonZero,
         bake_affine,
-        peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+        peniko::GlowColor {
+            color: peniko::Color::rgba(1.0, 0.0, 0.0, 0.9),
+            glow: 12.0,
+        },
         None,
         shape,
     );
-    (scene, anchor)
+    (scene, anchor, bake_affine)
 }
 
 /// Builds the frame→world affine from the host's `frame_particles` using the raw
@@ -296,6 +309,28 @@ pub fn spawn_decoration(
         .id()
 }
 
+/// Spawns an HP decoration: identical rendering bundle to [`spawn_decoration`],
+/// but also tagged with [`HealthDecoration`] so [`fade_hp_decorations`] can
+/// re-fill it from the character's [`TotalHealth`].
+pub fn spawn_health_decoration(
+    commands: &mut Commands,
+    host: Entity,
+    scene: VelloScene,
+    anchor: DecorationAnchor,
+    health: HealthDecoration,
+) -> Entity {
+    let entity = commands.spawn((
+        VelloSceneBundle {
+            scene,
+            coordinate_space: CoordinateSpace::WorldSpace,
+            transform: default(),
+            ..default()
+        },
+        (Decoration { host, anchor }, health),
+    ));
+    entity.id()
+}
+
 /// Computes this decoration's world `Transform` from its host's `frame_particles`.
 fn decorate_transform(
     anchor: &DecorationAnchor,
@@ -342,29 +377,45 @@ pub fn resolve_decoration_anchors(
             continue;
         };
         *transform = decorate_transform(&decoration.anchor, &collider.frame_particles);
-        // TEMP-DIAG: print the actual frame particles and computed world transform
-        // so we can see where the decoration is really landing.
-        let v = transform.translation;
-        info!(
-            "DECORATION runtime host={:?} frame_p0=({:.1},{:.1}) p1=({:.1},{:.1}) \
-             p2=({:.1},{:.1}) p3=({:.1},{:.1}) -> world=({:.2},{:.2},{:.2}) anchor={:?}",
-            decoration.host,
-            collider.frame_particles[0].pos.x,
-            collider.frame_particles[0].pos.y,
-            collider.frame_particles[1].pos.x,
-            collider.frame_particles[1].pos.y,
-            collider.frame_particles[2].pos.x,
-            collider.frame_particles[2].pos.y,
-            collider.frame_particles[3].pos.x,
-            collider.frame_particles[3].pos.y,
-            v.x,
-            v.y,
-            v.z,
-            std::mem::discriminant(&decoration.anchor),
-        );
     }
     for orphan in orphans.drain(..) {
         commands.entity(orphan).despawn();
+    }
+}
+
+/// Re-fills each HP decoration's [`VelloScene`] with an opacity scaled by the
+/// character's remaining [`TotalHealth`]:
+/// - full health → `alpha = 0` (transparent),
+/// - zero health  → `alpha = 1` (fully red).
+///
+/// Reference is O(1): the [`HealthDecorations`] on the root lists the HP
+/// decoration entities directly, so we never scan the entity space.
+pub fn fade_hp_decorations(
+    roots: Query<(&TotalHealth, &HealthDecorations), With<CharacterRoot>>,
+    mut hp: Query<(&mut VelloScene, &HealthDecoration), Without<CharacterRoot>>,
+) {
+    for (total, health_decos) in &roots {
+        if total.max <= 0.0 {
+            continue;
+        }
+        let ratio = (total.current / total.max).clamp(0.0, 1.0) as f64;
+        let alpha = 1.0 - ratio;
+        for entity in &health_decos.hp_decorations {
+            let Ok((mut scene, deco)) = hp.get_mut(*entity) else {
+                continue;
+            };
+            *scene = VelloScene::default();
+            scene.fill(
+                peniko::Fill::NonZero,
+                deco.bake_affine,
+                peniko::GlowColor {
+                    color: peniko::Color::rgba(1.0, 0.0, 0.0, alpha),
+                    glow: 12.0,
+                },
+                None,
+                &deco.shape,
+            );
+        }
     }
 }
 
@@ -373,6 +424,6 @@ pub struct DecorationPlugin;
 
 impl Plugin for DecorationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, resolve_decoration_anchors);
+        app.add_systems(Update, (resolve_decoration_anchors, fade_hp_decorations));
     }
 }

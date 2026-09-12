@@ -125,7 +125,10 @@ use crate::{
         TotalHealth,
     },
     death_channel::{channel::ChannelMessage, components::Detached, Detach},
-    decorations::{bake_authored_decoration, spawn_decoration},
+    decorations::{
+        bake_authored_decoration, spawn_decoration, spawn_health_decoration, HealthDecoration,
+        HealthDecorations,
+    },
     health::{Die, Health},
     utility::{DelayedEvent, DelayedEventTrigger},
     weapons::{observer::on_collision_character, MeleeWeapon},
@@ -549,6 +552,9 @@ pub fn assemble_character(
     // re-centers it onto the host AABB and produces a frame-local scene plus a
     // runtime anchor. We spawn a rendering-only decoration (no mass, collision,
     // or connectivity).
+    // Any HP decoration spawned here registers its entity on the root so the
+    // health-fade system can find it in O(1).
+    let mut hp_decoration_entities: Vec<Entity> = Vec::new();
     for decoration in blueprint.data.decorations.iter() {
         let host = &decoration.config.host;
         let Some((host_entity, _)) = colliders_particle_entity.get(host) else {
@@ -581,14 +587,28 @@ pub fn assemble_character(
         // geometry must be pre-scaled by the character's world scale to match
         // the (scaled) frame_particles space.
         let host_scale = transform.scale.truncate().x;
-        // TEMP-DIAG: confirm which host/decoration map together + root scale.
-        info!(
-            "DECO-ASSEMBLE decoration={} host={} host_aabb={:?} host_scale={:.3} anchor={:?}",
-            decoration.path_id, host, host_aabb, host_scale, decoration.config.anchor
-        );
-        let (deco_scene, anchor) =
+        let (deco_scene, anchor, bake_affine) =
             bake_authored_decoration(shape, host_aabb, &decoration.config.anchor, host_scale);
-        spawn_decoration(&mut commands, *host_entity, deco_scene, anchor);
+        if decoration.path_id.starts_with("Hp") {
+            let entity = spawn_health_decoration(
+                &mut commands,
+                *host_entity,
+                deco_scene,
+                anchor,
+                HealthDecoration {
+                    shape: shape.clone(),
+                    bake_affine,
+                },
+            );
+            hp_decoration_entities.push(entity);
+        } else {
+            spawn_decoration(&mut commands, *host_entity, deco_scene, anchor);
+        }
+    }
+    if !hp_decoration_entities.is_empty() {
+        commands.entity(root_entity).insert(HealthDecorations {
+            hp_decorations: hp_decoration_entities,
+        });
     }
 
     for item in blueprint.data.particles.iter() {

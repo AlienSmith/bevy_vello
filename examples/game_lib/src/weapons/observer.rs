@@ -174,10 +174,6 @@ pub(crate) fn on_collision_character(
     mut unreg_writer: EventWriter<CharacterPartEvent>,
 ) {
     let event = trigger.event();
-    info!(
-        "[char_collision] fired self={:?} other={:?} batch={}",
-        event.entity_self, event.entity_other, event.batch_index
-    );
 
     // ── Identity gate: both sides must be parts of DIFFERENT characters ──
     let Ok(self_conn) = connectivity_q.get(event.entity_self) else {
@@ -187,14 +183,8 @@ pub(crate) fn on_collision_character(
         return;
     };
     if self_conn.character == other_conn.character {
-        info!("[char_collision] self-collision, skipping");
         return; // self-collision (own arm vs own torso) — ignore
     }
-    info!(
-        "[char_collision] chars self={:?} other={:?}",
-        self_conn.character, other_conn.character
-    );
-
     // ── Physics: MUTUAL mild repulsion — BOTH characters get nudged ──
     //    In `make_collision_constraints`, the two override slots are resolved
     //    like this:
@@ -237,11 +227,6 @@ pub(crate) fn on_collision_character(
 
     entry.override_a = override_a;
     entry.override_b = override_b;
-    info!(
-        "[char_collision] self={:?} wrote override_a={} override_b={} (A pushes B with A's force, B pushes A with B's force)",
-        event.entity_self, self_force, other_force
-    );
-
     // ── Damage: this side's part strikes the opponent's part ──
     //    `other_conn.character` is copied (Entity is Copy) before the mutable
     //    query borrows below, so the immutable connectivity borrow ends here.
