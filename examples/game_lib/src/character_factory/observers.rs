@@ -13,6 +13,20 @@ pub struct DelayedDetachPayload {
     pub part: Entity,
 }
 
+/// Payload attached to a delayed-event entity. When the timer fires,
+/// [`on_delayed_character_death`] performs the whole-character teardown
+/// (detaching every body part from one another).
+#[derive(Component)]
+pub struct DelayedDeathPayload {
+    pub root: Entity,
+}
+
+/// Delay (in seconds) between the killing blow and the whole-character
+/// teardown. Giving the XPBD solver a few frames lets it propagate the
+/// killing blow's momentum through the *intact* skeleton constraint network,
+/// so the entire body flies apart instead of only the directly-struck part.
+pub const CHARACTER_DEATH_DETACH_DELAY: f32 = 0.1;
+
 // ---------------------------------------------------------------------------
 // Body-part observers: 3 observers attached to each body-part entity
 // ---------------------------------------------------------------------------
@@ -94,6 +108,85 @@ pub fn on_delayed_detach(
             character: payload.character,
         },
     });
+}
+
+// ---------------------------------------------------------------------------
+// Whole-character death: free body parts when TotalHealth hits zero
+// ---------------------------------------------------------------------------
+
+/// Observer on [`Trigger<Die>`] for the **character root**.
+///
+/// Fired when [`crate::damage::TotalHealth`] drops to zero (via
+/// [`crate::damage::resolve`] writing `ChannelMessage<Die>` on the root).
+///
+/// Rather than tearing the character apart on the very frame of the killing
+/// blow, this defers the teardown by [`CHARACTER_DEATH_DETACH_DELAY`] seconds
+/// (mirroring the cut-damage `DelayedEvent` detach pattern). That gives the
+/// physics solver a chance to propagate the last hit's momentum through the
+/// intact skeleton, so the *whole* body flies apart — not just the part that
+/// took the killing blow.
+pub fn on_character_root_death(trigger: Trigger<Die>, mut commands: Commands) {
+    let root_entity = trigger.target();
+    commands
+        .spawn((
+            DelayedEvent::new(CHARACTER_DEATH_DETACH_DELAY),
+            DelayedDeathPayload { root: root_entity },
+        ))
+        .observe(on_delayed_character_death);
+}
+
+/// Deferred whole-character teardown: detaches every body part from the
+/// character so they become independent, free-falling physics bodies, and
+/// dissolves the skeleton (connection particles + joints) that previously
+/// bound them together.
+pub fn on_delayed_character_death(
+    trigger: Trigger<DelayedEventTrigger>,
+    q: Query<&DelayedDeathPayload>,
+    mut commands: Commands,
+    root_q: Query<&ConnectivityRoot>,
+    collider_q: Query<(), With<VelloCollider>>,
+    particle_q: Query<(), With<VelloParticle>>,
+) {
+    let Ok(payload) = q.get(trigger.target()) else {
+        return;
+    };
+    let root_entity = payload.root;
+
+    // 1. Enumerate the body-part entities from the root's connectivity map.
+    let parts: Vec<Entity> = match root_q.get(root_entity) {
+        Ok(root) => root.parts.values().copied().collect(),
+        Err(_) => return, // Already torn down (e.g. a second Die); nothing to detach.
+    };
+
+    // 2. Free every body part. Colliders keep their global soft-body frame (so
+    //    they fall under gravity); skeleton particles are despawned to dissolve.
+    for part in parts {
+        let Ok(mut entity_cmd) = commands.get_entity(part) else {
+            continue; // Already despawned (e.g. propaged joint despawn).
+        };
+        if collider_q.contains(part) {
+            // Remove Connectivity -> becomes a standalone free soft body. The
+            // on_remove_connectivity hook drops it from ConnectivityRoot.parts and
+            // auto-despawns any connected joints (death_propegate).
+            entity_cmd.remove::<Connectivity>();
+        } else if particle_q.contains(part) {
+            entity_cmd.despawn();
+        }
+        // Remaining entries are VelloJoints: despawned via Connectivity
+        // propagation or left for the root despawn step below.
+    }
+
+    // 3. Safety-empty the root part map so on_remove_connectivity_root (which
+    //    despawns every entry) has nothing to despawn, protecting freed colliders.
+    if let Ok(mut cmd) = commands.get_entity(root_entity) {
+        cmd.insert(ConnectivityRoot::default());
+    }
+
+    // 4. Retire the root. Removing VelloCharacterPhysicsRoot triggers
+    //    remove_group; despawning cleans up remaining joints/particles/controllers.
+    if let Ok(mut cmd) = commands.get_entity(root_entity) {
+        cmd.despawn();
+    }
 }
 use bevy_vello::{
     collision::{path_to_ccw_quad_path, VELLO_COLLISION_COOL_DOWN_TIME},
@@ -723,6 +816,12 @@ pub fn assemble_character(
 
     commands.entity(root_entity).insert(character_connectivity);
     commands.entity(root_entity).insert(TotalHealth::new(100.0));
+    // Whole-character death observer: when TotalHealth hits zero the body parts
+    // are detached into independent free-falling colliders and the skeleton
+    // (particles + joints) is dissolved.
+    commands
+        .entity(root_entity)
+        .observe(on_character_root_death);
     let frame_config = blueprint.data.frame.init_config.clone();
     let left_hip = colliders_particle_entity
         .get(&frame_config.left_hip)
