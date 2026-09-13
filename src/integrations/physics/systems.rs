@@ -575,42 +575,40 @@ pub fn apply_explicit_impulse_on_connection_particle(
     mut position_event: EventReader<CharacterPivotPositionEvent>,
 ) {
     for event in events.read() {
-        let group = constraint_world
-            .data
-            .get_group_mut(event.character_entity)
-            .unwrap();
+        // Guard against stale events targeting a group whose root was removed
+        // (e.g. a character despawned on a kill frame between this Update event's
+        // emission and the next FixedUpdate consumption). Skip instead of panicking.
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
         group.add_connect_external_force(
             &event.joint_entity,
             &Vec2::new(event.force.x, event.force.y),
         );
     }
     for event in v_events.read() {
-        let group = constraint_world
-            .data
-            .get_group_mut(event.character_entity)
-            .unwrap();
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
         group.queue_connect_particle_velocity(&event.joint_entity, event.velocity);
     }
     for event in frame_events.read() {
-        let group = constraint_world
-            .data
-            .get_group_mut(event.character_entity)
-            .unwrap();
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
         let nalgebra_vecs: Vec<Vec2> = event.forces.iter().map(|v| Vec2::new(v.x, v.y)).collect();
         group.add_connect_frame_external_force(&nalgebra_vecs);
     }
     for event in angular_event.read() {
-        let group = constraint_world
-            .data
-            .get_group_mut(event.character_entity)
-            .unwrap();
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
         group.set_connect_angular_config(&event.joint_entity, &event.config);
     }
     for event in position_event.read() {
-        let group = constraint_world
-            .data
-            .get_group_mut(event.character_entity)
-            .unwrap();
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
         group.set_connect_particle_shahep_matching_config(&event.joint_entity, &event.target);
     }
 }

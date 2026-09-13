@@ -57,8 +57,9 @@ use game_lib::{
     },
     default_input_map,
     weapons::{AttachPistolToCharacterEvent, FireEvent, PistolControl},
-    CharacterController, CharacterPartEvent, CharacterRoot, ColliderRoot, ConnectivityRoot,
-    GameLabSystems, PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
+    AiState, CharacterController, CharacterPartEvent, CharacterRoot, ColliderRoot,
+    ConnectivityRoot, GameLabSystems, PlayerAction, PlayerMarker, SpineController,
+    VelloCharacterPlugin,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -579,6 +580,7 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                 point_vector: Vec2::ZERO,
                 ..Default::default()
             },
+            AiState::default(),
             Enemy,
         ))
         .with_child((

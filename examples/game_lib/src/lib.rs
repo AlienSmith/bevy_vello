@@ -27,7 +27,7 @@ use crate::{
 #[derive(Default)]
 pub struct VelloCharacterPlugin;
 pub use crate::{
-    ai::{build_enemy_ai_tree, Chase, Flee},
+    ai::{build_enemy_ai_tree, AiPhase, AiState},
     character::{
         ArmConfig, CharacterController, ConnectivityRoot, IkMode, LeftArmController,
         ResetArmControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
@@ -56,7 +56,7 @@ pub enum GameLabSystems {
 impl Plugin for VelloCharacterPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(InputPlugin)
-            //.add_plugins(AiPlugin)
+            .add_plugins(AiPlugin)
             .add_plugins(GameCharacterPlugin)
             .add_plugins(CharacterFactoryPlugin)
             .add_plugins(CharacterLoaderPlugin)

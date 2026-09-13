@@ -125,8 +125,20 @@ pub fn on_delayed_detach(
 /// physics solver a chance to propagate the last hit's momentum through the
 /// intact skeleton, so the *whole* body flies apart — not just the part that
 /// took the killing blow.
-pub fn on_character_root_death(trigger: Trigger<Die>, mut commands: Commands) {
+pub fn on_character_root_death(
+    trigger: Trigger<Die>,
+    mut commands: Commands,
+    mut spine_q: Query<&mut SpineController>,
+) {
     let root_entity = trigger.target();
+
+    // Stop the dead body from emitting movement events. update_character_movement
+    // skips a spine whose move_vector is ~zero, so clearing it here prevents stale
+    // CharacterPivotVelocityEvent(s) targeting this root after it is despawned.
+    if let Ok(mut spine) = spine_q.get_mut(root_entity) {
+        spine.move_vector = Vec2::ZERO;
+    }
+
     commands
         .spawn((
             DelayedEvent::new(CHARACTER_DEATH_DETACH_DELAY),

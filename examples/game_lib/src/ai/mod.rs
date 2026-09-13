@@ -1,22 +1,48 @@
 //! AI behavior for enemy characters using `bevy_behave` behavior trees.
 //!
-//! The AI alternates between chasing and fleeing the player with random
-//! durations (1–4 s), applying soft wall avoidance inside the arena.
+//! The AI drives a `CHARGE → FLEE → IDLE → CHARGE` loop that is purely
+//! **distance/facing driven** — there are no `Wait` timers. Transitions are
+//! decided live each frame by trigger conditions that read real physics state.
+//!
+//! # Behaviour
+//!
+//! - **CHARGE** — the enemy moves head-first (tail→head along its spine)
+//!   toward the player. It keeps charging until:
+//!     * **fist contact** ([`AiState::contact_landed`] set by the weapons
+//!       observer when a player body part touches the enemy), or
+//!     * **over-charge / miss** — after committing to some travel distance,
+//!       if the enemy now requires a large turn (>60°) to keep facing the
+//!       player it has overshot and would expose its back, so it retreats.
+//!   Either way it transitions immediately to **FLEE**.
+//! - **FLEE** — move directly away from the player until it reaches a safe
+//!   distance ([`SAFE_DISTANCE`]).
+//! - **IDLE** — stand still and keep its distance, re-preparing for a new
+//!   charge. When the player closes back into engagement range
+//!   ([`ADVANCE_RANGE`]) it transitions to **CHARGE** again.
 //!
 //! # Architecture
 //!
-//! - **Behavior tree** (`Forever → Sequence → [Chase, Wait, Flee, Wait]`)
-//!   handles phase timing via `Wait` nodes.
-//! - **`OnAdd`/`OnRemove` observers** fire once when `Chase`/`Flee` task
-//!   entities are spawned/despawned, inserting/removing marker components
-//!   on the character root.
+//! - **Behavior tree** (`Forever → Sequence → [While(Charge), While(Flee),
+//!   While(Idle)]`). Each phase is a single-child `While(trigger(cond))` node.
+//!   Because a single-child `While` resets and re-fires its condition trigger
+//!   after every successful loop, the condition observers are polled **every
+//!   frame** — giving live decisions with no `Wait` node.
+//! - Condition observers (`on_while_charge/flee/idle`) read the enemy's
+//!   [`AiState`], real physics particle positions, and the player's position;
+//!   they (a) apply the correct steering marker ([`AiChaseTarget`] /
+//!   [`AiFleeTarget`]) and (b) report `ctx.success()` to keep looping or
+//!   `ctx.failure()` when the phase is done. Each gate is wrapped in
+//!   [`Behave::Invert`] so `failure` (phase done) becomes `success` and the
+//!   parent `Sequence` advances to the next phase.
+//! - **`ai_travel_system`** accumulates how far the enemy has physically
+//!   traveled within the current phase ([`AiState::travel`]), resetting on a
+//!   phase change. This is the distance basis for the over-charge decision.
 //! - **`ai_steer_system`** (per-frame, `Update`) reads the markers, reads
 //!   actual physics particle positions (`VelloParticle` on P3), computes
 //!   direction + wall avoidance, and writes `SpineController.move_vector`.
 
 use bevy::prelude::*;
 use bevy_behave::prelude::*;
-use rand::Rng;
 
 use bevy_vello::integrations::physics::VelloParticle;
 
@@ -35,32 +61,79 @@ const AVOID_FORCE: f32 = 200.0;
 /// Distance from a wall boundary at which avoidance kicks in.
 const AVOID_MARGIN: f32 = 120.0;
 
-/// Arena safe area (bevy y-up). Walls are at ±960 x / ±540 y.
+/// Arena safe area (bevy y-up). Walls are at ±960 x / ±540 y.
 const ARENA_MIN_X: f32 = -920.0;
 const ARENA_MAX_X: f32 = 920.0;
 const ARENA_MIN_Y: f32 = -500.0;
 const ARENA_MAX_Y: f32 = 500.0;
 
+/// Distance from the player at which the enemy stops fleeing. Once far enough
+/// it moves to the IDLE phase.
+const SAFE_DISTANCE: f32 = 420.0;
+
+/// Distance from the player at which a defensive (IDLE) enemy re-engages and
+/// starts a new CHARGE. Kept below [`SAFE_DISTANCE`] so the envelope has
+/// hysteresis: flee out past `SAFE_DISTANCE`, then only come back when the
+/// player closes within `ADVANCE_RANGE`.
+const ADVANCE_RANGE: f32 = 380.0;
+
+/// Travel (within the current CHARGE phase) that must be accumulated before a
+/// facing-mismatch is treated as an *over-charge / miss*. This prevents an
+/// enemy that is merely starting to turn from instantly retreating.
+const CHARGE_MIN_TRAVEL: f32 = 60.0;
+
+/// Minimum dot product between the enemy's facing direction and the direction
+/// to the player to consider a charge still viable. `cos(60°) = 0.5`; below
+/// that the enemy needs a >60° turn and is over-charged (dangerous back
+/// exposure), so it flees.
+const CHARGE_ANGLE_COS: f32 = 0.5;
+
 // ---------------------------------------------------------------------------
-// Behaviour-tree task components (spawned on task child entities)
+// AI state (on the character root entity)
 // ---------------------------------------------------------------------------
 
-/// Task component: tells the AI to chase the player.
-///
-/// When the tree spawns this on a task child entity, the [`on_add_chase`]
-/// observer inserts [`AiChaseTarget`] on the character root.
-/// When the tree despawns it, [`on_remove_chase`] cleans up.
-#[derive(Component, Clone)]
-pub struct Chase {
-    /// The player entity to chase.
-    pub player: Entity,
+/// The current phase an enemy AI character is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiPhase {
+    /// Moving head-first toward the player.
+    Charge,
+    /// Moving directly away from the player to a safe distance.
+    Flee,
+    /// Standing still, keeping distance, preparing for the next charge.
+    Idle,
 }
 
-/// Task component: tells the AI to flee from the player.
-#[derive(Component, Clone)]
-pub struct Flee {
-    /// The player entity to flee from.
-    pub player: Entity,
+/// Per-enemy AI state stored on the character root.
+///
+/// This is the single source of truth for the AI's current phase. The
+/// behavior-tree condition observers read and mutate it, and it drives the
+/// steering markers via the condition observers.
+#[derive(Component)]
+pub struct AiState {
+    /// Current AI phase.
+    pub phase: AiPhase,
+    /// Set to `true` by [`crate::weapons`] when a player body part (fist)
+    /// contacts this enemy — the signal to stop a charge and flee.
+    pub contact_landed: bool,
+    /// Distance traveled within the current phase (bevy y-up units).
+    pub travel: f32,
+    /// Last observed position (bevy y-up) used to accumulate [`Self::travel`].
+    last_pos: Option<Vec2>,
+    /// The phase the travel accumulator was recording for, so it can detect a
+    /// phase change and reset the accumulator.
+    recorded_phase: AiPhase,
+}
+
+impl Default for AiState {
+    fn default() -> Self {
+        Self {
+            phase: AiPhase::Charge,
+            contact_landed: false,
+            travel: 0.0,
+            last_pos: None,
+            recorded_phase: AiPhase::Charge,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -83,86 +156,307 @@ pub struct AiFleeTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Observers (fire once on task entity when Chase/Flee is added/removed)
+// Behavior-tree condition payloads (fired by `Behave::trigger`)
 // ---------------------------------------------------------------------------
 
-/// `OnAdd<Chase>` observer: inserts [`AiChaseTarget`] on the character root.
-pub fn on_add_chase(
-    trigger: Trigger<OnAdd, Chase>,
-    q: Query<&Chase>,
-    ctx_q: Query<&BehaveCtx>,
-    mut commands: Commands,
-) {
-    let Ok(chase) = q.get(trigger.target()) else {
-        return;
-    };
-    let Ok(ctx) = ctx_q.get(trigger.target()) else {
-        return;
-    };
-    let character_root = ctx.target_entity();
-    commands.entity(character_root).insert(AiChaseTarget {
-        player: chase.player,
-    });
+// Each payload tags a distinct `BehaveTrigger<T>` event type, so each has its
+// own observer below. They only need `Clone + Send + Sync` (bevy_behave
+// requirement for `Behave::trigger`); the character root is obtained from the
+// trigger's `BehaveCtx`.
+
+/// Condition: "keep charging?". Emitted by the CHARGE gate.
+#[derive(Clone)]
+pub struct WhileCharging {
+    /// The player entity being charged.
+    pub player: Entity,
 }
 
-/// `OnRemove<Chase>` observer: removes [`AiChaseTarget`] and zeroes
-/// `move_vector`.
-pub fn on_remove_chase(
-    trigger: Trigger<OnRemove, Chase>,
-    ctx_q: Query<&BehaveCtx>,
-    mut spine_q: Query<&mut SpineController>,
-    mut commands: Commands,
+/// Condition: "keep fleeing?". Emitted by the FLEE gate.
+#[derive(Clone)]
+pub struct WhileFleeing {
+    /// The player entity being fled from.
+    pub player: Entity,
+}
+
+/// Condition: "keep idling?". Emitted by the IDLE gate.
+#[derive(Clone)]
+pub struct WhileIdling {
+    /// The player entity to prepare to re-engage.
+    pub player: Entity,
+}
+
+// ---------------------------------------------------------------------------
+// Condition observers (polled every frame by the single-child `While` nodes)
+// ---------------------------------------------------------------------------
+
+fn handle_charge(
+    root: Entity,
+    player: Entity,
+    ai_q: &mut Query<&mut AiState>,
+    spine_q: &Query<&SpineController>,
+    particle_q: &Query<&VelloParticle>,
+    commands: &mut Commands,
+    ctx: &BehaveCtx,
 ) {
-    let Ok(ctx) = ctx_q.get(trigger.target()) else {
+    let Ok(mut ai) = ai_q.get_mut(root) else {
+        commands.trigger(ctx.failure());
         return;
     };
-    let character_root = ctx.target_entity();
-    commands.entity(character_root).remove::<AiChaseTarget>();
-    if let Ok(mut spine) = spine_q.get_mut(character_root) {
-        spine.move_vector = Vec2::ZERO;
+    if ai.phase != AiPhase::Charge {
+        // Not supposed to be charging — bail out of this gate.
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // Apply steering: chase the player, cancel any leftover flee.
+    commands.entity(root).insert(AiChaseTarget { player });
+    commands.entity(root).remove::<AiFleeTarget>();
+
+    // Decide whether the charge is over (→ FLEE).
+    let Some(enemy_base) = spine_q
+        .get(root)
+        .ok()
+        .and_then(|s| get_bevy_pos(&s, particle_q))
+    else {
+        commands.trigger(ctx.success());
+        return;
+    };
+    let Some(player_pos) = get_player_bevy_pos(player, spine_q, particle_q) else {
+        commands.trigger(ctx.success());
+        return;
+    };
+
+    // 1) Fist contact — the player hit us, flee immediately.
+    if ai.contact_landed {
+        ai.phase = AiPhase::Flee;
+        ai.contact_landed = false;
+        commands.entity(root).remove::<AiChaseTarget>();
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // 2) Over-charge / miss — after committing to travel, if we now need a
+    //    >60° turn to keep facing the player we've overshot and our back is
+    //    exposed, so retreat.
+    let mut over_charged = false;
+    if ai.travel > CHARGE_MIN_TRAVEL {
+        if let Some(facing) = enemy_facing(root, spine_q, particle_q) {
+            let to_player = (player_pos - enemy_base).normalize_or_zero();
+            if facing.length_squared() > 1e-4 && to_player.length_squared() > 1e-4 {
+                over_charged = facing.dot(to_player) < CHARGE_ANGLE_COS;
+            }
+        }
+    }
+    if over_charged {
+        ai.phase = AiPhase::Flee;
+        commands.entity(root).remove::<AiChaseTarget>();
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // Otherwise keep charging.
+    commands.trigger(ctx.success());
+}
+
+fn handle_flee(
+    root: Entity,
+    player: Entity,
+    ai_q: &mut Query<&mut AiState>,
+    spine_q: &Query<&SpineController>,
+    particle_q: &Query<&VelloParticle>,
+    commands: &mut Commands,
+    ctx: &BehaveCtx,
+) {
+    let Ok(mut ai) = ai_q.get_mut(root) else {
+        commands.trigger(ctx.failure());
+        return;
+    };
+    if ai.phase != AiPhase::Flee {
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // Apply steering: flee away, cancel any leftover chase.
+    commands.entity(root).insert(AiFleeTarget { player });
+    commands.entity(root).remove::<AiChaseTarget>();
+
+    let Some(enemy_base) = spine_q
+        .get(root)
+        .ok()
+        .and_then(|s| get_bevy_pos(&s, particle_q))
+    else {
+        commands.trigger(ctx.success());
+        return;
+    };
+    let Some(player_pos) = get_player_bevy_pos(player, spine_q, particle_q) else {
+        commands.trigger(ctx.success());
+        return;
+    };
+
+    let dist = enemy_base.distance(player_pos);
+    if dist > SAFE_DISTANCE {
+        // Reached a safe distance → IDLE.
+        ai.phase = AiPhase::Idle;
+        commands.entity(root).remove::<AiFleeTarget>();
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // Otherwise keep fleeing.
+    commands.trigger(ctx.success());
+}
+
+fn handle_idle(
+    root: Entity,
+    player: Entity,
+    ai_q: &mut Query<&mut AiState>,
+    spine_q: &Query<&SpineController>,
+    particle_q: &Query<&VelloParticle>,
+    commands: &mut Commands,
+    ctx: &BehaveCtx,
+) {
+    let Ok(mut ai) = ai_q.get_mut(root) else {
+        commands.trigger(ctx.failure());
+        return;
+    };
+    if ai.phase != AiPhase::Idle {
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // Idle: stand still (no steering marker), keep distance, re-prepare.
+    commands.entity(root).remove::<AiChaseTarget>();
+    commands.entity(root).remove::<AiFleeTarget>();
+
+    let Some(enemy_base) = spine_q
+        .get(root)
+        .ok()
+        .and_then(|s| get_bevy_pos(&s, particle_q))
+    else {
+        commands.trigger(ctx.success());
+        return;
+    };
+    let Some(player_pos) = get_player_bevy_pos(player, spine_q, particle_q) else {
+        commands.trigger(ctx.success());
+        return;
+    };
+
+    // Re-engage once the player closes back into range → fresh CHARGE.
+    let dist = enemy_base.distance(player_pos);
+    if !ai.contact_landed && dist < ADVANCE_RANGE {
+        ai.phase = AiPhase::Charge;
+        ai.travel = 0.0;
+        commands.trigger(ctx.failure());
+        return;
+    }
+
+    // Otherwise keep waiting at a defensive distance.
+    commands.trigger(ctx.success());
+}
+
+/// `OnAdd<(WhileCharging,)>` observer: entry point for the CHARGE gate.
+pub fn on_while_charging(
+    trigger: Trigger<BehaveTrigger<WhileCharging>>,
+    mut ai_q: Query<&mut AiState>,
+    spine_q: Query<&SpineController>,
+    particle_q: Query<&VelloParticle>,
+    mut commands: Commands,
+) {
+    let ctx = trigger.event().ctx();
+    let root = ctx.target_entity();
+    let player = trigger.event().inner().player;
+    handle_charge(
+        root,
+        player,
+        &mut ai_q,
+        &spine_q,
+        &particle_q,
+        &mut commands,
+        ctx,
+    );
+}
+
+/// `OnAdd<(WhileFleeing,)>` observer: entry point for the FLEE gate.
+pub fn on_while_fleeing(
+    trigger: Trigger<BehaveTrigger<WhileFleeing>>,
+    mut ai_q: Query<&mut AiState>,
+    spine_q: Query<&SpineController>,
+    particle_q: Query<&VelloParticle>,
+    mut commands: Commands,
+) {
+    let ctx = trigger.event().ctx();
+    let root = ctx.target_entity();
+    let player = trigger.event().inner().player;
+    handle_flee(
+        root,
+        player,
+        &mut ai_q,
+        &spine_q,
+        &particle_q,
+        &mut commands,
+        ctx,
+    );
+}
+
+/// `OnAdd<(WhileIdling,)>` observer: entry point for the IDLE gate.
+pub fn on_while_idling(
+    trigger: Trigger<BehaveTrigger<WhileIdling>>,
+    mut ai_q: Query<&mut AiState>,
+    spine_q: Query<&SpineController>,
+    particle_q: Query<&VelloParticle>,
+    mut commands: Commands,
+) {
+    let ctx = trigger.event().ctx();
+    let root = ctx.target_entity();
+    let player = trigger.event().inner().player;
+    handle_idle(
+        root,
+        player,
+        &mut ai_q,
+        &spine_q,
+        &particle_q,
+        &mut commands,
+        ctx,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame systems: travel accumulator + steering
+// ---------------------------------------------------------------------------
+
+/// Accumulates the physical distance the enemy has traveled within its current
+/// phase. Resets the accumulator whenever the phase changes. Used by the
+/// CHARGE gate to decide over-charge.
+pub fn ai_travel_system(
+    mut ai_q: Query<(&mut AiState, &SpineController)>,
+    particle_q: Query<&VelloParticle>,
+) {
+    for (mut ai, spine) in &mut ai_q {
+        let Some(pos) = get_bevy_pos(&spine, &particle_q) else {
+            continue;
+        };
+
+        // Phase change → reset accumulator and origin.
+        if ai.phase != ai.recorded_phase {
+            ai.recorded_phase = ai.phase;
+            ai.travel = 0.0;
+            ai.last_pos = None;
+        }
+
+        match ai.phase {
+            AiPhase::Charge | AiPhase::Flee => {
+                if let Some(last) = ai.last_pos {
+                    ai.travel += (pos - last).length();
+                }
+                ai.last_pos = Some(pos);
+            }
+            AiPhase::Idle => {
+                // Standing still — no travel accumulation.
+                ai.last_pos = None;
+            }
+        }
     }
 }
-
-/// `OnAdd<Flee>` observer: inserts [`AiFleeTarget`] on the character root.
-pub fn on_add_flee(
-    trigger: Trigger<OnAdd, Flee>,
-    q: Query<&Flee>,
-    ctx_q: Query<&BehaveCtx>,
-    mut commands: Commands,
-) {
-    let Ok(flee) = q.get(trigger.target()) else {
-        return;
-    };
-    let Ok(ctx) = ctx_q.get(trigger.target()) else {
-        return;
-    };
-    let character_root = ctx.target_entity();
-    commands.entity(character_root).insert(AiFleeTarget {
-        player: flee.player,
-    });
-}
-
-/// `OnRemove<Flee>` observer: removes [`AiFleeTarget`] and zeroes
-/// `move_vector`.
-pub fn on_remove_flee(
-    trigger: Trigger<OnRemove, Flee>,
-    ctx_q: Query<&BehaveCtx>,
-    mut spine_q: Query<&mut SpineController>,
-    mut commands: Commands,
-) {
-    let Ok(ctx) = ctx_q.get(trigger.target()) else {
-        return;
-    };
-    let character_root = ctx.target_entity();
-    commands.entity(character_root).remove::<AiFleeTarget>();
-    if let Ok(mut spine) = spine_q.get_mut(character_root) {
-        spine.move_vector = Vec2::ZERO;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-frame system: reads markers + particle positions, writes move_vector
-// ---------------------------------------------------------------------------
 
 /// Drives `SpineController.move_vector` each frame for all AI-controlled
 /// characters, applying chase/flee direction and wall avoidance.
@@ -200,7 +494,14 @@ pub fn ai_steer_system(
             continue;
         };
 
-        let Some(player_pos) = get_player_bevy_pos(player, &all_spines, &particle_q) else {
+        // Read the player's P3 position (player spine is separate from the
+        // enemies' spines, so reading it here while holding the enemy's spine
+        // borrow is fine).
+        let Some(player_pos) = all_spines
+            .get(player)
+            .ok()
+            .and_then(|spine| get_bevy_pos(&spine, &particle_q))
+        else {
             continue;
         };
 
@@ -219,22 +520,50 @@ pub fn ai_steer_system(
     }
 }
 
-/// Read the P3 particle position from an entity's [`SpineController`],
-/// converting from vello y-down to bevy y-up.
-fn get_bevy_pos(spine: &SpineController, particle_q: &Query<&VelloParticle>) -> Option<Vec2> {
-    let p3_entity = spine.particles.get(4)?;
-    let particle = particle_q.get(*p3_entity).ok()?;
+// ---------------------------------------------------------------------------
+// Position / facing helpers
+// ---------------------------------------------------------------------------
+
+/// Read a spine particle's world position (bevy y-up) by index.
+///
+/// `particles[0]` is the head (PH), `particles[4]` is the base (P3). Converts
+/// from vello y-down to bevy y-up.
+fn get_part_pos(
+    spine: &SpineController,
+    idx: usize,
+    particle_q: &Query<&VelloParticle>,
+) -> Option<Vec2> {
+    let entity = spine.particles.get(idx)?;
+    let particle = particle_q.get(*entity).ok()?;
     let vello = particle.particle.pos;
     Some(Vec2::new(vello.x, -vello.y))
+}
+
+/// Read the P3 (tail/base) particle position from an entity's
+/// [`SpineController`], converting from vello y-down to bevy y-up.
+fn get_bevy_pos(spine: &SpineController, particle_q: &Query<&VelloParticle>) -> Option<Vec2> {
+    get_part_pos(spine, 4, particle_q)
+}
+
+/// The enemy's facing direction (head → base), in bevy y-up space.
+fn enemy_facing(
+    root: Entity,
+    spine_q: &Query<&SpineController>,
+    particle_q: &Query<&VelloParticle>,
+) -> Option<Vec2> {
+    let spine = spine_q.get(root).ok()?;
+    let head = get_part_pos(&spine, 0, particle_q)?;
+    let base = get_part_pos(&spine, 4, particle_q)?;
+    Some((head - base).normalize_or_zero())
 }
 
 /// Read the P3 position of the player entity.
 fn get_player_bevy_pos(
     player: Entity,
-    player_spine_q: &Query<&mut SpineController>,
+    spine_q: &Query<&SpineController>,
     particle_q: &Query<&VelloParticle>,
 ) -> Option<Vec2> {
-    let spine = player_spine_q.get(player).ok()?;
+    let spine = spine_q.get(player).ok()?;
     get_bevy_pos(&spine, particle_q)
 }
 
@@ -266,23 +595,22 @@ fn compute_wall_avoidance(pos: Vec2) -> Vec2 {
 // ---------------------------------------------------------------------------
 
 /// Registers the behaviour-tree plugin, AI observers, and the per-frame
-/// steering system.
+/// steering/travel systems.
 pub struct AiPlugin;
 
 impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
-        // Tick behaviour trees in FixedPreUpdate (BehavePlugin default).
+        // Tick behaviour trees (BehavePlugin default schedule).
         app.add_plugins(BehavePlugin::default());
 
-        // Observers for Chase/Flee lifecycle.
-        app.add_observer(on_add_chase);
-        app.add_observer(on_remove_chase);
-        app.add_observer(on_add_flee);
-        app.add_observer(on_remove_flee);
+        // Observers for the phase condition triggers.
+        app.add_observer(on_while_charging);
+        app.add_observer(on_while_fleeing);
+        app.add_observer(on_while_idling);
 
-        // Per-frame steering system: runs in Update so it writes
-        // move_vector before update_character_movement (PostUpdate).
-        app.add_systems(Update, ai_steer_system);
+        // Per-frame systems: travel accumulation + steering run in Update so
+        // they write move_vector before update_character_movement (PostUpdate).
+        app.add_systems(Update, (ai_travel_system, ai_steer_system).chain());
     }
 }
 
@@ -292,20 +620,41 @@ impl Plugin for AiPlugin {
 
 /// Builds the behaviour tree for an enemy character.
 ///
-/// Random chase/flee durations are baked in at construction time
-/// (1–4 seconds each).
+/// The tree is a `CHARGE → FLEE → IDLE → CHARGE` loop with **no `Wait` nodes**.
+/// Each phase is a single-child `While(trigger(cond))` gate wrapped in
+/// `Invert`:
+///
+/// ```text
+/// Forever →
+///   Sequence →
+///     Invert( While( trigger(WhileCharging) ) )   // block while charging
+///     Invert( While( trigger(WhileFleeing)  ) )   // block while fleeing
+///     Invert( While( trigger(WhileIdling)   ) )   // block while idling
+/// ```
+///
+/// A `While` holds the phase while its condition reports `success()` (loop) and
+/// reports `failure()` when the phase is complete. The outer `Invert` turns
+/// that *phase-complete* `failure` into a `success` so the parent `Sequence`
+/// advances to the next gate.
 pub fn build_enemy_ai_tree(player: Entity) -> Tree<Behave> {
-    let mut rng = rand::thread_rng();
-    let chase_dur: f32 = rng.gen::<f32>() * 3.0 + 1.0;
-    let flee_dur: f32 = rng.gen::<f32>() * 3.0 + 1.0;
-
     tree! {
         Behave::Forever => {
             Behave::Sequence => {
-                Behave::spawn_named("Chase", Chase { player }),
-                Behave::Wait(chase_dur),
-                Behave::spawn_named("Flee", Flee { player }),
-                Behave::Wait(flee_dur),
+                Behave::Invert => {
+                    Behave::While => {
+                        Behave::trigger(WhileCharging { player })
+                    }
+                },
+                Behave::Invert => {
+                    Behave::While => {
+                        Behave::trigger(WhileFleeing { player })
+                    }
+                },
+                Behave::Invert => {
+                    Behave::While => {
+                        Behave::trigger(WhileIdling { player })
+                    }
+                },
             }
         }
     }

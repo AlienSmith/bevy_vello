@@ -5,6 +5,7 @@ use bevy_vello::{
 };
 
 use crate::{
+    ai::AiState,
     character::Connectivity,
     damage::{
         components::{AttackStats, Damageable, TotalHealth},
@@ -13,7 +14,7 @@ use crate::{
     death_channel::{channel::ChannelMessage, components::Detached},
     health::{Die, Health},
     weapons::{MeleeWeapon, RayTraceHitPoints},
-    CharacterPartEvent,
+    CharacterPartEvent, PlayerMarker,
 };
 
 /// Observer fired when a bullet collides with something.
@@ -172,6 +173,8 @@ pub(crate) fn on_collision_character(
     connectivity_q: Query<&Connectivity>,
     mut die_writer: EventWriter<ChannelMessage<Die>>,
     mut unreg_writer: EventWriter<CharacterPartEvent>,
+    mut ai_q: Query<&mut AiState>,
+    player_q: Query<(), With<PlayerMarker>>,
 ) {
     let event = trigger.event();
 
@@ -184,6 +187,19 @@ pub(crate) fn on_collision_character(
     };
     if self_conn.character == other_conn.character {
         return; // self-collision (own arm vs own torso) — ignore
+    }
+
+    // ── Fist contact: a player body part hitting an AI enemy signals the
+    //    enemy's charge to end. This observer runs once per side of the pair;
+    //    in this invocation `entity_self` is the player's part and
+    //    `entity_other` is the enemy's part, so the enemy root (which carries
+    //    `AiState`) gets flagged. The mirror invocation (enemy part strikes the
+    //    player part) fails the `AiState` lookup on the player root and is a
+    //    no-op, so the flag is set exactly once.
+    if player_q.contains(self_conn.character) {
+        if let Ok(mut enemy_ai) = ai_q.get_mut(other_conn.character) {
+            enemy_ai.contact_landed = true;
+        }
     }
     // ── Physics: MUTUAL mild repulsion — BOTH characters get nudged ──
     //    In `make_collision_constraints`, the two override slots are resolved
