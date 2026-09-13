@@ -57,12 +57,12 @@ impl Default for MeleeWeapon {
 
 impl MeleeWeapon {
     /// Build a melee weapon with the given knockback scale and a default
-    /// attack profile (`blunt 30, cut 0, penetration 5`).
+    /// attack profile (`blunt 10, cut 0, penetration 5`).
     #[must_use]
     pub fn new(striking_force: f32) -> Self {
         Self {
             striking_force,
-            attack_stats: AttackStats::new(30.0, 0.0, 5.0),
+            attack_stats: AttackStats::new(1.0, 0.0, 5.0),
         }
     }
 }

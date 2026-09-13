@@ -506,7 +506,7 @@ fn setup_back_ground(mut commands: Commands) {
         kurbo::Affine::default(),
         peniko::Color::rgb(1.0, 1.0, 1.0),
         None,
-        &kurbo::Rect::new(-1024.0, -1024.0, 1024.0, 1024.0),
+        &kurbo::Rect::new(-2048.0, -2048.0, 2048.0, 2048.0),
     );
 
     commands.spawn((VelloSceneBundle {
@@ -645,20 +645,20 @@ fn setup_pistol(
 
 fn make_static_scene(commands: &mut Commands) {
     let make_long_rect = || {
-        let rect: kurbo::Rect = kurbo::Rect::new(-980.0, -20.0, 980.0, 20.0);
+        let rect: kurbo::Rect = kurbo::Rect::new(-1940.0, -20.0, 1940.0, 20.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
     //aabb will only take the effect of position ignoring entity rotation and scale.
     //in other words if your static collider contains rotation or scaling you need to account for that
     let make_short_rect = || {
-        let rect = kurbo::Rect::new(-20.0, -560.0, 20.0, 560.0);
+        let rect = kurbo::Rect::new(-20.0, -1120.0, 20.0, 1120.0);
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
     make_static_collision_shape(
         commands,
-        Vec4::new(0.0, 540.0, 0.0, 1.0),
+        Vec4::new(0.0, 1080.0, 0.0, 1.0),
         make_long_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -671,7 +671,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_static_collision_shape(
         commands,
-        Vec4::new(0.0, -540.0, 0.0, 1.0),
+        Vec4::new(0.0, -1080.0, 0.0, 1.0),
         make_long_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -684,7 +684,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_static_collision_shape(
         commands,
-        Vec4::new(-960.0, 0.0, 0.0, 1.0),
+        Vec4::new(-1920.0, 0.0, 0.0, 1.0),
         make_short_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -697,7 +697,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_static_collision_shape(
         commands,
-        Vec4::new(960.0, 0.0, 0.0, 1.0),
+        Vec4::new(1920.0, 0.0, 0.0, 1.0),
         make_short_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),

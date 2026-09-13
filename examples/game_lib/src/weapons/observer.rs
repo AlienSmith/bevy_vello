@@ -259,7 +259,7 @@ pub(crate) fn on_collision_character(
         event.entity_other,
         self_melee
             .map(|m| m.attack_stats)
-            .unwrap_or_else(|| AttackStats::new(30.0, 0.0, 5.0)),
+            .unwrap_or_else(|| AttackStats::new(10.0, 0.0, 5.0)),
         None,
         &mut target_part,
         &mut total,

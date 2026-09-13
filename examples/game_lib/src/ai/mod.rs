@@ -61,11 +61,11 @@ const AVOID_FORCE: f32 = 200.0;
 /// Distance from a wall boundary at which avoidance kicks in.
 const AVOID_MARGIN: f32 = 120.0;
 
-/// Arena safe area (bevy y-up). Walls are at ±960 x / ±540 y.
-const ARENA_MIN_X: f32 = -920.0;
-const ARENA_MAX_X: f32 = 920.0;
-const ARENA_MIN_Y: f32 = -500.0;
-const ARENA_MAX_Y: f32 = 500.0;
+/// Arena safe area (bevy y-up). Walls are at ±1920 x / ±1080 y.
+const ARENA_MIN_X: f32 = -1880.0;
+const ARENA_MAX_X: f32 = 1880.0;
+const ARENA_MIN_Y: f32 = -1040.0;
+const ARENA_MAX_Y: f32 = 1040.0;
 
 /// Distance from the player at which the enemy stops fleeing. Once far enough
 /// it moves to the IDLE phase.
@@ -76,6 +76,11 @@ const SAFE_DISTANCE: f32 = 420.0;
 /// hysteresis: flee out past `SAFE_DISTANCE`, then only come back when the
 /// player closes within `ADVANCE_RANGE`.
 const ADVANCE_RANGE: f32 = 380.0;
+
+/// How long (seconds) the enemy will stand still in the IDLE phase before it
+/// re-engages and starts a fresh CHARGE on its own — even if the player never
+/// closes back into [`ADVANCE_RANGE`]. Keeps the AI cycling continuously.
+const IDLE_DURATION: f32 = 1.5;
 
 /// Travel (within the current CHARGE phase) that must be accumulated before a
 /// facing-mismatch is treated as an *over-charge / miss*. This prevents an
@@ -117,6 +122,10 @@ pub struct AiState {
     pub contact_landed: bool,
     /// Distance traveled within the current phase (bevy y-up units).
     pub travel: f32,
+    /// Accumulated time (seconds) the enemy has stood still in the IDLE phase.
+    /// Once it exceeds [`crate::ai::IDLE_DURATION`] the enemy re-engages on its
+    /// own, so it cycles continuously even with a stationary player.
+    pub idle_timer: f32,
     /// Last observed position (bevy y-up) used to accumulate [`Self::travel`].
     last_pos: Option<Vec2>,
     /// The phase the travel accumulator was recording for, so it can detect a
@@ -130,6 +139,7 @@ impl Default for AiState {
             phase: AiPhase::Charge,
             contact_landed: false,
             travel: 0.0,
+            idle_timer: 0.0,
             last_pos: None,
             recorded_phase: AiPhase::Charge,
         }
@@ -325,6 +335,8 @@ fn handle_idle(
     }
 
     // Idle: stand still (no steering marker), keep distance, re-prepare.
+    // `ai_steer_system` detects the missing markers and zeroes `move_vector`
+    // so the character actually stops (no stale flee thrust into the wall).
     commands.entity(root).remove::<AiChaseTarget>();
     commands.entity(root).remove::<AiFleeTarget>();
 
@@ -342,6 +354,9 @@ fn handle_idle(
     };
 
     // Re-engage once the player closes back into range → fresh CHARGE.
+    // (The self-driven idle-timeout re-charge is handled separately in the
+    // every-frame [`ai_travel_system`], because the tree's IDLE gate only runs
+    // `handle_idle` once and never re-polls its timer.)
     let dist = enemy_base.distance(player_pos);
     if !ai.contact_landed && dist < ADVANCE_RANGE {
         ai.phase = AiPhase::Charge;
@@ -430,6 +445,7 @@ pub fn on_while_idling(
 pub fn ai_travel_system(
     mut ai_q: Query<(&mut AiState, &SpineController)>,
     particle_q: Query<&VelloParticle>,
+    time: Res<Time>,
 ) {
     for (mut ai, spine) in &mut ai_q {
         let Some(pos) = get_bevy_pos(&spine, &particle_q) else {
@@ -440,6 +456,7 @@ pub fn ai_travel_system(
         if ai.phase != ai.recorded_phase {
             ai.recorded_phase = ai.phase;
             ai.travel = 0.0;
+            ai.idle_timer = 0.0;
             ai.last_pos = None;
         }
 
@@ -451,7 +468,18 @@ pub fn ai_travel_system(
                 ai.last_pos = Some(pos);
             }
             AiPhase::Idle => {
-                // Standing still — no travel accumulation.
+                // Standing still — no travel accumulation, but keep clocking
+                // the idle timer so the enemy eventually re-engages on its own.
+                ai.idle_timer += time.delta_secs();
+                if ai.idle_timer >= IDLE_DURATION {
+                    // Self-driven re-engage: flip back to CHARGE. The tree's
+                    // phase gates re-read `phase` from scratch every frame (the
+                    // `SequenceFlow` re-ticks its first child each tick), so the
+                    // while-charging gate picks this up and drives the enemy
+                    // toward the player again — even if the player stands still.
+                    ai.phase = AiPhase::Charge;
+                    ai.idle_timer = 0.0;
+                }
                 ai.last_pos = None;
             }
         }
@@ -468,20 +496,22 @@ pub fn ai_travel_system(
 /// the enemies' spines (readable via `Query::get`), avoiding the B0001
 /// read/write conflict of two separate `SpineController` queries.
 pub fn ai_steer_system(
-    ai_q: Query<
-        (Entity, Option<&AiChaseTarget>, Option<&AiFleeTarget>),
-        Or<(With<AiChaseTarget>, With<AiFleeTarget>)>,
-    >,
+    ai_q: Query<(Entity, Option<&AiChaseTarget>, Option<&AiFleeTarget>), With<AiState>>,
     particle_q: Query<&VelloParticle>,
     mut all_spines: Query<&mut SpineController>,
 ) {
     for (enemy, chase_target, flee_target) in &ai_q {
-        // Determine player entity and whether we chase (true) or flee (false).
+        // No active steering marker (e.g. IDLE phase): the character must stop.
+        // Zeroing here guarantees a stale flee `move_vector` can't keep pushing
+        // the enemy into a wall after the AI gate flips to IDLE.
         let (player, toward_player) = if let Some(chase) = chase_target {
             (chase.player, true)
         } else if let Some(flee) = flee_target {
             (flee.player, false)
         } else {
+            if let Ok(mut spine) = all_spines.get_mut(enemy) {
+                spine.move_vector = Vec2::ZERO;
+            }
             continue;
         };
 
@@ -513,10 +543,18 @@ pub fn ai_steer_system(
 
         let avoid = compute_wall_avoidance(enemy_pos);
 
+        // Flee by heading to the safe anchor currently farthest from the
+        // player, so the enemy never aims into a wall.
+        let flee_dir = choose_flee_direction(enemy_pos, player_pos, avoid);
+
         let Ok(mut spine) = all_spines.get_mut(enemy) else {
             continue;
         };
-        spine.move_vector = dir * AI_SPEED + avoid * AVOID_FORCE;
+        spine.move_vector = if toward_player {
+            dir * AI_SPEED + avoid * AVOID_FORCE
+        } else {
+            flee_dir * AI_SPEED + avoid * AVOID_FORCE
+        };
     }
 }
 
@@ -588,6 +626,51 @@ fn compute_wall_avoidance(pos: Vec2) -> Vec2 {
     }
 
     avoid
+}
+
+/// Lightweight "nav graph" of safe retreat anchors, placed on the arena
+/// interior (outside the wall-avoidance margin) for each side and corner.
+///
+/// Fleeing steers toward whichever anchor is currently farthest from the
+/// player. Because anchors are always safely inside the arena, the enemy's flee
+/// heading can never aim into — and get pinned against — a wall. This is the
+/// cheap box-only analog of a full navmesh; it generalizes later to an actual
+/// node graph if the scene grows interior obstacles.
+fn retreat_anchors() -> [Vec2; 4] {
+    let m = AVOID_MARGIN * 2.0;
+    [
+        Vec2::new(0.0, ARENA_MAX_Y - m), // top
+        Vec2::new(0.0, ARENA_MIN_Y + m), // bottom
+        Vec2::new(ARENA_MIN_X + m, 0.0), // left
+        Vec2::new(ARENA_MAX_X - m, 0.0), // right
+    ]
+}
+
+/// Picks the fleet direction for the current frame.
+///
+/// Chooses the retreat anchor farthest from the player (growing separation) and
+/// steers toward it. If the enemy is already closer to a wall than the chosen
+/// anchor's heading would allow, the reactive [`compute_wall_avoidance`] force
+/// still peels it off — the anchor handles the general case, avoidance only the
+/// transient tail when the anchor just flipped sides.
+fn choose_flee_direction(enemy_pos: Vec2, player_pos: Vec2, avoid: Vec2) -> Vec2 {
+    let mut best = Vec2::ZERO;
+    let mut best_dist = -1.0_f32;
+    for anchor in retreat_anchors() {
+        let dist = anchor.distance(player_pos);
+        if dist > best_dist {
+            best_dist = dist;
+            best = anchor;
+        }
+    }
+
+    let dir = (best - enemy_pos).normalize_or_zero();
+    // If we're already *at* the anchor, rely on the avoidance force to nudge us
+    // back into open space rather than oscillating around a single point.
+    if dir.length_squared() < 1e-6 {
+        return avoid.normalize_or_zero();
+    }
+    dir
 }
 
 // ---------------------------------------------------------------------------
