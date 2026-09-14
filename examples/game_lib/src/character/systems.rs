@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
+    CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, CharacterPivotPositionEvent,
     VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
 };
 use vello_physics::{
@@ -54,7 +54,7 @@ fn claculate_velocity_spine(
     frame_particles: &Vec<VelloParticle>,
     vec: Vec2,
     config: &SpineConfig,
-) -> Vec<CharacterPivotVelocityEvent> {
+) -> Vec<CharacterPivotImpulseEvent> {
     const SPINE_PARTICLE_COUNT: usize = 5;
 
     let mut result = vec![];
@@ -68,6 +68,19 @@ fn claculate_velocity_spine(
     if length <= f32::EPSILON {
         return result;
     }
+
+    // Convert a desired delta-velocity into an impulse, respecting each particle's
+    // inverse mass. The engine applies `delta_v = impulse * inv_mass`, so dividing the
+    // velocity gap by `inv_mass` yields exactly the requested delta-v. This is additive
+    // (it corrects FROM the post-physics velocity) rather than overwriting velocity, so
+    // external pushes like collisions are preserved.
+    let velocity_gap_to_impulse = |current_vel: Vec2, target_vel: Vec2, inv_mass: f32| -> Vec2 {
+        if inv_mass <= f32::EPSILON {
+            Vec2::ZERO
+        } else {
+            (target_vel - current_vel) / inv_mass
+        }
+    };
 
     // Desired movement direction in Vello coordinates (x-right, y-down).
     let desired_dir = dir / length;
@@ -86,10 +99,16 @@ fn claculate_velocity_spine(
     if spine_len <= f32::EPSILON {
         // Degenerate spine: all particles collapsed. Push them all forward.
         for i in 0..SPINE_PARTICLE_COUNT {
-            result.push(CharacterPivotVelocityEvent {
+            let target_velocity = desired_dir * length * config.velocity_scale;
+            let impulse = velocity_gap_to_impulse(
+                particles[i].particle.velocity,
+                target_velocity,
+                particles[i].particle.inv_mass,
+            );
+            result.push(CharacterPivotImpulseEvent {
                 character_entity: particles[i].root_entity,
                 joint_entity: entities[i],
-                velocity: desired_dir * length * config.velocity_scale,
+                impulse,
             });
         }
         return result;
@@ -162,11 +181,14 @@ fn claculate_velocity_spine(
 
     // Spine particles.
     for i in 0..SPINE_PARTICLE_COUNT {
-        let velocity = rigid_velocity(positions[i], particles[i].particle.velocity);
-        result.push(CharacterPivotVelocityEvent {
+        let current_vel = particles[i].particle.velocity;
+        let velocity = rigid_velocity(positions[i], current_vel);
+        let impulse =
+            velocity_gap_to_impulse(current_vel, velocity, particles[i].particle.inv_mass);
+        result.push(CharacterPivotImpulseEvent {
             character_entity: particles[i].root_entity,
             joint_entity: entities[i],
-            velocity,
+            impulse,
         });
     }
 
@@ -176,11 +198,13 @@ fn claculate_velocity_spine(
     // frame, the shape-matching `-drag` correction can cleanly undo the motion.
     for (i, entity) in frame_entities.iter().enumerate() {
         let f = &frame_particles[i];
-        let velocity = rigid_velocity(f.particle.pos, f.particle.velocity);
-        result.push(CharacterPivotVelocityEvent {
+        let current_vel = f.particle.velocity;
+        let velocity = rigid_velocity(f.particle.pos, current_vel);
+        let impulse = velocity_gap_to_impulse(current_vel, velocity, f.particle.inv_mass);
+        result.push(CharacterPivotImpulseEvent {
             character_entity: f.root_entity,
             joint_entity: *entity,
-            velocity,
+            impulse,
         });
     }
 
@@ -490,7 +514,7 @@ pub fn update_character_movement(
     mut left_arm_q: Query<(&mut LeftArmController, &VelloCharacterPhysicsRoot)>,
     p_q: Query<&VelloParticle>,
     j_q: Query<&VelloJoint>,
-    mut velocity_events: EventWriter<CharacterPivotVelocityEvent>,
+    mut velocity_events: EventWriter<CharacterPivotImpulseEvent>,
     mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
     mut position_events: EventWriter<CharacterPivotPositionEvent>,
 ) {

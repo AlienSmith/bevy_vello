@@ -112,6 +112,7 @@ pub(crate) fn on_collision_melee(
         explosion_impulse: None,
         velocity_scale: Some(melee.striking_force),
         inv_mass_scale: Some(1.0),
+        minimum_separation_speed: None, // melee-vs-character keeps pure momentum feel
     };
     if event.entity_self == entry.event.entity_a {
         entry.override_a = weapon_override;
@@ -226,10 +227,18 @@ pub(crate) fn on_collision_character(
         .map(|m| m.striking_force)
         .unwrap_or(1.4);
 
+    // Bumper-car minimum separation floor: a SCALAR magnitude that guarantees a
+    // velocity-independent back-off along the real collision normal, so even two
+    // stopped characters get pushed apart enough to aim/rotate/flee. It blends
+    // with the velocity_scale feel term (fast strikes still heavier than grazes)
+    // and is applied symmetrically on both sides. Tune to separate frames by
+    // ~one body-width without launching.
+    const MIN_SEPARATION_SPEED: f32 = 180.0; // px/s — "bumper room" knob (tune)
     let shove = |force: f32| CollisionOverride {
         explosion_impulse: None, // no wall hack → no fly-away
         velocity_scale: Some(force),
         inv_mass_scale: Some(1.0), // both keep real mass → mutual give
+        minimum_separation_speed: Some(MIN_SEPARATION_SPEED), // guaranteed back-off
     };
 
     // override_a determines how A gets B shoved (A's striking force applies to

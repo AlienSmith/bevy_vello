@@ -85,6 +85,13 @@ pub struct CharacterPivotVelocityEvent {
 }
 //in vello space
 #[derive(Event)]
+pub struct CharacterPivotImpulseEvent {
+    pub character_entity: Entity,
+    pub joint_entity: Entity,
+    pub impulse: Vec2,
+}
+//in vello space
+#[derive(Event)]
 pub struct CharacterAngularConstraintEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,

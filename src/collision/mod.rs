@@ -132,6 +132,17 @@ pub struct CollisionOverride {
     /// 0.0 = treat opponent as infinitely heavy (like bullet hack).
     /// >1.0 = treat opponent as lighter (less reaction).
     pub inv_mass_scale: Option<f32>,
+
+    /// Guaranteed minimum separation speed (a SCALAR magnitude) applied along
+    /// the REAL collision normal of this side, independent of contact velocity.
+    ///
+    /// This is the "bumper-car" floor: even two stopped characters are pushed
+    /// apart enough to create room to aim/rotate/flee. It is a scalar because
+    /// the direction must come from the collision system's real per-side normal
+    /// (see `make_collision_constraints`), not a vector invented by the game.
+    ///
+    /// None = no minimum separation floor.
+    pub minimum_separation_speed: Option<f32>,
 }
 
 impl CollisionOverride {
@@ -140,6 +151,7 @@ impl CollisionOverride {
         self.explosion_impulse.is_some()
             || self.velocity_scale.is_some()
             || self.inv_mass_scale.is_some()
+            || self.minimum_separation_speed.is_some()
     }
 }
 

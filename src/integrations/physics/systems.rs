@@ -9,9 +9,9 @@ use crate::{
     },
     integrations::physics::{
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
-        PivotVisualizer, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
-        VelloParticle,
+        CharacterPivotImpulseEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
+        ColliderExternalImpulseEvent, PivotVisualizer, VelloCharacterPhysicsRoot,
+        VelloConstraintWorld, VelloJoint, VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -186,18 +186,38 @@ pub fn make_collision_constraints(
 
         if diff.dot(a_normal) > 0.0 {
             // For side A: check override_a (how A wants B to behave)
-            let (effective_inv_mass_b, effective_vel_b) = if entry.override_a.is_active() {
+            let (effective_inv_mass_b, mut effective_vel_b) = if entry.override_a.is_active() {
                 resolve_collision_intent(&entry.override_a, inv_mass_a, vel_a, inv_mass_b, vel_b)
             } else {
                 (inv_mass_b, vel_b)
             };
 
             // For side B: check override_b (how B wants A to behave)
-            let (effective_inv_mass_a, effective_vel_a) = if entry.override_b.is_active() {
+            let (effective_inv_mass_a, mut effective_vel_a) = if entry.override_b.is_active() {
                 resolve_collision_intent(&entry.override_b, inv_mass_b, vel_b, inv_mass_a, vel_a)
             } else {
                 (inv_mass_a, vel_a)
             };
+
+            // ── Bumper-car minimum separation floor ──────────────────────────
+            // `minimum_separation_speed` is a SCALAR magnitude. Its direction is
+            // the REAL per-side collision normal (a_normal / b_normal), NOT a
+            // vector invented by the game. The solver computes
+            //   frame_velocity' = (frame_velocity - other_velocity) * ...
+            // so to push a side OUT of the contact we add +normal * speed to the
+            // other_velocity it feeds the constraint:
+            //   * A's constraint uses normal = b_normal and other -> B. To push A
+            //     away from B (direction -b_normal), add +b_normal * speed.
+            //   * B's constraint uses normal = a_normal and other -> A. To push B
+            //     away from A (direction -a_normal), add +a_normal * speed.
+            // Since a_normal ≈ -b_normal, both characters separate symmetrically
+            // along the true contact axis — a real two-body bumper exchange.
+            if let Some(min_speed) = entry.override_a.minimum_separation_speed {
+                effective_vel_b += b_normal * min_speed;
+            }
+            if let Some(min_speed) = entry.override_b.minimum_separation_speed {
+                effective_vel_a += a_normal * min_speed;
+            }
 
             if let Ok(item) = query.get(a_index) {
                 if item.is_soft_body() {
@@ -569,6 +589,7 @@ pub fn update_connection_particles(
 pub fn apply_explicit_impulse_on_connection_particle(
     mut constraint_world: ResMut<VelloConstraintWorld>,
     mut events: EventReader<CharacterPivotForceEvent>,
+    mut impulse_events: EventReader<CharacterPivotImpulseEvent>,
     mut v_events: EventReader<CharacterPivotVelocityEvent>,
     mut frame_events: EventReader<CharacterFrameForceEvent>,
     mut angular_event: EventReader<CharacterAngularConstraintEvent>,
@@ -585,6 +606,12 @@ pub fn apply_explicit_impulse_on_connection_particle(
             &event.joint_entity,
             &Vec2::new(event.force.x, event.force.y),
         );
+    }
+    for event in impulse_events.read() {
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
+        group.add_connect_external_force(&event.joint_entity, &event.impulse);
     }
     for event in v_events.read() {
         let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {

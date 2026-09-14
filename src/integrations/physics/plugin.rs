@@ -20,8 +20,8 @@ use crate::{
             update_connection_particles, update_constraint_world, visualize_colliders,
         },
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotPositionEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
-        VelloConstraintWorld,
+        CharacterPivotImpulseEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
+        ColliderExternalImpulseEvent, VelloConstraintWorld,
     },
 };
 
@@ -37,6 +37,7 @@ impl Plugin for VelloCollisionResponsePlugin {
             .add_event::<ColliderExternalImpulseEvent>()
             .add_event::<CharacterPivotForceEvent>()
             .add_event::<CharacterPivotVelocityEvent>()
+            .add_event::<CharacterPivotImpulseEvent>()
             .add_event::<CharacterAngularConstraintEvent>()
             .add_event::<CharacterPivotPositionEvent>()
             .add_event::<CharacterFrameForceEvent>()
