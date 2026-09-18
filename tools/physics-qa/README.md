@@ -50,6 +50,15 @@ worth the permanent history.
 
 ## Build and run
 
+Setting this up on a new machine — including the two branch traps and the sibling
+layout — is covered in **[SETUP.md](SETUP.md)**. Verify a machine with:
+
+```bash
+tools/physics-qa/run_capture.sh --check
+```
+
+Then:
+
 ```bash
 cargo build --release -p collision_detection
 
