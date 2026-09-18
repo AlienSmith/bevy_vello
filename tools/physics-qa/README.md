@@ -160,13 +160,91 @@ agent do it: the credential stays with the agent's model provider and no script
 in this repository ever handles a key. `vision.py` exists for the cases where
 that is not possible.
 
-Two things to know when running a vision model over these frames:
+Three things to know when running a vision model over these frames:
 
 1. **The model must declare image input.** A harness will refuse a `read_image`
-   call on a text-only model before the request is made.
+   call on a text-only model before the request is made. This is a property of
+   the *model*, not of the file or the tool, so the same call succeeds or fails
+   depending only on which model the reading agent runs on.
 2. **Give a reasoning model room.** With a tight `max_tokens` it can spend the
    whole budget on reasoning and return empty content with
    `finish_reason: length`.
+3. **A delegated child may inherit the parent's model.** See below; this is the
+   one that silently defeats the whole setup.
+
+### Routing a delegated judge to a vision model
+
+The natural design — delegate the judging to a child agent and let it call
+`read_image` — fails by default on a harness whose *reasoning* model is
+text-only, because a delegated child inherits the parent's model. The failure is
+loud and clear once it happens (`model "..." does not declare image input`), but
+the cause is not where it looks: it is not the image, the path, or the tool.
+
+Whether a delegation tool can select a child model at all is decided by two
+separate things, and both must hold:
+
+- the delegation tool is configured with model selection enabled, **and**
+- a Host setting actually supplies the allowed routes.
+
+The second is what fails in practice. It is a Host setting, off by default:
+
+```yaml
+subagent-model-selection:
+  enabled: true
+  allowedModels:
+    - provider: <provider>
+      model: <vision-capable-model>
+```
+
+With it off, the delegation tool's schema has no `provider` / `model` /
+`reasoning_effort` fields at all, so the capability is effectively invisible and
+no error mentions the setting. Enabling it also adds a `list_subagent_models`
+tool for discovering the advertised routes; the exact provider and model ids are
+whatever the harness's own provider block declares.
+
+Two caveats when enabling it:
+
+- **It is sampled per session, for a fresh session only.** It applies to the
+  next session, not the current one, and children inherit their parent's policy.
+- **A fork-style tool may omit model selection on purpose**, to keep the
+  inherited conversation prefix eligible for cache reuse. A tool that inherits
+  the whole conversation can therefore be unable to see images even when a plain
+  delegation tool can.
+
+### Continuity without a resident child
+
+A judge does not have to stay resident to be re-consulted. Because the frames are
+local files, a *fresh* child given the same paths and the earlier answer as text
+can answer follow-up questions about a specific detail — re-reading a local file
+costs nothing, so continuity can be synthesised by re-briefing rather than
+inherited.
+
+This matters because the two properties do not always arrive together: some ways
+of delegating to a chosen model run to completion and return only text, with no
+durable child to message afterwards. Re-briefing is then the only route, and it
+works.
+
+This is the cheaper default anyway. A judge that returns a verdict and exits
+avoids holding a child open for the length of a sweep, and it keeps each verdict
+independent of the last one's framing.
+
+### The judge describes better than it adjudicates
+
+Two observations from running a vision model over these frames, both arguing for
+the metrics-first design above:
+
+- **Perception is decent; interpretation is not.** Asked to locate the red
+  collision VFX, the model placed it within ~20% of its true bounding box
+  (claimed ~160x190 at x550-715; actual 131x157 at x562-692). Asked what it
+  *was*, it called the particle burst a "soft-body blob" and reported a
+  character overlapping it. It measured the pixels well and then drew the wrong
+  conclusion from them — which is exactly the failure mode the metrics exist to
+  catch.
+- **A follow-up question can confirm a description but cannot settle a
+  classification.** Whether a red region is one solid mass or many discrete
+  particles is answerable, but not reliably from a natural-language answer;
+  measure it instead (the frame above is ~12k red pixels at ~59% fill inside its
+  bounding box).
 
 ## Results so far
 
