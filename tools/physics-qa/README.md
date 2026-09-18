@@ -83,9 +83,17 @@ the static debug UI panel on the left) and fails a run when:
 - `mean_rmse > 12.0` — consecutive frames differ too much (jitter / thrash)
 - `motion_frac > 0.15` — too much of the arena changes across the burst
 - `motion_growth > 2.5` — the changed region keeps expanding pair over pair
+- `edge_frac > 0.02` — the disturbance reaches the arena border, i.e. a body is
+  leaving the arena
 - `no_motion` — nothing changed at all, i.e. the capture is blank
 
-Thresholds are overridable with `--gate-*`.
+The first three thresholds are overridable with `--gate-rmse`,
+`--gate-motion-frac` and `--gate-motion-growth`. `edge_frac > 0.02` is currently
+hard-coded.
+
+**The verdict is the `ok` field, not the exit code.** `metrics.py` exits 0 even
+when the run fails its gates — a failing run is a successful measurement. Read
+`ok` / `suspect` from the JSON; do not write `metrics.py ... && echo pass`.
 
 The gates are **temporal** on purpose. The camera is fixed and the arena is drawn
 with a lot of static detail, so a "differs from the background" mask is ~98%
@@ -246,6 +254,76 @@ the metrics-first design above:
   measure it instead (the frame above is ~12k red pixels at ~59% fill inside its
   bounding box).
 
+## Interfaces
+
+Everything here is scriptable, which is the point: the loop is meant to be driven
+by a program, not by hand.
+
+### `run_capture.sh`
+
+```
+run_capture.sh --out DIR [--frames N] [--interval S] [--settle S] [--binary PATH]
+run_capture.sh --check
+```
+
+Prints a JSON summary on stdout: `{ok, alive_after_capture, frames: [...], log}`.
+`ok` is true when at least one frame was captured. `alive_after_capture` reports
+whether the game was still running at the end — useful for telling "the physics
+exploded" apart from "the process died".
+
+Exit codes:
+
+| code | meaning |
+| --- | --- |
+| 0 | capture completed (check the JSON, not the code) |
+| 1 | the game exited during startup, or no window ever appeared |
+| 2 | bad arguments |
+| 5 | a stale game window was already on the display |
+| 6 | preflight failed (see `--check`) |
+
+Exit 5 exists because a leftover instance owns the window name and would be the
+thing captured, producing black or identical frames that look like a physics
+result.
+
+### `metrics.py`
+
+```
+metrics.py [--json] [--gate-rmse F] [--gate-motion-frac F] [--gate-motion-growth F] FRAME...
+```
+
+Emits one JSON object: `ok`, `suspect`, `frames`, `panel_cols`, `arena_cols`,
+`mean_rmse`, `frame_rmse`, `motion_px`, `motion_frac`, `motion_bbox`,
+`motion_growth`, `edge_frac`, `bg_color`.
+
+`bg_color` is reported for sanity-checking a capture and is deliberately not
+gated: a black or blank frame is obvious there. `panel_cols` is the detected
+left UI panel, so a wrong detection is visible rather than silent.
+
+Exits 0 whether or not the gates pass — see the note above.
+
+### `tune.py sweep` candidates file
+
+A JSON list of `"knob=value"` strings:
+
+```json
+["softbody.substeps=3", "softbody.substeps=4", "collision.pull_compliance_scaler=1.2"]
+```
+
+`sweep` tries them best-first and reverts the losers. It also writes
+`original.character.json` beside its output root, so a sweep is recoverable even
+if the process is interrupted.
+
+### `vision.py`
+
+```
+vision.py [--base-url URL] [--model ID] [--key-env NAME] [--max-tokens N] \
+          --prompt-file qa_prompt.txt FRAME...
+```
+
+Reads the key from the environment only — never from a credential file — and
+exits non-zero if the variable is unset. `--key-env` names the variable;
+`--max-tokens` defaults to 4000, which is not generous for a reasoning model.
+
 ## Results so far
 
 | run | frames | metrics | vision | note |
@@ -258,3 +336,4 @@ the metrics-first design above:
 Run-to-run variance is high because the scene contains two characters (the player
 and an AI-driven enemy), so frames are not reproducible. Compare runs using the
 metrics, and re-run a suspect configuration rather than trusting one capture.
+
