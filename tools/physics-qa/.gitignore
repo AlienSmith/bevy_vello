@@ -1,0 +1,4 @@
+# Capture output: frame bursts, logs and sweep results are per-run artifacts.
+shots*/
+*.character.json.tmp
+__pycache__/
