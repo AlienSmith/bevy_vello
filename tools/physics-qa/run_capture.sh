@@ -2,7 +2,17 @@
 # Run the game on a private Xvfb display and capture a burst of screenshots.
 #
 #   run_capture.sh --out DIR [--frames N] [--interval S] [--settle S] [--binary PATH]
+#                  [--input "hold d 3; tap f"] [--hold]
 #   run_capture.sh --check
+#
+# --input injects synthetic X11 input (XTEST, via x11_input.sh) after the settle
+# delay and before the capture burst, so a QA run can exercise the character -
+# running, firing, aiming - while frames are taken. The game binary itself keeps
+# no test hooks: it remains an ordinary, human-playable game.
+#
+# --hold leaves the game (and the Xvfb, if this script started it) running after
+# the burst, reporting their pids in the JSON, so an agent can keep driving the
+# game with x11_input.sh. A held game must be killed before the next run.
 #
 # The game resolves assets relative to the executable directory
 # (target/release/assets), so this script syncs the example asset folder there
@@ -33,6 +43,8 @@ FRAMES=3
 INTERVAL=0.6
 SETTLE=3.0
 CHECK_ONLY=0
+INPUT_SPEC=""
+HOLD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +53,8 @@ while [[ $# -gt 0 ]]; do
     --interval) INTERVAL="$2"; shift 2 ;;
     --settle) SETTLE="$2"; shift 2 ;;
     --binary) BINARY="$2"; shift 2 ;;
+    --input) INPUT_SPEC="$2"; shift 2 ;;
+    --hold) HOLD=1; shift ;;
     --check) CHECK_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -102,7 +116,8 @@ fi
 
 # Resolve Xvfb now so the check and the launch below agree on the same binary.
 XVFB_BIN="$(command -v Xvfb || true)"
-for cand in "$PIPELINE_DIR/tools/Xvfb" /tmp/xvfb_pkg/usr/bin/Xvfb; do
+for cand in "$PIPELINE_DIR/tools/Xvfb" "$PIPELINE_DIR/.x11/root/usr/bin/Xvfb" \
+            /tmp/xvfb_pkg/usr/bin/Xvfb /tmp/x11get/root/usr/bin/Xvfb; do
   [[ -n "$XVFB_BIN" ]] && break
   [[ -x "$cand" ]] && XVFB_BIN="$cand"
 done
@@ -168,6 +183,10 @@ DISPLAY="$DISPLAY_NUM" PHYSICS_QA_CAPTURE="$CAPTURE_MODE" "$BINARY" >"$LOG" 2>&1
 GAME_PID=$!
 
 cleanup() {
+  if [[ "$HOLD" == "1" ]]; then
+    echo "holding: game pid $GAME_PID stays up on $DISPLAY_NUM (kill it when done)" >&2
+    return
+  fi
   kill "$GAME_PID" 2>/dev/null
   wait "$GAME_PID" 2>/dev/null
   [[ -n "$XVFB_PID" ]] && kill "$XVFB_PID" 2>/dev/null
@@ -194,6 +213,23 @@ fi
 # Let assets load and the simulation settle.
 sleep "$SETTLE"
 
+# Synthetic input goes through X11 (XTEST), so the game keeps no test hooks. On
+# a bare Xvfb there is no window manager, so the window must be focused
+# explicitly or the keystrokes never reach the game.
+if [[ -n "$INPUT_SPEC" ]]; then
+  if ! "$PIPELINE_DIR/x11_input.sh" --display "$DISPLAY_NUM" focus; then
+    echo "{\"ok\":false,\"stage\":\"input\",\"error\":\"could not focus the game window; is xdotool available? (see SETUP.md)\"}"
+    exit 1
+  fi
+  IFS=';' read -ra INPUT_CMDS <<< "$INPUT_SPEC"
+  for cmd in "${INPUT_CMDS[@]}"; do
+    # shellcheck disable=SC2086
+    "$PIPELINE_DIR/x11_input.sh" --display "$DISPLAY_NUM" $cmd || true
+  done
+else
+  "$PIPELINE_DIR/x11_input.sh" --display "$DISPLAY_NUM" focus >/dev/null 2>&1 || true
+fi
+
 SHOTS=()
 for i in $(seq 1 "$FRAMES"); do
   SHOT="$OUT/frame_$(printf '%02d' "$i").png"
@@ -205,9 +241,14 @@ done
 ALIVE="true"
 kill -0 "$GAME_PID" 2>/dev/null || ALIVE="false"
 
-python3 - "$OUT" "$ALIVE" "$LOG" "${SHOTS[@]}" <<'PY'
+python3 - "$OUT" "$ALIVE" "$LOG" "$HOLD" "$GAME_PID" "$DISPLAY_NUM" "${SHOTS[@]}" <<'PY'
 import json, sys
-out, alive, log, *shots = sys.argv[1:]
-print(json.dumps({"ok": len(shots) > 0, "alive_after_capture": alive == "true",
-                  "frames": shots, "log": log}, indent=2))
+out, alive, log, hold, game_pid, display, *shots = sys.argv[1:]
+result = {"ok": len(shots) > 0, "alive_after_capture": alive == "true",
+          "frames": shots, "log": log}
+if hold == "1":
+    result["held"] = {"game_pid": int(game_pid), "display": display,
+                      "note": "game left running; drive it with x11_input.sh --display "
+                              + display + ", then kill pid " + game_pid}
+print(json.dumps(result, indent=2))
 PY

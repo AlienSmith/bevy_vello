@@ -263,6 +263,7 @@ by a program, not by hand.
 
 ```
 run_capture.sh --out DIR [--frames N] [--interval S] [--settle S] [--binary PATH]
+               [--input "hold d 3; tap f"] [--hold]
 run_capture.sh --check
 ```
 
@@ -270,6 +271,12 @@ Prints a JSON summary on stdout: `{ok, alive_after_capture, frames: [...], log}`
 `ok` is true when at least one frame was captured. `alive_after_capture` reports
 whether the game was still running at the end — useful for telling "the physics
 exploded" apart from "the process died".
+
+`--input` injects synthetic X11 input after the settle delay and before the
+burst, so the frames show where the character ended up; commands are the
+`x11_input.sh` ones, separated by `;`. `--hold` leaves the game and its display
+running and adds a `held: {game_pid, display}` object to the JSON — kill that
+pid before the next run, or the stale-window check (exit 5) will reject it.
 
 Exit codes:
 
@@ -324,6 +331,45 @@ Reads the key from the environment only — never from a credential file — and
 exits non-zero if the variable is unset. `--key-env` names the variable;
 `--max-tokens` defaults to 4000, which is not generous for a reasoning model.
 
+### `x11_input.sh`
+
+```
+x11_input.sh [--display :99] [--window NAME] [--force] <command> [args]
+```
+
+Injects synthetic keyboard and mouse input through the X11 XTEST extension:
+`focus`, `geometry`, `tap <key>`, `hold <key> <seconds>`, `click <x> <y>`,
+`move <x> <y>`. Keys use xdotool syntax (`w a s d f v`, `Return`, `space`).
+
+This is the input path for the whole pipeline, and it is deliberately external
+to the game: the binary keeps no test hooks, no feature flag, and no second
+input mapping, so it stays an ordinary, human-playable game. The same calls work
+against a private Xvfb for automated capture and against a real display if a
+human and an agent ever play at the same time.
+
+Two behaviours worth knowing:
+
+- A bare Xvfb has no window manager, so the script focuses the game window
+  itself. Without that, keystrokes are delivered to nothing and vanish.
+- It refuses to inject on a display with more than a dozen root children, which
+  is what a developer's real desktop looks like — there, synthetic keys would
+  land in whatever the human currently has focused. Override with `--force`.
+
+Exit codes: 0 ok, 1 no matching window, 2 bad arguments, 5 display unreachable,
+6 missing xdotool, missing XTEST, or the desktop-safety refusal.
+
+### `x11_setup.sh`
+
+```
+x11_setup.sh [--prefix DIR]
+```
+
+Downloads and unpacks `xvfb`, `xserver-common`, `xdotool` and `libxdo3` into a
+local prefix — default `tools/physics-qa/.x11/root`, which is gitignored —
+without needing root. Both `run_capture.sh` and `x11_input.sh` look there
+automatically. Use it where passwordless sudo is unavailable; otherwise
+`sudo apt install xvfb xdotool` is equivalent.
+
 ## Results so far
 
 | run | frames | metrics | vision | note |
@@ -332,8 +378,20 @@ exits non-zero if the variable is unset. `--key-env` names the variable;
 | run2 | valid | ok, `mean_rmse` 6.6 | OK | stable baseline |
 | run3 | valid | fail, `mean_rmse` 23.6 | EXPLOSION | collision VFX covered the body; needs re-running once the game honours the capture flag |
 | verify | valid | ok, `mean_rmse` 2.5 | — | quiet window, no collision VFX |
+| x11 ctrl | valid | — | player stationary | no input for 3s: player drifted ~10px, enemy walked ~55px on its own |
+| x11 key D | valid | — | player ran right | `--input "hold d 3"`: player moved ~600px right, enemy closed leftward |
+| x11 key A | valid | — | player ran left | `hold a 3`: player left the visible area behind the UI panel; enemy barely moved |
 
 Run-to-run variance is high because the scene contains two characters (the player
 and an AI-driven enemy), so frames are not reproducible. Compare runs using the
 metrics, and re-run a suspect configuration rather than trusting one capture.
+
+The frame-difference metrics are the wrong tool for verifying input, though. In
+one measured pair the `hold d` run scored `mean_rmse` 6374 against 3485 for
+`hold a` — but that gap came from a particle blob that happened to be present in
+one frame, not from motion; a character's displacement is far smaller than a VFX
+burst in RMSE terms. The reliable signal is visual: the player carries a
+light-coloured card sprite, so track it across a `--input` run. Direction is the
+discriminator — no input leaves the player put, while the enemy wanders in every
+run, so only real input can flip the player's direction of travel.
 

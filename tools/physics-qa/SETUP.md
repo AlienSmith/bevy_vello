@@ -44,6 +44,16 @@ python3 -m pip install numpy pillow
 | `imagemagick` | `import`, to capture the window |
 | `numpy`, `pillow` | `metrics.py` |
 
+`xdotool` is only needed to inject input (`--input`, `x11_input.sh`). Where you
+cannot install packages, fetch Xvfb and xdotool into a local prefix instead —
+no root required:
+
+```bash
+tools/physics-qa/x11_setup.sh
+```
+
+Both scripts find that copy on their own, so nothing else needs setting.
+
 ## 3. Build
 
 ```bash

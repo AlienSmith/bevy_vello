@@ -211,6 +211,48 @@ fn claculate_velocity_spine(
     result
 }
 
+/// Braking impulses: nudge every spine + frame particle velocity toward zero
+/// by `brake_blending` per frame while no movement input is held. This is the
+/// release-side counterpart of `claculate_velocity_spine`: without it the body
+/// coasts for seconds (headless probe: ~640 px after a 2.4 s D-hold), because
+/// the only natural decay is a hardcoded 0.999/tick factor.
+///
+/// A gentle blend (default 0.12) keeps some physics feel — external pushes
+/// from hits still move the body, they just settle within ~0.5–1 s instead of
+/// never.
+fn calculate_brake_impulses(
+    entities: &Vec<Entity>,
+    particles: &Vec<VelloParticle>,
+    frame_entities: &[Entity; 4],
+    frame_particles: &Vec<VelloParticle>,
+    config: &SpineConfig,
+) -> Vec<CharacterPivotImpulseEvent> {
+    let mut result = vec![];
+    let brake = config.brake_blending.clamp(0.0, 1.0);
+    if brake <= f32::EPSILON {
+        return result;
+    }
+    let mut emit = |f: &VelloParticle, entity: Entity| {
+        if f.particle.inv_mass <= f32::EPSILON {
+            return;
+        }
+        // Δv = -brake * current  →  impulse = Δv / inv_mass
+        let impulse = -brake * f.particle.velocity / f.particle.inv_mass;
+        result.push(CharacterPivotImpulseEvent {
+            character_entity: f.root_entity,
+            joint_entity: entity,
+            impulse,
+        });
+    };
+    for (i, entity) in entities.iter().enumerate() {
+        emit(&particles[i], *entity);
+    }
+    for (i, entity) in frame_entities.iter().enumerate() {
+        emit(&frame_particles[i], *entity);
+    }
+    result
+}
+
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
 ///
 /// # Arm topology
@@ -583,6 +625,24 @@ pub fn update_character_movement(
         }
 
         if spine.move_vector.length_squared() <= 0.01 {
+            let entities: Vec<Entity> = spine.particles.to_vec();
+            let particles: Vec<VelloParticle> = entities
+                .iter()
+                .map(|e| p_q.get(*e).unwrap().clone())
+                .collect();
+            let frame_entities = p_root.frame_entities;
+            let frame_particles: Vec<VelloParticle> = frame_entities
+                .iter()
+                .map(|e| p_q.get(*e).unwrap().clone())
+                .collect();
+            let brakes = calculate_brake_impulses(
+                &entities,
+                &particles,
+                &frame_entities,
+                &frame_particles,
+                &spine.config,
+            );
+            velocity_events.write_batch(brakes);
             continue;
         }
 

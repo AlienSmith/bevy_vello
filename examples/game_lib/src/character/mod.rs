@@ -71,6 +71,13 @@ pub struct SpineConfig {
     /// Hard cap on particle velocity magnitude. Blended result is clamped
     /// to this limit before being applied.
     pub max_speed: f32,
+    /// Lerp factor for braking toward zero velocity per frame when
+    /// `move_vector` is zero. Headless probe measured that without braking
+    /// the body coasts ~640 px (and keeps sliding ~720 px/s) after a 2.4 s
+    /// D-hold, because the only decay paths are a hardcoded 0.999/tick and
+    /// shape-relative damping that cannot oppose bulk translation.
+    /// 0.12 halves speed in ~6 frames at 60 fps (~65 px glide from 500 px/s).
+    pub brake_blending: f32,
 }
 
 impl Default for SpineConfig {
@@ -80,6 +87,7 @@ impl Default for SpineConfig {
             velocity_scale: 10.0,
             velocity_blending: 0.5,
             max_speed: 600.0,
+            brake_blending: 0.12,
         }
     }
 }

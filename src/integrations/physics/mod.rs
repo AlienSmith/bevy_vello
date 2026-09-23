@@ -1,5 +1,7 @@
 mod plugin;
-mod systems;
+// pub: headless/tooling binaries reuse the pub physics systems to run the
+// same FixedUpdate chain without the GPU collision tail.
+pub mod systems;
 
 use bevy::{
     ecs::{
@@ -31,6 +33,20 @@ impl VelloConstraintWorld {
     // vello coordinate is x right y down
     pub fn set_gravity(&mut self, gravity: Vec2) {
         self.data.gravity = gravity;
+    }
+
+    /// Test support: queue a synthetic collision hit on the soft body of
+    /// `collider`. Consumed by the next physics step; the body frame receives
+    /// the kinematic delta and the skeleton sees the same offsets through
+    /// `apply_collision_correction`. Headless probes use this to exercise the
+    /// collision→skeleton channel without GPU collision detection.
+    pub fn queue_test_hit(&mut self, collider: Entity, pos_offset: Vec2, vel_offset: Vec2) {
+        self.data.queue_test_hit(&collider, pos_offset, vel_offset);
+    }
+
+    /// Entity keys of all soft bodies currently in the world (probe helper).
+    pub fn softbody_collider_keys(&self) -> Vec<Entity> {
+        self.data.collider_to_body.keys().copied().collect()
     }
 }
 

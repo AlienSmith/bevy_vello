@@ -560,33 +560,33 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
         .character
         .expect("player must be spawned first");
 
-    commands
-        .spawn((
-            VelloSceneBundle {
-                transform: Transform {
-                    translation: Vec3::new(400.0, 0.0, 100.0),
-                    scale: Vec3::new(0.5, 0.5, 1.0),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            CharacterRoot {
-                svg_asset_id: "V8.character.svg".to_owned(),
-                blueprint_asset_id: "v8.character.json".to_owned(),
-                collision_group: ENEMY_COLLISION_GROUP,
-            },
-            CharacterController {
-                move_vector: Vec2::ZERO,
-                point_vector: Vec2::ZERO,
-                ..Default::default()
-            },
-            AiState::default(),
-            Enemy,
-        ))
-        .with_child((
-            Name::new("Enemy AI"),
-            BehaveTree::new(build_enemy_ai_tree(player_entity)),
-        ));
+    // commands
+    //     .spawn((
+    //         VelloSceneBundle {
+    //             transform: Transform {
+    //                 translation: Vec3::new(400.0, 0.0, 100.0),
+    //                 scale: Vec3::new(0.5, 0.5, 1.0),
+    //                 ..Default::default()
+    //             },
+    //             ..Default::default()
+    //         },
+    //         CharacterRoot {
+    //             svg_asset_id: "V8.character.svg".to_owned(),
+    //             blueprint_asset_id: "v8.character.json".to_owned(),
+    //             collision_group: ENEMY_COLLISION_GROUP,
+    //         },
+    //         CharacterController {
+    //             move_vector: Vec2::ZERO,
+    //             point_vector: Vec2::ZERO,
+    //             ..Default::default()
+    //         },
+    //         AiState::default(),
+    //         Enemy,
+    //     ))
+    //     .with_child((
+    //         Name::new("Enemy AI"),
+    //         BehaveTree::new(build_enemy_ai_tree(player_entity)),
+    //     ));
 }
 
 /// Spawn a pistol collider and connect it to the character's PRLA particle

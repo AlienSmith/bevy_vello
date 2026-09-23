@@ -2,3 +2,5 @@
 shots*/
 *.character.json.tmp
 __pycache__/
+# Local no-root X11 install (Xvfb + xdotool unpacked from .debs)
+.x11/

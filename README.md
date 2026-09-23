@@ -97,3 +97,26 @@ their respective licenses, available in the `LICENSE` file in their directories.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
+
+## Project notes (physics / character controller work)
+
+Custom physics work lives in `study_vello/integrations/vello_physics` (sibling
+repo, branch `transmission`) and is wired up under
+`src/integrations/physics/`. Design docs and session handoff notes are in
+[`plans/`](plans/):
+
+- [`plans/one_way_coupling_and_collision_channel.md`](plans/one_way_coupling_and_collision_channel.md)
+  — **latest change**: skeleton drives body parts one-directionally
+  (`skeleton_drives_body` JSON knob); collision reaches the skeleton only
+  through the kinematic channel (`apply_collision_correction`, now hardened
+  with a single `apply_kinematic_delta` choke point, px / px-per-tick units
+  contract, safety clamps, tunable `collision_damping`/`rotation_resistance`).
+  Includes headless test results and the **GPU-side test checklist that has
+  not been run yet**.
+- [`plans/xpbd_spine_collision_audit.md`](plans/xpbd_spine_collision_audit.md)
+  — full audit of the XPBD skeleton solver, body soft bodies, and the
+  two-level collision resolution pipeline (findings F1–F10, ranked fixes).
+- Headless probe (no GPU): `examples/collision_detection/examples/headless_ctrl.rs`
+  — runs the real character + controller + XPBD physics; env knobs
+  `OUT_CSV`, `SYNTH_HIT`, `ROT_GAIN`, `V_SCALE`, `BRAKE`.
+  Capture/QA tooling: `tools/physics-qa/`.
