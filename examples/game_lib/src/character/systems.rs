@@ -75,25 +75,25 @@ pub fn tick_spine_drive(
         } else {
             config.velocity_blending = rate(config.velocity_blending);
         }
-        let events: Vec<CharacterPivotImpulseEvent> =
-            if spine.move_vector.length_squared() <= 0.01 {
-                calculate_brake_impulses(
-                    &entities,
-                    &particles,
-                    &frame_entities,
-                    &frame_particles,
-                    &config,
-                )
-            } else {
-                claculate_velocity_spine(
-                    &entities,
-                    &particles,
-                    &frame_entities,
-                    &frame_particles,
-                    spine.move_vector,
-                    &config,
-                )
-            };
+        let events: Vec<CharacterPivotImpulseEvent> = if spine.move_vector.length_squared() <= 0.01
+        {
+            calculate_brake_impulses(
+                &entities,
+                &particles,
+                &frame_entities,
+                &frame_particles,
+                &config,
+            )
+        } else {
+            claculate_velocity_spine(
+                &entities,
+                &particles,
+                &frame_entities,
+                &frame_particles,
+                spine.move_vector,
+                &config,
+            )
+        };
 
         // Convert each Δv (impulse = Δv / inv_mass, computed from the same
         // mirrored velocity we read here) into an overwrite of that
@@ -190,24 +190,6 @@ fn claculate_velocity_spine(
     let spine_vec = positions[0] - positions[SPINE_PARTICLE_COUNT - 1];
     let spine_len = spine_vec.length();
 
-    if spine_len <= f32::EPSILON {
-        // Degenerate spine: all particles collapsed. Push them all forward.
-        for i in 0..SPINE_PARTICLE_COUNT {
-            let target_velocity = desired_dir * length * config.velocity_scale;
-            let impulse = velocity_gap_to_impulse(
-                particles[i].particle.velocity,
-                target_velocity,
-                particles[i].particle.inv_mass,
-            );
-            result.push(CharacterPivotImpulseEvent {
-                character_entity: particles[i].root_entity,
-                joint_entity: entities[i],
-                impulse,
-            });
-        }
-        return result;
-    }
-
     let spine_dir = spine_vec / spine_len;
 
     // Rotation pivot: P2 (spine_mid, index 3). P2 is a frame particle, so the
@@ -272,19 +254,6 @@ fn claculate_velocity_spine(
             blended
         }
     };
-
-    // Spine particles.
-    for i in 0..SPINE_PARTICLE_COUNT {
-        let current_vel = particles[i].particle.velocity;
-        let velocity = rigid_velocity(positions[i], current_vel);
-        let impulse =
-            velocity_gap_to_impulse(current_vel, velocity, particles[i].particle.inv_mass);
-        result.push(CharacterPivotImpulseEvent {
-            character_entity: particles[i].root_entity,
-            joint_entity: entities[i],
-            impulse,
-        });
-    }
 
     // Frame particles: [P30, P31, P3, P2]. Driving all four with the same rigid
     // velocity field keeps the frame rigid under the controller (the old code
