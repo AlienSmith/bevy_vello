@@ -78,6 +78,35 @@ pub struct SpineConfig {
     /// shape-relative damping that cannot oppose bulk translation.
     /// 0.12 halves speed in ~6 frames at 60 fps (~65 px glide from 500 px/s).
     pub brake_blending: f32,
+    /// Drive model switch. `false` = the original velocity-tracking servo
+    /// (overwrite the full gap to a rigid target each tick — snappy but
+    /// kinematic-feeling). `true` = the muscle drive
+    /// ([`calculate_muscle_drive`]): bounded additive impulses on the frame
+    /// COM + heading torque + drag, so momentum is real and the solver
+    /// negotiates with the controller instead of being overridden.
+    pub drive_muscle: bool,
+    /// Muscle drive: cruising speed at full alignment (px/s).
+    pub speed_target: f32,
+    /// Muscle drive: acceleration cap (px/s²) — bounds the linear Δv per
+    /// tick, creating ramp-up and coast-down instead of instant velocity.
+    pub accel_max: f32,
+    /// Muscle drive: how fast the velocity servo closes the gap to
+    /// `v_target` (1/s), subject to `accel_max`.
+    pub speed_gain: f32,
+    /// Muscle drive: P gain from heading error (rad) to target angular
+    /// velocity (rad/s), clamped to `omega_max`.
+    pub heading_gain: f32,
+    /// Muscle drive: turn-rate cap (rad/s). Bounds the 180° turn time.
+    pub omega_max: f32,
+    /// Muscle drive: how fast ω chases its target (1/s).
+    pub omega_gain: f32,
+    /// Muscle drive: angular acceleration cap (rad/s²) — torque limit.
+    pub alpha_max: f32,
+    /// Muscle drive: linear drag (1/s). The only stopping mechanism on
+    /// release; speed decays as v·e^(-drag·t) — a coast, not a brake.
+    pub linear_drag: f32,
+    /// Muscle drive: angular drag (1/s), settles the turn overshoot.
+    pub angular_drag: f32,
 }
 
 impl Default for SpineConfig {
@@ -92,6 +121,19 @@ impl Default for SpineConfig {
             velocity_blending: 0.5,
             max_speed: 600.0,
             brake_blending: 0.12,
+            // Muscle drive defaults: v_blueprint mirror in SpineControlConfig
+            // (vello_physics). Servo remains the default mode so existing
+            // blueprints are bit-identical.
+            drive_muscle: false,
+            speed_target: 400.0,
+            accel_max: 900.0,
+            speed_gain: 8.0,
+            heading_gain: 6.0,
+            omega_max: 2.4,
+            omega_gain: 10.0,
+            alpha_max: 15.0,
+            linear_drag: 1.2,
+            angular_drag: 2.0,
         }
     }
 }

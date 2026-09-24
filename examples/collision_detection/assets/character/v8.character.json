@@ -1393,7 +1393,17 @@
     "velocity_scale": 10.0,
     "velocity_blending": 0.5,
     "max_speed": 600.0,
-    "brake_blending": 0.12
+    "brake_blending": 0.12,
+    "drive_muscle": true,
+    "speed_target": 480.0,
+    "accel_max": 4000.0,
+    "speed_gain": 50.0,
+    "heading_gain": 14.0,
+    "omega_max": 3.0,
+    "omega_gain": 30.0,
+    "alpha_max": 90.0,
+    "linear_drag": 1.2,
+    "angular_drag": 2.0
   },
   "decorations": [
     {
