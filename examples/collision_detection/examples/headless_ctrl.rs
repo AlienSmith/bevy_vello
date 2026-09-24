@@ -53,15 +53,19 @@ const BASELINE_END: f32 = 2.0;
 const LOG_PERIOD: f32 = 0.05;
 
 /// Instability scenarios (`SCENARIO` env):
-/// - `walk` (default): hold D 2.4 s — forward walk in the spawn facing.
-/// - `up`:    hold W 4 s — move_vector (0, 50): perpendicular to the spawn
-///   facing, so the ROTATIONAL controller runs at full gain the whole time.
+/// - `walk` (default): hold D 2.4 s — perpendicular walk in the spawn facing
+///   (character spawns facing up; D is a 90° turn-then-walk case).
+/// - `up`:    hold W 4 s — move_vector (0, 50): ALIGNED walk (straight-line
+///   quality test, requirement 1).
+/// - `down`:  hold S 8 s — move_vector (0, -50): 180° turn-then-walk
+///   (requirement 2: turn within a small travel distance).
 /// - `turn`:  hold A 6 s — 180° alignment command.
 /// - `tap`:   single 0.3 s D press, then 5 s of observation.
 fn scenario() -> (Vec2, f32, f32, f32) {
     // (input vector, input_end, exit_at, log_period)
     match std::env::var("SCENARIO").as_deref() {
         Ok("up") => (Vec2::new(0.0, 50.0), 6.0, 8.0, 0.02),
+        Ok("down") => (Vec2::new(0.0, -50.0), 8.0, 10.0, 0.02),
         Ok("turn") => (Vec2::new(-50.0, 0.0), 8.0, 10.0, 0.02),
         Ok("tap") => (Vec2::new(50.0, 0.0), 2.3, 8.0, 0.02),
         _ => (D_INPUT, 4.4, 6.5, 0.05),
@@ -310,6 +314,11 @@ fn probe_driver(
         if let Ok(g) = std::env::var("BRAKE") {
             if let Ok(v) = g.parse::<f32>() {
                 spine.config.brake_blending = v;
+            }
+        }
+        if let Ok(g) = std::env::var("VEL_BLEND") {
+            if let Ok(v) = g.parse::<f32>() {
+                spine.config.velocity_blending = v;
             }
         }
         spine.move_vector = if t >= BASELINE_END && t < probe.input_end {

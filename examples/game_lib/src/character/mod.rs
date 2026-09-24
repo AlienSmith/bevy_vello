@@ -83,7 +83,11 @@ pub struct SpineConfig {
 impl Default for SpineConfig {
     fn default() -> Self {
         Self {
-            rotation_gain: 24.0,
+            // 36 (tuned 2026-09-24): halves 180° turn time (2.74 -> 1.74 s)
+            // and turn travel (322 -> 162 px) vs 24, with the cleanest
+            // post-turn walk (±0.8°) and lowest path lateral swing (19 px).
+            // 48+ turns marginally faster but swings the path (29-41 px).
+            rotation_gain: 36.0,
             velocity_scale: 10.0,
             velocity_blending: 0.5,
             max_speed: 600.0,
