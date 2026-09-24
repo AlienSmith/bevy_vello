@@ -800,7 +800,15 @@ pub fn assemble_character(
     // Spine particles: [PH, P0, P1, P2, P3]
     let spine = SpineController {
         particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
-        config: SpineConfig::default(),
+        // Controller gains come from the character blueprint JSON ("spine"
+        // section) so they can be tuned without recompiling.
+        config: SpineConfig {
+            rotation_gain: blueprint.data.spine.rotation_gain,
+            velocity_scale: blueprint.data.spine.velocity_scale,
+            velocity_blending: blueprint.data.spine.velocity_blending,
+            max_speed: blueprint.data.spine.max_speed,
+            brake_blending: blueprint.data.spine.brake_blending,
+        },
         move_vector: Vec2::ZERO,
     };
 
