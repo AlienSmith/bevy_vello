@@ -818,6 +818,7 @@ pub fn assemble_character(
             alpha_max: blueprint.data.spine.alpha_max,
             linear_drag: blueprint.data.spine.linear_drag,
             angular_drag: blueprint.data.spine.angular_drag,
+            speed_floor: blueprint.data.spine.speed_floor,
         },
         move_vector: Vec2::ZERO,
     };

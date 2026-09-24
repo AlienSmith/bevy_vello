@@ -107,6 +107,12 @@ pub struct SpineConfig {
     pub linear_drag: f32,
     /// Muscle drive: angular drag (1/s), settles the turn overshoot.
     pub angular_drag: f32,
+    /// Muscle drive: heading gain for the LOWER body (hips) — a weaker
+    /// follower motor so the hips converge to the heading after the upper
+    /// Muscle drive: fraction of cruise speed kept while misaligned (the
+    /// motion-during-turn floor). 0 = old two-stage behavior (stop, then
+    /// go); 0.2 = drift through the turn.
+    pub speed_floor: f32,
 }
 
 impl Default for SpineConfig {
@@ -134,6 +140,7 @@ impl Default for SpineConfig {
             alpha_max: 15.0,
             linear_drag: 1.2,
             angular_drag: 2.0,
+            speed_floor: 0.2,
         }
     }
 }

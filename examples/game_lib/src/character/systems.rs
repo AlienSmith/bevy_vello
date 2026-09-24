@@ -247,13 +247,20 @@ fn calculate_muscle_drive(
     let (lower_com, lower_vel, lower_mass) = com_of(&lower);
     let total_mass = upper_mass + lower_mass;
     let core_vel = (upper_vel * upper_mass + lower_vel * lower_mass) / total_mass;
+    let core_com = (upper_com * upper_mass + lower_com * lower_mass) / total_mass;
+    // One driven set for the single core motor.
+    let mut driven: Vec<(&VelloParticle, Entity)> = Vec::with_capacity(7);
+    driven.extend(upper.iter().copied());
+    driven.extend(lower.iter().copied());
 
-    // Heading sensor: the UPPER body's own orientation (PH − P1) — the same
-    // body as the actuator, so it cannot wind against a lagging chain.
-    let upper_vec = positions[0] - positions[2];
+    // Heading sensor: the FULL spine (PH − P3) — what the player sees as
+    // "where the head points". The single core motor converges this to the
+    // move direction; the upper-body lead/lag during the turn comes from the
+    // spine joints' angular compliance, not from a second actuator.
+    let spine_vec = positions[0] - positions[SPINE_PARTICLE_COUNT - 1];
     // NaN guard (same rationale as the servo path).
-    let upper_len = upper_vec.length().max(1e-3);
-    let spine_dir = upper_vec / upper_len;
+    let spine_len = spine_vec.length().max(1e-3);
+    let spine_dir = spine_vec / spine_len;
 
     // --- 1. Linear drive (bounded, always moving) -----------------------
     // Speed floor: the character keeps moving (at speed_floor of cruise)
@@ -261,7 +268,8 @@ fn calculate_muscle_drive(
     // old two-stage "turn first, then go".
     let dot_val = spine_dir.dot(desired_dir);
     let alignment = if moving { dot_val.clamp(0.0, 1.0) } else { 0.0 };
-    let speed_factor = 0.35 + 0.65 * alignment;
+    let speed_factor = config.speed_floor.clamp(0.0, 1.0)
+        + (1.0 - config.speed_floor.clamp(0.0, 1.0)) * alignment;
     let v_target = desired_dir * config.speed_target * speed_factor;
     let mut delta_v_com =
         (v_target - core_vel) * config.speed_gain.min(50.0) * dt;
@@ -284,11 +292,11 @@ fn calculate_muscle_drive(
     } else {
         0.0
     };
-    // Rigid-body ω fit over the UPPER body (mass-weighted).
+    // Rigid-body ω fit over the whole core (mass-weighted).
     let mut rr_sum = 0.0f32;
     let mut rv_sum = 0.0f32;
-    for (p, _) in &upper {
-        let r = p.particle.pos - upper_com;
+    for (p, _) in &driven {
+        let r = p.particle.pos - core_com;
         let m = 1.0 / p.particle.inv_mass;
         rr_sum += m * r.length_squared();
         rv_sum += m * cross(r, p.particle.velocity);
@@ -303,27 +311,24 @@ fn calculate_muscle_drive(
     let drag_omega = omega * config.angular_drag.min(50.0) * dt;
 
     // --- 3. Emit per-particle Δv ---------------------------------------
-    // Linear drive + drag: whole core (upper + lower).
-    // Heading torque + angular drag: UPPER body only, as a pure couple
-    // about its own COM. The lower body follows through the spine joints.
-    for (set, com, angular) in [
-        (&upper, upper_com, delta_omega - drag_omega),
-        (&lower, lower_com, 0.0),
-    ] {
-        for (p, entity) in set {
-            let r = p.particle.pos - com;
-            // perp(r)·Δω rotates r by +90°; y-down → positive Δω = CW.
-            let tangential = Vec2::new(-r.y, r.x) * angular;
-            // Linear drag per particle (bulk decay + slight settling).
-            let drag = -p.particle.velocity * config.linear_drag.min(50.0) * dt;
-            let delta_v = delta_v_com + tangential + drag;
-            // Δv → impulse (the tick path multiplies back by inv_mass).
-            result.push(CharacterPivotImpulseEvent {
-                character_entity: p.root_entity,
-                joint_entity: *entity,
-                impulse: delta_v / p.particle.inv_mass,
-            });
-        }
+    // ONE heading motor on the whole core (upper + lower as a single
+    // rigid-ish body), applied as a pure couple about the core COM. The
+    // upper-body lead/lag during turns comes from the spine joints'
+    // angular compliance (JSON), not from a second actuator — two motors
+    // on one stiff chain fight each other (measured: 5x turn travel).
+    for (p, entity) in &driven {
+        let r = p.particle.pos - core_com;
+        // perp(r)·Δω rotates r by +90°; y-down → positive Δω = CW.
+        let tangential = Vec2::new(-r.y, r.x) * (delta_omega - drag_omega);
+        // Linear drag per particle (bulk decay + slight settling).
+        let drag = -p.particle.velocity * config.linear_drag.min(50.0) * dt;
+        let delta_v = delta_v_com + tangential + drag;
+        // Δv → impulse (the tick path multiplies back by inv_mass).
+        result.push(CharacterPivotImpulseEvent {
+            character_entity: p.root_entity,
+            joint_entity: *entity,
+            impulse: delta_v / p.particle.inv_mass,
+        });
     }
     result
 }
