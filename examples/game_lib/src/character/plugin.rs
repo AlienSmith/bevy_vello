@@ -34,9 +34,15 @@ impl Plugin for GameCharacterPlugin {
                 update_character_movement.before(CollisionSystems::CollisionResponsePhysics),
             );
         //we would intensionally make the reset event being resolved frame later so it won't got mixed with control event.
-        app.add_systems(
-            PostUpdate,
-            reset_arm_constraint_event.after(CollisionSystems::CollisionResponsePhysics),
-        );
+        // VELLO_NO_ARM=1: diagnostic kill-switch — drops the arm/aim
+        // constraint rewrites entirely (isolates arm-strain energy from
+        // spine behavior; a strained aim behind the character can pump
+        // energy into the skeleton indefinitely).
+        if std::env::var("VELLO_NO_ARM").as_deref() != Ok("1") {
+            app.add_systems(
+                PostUpdate,
+                reset_arm_constraint_event.after(CollisionSystems::CollisionResponsePhysics),
+            );
+        }
     }
 }

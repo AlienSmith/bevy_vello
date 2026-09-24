@@ -267,9 +267,16 @@ fn calculate_muscle_drive(
     // even while misaligned — motion and turning overlap instead of the
     // old two-stage "turn first, then go".
     let dot_val = spine_dir.dot(desired_dir);
-    let alignment = if moving { dot_val.clamp(0.0, 1.0) } else { 0.0 };
-    let speed_factor = config.speed_floor.clamp(0.0, 1.0)
-        + (1.0 - config.speed_floor.clamp(0.0, 1.0)) * alignment;
+    // The floor applies ONLY while the player holds input — on release the
+    // target is ZERO (true coast) or the drive keeps pushing at floor speed
+    // forever, which bends the spine while "resting" and was misread as the
+    // physics refusing to straighten.
+    let speed_factor = if moving {
+        let floor = config.speed_floor.clamp(0.0, 1.0);
+        floor + (1.0 - floor) * dot_val.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let v_target = desired_dir * config.speed_target * speed_factor;
     let mut delta_v_com =
         (v_target - core_vel) * config.speed_gain.min(50.0) * dt;

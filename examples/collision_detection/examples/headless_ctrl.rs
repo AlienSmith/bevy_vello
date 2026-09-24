@@ -64,8 +64,8 @@ const LOG_PERIOD: f32 = 0.05;
 fn scenario() -> (Vec2, f32, f32, f32) {
     // (input vector, input_end, exit_at, log_period)
     match std::env::var("SCENARIO").as_deref() {
-        Ok("up") => (Vec2::new(0.0, 50.0), 6.0, 8.0, 0.02),
-        Ok("down") => (Vec2::new(0.0, -50.0), 8.0, 10.0, 0.02),
+        Ok("up") => (Vec2::new(0.0, 50.0), 4.5, 9.5, 0.02),
+        Ok("down") => (Vec2::new(0.0, -50.0), 4.5, 11.5, 0.02),
         Ok("turn") => (Vec2::new(-50.0, 0.0), 8.0, 10.0, 0.02),
         Ok("tap") => (Vec2::new(50.0, 0.0), 2.3, 8.0, 0.02),
         _ => (D_INPUT, 4.4, 6.5, 0.05),
