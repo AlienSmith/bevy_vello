@@ -36,3 +36,4 @@ dist/
 
 # Design plans — temp files, code is the source of truth
 /plans/
+captures/
