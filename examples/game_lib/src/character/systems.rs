@@ -188,7 +188,12 @@ fn claculate_velocity_spine(
     // Current spine direction: PH (head, index 0) minus P3 (tail, index 4).
     // spine_dir points from tail toward head.
     let spine_vec = positions[0] - positions[SPINE_PARTICLE_COUNT - 1];
-    let spine_len = spine_vec.length();
+    // NaN guard: with the degenerate-spine branch gone, a collapsed spine
+    // would divide by ~0 and the tick controller would overwrite real
+    // velocities with NaN (unrecoverable). Clamping keeps the math finite —
+    // the chain just stops being steerable for a tick and the joints
+    // recover it.
+    let spine_len = spine_vec.length().max(1e-3);
 
     let spine_dir = spine_vec / spine_len;
 
