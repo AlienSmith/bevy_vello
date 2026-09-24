@@ -200,63 +200,77 @@ fn calculate_muscle_drive(
         .map(|p| p.particle.pos)
         .collect();
 
-    // Heading: PH (head) minus P3 (tail) — the whole spine chain is part of
-    // the driven set, so sensor and actuator live on the same (near-rigid)
-    // body and the frame cannot wind against a lagging chain.
-    let spine_vec = positions[0] - positions[SPINE_PARTICLE_COUNT - 1];
-    // NaN guard (same rationale as the servo path).
-    let spine_len = spine_vec.length().max(1e-3);
-    let spine_dir = spine_vec / spine_len;
-
-    // Driven set = the heavy skeleton core: the 5 spine particles
-    // [PH, P0, P1, P2, P3] plus the two hips [P30, P31]. P2/P3 appear in
-    // both lists; deduplicate by taking the spine list + hips only. The
-    // light limbs (arms) are deliberately NOT actuated — they hang off
-    // their joints and follow passively, which is what keeps the walk
-    // organic instead of robotic.
-    // COM is mass-weighted (spine particles are heavier than limbs, and
-    // within the driven set masses can differ too); zero-inv-mass
-    // particles are static and excluded entirely.
-    let mut driven: Vec<(&VelloParticle, Entity)> = Vec::with_capacity(7);
+    // --- Body split -----------------------------------------------------
+    // Upper body = [PH, P0, P1] (the steering muscles — head/neck/chest);
+    // lower body = [P2, P3] + hips [P30, P31] (the locomotion engine).
+    // The heading motor spins the UPPER body about its own COM (a pure
+    // couple: zero net linear momentum); the stiff spine joints then drag
+    // the lower body around — head turns first, hips swing after. The
+    // light limbs stay passive, hanging off their joints.
+    let mut upper: Vec<(&VelloParticle, Entity)> = Vec::with_capacity(3);
+    let mut lower: Vec<(&VelloParticle, Entity)> = Vec::with_capacity(4);
     for (i, e) in entities.iter().take(SPINE_PARTICLE_COUNT).enumerate() {
-        if particles[i].particle.inv_mass > f32::EPSILON {
-            driven.push((&particles[i], *e));
+        if particles[i].particle.inv_mass <= f32::EPSILON {
+            continue;
+        }
+        if i < 3 {
+            upper.push((&particles[i], *e));
+        } else {
+            lower.push((&particles[i], *e));
         }
     }
     for (i, e) in frame_entities.iter().enumerate() {
-        let is_spine_dup = i >= 2; // [P30, P31, P3, P2] — P3/P2 already driven
+        let is_spine_dup = i >= 2; // [P30, P31, P3, P2] — P3/P2 already in lower
         if !is_spine_dup && frame_particles[i].particle.inv_mass > f32::EPSILON {
-            driven.push((&frame_particles[i], *e));
+            lower.push((&frame_particles[i], *e));
         }
     }
-    if driven.is_empty() {
+    if upper.is_empty() || lower.is_empty() {
         return result;
     }
 
-    let mut total_mass = 0.0f32;
-    let mut com_pos = Vec2::ZERO;
-    let mut com_vel = Vec2::ZERO;
-    for (p, _) in &driven {
-        let m = 1.0 / p.particle.inv_mass;
-        total_mass += m;
-        com_pos += p.particle.pos * m;
-        com_vel += p.particle.velocity * m;
-    }
-    com_pos /= total_mass;
-    com_vel /= total_mass;
+    // Mass-weighted COM helper (spine particles are heavier than limbs, and
+    // masses can differ inside the core too).
+    let com_of = |set: &[(&VelloParticle, Entity)]| -> (Vec2, Vec2, f32) {
+        let mut m_sum = 0.0f32;
+        let mut p_sum = Vec2::ZERO;
+        let mut v_sum = Vec2::ZERO;
+        for (p, _) in set {
+            let m = 1.0 / p.particle.inv_mass;
+            m_sum += m;
+            p_sum += p.particle.pos * m;
+            v_sum += p.particle.velocity * m;
+        }
+        (p_sum / m_sum, v_sum / m_sum, m_sum)
+    };
+    let (upper_com, upper_vel, upper_mass) = com_of(&upper);
+    let (lower_com, lower_vel, lower_mass) = com_of(&lower);
+    let total_mass = upper_mass + lower_mass;
+    let core_vel = (upper_vel * upper_mass + lower_vel * lower_mass) / total_mass;
 
-    // --- 1. Linear drive (bounded) ------------------------------------
+    // Heading sensor: the UPPER body's own orientation (PH − P1) — the same
+    // body as the actuator, so it cannot wind against a lagging chain.
+    let upper_vec = positions[0] - positions[2];
+    // NaN guard (same rationale as the servo path).
+    let upper_len = upper_vec.length().max(1e-3);
+    let spine_dir = upper_vec / upper_len;
+
+    // --- 1. Linear drive (bounded, always moving) -----------------------
+    // Speed floor: the character keeps moving (at speed_floor of cruise)
+    // even while misaligned — motion and turning overlap instead of the
+    // old two-stage "turn first, then go".
     let dot_val = spine_dir.dot(desired_dir);
     let alignment = if moving { dot_val.clamp(0.0, 1.0) } else { 0.0 };
-    let v_target = desired_dir * config.speed_target * alignment;
+    let speed_factor = 0.35 + 0.65 * alignment;
+    let v_target = desired_dir * config.speed_target * speed_factor;
     let mut delta_v_com =
-        (v_target - com_vel) * config.speed_gain.min(50.0) * dt;
+        (v_target - core_vel) * config.speed_gain.min(50.0) * dt;
     let lin_cap = config.accel_max * dt;
     if delta_v_com.length() > lin_cap {
         delta_v_com = delta_v_com / delta_v_com.length() * lin_cap;
     }
 
-    // --- 2. Heading torque motor (bounded) -----------------------------
+    // --- 2. Heading torque motor on the UPPER body (bounded) ------------
     // Signed heading error in radians; the exact anti-parallel case
     // (e.g. facing up, holding S) has sin == ±0 → pick the consistent
     // positive (clockwise) direction, matching the servo's signum behavior.
@@ -270,11 +284,11 @@ fn calculate_muscle_drive(
     } else {
         0.0
     };
-    // Rigid-body ω fit over the driven set (mass-weighted).
+    // Rigid-body ω fit over the UPPER body (mass-weighted).
     let mut rr_sum = 0.0f32;
     let mut rv_sum = 0.0f32;
-    for (p, _) in &driven {
-        let r = p.particle.pos - com_pos;
+    for (p, _) in &upper {
+        let r = p.particle.pos - upper_com;
         let m = 1.0 / p.particle.inv_mass;
         rr_sum += m * r.length_squared();
         rv_sum += m * cross(r, p.particle.velocity);
@@ -289,20 +303,27 @@ fn calculate_muscle_drive(
     let drag_omega = omega * config.angular_drag.min(50.0) * dt;
 
     // --- 3. Emit per-particle Δv ---------------------------------------
-    for (p, entity) in &driven {
-        let r = p.particle.pos - com_pos;
-        // Tangential velocity change for the angular actuator
-        // (perp(r)·Δω rotates r by +90°; y-down → positive Δω = clockwise).
-        let tangential = Vec2::new(-r.y, r.x) * (delta_omega - drag_omega);
-        // Linear drag per particle (bulk decay + slight internal settling).
-        let drag = -p.particle.velocity * config.linear_drag.min(50.0) * dt;
-        let delta_v = delta_v_com + tangential + drag;
-        // Δv → impulse (the tick path multiplies back by inv_mass).
-        result.push(CharacterPivotImpulseEvent {
-            character_entity: p.root_entity,
-            joint_entity: *entity,
-            impulse: delta_v / p.particle.inv_mass,
-        });
+    // Linear drive + drag: whole core (upper + lower).
+    // Heading torque + angular drag: UPPER body only, as a pure couple
+    // about its own COM. The lower body follows through the spine joints.
+    for (set, com, angular) in [
+        (&upper, upper_com, delta_omega - drag_omega),
+        (&lower, lower_com, 0.0),
+    ] {
+        for (p, entity) in set {
+            let r = p.particle.pos - com;
+            // perp(r)·Δω rotates r by +90°; y-down → positive Δω = CW.
+            let tangential = Vec2::new(-r.y, r.x) * angular;
+            // Linear drag per particle (bulk decay + slight settling).
+            let drag = -p.particle.velocity * config.linear_drag.min(50.0) * dt;
+            let delta_v = delta_v_com + tangential + drag;
+            // Δv → impulse (the tick path multiplies back by inv_mass).
+            result.push(CharacterPivotImpulseEvent {
+                character_entity: p.root_entity,
+                joint_entity: *entity,
+                impulse: delta_v / p.particle.inv_mass,
+            });
+        }
     }
     result
 }
