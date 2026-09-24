@@ -322,7 +322,14 @@ fn calculate_muscle_drive(
         let tangential = Vec2::new(-r.y, r.x) * (delta_omega - drag_omega);
         // Linear drag per particle (bulk decay + slight settling).
         let drag = -p.particle.velocity * config.linear_drag.min(50.0) * dt;
-        let delta_v = delta_v_com + tangential + drag;
+        // Posture damping: bleed the DEVIATION from the rigid motion field
+        // (pure dissipation — rigid momentum is untouched). This is what
+        // makes soft joints usable: they can bow, but the bend vibration
+        // decays instead of whipping.
+        let rigid_here = core_vel + Vec2::new(-r.y, r.x) * omega;
+        let posture =
+            -(p.particle.velocity - rigid_here) * config.posture_damping.min(50.0) * dt;
+        let delta_v = delta_v_com + tangential + drag + posture;
         // Δv → impulse (the tick path multiplies back by inv_mass).
         result.push(CharacterPivotImpulseEvent {
             character_entity: p.root_entity,

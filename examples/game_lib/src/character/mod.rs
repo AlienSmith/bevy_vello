@@ -113,6 +113,11 @@ pub struct SpineConfig {
     /// motion-during-turn floor). 0 = old two-stage behavior (stop, then
     /// go); 0.2 = drift through the turn.
     pub speed_floor: f32,
+    /// Muscle drive: damping (1/s) of each particle's DEVIATION from the
+    /// rigid motion field (core COM + fitted ω). Pure dissipation — never
+    /// adds or removes rigid momentum, only bleeds bend vibrations so soft
+    /// joints can bow without whipping. 0 = undamped (flails).
+    pub posture_damping: f32,
 }
 
 impl Default for SpineConfig {
@@ -141,6 +146,7 @@ impl Default for SpineConfig {
             linear_drag: 1.2,
             angular_drag: 2.0,
             speed_floor: 0.2,
+            posture_damping: 5.0,
         }
     }
 }

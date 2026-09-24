@@ -819,6 +819,7 @@ pub fn assemble_character(
             linear_drag: blueprint.data.spine.linear_drag,
             angular_drag: blueprint.data.spine.angular_drag,
             speed_floor: blueprint.data.spine.speed_floor,
+            posture_damping: blueprint.data.spine.posture_damping,
         },
         move_vector: Vec2::ZERO,
     };
