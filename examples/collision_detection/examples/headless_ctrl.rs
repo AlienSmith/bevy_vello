@@ -50,9 +50,24 @@ use game_lib::{
 
 const D_INPUT: Vec2 = Vec2::new(50.0, 0.0); // what read_player_input writes for KeyD
 const BASELINE_END: f32 = 2.0;
-const INPUT_END: f32 = 4.4;
-const EXIT_AT: f32 = 6.5;
 const LOG_PERIOD: f32 = 0.05;
+
+/// Instability scenarios (`SCENARIO` env):
+/// - `walk` (default): hold D 2.4 s — forward walk in the spawn facing.
+/// - `up`:    hold W 4 s — move_vector (0, 50): perpendicular to the spawn
+///   facing, so the ROTATIONAL controller runs at full gain the whole time.
+/// - `turn`:  hold A 6 s — 180° alignment command.
+/// - `tap`:   single 0.3 s D press, then 5 s of observation.
+fn scenario() -> (Vec2, f32, f32, f32) {
+    // (input vector, input_end, exit_at, log_period)
+    match std::env::var("SCENARIO").as_deref() {
+        Ok("up") => (Vec2::new(0.0, 50.0), 6.0, 8.0, 0.02),
+        Ok("turn") => (Vec2::new(-50.0, 0.0), 8.0, 10.0, 0.02),
+        Ok("tap") => (Vec2::new(50.0, 0.0), 2.3, 8.0, 0.02),
+        _ => (D_INPUT, 4.4, 6.5, 0.05),
+    }
+}
+
 fn out_path() -> String {
     std::env::var("OUT_CSV").unwrap_or_else(|_| "/tmp/x11get/headless/ctrl_log.csv".to_string())
 }
@@ -64,12 +79,23 @@ struct Probe {
     log: Vec<String>,
     next_log: f32,
     exited: bool,
+    input_vec: Vec2,
+    input_end: f32,
+    exit_at: f32,
+    log_period: f32,
 }
 
 fn main() {
+    // Frame rate is a first-class experimental variable: the controller runs
+    // per rendered frame while physics is fixed 90 Hz, so the pump/beat
+    // regime depends on it. PROBE_FPS overrides the default 60.
+    let fps: f64 = std::env::var("PROBE_FPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60.0);
     let mut app = App::default();
     app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-        1.0 / 60.0, // controller runs per app update; match the real game's ~60 fps
+        1.0 / fps, // controller runs per app update; override with PROBE_FPS
     ))))
         .add_plugins(bevy::log::LogPlugin::default())
         .add_plugins(AssetPlugin {
@@ -99,6 +125,10 @@ fn main() {
             log: vec![],
             next_log: 0.0,
             exited: false,
+            input_vec: scenario().0,
+            input_end: scenario().1,
+            exit_at: scenario().2,
+            log_period: scenario().3,
         });
 
     // Real physics stepping, same order as VelloCollisionResponsePlugin,
@@ -259,8 +289,8 @@ fn probe_driver(
     // as update_character_movement: initial_frame_coordinates.is_some()).
     let phase = if t < BASELINE_END {
         "baseline"
-    } else if t < INPUT_END {
-        "D_held"
+    } else if t < probe.input_end {
+        "input_held"
     } else {
         "released"
     };
@@ -282,8 +312,8 @@ fn probe_driver(
                 spine.config.brake_blending = v;
             }
         }
-        spine.move_vector = if t >= BASELINE_END && t < INPUT_END {
-            D_INPUT
+        spine.move_vector = if t >= BASELINE_END && t < probe.input_end {
+            probe.input_vec
         } else {
             Vec2::ZERO
         };
@@ -291,7 +321,7 @@ fn probe_driver(
 
     // Log spine particle state (vello coords: x right, y down).
     if t >= probe.next_log {
-        probe.next_log = t + LOG_PERIOD;
+        probe.next_log = t + probe.log_period;
         if let Ok(spine) = spine_q.get(character) {
             let names = ["PH", "P0", "P1", "P2", "P3"];
             let mut row = format!("{t:.3},{phase}");
@@ -328,7 +358,7 @@ fn probe_driver(
         }
     }
 
-    if t >= EXIT_AT && !probe.exited {
+    if t >= probe.exit_at && !probe.exited {
         probe.exited = true;
         let mut out = String::from(
             "t,phase,PH_x,PH_y,PH_vx,PH_vy,P0_x,P0_y,P0_vx,P0_vy,P1_x,P1_y,P1_vx,P1_vy,P2_x,P2_y,P2_vx,P2_vy,P3_x,P3_y,P3_vx,P3_vy,center_x,center_y,col_cx,col_cy,col_n\n",

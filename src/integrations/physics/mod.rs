@@ -48,6 +48,38 @@ impl VelloConstraintWorld {
     pub fn softbody_collider_keys(&self) -> Vec<Entity> {
         self.data.collider_to_body.keys().copied().collect()
     }
+
+    /// Frame-particle info (index, position, inverse mass) of a soft body
+    /// keyed by its collider root. Debug/probe helper.
+    pub fn frame_info(&self, root: Entity) -> Option<Vec<vello_physics::soft_body::ParticleInfo>> {
+        self.data.get_all_frame_info(root)
+    }
+
+    /// Queue an external force on a soft body keyed by its collider root.
+    /// Applied at the next physics step. Debug/probe helper.
+    pub fn queue_external_force(
+        &mut self,
+        root: Entity,
+        force: vello_physics::soft_body::ExternalForce,
+    ) {
+        self.data.add_external_force(root, force);
+    }
+
+    /// Queue an idempotent velocity overwrite on one connection particle of
+    /// a character group. Applied at the start of the next physics step;
+    /// last write wins (HashMap insert), so a duplicated or lost application
+    /// can never accumulate energy. Tick-native controller path.
+    pub fn queue_connect_particle_velocity(
+        &mut self,
+        character: Entity,
+        joint: &Entity,
+        velocity: Vec2,
+    ) -> bool {
+        match self.data.get_group_mut(character) {
+            Ok(group) => group.queue_connect_particle_velocity(joint, velocity),
+            Err(_) => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

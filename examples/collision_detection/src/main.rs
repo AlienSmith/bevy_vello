@@ -77,6 +77,75 @@ const ENEMY_COLLISION_GROUP: u32 = 2;
 #[derive(Component)]
 pub struct Player;
 
+/// DEBUG EXPERIMENT (env-gated, per the 2026-09-24 frame-rate investigation):
+/// a tick-native drag that replaces the spine controller entirely.
+///
+/// When `VELLO_TICK_DRAG=1`, every FixedUpdate tick pulls the spine particles
+/// toward `DRAG_VY` (px/s) with per-tick blend `DRAG_GAIN`. No input system,
+/// no SpineController, no per-frame event bridge — the drag lives entirely
+/// inside the fixed step, so its behavior cannot depend on render fps.
+///
+/// If the character still explodes with this enabled, the physics core is
+/// broken; if it stays stable, the per-frame controller event bridge was the
+/// pump (see plans/one_way_coupling_and_collision_channel.md §8).
+fn tick_drag(
+    spine_q: Query<&SpineController>,
+    particle_q: Query<&VelloParticle>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    roots: Query<Entity, With<CharacterRoot>>,
+) {
+    if std::env::var("VELLO_TICK_DRAG").as_deref() != Ok("1") {
+        return;
+    }
+    let target_y: f32 = std::env::var("DRAG_VY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500.0);
+    let gain: f32 = std::env::var("DRAG_GAIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.1);
+    let Ok(root) = roots.get_single() else {
+        return;
+    };
+    // Match each physics frame particle to the mirrored Bevy particle by
+    // position (the mirror is one sync stale, which is fine for a drag).
+    let Some(infos) = constraint_world.frame_info(root) else {
+        return;
+    };
+    for info in &infos {
+        // find the mirrored velocity for this physics particle
+        let mut vel = None;
+        for spine in spine_q.iter() {
+            for e in spine.particles.iter() {
+                if let Ok(vp) = particle_q.get(*e) {
+                    let p = vp.particle.pos;
+                    if (p.x - info.pos_x).abs() < 1.0 && (p.y - info.pos_y).abs() < 1.0 {
+                        vel = Some(vp.particle.velocity);
+                        break;
+                    }
+                }
+            }
+            if vel.is_some() {
+                break;
+            }
+        }
+        let Some(v) = vel else { continue };
+        // Δv per tick toward the target; ExternalForce::Impulse applies
+        // delta_pos = impulse * inv_mass * dt, so impulse = Δv / inv_mass.
+        let dvx = (0.0 - v.x) * gain;
+        let dvy = (target_y - v.y) * gain;
+        constraint_world.queue_external_force(
+            root,
+            vello_physics::soft_body::ExternalForce::Impulse(
+                info.index,
+                dvx / info.inv_mass.max(f32::EPSILON),
+                dvy / info.inv_mass.max(f32::EPSILON),
+            ),
+        );
+    }
+}
+
 #[derive(Component)]
 pub struct Enemy;
 
@@ -180,6 +249,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_plugins(particles::VelloPartclePlugin)
+        .add_systems(
+            FixedUpdate,
+            tick_drag.before(CollisionSystems::CollisionResponsePhysics),
+        )
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)

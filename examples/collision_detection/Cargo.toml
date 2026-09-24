@@ -11,6 +11,7 @@ publish = false
 ron = "0.8"
 #particle won't work with multi-threaded
 bevy = { workspace = true}
+vello_physics = { workspace = true }
 
 bevy_behave = { git = "https://github.com/AlienSmith/bevy_behave", branch = "bevy-0.16-fix" }
 bevy_vello = { path = "../../"}

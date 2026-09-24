@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, CharacterPivotPositionEvent,
-    VelloCharacterPhysicsRoot, VelloJoint, VelloParticle,
+    VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
 };
 use vello_physics::{
     collision_response::PartcileShapeMatchingConfig,
@@ -13,6 +13,100 @@ use crate::character::{
     ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
     SpineConfig, SpineController,
 };
+
+/// Spine controller application mode (2026-09-24 frame-rate investigation).
+///
+/// Tick-native (default): the spine drive runs inside FixedUpdate
+/// ([`tick_spine_drive`]) and lands its result as an idempotent velocity
+/// overwrite — one batch per physics tick, application pattern independent
+/// of render fps. Legacy (`VELLO_LEGACY_CONTROLLER=1`): the old per-frame
+/// `CharacterPivotImpulseEvent` bridge whose accumulating deltas piled up
+/// between ticks at high render fps (NaN explosion at >=120 fps, reproduced
+/// headless; see plans/one_way_coupling_and_collision_channel.md §8).
+#[derive(Resource)]
+pub struct SpineControllerMode {
+    pub tick_native: bool,
+}
+
+/// Tick-native spine drive. Same math as the legacy path
+/// ([`claculate_velocity_spine`] / [`calculate_brake_impulses`]), but:
+///
+/// 1. runs once per 90 Hz physics tick (never per rendered frame), and
+/// 2. applies the result as an idempotent velocity overwrite
+///    (`queue_particle_velocity` — HashMap insert, last write wins), so a
+///    duplicated or lost application cannot accumulate energy.
+///
+/// Per-frame gains in [`SpineConfig`] were tuned at a 60 fps reference; they
+/// are rate-converted per tick (`k_tick = 1 - (1 - k_frame)^frames_per_tick`)
+/// so the per-second convergence rate is identical at any tick rate.
+pub fn tick_spine_drive(
+    time: Res<Time>,
+    mode: Res<SpineControllerMode>,
+    spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
+    p_q: Query<&VelloParticle>,
+    mut world: ResMut<VelloConstraintWorld>,
+) {
+    if !mode.tick_native {
+        return;
+    }
+    let dt = time.delta_secs();
+    let frames_per_tick = (dt * 60.0).clamp(0.0, 4.0);
+    let rate = |k_frame: f32| 1.0 - (1.0 - k_frame.clamp(0.0, 1.0)).powf(frames_per_tick);
+
+    for (spine, p_root) in &spine_q {
+        if p_root.initial_frame_coordinates.is_none() {
+            continue;
+        }
+        let entities: Vec<Entity> = spine.particles.to_vec();
+        let particles: Vec<VelloParticle> = entities
+            .iter()
+            .map(|e| p_q.get(*e).unwrap().clone())
+            .collect();
+        let frame_entities = p_root.frame_entities;
+        let frame_particles: Vec<VelloParticle> = frame_entities
+            .iter()
+            .map(|e| p_q.get(*e).unwrap().clone())
+            .collect();
+
+        // Same pure math as the legacy path, with rate-converted gains.
+        let mut config = spine.config.clone();
+        if spine.move_vector.length_squared() <= 0.01 {
+            config.brake_blending = rate(config.brake_blending);
+        } else {
+            config.velocity_blending = rate(config.velocity_blending);
+        }
+        let events: Vec<CharacterPivotImpulseEvent> =
+            if spine.move_vector.length_squared() <= 0.01 {
+                calculate_brake_impulses(
+                    &entities,
+                    &particles,
+                    &frame_entities,
+                    &frame_particles,
+                    &config,
+                )
+            } else {
+                claculate_velocity_spine(
+                    &entities,
+                    &particles,
+                    &frame_entities,
+                    &frame_particles,
+                    spine.move_vector,
+                    &config,
+                )
+            };
+
+        // Convert each Δv (impulse = Δv / inv_mass, computed from the same
+        // mirrored velocity we read here) into an overwrite of that
+        // particle's velocity: v_new = v_current + Δv.
+        for ev in events {
+            let Ok(p) = p_q.get(ev.joint_entity) else {
+                continue;
+            };
+            let v_new = p.particle.velocity + ev.impulse * p.particle.inv_mass;
+            world.queue_connect_particle_velocity(ev.character_entity, &ev.joint_entity, v_new);
+        }
+    }
+}
 
 use super::ik::compute_ik_positions;
 
@@ -551,6 +645,7 @@ fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32)
 
 pub fn update_character_movement(
     time: Res<Time>,
+    mode: Res<SpineControllerMode>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     mut right_arm_q: Query<(&mut RightArmController, &VelloCharacterPhysicsRoot)>,
     mut left_arm_q: Query<(&mut LeftArmController, &VelloCharacterPhysicsRoot)>,
@@ -619,6 +714,12 @@ pub fn update_character_movement(
     }
 
     // ---- Spine ----
+    // Tick-native mode applies the spine drive inside FixedUpdate
+    // (tick_spine_drive). This per-frame event path remains only for the
+    // legacy kill-switch (VELLO_LEGACY_CONTROLLER=1).
+    if mode.tick_native {
+        return;
+    }
     for (spine, p_root) in &spine_q {
         if p_root.initial_frame_coordinates.is_none() {
             continue;
