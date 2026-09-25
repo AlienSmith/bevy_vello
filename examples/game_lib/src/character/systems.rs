@@ -127,6 +127,43 @@ pub fn spine_tangent(prev: Vec2, current: Vec2, next: Vec2) -> Vec2 {
     }
 }
 
+/// Per-particle curvature tangents along the spine.
+///
+/// Interior particles use the bisector of their two adjacent bones. The two
+/// end particles have only one bone, so we synthesise an imaginary neighbour
+/// anchored on the tangent of the closest interior particle: the head gets a
+/// virtual particle behind it (`pos - t_inner`), the tail one beyond it
+/// (`pos + t_inner`). This keeps the end tangents well-defined and continuous
+/// with the body instead of snapping to a single bone's axis.
+fn compute_spine_tangents(particles: &[VelloParticle]) -> Vec<Vec2> {
+    let n = particles.len();
+    let mut tangents = vec![Vec2::ZERO; n];
+    if n < 2 {
+        return tangents;
+    }
+
+    let pos = |i: usize| particles[i].particle.pos;
+
+    // Interior bisector tangents.
+    for i in 1..n - 1 {
+        tangents[i] = spine_tangent(pos(i - 1), pos(i), pos(i + 1));
+    }
+
+    // Head: imaginary particle reflected from the first interior tangent.
+    let inner_head = tangents[1];
+    if inner_head != Vec2::ZERO {
+        tangents[0] = spine_tangent(pos(0) - inner_head, pos(0), pos(1));
+    }
+
+    // Tail: imaginary particle reflected from the last interior tangent.
+    let inner_tail = tangents[n - 2];
+    if inner_tail != Vec2::ZERO {
+        tangents[n - 1] = spine_tangent(pos(n - 2), pos(n - 1), pos(n - 1) + inner_tail);
+    }
+
+    tangents
+}
+
 const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
 
 fn calculate_spine_drive(
@@ -143,15 +180,20 @@ fn calculate_spine_drive(
 ) {
     let mut angular_events = vec![];
     let move_axis = move_vector_vello.y;
-    let impulse_normalized = Vec2::new(0.0, move_axis * dt * config.impulse_scaler);
+    let impulse_magnitude = move_axis * dt * config.impulse_scaler;
+
+    // Thrust each particle along its local curvature tangent, so forward/back
+    // motion follows the spine's bend instead of a fixed world axis.
+    let tangents = compute_spine_tangents(particles);
     let result = entities
         .iter()
         .zip(particles.iter())
+        .zip(tangents.iter())
         .into_iter()
-        .map(|(e, p)| CharacterPivotImpulseEvent {
+        .map(|((e, p), tangent)| CharacterPivotImpulseEvent {
             character_entity: p.root_entity,
             joint_entity: *e,
-            impulse: impulse_normalized / p.particle.inv_mass,
+            impulse: *tangent * impulse_magnitude / p.particle.inv_mass,
         })
         .collect();
 
