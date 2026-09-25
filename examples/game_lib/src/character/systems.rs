@@ -81,6 +81,52 @@ pub fn cross(a: Vec2, b: Vec2) -> f32 {
     (a.x * b.y) - (a.y * b.x)
 }
 
+/// Curvature tangent at a spine particle: the normalized bisector of its two
+/// adjacent bones.
+///
+/// For an interior particle the tangent is the average direction of the
+/// incoming and outgoing bone:
+///
+/// ```text
+///   tangent = normalize( normalize(Pi - P(i-1)) + normalize(P(i+1) - Pi) )
+/// ```
+///
+/// This is smoother than using a single bone's direction (e.g. a straight
+/// neck/head cresting over two joints keeps a well-defined tangent even when
+/// the adjacent bones are not collinear).
+///
+/// At the spine endpoints only one bone exists, so callers should pass the
+/// sole neighbor for the missing side (e.g. `tangent(P0, P0, P1)` for the
+/// first particle) — the zero-length side is skipped and the single bone's
+/// direction is returned. Returns `Vec2::ZERO` if both sides are degenerate.
+#[inline]
+pub fn spine_tangent(prev: Vec2, current: Vec2, next: Vec2) -> Vec2 {
+    let d1 = current - prev;
+    let d2 = next - current;
+
+    let len1 = d1.length();
+    let len2 = d2.length();
+
+    let u1 = if len1 > f32::EPSILON {
+        d1 / len1
+    } else {
+        Vec2::ZERO
+    };
+    let u2 = if len2 > f32::EPSILON {
+        d2 / len2
+    } else {
+        Vec2::ZERO
+    };
+
+    let bisector = u1 + u2;
+    let len_b = bisector.length();
+    if len_b > f32::EPSILON {
+        bisector / len_b
+    } else {
+        Vec2::ZERO
+    }
+}
+
 const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
 
 fn calculate_spine_drive(
@@ -95,6 +141,7 @@ fn calculate_spine_drive(
     Vec<CharacterPivotImpulseEvent>,
     Vec<CharacterAngularConstraintEvent>,
 ) {
+    let mut angular_events = vec![];
     let move_axis = move_vector_vello.y;
     let impulse_normalized = Vec2::new(0.0, move_axis * dt * config.impulse_scaler);
     let result = entities
@@ -107,7 +154,29 @@ fn calculate_spine_drive(
             impulse: impulse_normalized / p.particle.inv_mass,
         })
         .collect();
-    (result, vec![])
+
+    let steer_axis = move_vector_vello.x.clamp(-1.0, 1.0);
+    let steer_angle = steer_axis * config.steer_angle;
+    let target = Vec2::new(steer_angle.cos(), steer_angle.sin());
+
+    for (i, joint_entity) in angular_entities.iter().enumerate() {
+        let compliance = match angulars[i].init_config {
+            vello_physics::ConnectionConstraintInitConfig::Angular(_, _, _, c) => c,
+            _ => 0.0,
+        };
+
+        angular_events.push(CharacterAngularConstraintEvent {
+            character_entity: particles[0].root_entity,
+            joint_entity: *joint_entity,
+            config: vello_physics::AngularConstraintConfig {
+                rest_cos: target.x,
+                rest_sin: target.y,
+                compliance,
+            },
+        });
+    }
+
+    (result, angular_events)
 }
 
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.

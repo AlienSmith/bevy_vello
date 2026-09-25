@@ -60,13 +60,17 @@ pub enum IkMode {
 
 #[derive(Clone)]
 pub struct SpineConfig {
-    impulse_scaler: f32,
+    /// Forward/back linear impulse scaler (y-axis in Vello space).
+    pub impulse_scaler: f32,
+    /// Max angular velocity for the rest-angle blend (rad/s).
+    pub steer_angle: f32,
 }
 
 impl Default for SpineConfig {
     fn default() -> Self {
         Self {
             impulse_scaler: 100.0,
+            steer_angle: 0.15 * std::f32::consts::PI,
         }
     }
 }

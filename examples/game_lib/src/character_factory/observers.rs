@@ -800,7 +800,7 @@ pub fn assemble_character(
     // Spine particles: [PH, P0, P1, P2, P3]
     let spine = SpineController {
         particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
-        angulars: [get("PH_P0_P1"), get("P0_P1_P2"), get("P1_P12_P13")],
+        angulars: [get("PH_P0_P1"), get("P0_P1_P2"), get("P1_P2_P3")],
         config: SpineConfig::default(),
         move_vector: Vec2::ZERO,
     };
