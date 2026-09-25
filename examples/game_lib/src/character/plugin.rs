@@ -5,10 +5,7 @@ use bevy_vello::integrations::physics::systems::update_constraint_world;
 use crate::{
     character::{
         observers::{on_remove_connectivity, on_remove_connectivity_root},
-        systems::{
-            reset_arm_constraint_event, tick_spine_drive, SpineControllerMode,
-            update_character_movement,
-        },
+        systems::{reset_arm_constraint_event, tick_spine_drive, update_character_movement},
         StringPool,
     },
     ResetArmControlConstraintsEvent,
@@ -21,7 +18,6 @@ impl Plugin for GameCharacterPlugin {
         // restores the old per-frame event bridge (kill-switch).
         let tick_native = std::env::var("VELLO_LEGACY_CONTROLLER").as_deref() != Ok("1");
         app.insert_resource(StringPool::default())
-            .insert_resource(SpineControllerMode { tick_native })
             .add_event::<ResetArmControlConstraintsEvent>()
             .add_observer(on_remove_connectivity)
             .add_observer(on_remove_connectivity_root)

@@ -14,45 +14,14 @@ use crate::character::{
     SpineConfig, SpineController,
 };
 
-/// Spine controller application mode (2026-09-24 frame-rate investigation).
-///
-/// Tick-native (default): the spine drive runs inside FixedUpdate
-/// ([`tick_spine_drive`]) and lands its result as an idempotent velocity
-/// overwrite — one batch per physics tick, application pattern independent
-/// of render fps. Legacy (`VELLO_LEGACY_CONTROLLER=1`): the old per-frame
-/// `CharacterPivotImpulseEvent` bridge whose accumulating deltas piled up
-/// between ticks at high render fps (NaN explosion at >=120 fps, reproduced
-/// headless; see plans/one_way_coupling_and_collision_channel.md §8).
-#[derive(Resource)]
-pub struct SpineControllerMode {
-    pub tick_native: bool,
-}
-
-/// Tick-native spine drive. Same math as the legacy path
-/// ([`claculate_velocity_spine`] / [`calculate_brake_impulses`]), but:
-///
-/// 1. runs once per 90 Hz physics tick (never per rendered frame), and
-/// 2. applies the result as an idempotent velocity overwrite
-///    (`queue_particle_velocity` — HashMap insert, last write wins), so a
-///    duplicated or lost application cannot accumulate energy.
-///
-/// Per-frame gains in [`SpineConfig`] were tuned at a 60 fps reference; they
-/// are rate-converted per tick (`k_tick = 1 - (1 - k_frame)^frames_per_tick`)
-/// so the per-second convergence rate is identical at any tick rate.
 pub fn tick_spine_drive(
     time: Res<Time>,
-    mode: Res<SpineControllerMode>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     p_q: Query<&VelloParticle>,
+    p_j: Query<&VelloJoint>,
     mut world: ResMut<VelloConstraintWorld>,
 ) {
-    if !mode.tick_native {
-        return;
-    }
     let dt = time.delta_secs();
-    let frames_per_tick = (dt * 60.0).clamp(0.0, 4.0);
-    let rate = |k_frame: f32| 1.0 - (1.0 - k_frame.clamp(0.0, 1.0)).powf(frames_per_tick);
-
     for (spine, p_root) in &spine_q {
         if p_root.initial_frame_coordinates.is_none() {
             continue;
@@ -62,49 +31,32 @@ pub fn tick_spine_drive(
             .iter()
             .map(|e| p_q.get(*e).unwrap().clone())
             .collect();
-        let frame_entities = p_root.frame_entities;
-        let frame_particles: Vec<VelloParticle> = frame_entities
+        let angular_entities: Vec<Entity> = spine.angulars.to_vec();
+        let angulars: Vec<VelloJoint> = angular_entities
             .iter()
-            .map(|e| p_q.get(*e).unwrap().clone())
+            .map(|e| p_j.get(*e).unwrap().clone())
             .collect();
-
         // Same pure math as the legacy path, with rate-converted gains.
-        let mut config = spine.config.clone();
-        if spine.move_vector.length_squared() <= 0.01 {
-            config.brake_blending = rate(config.brake_blending);
-        } else {
-            config.velocity_blending = rate(config.velocity_blending);
-        }
-        let events: Vec<CharacterPivotImpulseEvent> = if spine.move_vector.length_squared() <= 0.01
-        {
-            calculate_brake_impulses(
-                &entities,
-                &particles,
-                &frame_entities,
-                &frame_particles,
-                &config,
-            )
-        } else {
-            claculate_velocity_spine(
-                &entities,
-                &particles,
-                &frame_entities,
-                &frame_particles,
-                spine.move_vector,
-                &config,
-            )
-        };
+        let config = spine.config.clone();
 
-        // Convert each Δv (impulse = Δv / inv_mass, computed from the same
-        // mirrored velocity we read here) into an overwrite of that
-        // particle's velocity: v_new = v_current + Δv.
-        for ev in events {
-            let Ok(p) = p_q.get(ev.joint_entity) else {
-                continue;
-            };
-            let v_new = p.particle.velocity + ev.impulse * p.particle.inv_mass;
-            world.queue_connect_particle_velocity(ev.character_entity, &ev.joint_entity, v_new);
-        }
+        let events = calculate_spine_drive(
+            &entities,
+            &particles,
+            &angular_entities,
+            &angulars,
+            &config,
+            bevy_to_vello(spine.move_vector),
+            dt,
+        );
+
+        events
+            .0
+            .iter()
+            .for_each(|e| world.queue_character_external_force(e));
+        events
+            .1
+            .iter()
+            .for_each(|e| world.queue_character_angular_constraints(e));
     }
 }
 
@@ -129,191 +81,33 @@ pub fn cross(a: Vec2, b: Vec2) -> f32 {
     (a.x * b.y) - (a.y * b.x)
 }
 
-/// Angular error dead zone (in radians) for forearm alignment.
-/// When the angular error between the current and desired forearm direction
-/// is ≤ this value, no IK corrections are emitted at all.  This prevents a
-/// feedback loop where infinitesimal IK corrections cause the physics solver
-/// to apply tiny forces each frame, which shift particles, which produce new
-/// (equally tiny) IK corrections the next frame — a sustained high-frequency
-/// oscillation that never fully damps out.
-///
-/// 0.003 rad ≈ 0.17° — small enough to be invisible, large enough to break
-/// the IK↔physics feedback loop near convergence.
 const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
 
-fn claculate_velocity_spine(
+fn calculate_spine_drive(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
-    frame_entities: &[Entity; 4],
-    frame_particles: &Vec<VelloParticle>,
-    vec: Vec2,
+    angular_entities: &Vec<Entity>,
+    angulars: &Vec<VelloJoint>,
     config: &SpineConfig,
-) -> Vec<CharacterPivotImpulseEvent> {
-    const SPINE_PARTICLE_COUNT: usize = 5;
-
-    let mut result = vec![];
-
-    if entities.len() < SPINE_PARTICLE_COUNT || particles.len() < SPINE_PARTICLE_COUNT {
-        return result;
-    }
-
-    let dir = bevy_to_vello(vec);
-    let length = dir.length();
-    if length <= f32::EPSILON {
-        return result;
-    }
-
-    // Convert a desired delta-velocity into an impulse, respecting each particle's
-    // inverse mass. The engine applies `delta_v = impulse * inv_mass`, so dividing the
-    // velocity gap by `inv_mass` yields exactly the requested delta-v. This is additive
-    // (it corrects FROM the post-physics velocity) rather than overwriting velocity, so
-    // external pushes like collisions are preserved.
-    let velocity_gap_to_impulse = |current_vel: Vec2, target_vel: Vec2, inv_mass: f32| -> Vec2 {
-        if inv_mass <= f32::EPSILON {
-            Vec2::ZERO
-        } else {
-            (target_vel - current_vel) / inv_mass
-        }
-    };
-
-    // Desired movement direction in Vello coordinates (x-right, y-down).
-    let desired_dir = dir / length;
-
-    let positions: Vec<Vec2> = particles
+    move_vector_vello: Vec2,
+    dt: f32,
+) -> (
+    Vec<CharacterPivotImpulseEvent>,
+    Vec<CharacterAngularConstraintEvent>,
+) {
+    let move_axis = move_vector_vello.y;
+    let impulse_normalized = Vec2::new(0.0, move_axis * dt * config.impulse_scaler);
+    let result = entities
         .iter()
-        .take(SPINE_PARTICLE_COUNT)
-        .map(|p| p.particle.pos)
+        .zip(particles.iter())
+        .into_iter()
+        .map(|(e, p)| CharacterPivotImpulseEvent {
+            character_entity: p.root_entity,
+            joint_entity: *e,
+            impulse: impulse_normalized / p.particle.inv_mass,
+        })
         .collect();
-
-    // Current spine direction: PH (head, index 0) minus P3 (tail, index 4).
-    // spine_dir points from tail toward head.
-    let spine_vec = positions[0] - positions[SPINE_PARTICLE_COUNT - 1];
-    let spine_len = spine_vec.length();
-
-    let spine_dir = spine_vec / spine_len;
-
-    // Rotation pivot: P2 (spine_mid, index 3). P2 is a frame particle, so the
-    // whole rigid frame rotates about it instead of shearing. The old code
-    // rotated about P1, which is NOT a frame particle (it lives above the frame)
-    // — that applied a shear to the frame every substep.
-    let pivot = positions[3];
-
-    // Reference lever arm: distance from the pivot to the head (PH). Each
-    // particle's rotational velocity is scaled by its own lever arm projected
-    // on the spine, giving a true rigid rotation about the pivot.
-    let lever_ref = (positions[0] - pivot).length().max(1e-3);
-
-    // Unit tangent perpendicular to spine_dir (90° CCW in y-down).
-    let tangent = Vec2::new(-spine_dir.y, spine_dir.x);
-
-    // Signed rotation between spine_dir and desired_dir.
-    let dot_val = spine_dir.dot(desired_dir);
-    let cross_val = cross(spine_dir, desired_dir);
-
-    // Smooth, sign-correct rotation command in [-1, 1].
-    // - Heading toward desired (dot >= 0): proportional to cross_val.
-    // - Heading away (dot < 0): cross_val shrinks to ~0 near anti-parallel,
-    //   which would stall the turn. Ramp the corrective rotation up smoothly
-    //   in the correct turn direction instead of the old constant
-    //   `rotation_gain * 2.0` kick (unbounded and always pushed the same
-    //   rotational direction regardless of which way the character should turn).
-    let rotation_error = if dot_val < 0.0 {
-        (cross_val.signum() * (1.0 - dot_val).sqrt()).clamp(-1.0, 1.0)
-    } else {
-        cross_val
-    };
-
-    // Alignment factor: 0 when spine faces away (dot < 0), ramps to 1 as
-    // the spine aligns with desired_dir.
-    let alignment = dot_val.clamp(0.0, 1.0);
-
-    // Compute the blended + clamped target velocity for a particle at `pos`:
-    // a rigid rotation about the pivot plus forward translation.
-    let rigid_velocity = |pos: Vec2, current_vel: Vec2| -> Vec2 {
-        // Lever arm projected onto the spine, normalized → [-1, 1] along the body.
-        let r = pos - pivot;
-        let signed_lever = r.dot(spine_dir) / lever_ref;
-
-        // 1. Translational component: scaled by alignment.
-        let translational = desired_dir * length * config.velocity_scale * alignment;
-
-        // 2. Rotational component: tangential velocity about the pivot,
-        //    proportional to each particle's own lever arm (rigid rotation).
-        let rotational = tangent * signed_lever * rotation_error * config.rotation_gain * length;
-
-        let target_velocity = translational + rotational;
-
-        // 3. Smooth blend from current physics velocity toward target.
-        let blended = current_vel + config.velocity_blending * (target_velocity - current_vel);
-
-        // 4. Hard clamp to max speed.
-        let speed = blended.length();
-        if speed > config.max_speed && speed > f32::EPSILON {
-            blended / speed * config.max_speed
-        } else {
-            blended
-        }
-    };
-
-    // Frame particles: [P30, P31, P3, P2]. Driving all four with the same rigid
-    // velocity field keeps the frame rigid under the controller (the old code
-    // left the hips untouched, shearing the frame every substep). With a rigid
-    // frame, the shape-matching `-drag` correction can cleanly undo the motion.
-    for (i, entity) in frame_entities.iter().enumerate() {
-        let f = &frame_particles[i];
-        let current_vel = f.particle.velocity;
-        let velocity = rigid_velocity(f.particle.pos, current_vel);
-        let impulse = velocity_gap_to_impulse(current_vel, velocity, f.particle.inv_mass);
-        result.push(CharacterPivotImpulseEvent {
-            character_entity: f.root_entity,
-            joint_entity: *entity,
-            impulse,
-        });
-    }
-
-    result
-}
-
-/// Braking impulses: nudge every spine + frame particle velocity toward zero
-/// by `brake_blending` per frame while no movement input is held. This is the
-/// release-side counterpart of `claculate_velocity_spine`: without it the body
-/// coasts for seconds (headless probe: ~640 px after a 2.4 s D-hold), because
-/// the only natural decay is a hardcoded 0.999/tick factor.
-///
-/// A gentle blend (default 0.12) keeps some physics feel — external pushes
-/// from hits still move the body, they just settle within ~0.5–1 s instead of
-/// never.
-fn calculate_brake_impulses(
-    entities: &Vec<Entity>,
-    particles: &Vec<VelloParticle>,
-    frame_entities: &[Entity; 4],
-    frame_particles: &Vec<VelloParticle>,
-    config: &SpineConfig,
-) -> Vec<CharacterPivotImpulseEvent> {
-    let mut result = vec![];
-    let brake = config.brake_blending.clamp(0.0, 1.0);
-    if brake <= f32::EPSILON {
-        return result;
-    }
-    let mut emit = |f: &VelloParticle, entity: Entity| {
-        if f.particle.inv_mass <= f32::EPSILON {
-            return;
-        }
-        // Δv = -brake * current  →  impulse = Δv / inv_mass
-        let impulse = -brake * f.particle.velocity / f.particle.inv_mass;
-        result.push(CharacterPivotImpulseEvent {
-            character_entity: f.root_entity,
-            joint_entity: entity,
-            impulse,
-        });
-    };
-    for (i, entity) in entities.iter().enumerate() {
-        emit(&particles[i], *entity);
-    }
-    for (i, entity) in frame_entities.iter().enumerate() {
-        emit(&frame_particles[i], *entity);
-    }
-    result
+    (result, vec![])
 }
 
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
@@ -614,7 +408,6 @@ fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32)
 
 pub fn update_character_movement(
     time: Res<Time>,
-    mode: Res<SpineControllerMode>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     mut right_arm_q: Query<(&mut RightArmController, &VelloCharacterPhysicsRoot)>,
     mut left_arm_q: Query<(&mut LeftArmController, &VelloCharacterPhysicsRoot)>,
@@ -680,61 +473,6 @@ pub fn update_character_movement(
 
         angular_events.write_batch(arm_angular_events);
         position_events.write_batch(arm_position_events);
-    }
-
-    // ---- Spine ----
-    // Tick-native mode applies the spine drive inside FixedUpdate
-    // (tick_spine_drive). This per-frame event path remains only for the
-    // legacy kill-switch (VELLO_LEGACY_CONTROLLER=1).
-    if mode.tick_native {
-        return;
-    }
-    for (spine, p_root) in &spine_q {
-        if p_root.initial_frame_coordinates.is_none() {
-            continue;
-        }
-
-        if spine.move_vector.length_squared() <= 0.01 {
-            let entities: Vec<Entity> = spine.particles.to_vec();
-            let particles: Vec<VelloParticle> = entities
-                .iter()
-                .map(|e| p_q.get(*e).unwrap().clone())
-                .collect();
-            let frame_entities = p_root.frame_entities;
-            let frame_particles: Vec<VelloParticle> = frame_entities
-                .iter()
-                .map(|e| p_q.get(*e).unwrap().clone())
-                .collect();
-            let brakes = calculate_brake_impulses(
-                &entities,
-                &particles,
-                &frame_entities,
-                &frame_particles,
-                &spine.config,
-            );
-            velocity_events.write_batch(brakes);
-            continue;
-        }
-
-        let entities: Vec<Entity> = spine.particles.to_vec();
-        let particles: Vec<VelloParticle> = entities
-            .iter()
-            .map(|e| p_q.get(*e).unwrap().clone())
-            .collect();
-        let frame_entities = p_root.frame_entities;
-        let frame_particles: Vec<VelloParticle> = frame_entities
-            .iter()
-            .map(|e| p_q.get(*e).unwrap().clone())
-            .collect();
-        let velocities = claculate_velocity_spine(
-            &entities,
-            &particles,
-            &frame_entities,
-            &frame_particles,
-            spine.move_vector,
-            &spine.config,
-        );
-        velocity_events.write_batch(velocities);
     }
 }
 

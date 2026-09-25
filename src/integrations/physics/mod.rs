@@ -65,6 +65,18 @@ impl VelloConstraintWorld {
         self.data.add_external_force(root, force);
     }
 
+    pub fn queue_character_external_force(&mut self, event: &CharacterPivotImpulseEvent) {
+        if let Ok(group) = self.data.get_group_mut(event.character_entity) {
+            group.add_connect_external_force(&event.joint_entity, &event.impulse);
+        }
+    }
+
+    pub fn queue_character_angular_constraints(&mut self, event: &CharacterAngularConstraintEvent) {
+        if let Ok(group) = self.data.get_group_mut(event.character_entity) {
+            group.set_connect_angular_config(&event.joint_entity, &event.config);
+        }
+    }
+
     /// Queue an idempotent velocity overwrite on one connection particle of
     /// a character group. Applied at the start of the next physics step;
     /// last write wins (HashMap insert), so a duplicated or lost application
