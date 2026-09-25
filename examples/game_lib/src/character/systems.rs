@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{math::VectorSpace, prelude::*};
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, CharacterPivotPositionEvent,
     VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
@@ -164,8 +164,14 @@ fn compute_spine_tangents(particles: &[VelloParticle]) -> Vec<Vec2> {
     tangents
 }
 
-const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
+fn remap_spine_control(input: Vec2, heading: Vec2) -> Vec2 {
+    let move_axis = input.y;
+    let steer_axis = input.x.clamp(-1.0, 1.0);
+    Vec2::new(move_axis, steer_axis)
+}
 
+const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
+const SIGN: [f32; 5] = [1.0, 1.0, 0.0, -1.0, -1.0];
 fn calculate_spine_drive(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
@@ -179,26 +185,28 @@ fn calculate_spine_drive(
     Vec<CharacterAngularConstraintEvent>,
 ) {
     let mut angular_events = vec![];
-    let move_axis = move_vector_vello.y;
-    let impulse_magnitude = move_axis * dt * config.impulse_scaler;
-
-    // Thrust each particle along its local curvature tangent, so forward/back
-    // motion follows the spine's bend instead of a fixed world axis.
+    let mut impulse_events = vec![];
+    let control = remap_spine_control(move_vector_vello, Vec2::ZERO);
+    let tangent_impulse_magnitude = control.x * dt * config.tangent_impulse_scaler;
+    let normal_impulse_magnituide = control.y * dt * config.normal_impulse_scaler;
     let tangents = compute_spine_tangents(particles);
-    let result = entities
-        .iter()
-        .zip(particles.iter())
-        .zip(tangents.iter())
-        .into_iter()
-        .map(|((e, p), tangent)| CharacterPivotImpulseEvent {
-            character_entity: p.root_entity,
-            joint_entity: *e,
-            impulse: *tangent * impulse_magnitude / p.particle.inv_mass,
-        })
-        .collect();
 
-    let steer_axis = move_vector_vello.x.clamp(-1.0, 1.0);
-    let steer_angle = steer_axis * config.steer_angle;
+    for i in 0..particles.len() {
+        let sign = SIGN[i];
+        let e = entities[i];
+        let p = &particles[i];
+        let tangent = tangents[i];
+        let normal = Vec2::new(-tangent.y, tangent.x);
+        let tangent_impulse = tangent * tangent_impulse_magnitude / p.particle.inv_mass;
+        let normal_impulse = normal * sign * normal_impulse_magnituide / p.particle.inv_mass;
+        impulse_events.push(CharacterPivotImpulseEvent {
+            character_entity: p.root_entity,
+            joint_entity: e,
+            impulse: tangent_impulse + normal_impulse,
+        })
+    }
+
+    let steer_angle = control.y * config.steer_angle;
     let target = Vec2::new(steer_angle.cos(), steer_angle.sin());
 
     for (i, joint_entity) in angular_entities.iter().enumerate() {
@@ -218,7 +226,7 @@ fn calculate_spine_drive(
         });
     }
 
-    (result, angular_events)
+    (impulse_events, angular_events)
 }
 
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
