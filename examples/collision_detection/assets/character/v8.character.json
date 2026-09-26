@@ -376,7 +376,7 @@
           347.05768,
           143.75
         ],
-        "inv_mass": 1.0
+        "inv_mass": 0.25
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -391,7 +391,7 @@
           347.05768,
           202.74998
         ],
-        "inv_mass": 0.5
+        "inv_mass": 0.25
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -406,7 +406,7 @@
           347.05768,
           275.74997
         ],
-        "inv_mass": 1.0
+        "inv_mass": 0.25
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -421,7 +421,7 @@
           347.05768,
           345.75
         ],
-        "inv_mass": 0.6666667
+        "inv_mass": 0.25
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -466,7 +466,7 @@
           199.0577,
           201.74998
         ],
-        "inv_mass": 4.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -481,7 +481,7 @@
           494.05768,
           202.74998
         ],
-        "inv_mass": 4.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -496,7 +496,7 @@
           347.05768,
           94.75
         ],
-        "inv_mass": 2.0
+        "inv_mass": 0.25
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -526,7 +526,7 @@
           605.0577,
           201.74998
         ],
-        "inv_mass": 4.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -541,7 +541,7 @@
           463.05768,
           551.75006
         ],
-        "inv_mass": 2.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -556,7 +556,7 @@
           244.0577,
           557.75006
         ],
-        "inv_mass": 2.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -571,7 +571,7 @@
           384.05768,
           202.74998
         ],
-        "inv_mass": 2.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -586,7 +586,7 @@
           309.05768,
           202.74998
         ],
-        "inv_mass": 2.0
+        "inv_mass": 1.0
       },
       "frame_conn": {
         "compliance": 0.01,
@@ -819,7 +819,7 @@
         "Distance": [
           "P2",
           "P31",
-          1e-8
+          1e-6
         ]
       }
     },
@@ -831,7 +831,7 @@
           "P1",
           "P2",
           "P3",
-          0.0000005
+          1e-6
         ]
       }
     },
@@ -843,7 +843,7 @@
           "PH",
           "P0",
           "P1",
-          0.000001
+          1e-6
         ]
       }
     },
@@ -855,7 +855,7 @@
           "P0",
           "P1",
           "P2",
-          0.000001
+          1e-7
         ]
       }
     },
@@ -1409,5 +1409,12 @@
         "host": "LLA"
       }
     }
-  ]
+  ],
+  "controllers": {
+    "spine_drive": {
+      "tangent_impulse_scaler": 100.0,
+      "normal_impulse_scaler": 100.0,
+      "steer_angle": 30.0
+    }
+  }
 }

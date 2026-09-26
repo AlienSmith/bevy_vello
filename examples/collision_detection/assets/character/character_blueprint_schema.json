@@ -31,6 +31,9 @@
       "items": {
         "$ref": "#/$defs/ParticleConfig"
       }
+    },
+    "controllers": {
+      "$ref": "#/$defs/ControllersConfig"
     }
   },
   "required": [
@@ -462,6 +465,36 @@
         "self_collision_complaince",
         "self_collision_distance_threhold",
         "shape_matching_damping"
+      ]
+    },
+    "ControllersConfig": {
+      "type": "object",
+      "properties": {
+        "spine_drive": {
+          "$ref": "#/$defs/SpineDriveConfig"
+        }
+      }
+    },
+    "SpineDriveConfig": {
+      "type": "object",
+      "properties": {
+        "tangent_impulse_scaler": {
+          "type": "number",
+          "format": "float"
+        },
+        "normal_impulse_scaler": {
+          "type": "number",
+          "format": "float"
+        },
+        "steer_angle": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "tangent_impulse_scaler",
+        "normal_impulse_scaler",
+        "steer_angle"
       ]
     }
   }

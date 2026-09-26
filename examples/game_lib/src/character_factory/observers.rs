@@ -1,3 +1,5 @@
+use std::f32::consts::PI;
+
 use bevy::{ecs::intern::Interned, platform::collections::HashMap, prelude::*};
 
 // ---------------------------------------------------------------------------
@@ -798,10 +800,17 @@ pub fn assemble_character(
     };
 
     // Spine particles: [PH, P0, P1, P2, P3]
+    // Driving config comes from the blueprint's controllers.spine_drive block
+    // so it can be tuned by editing the character JSON without recompiling.
+    let spine_drive = &blueprint.data.controllers.spine_drive;
     let spine = SpineController {
         particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
         angulars: [get("PH_P0_P1"), get("P0_P1_P2"), get("P1_P2_P3")],
-        config: SpineConfig::default(),
+        config: SpineConfig {
+            tangent_impulse_scaler: spine_drive.tangent_impulse_scaler,
+            normal_impulse_scaler: spine_drive.normal_impulse_scaler,
+            steer_angle: spine_drive.steer_angle / 180.0 * PI,
+        },
         move_vector: Vec2::ZERO,
     };
 

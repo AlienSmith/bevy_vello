@@ -1,4 +1,4 @@
-use bevy::{math::VectorSpace, prelude::*};
+use bevy::{ecs::error::info, math::VectorSpace, prelude::*};
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, CharacterPivotPositionEvent,
     VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
@@ -171,7 +171,7 @@ fn remap_spine_control(input: Vec2, heading: Vec2) -> Vec2 {
 }
 
 const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
-const SIGN: [f32; 5] = [1.0, 1.0, 0.0, -1.0, -1.0];
+const SIGN: [f32; 5] = [-1.0, -1.0, 0.0, 1.0, 1.0];
 fn calculate_spine_drive(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
@@ -199,6 +199,8 @@ fn calculate_spine_drive(
         let normal = Vec2::new(-tangent.y, tangent.x);
         let tangent_impulse = tangent * tangent_impulse_magnitude / p.particle.inv_mass;
         let normal_impulse = normal * sign * normal_impulse_magnituide / p.particle.inv_mass;
+        let impulse = tangent_impulse + normal_impulse;
+        info!("{}", impulse);
         impulse_events.push(CharacterPivotImpulseEvent {
             character_entity: p.root_entity,
             joint_entity: e,
