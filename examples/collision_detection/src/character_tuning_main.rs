@@ -1,0 +1,632 @@
+//! Standalone character-tuning app.
+//!
+//! A slimmed-down variant of the collision_detection demo, with all UI
+//! (egui), mouse-drag sandbox, and preview code stripped out. It keeps only
+//! the character, the static collision walls, the light, and the physics
+//! chain — so the character can be driven/tuned via input and env-gated
+//! experiments (e.g. `VELLO_TICK_DRAG`).
+//!
+//! Run:
+//!   cargo run -p collision_detection --bin character_tuning_main --release
+
+mod edge_pan_camera;
+mod spine_indicator;
+
+use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
+
+use bevy_vello::{
+    collision::{
+        generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
+        SoftBodyInitConfig, VelloCollisionTrigger, VELLO_COLLISION_COOL_DOWN_TIME,
+    },
+    integrations::{
+        particles::{self, ExplosionEffect},
+        physics::{VelloConstraintWorld, VelloParticle},
+        svg_collider::{
+            SvgColliderAsset, SvgColliderAssetManager, VelloColliderAssetMetaData, VelloImageAsset,
+            VelloImageAssetManager, VelloImageAssetMetaData,
+        },
+    },
+    vello::{
+        kurbo::{self, BezPath, Shape},
+        peniko::{self, GlowColor},
+    },
+    VelloCollider, VelloCollisionResponsePlugin,
+};
+use bevy_vello::{prelude::*, VelloPlugin};
+use game_lib::{
+    character_asset::{
+        BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
+        SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
+    },
+    default_input_map,
+    weapons::{AttachPistolToCharacterEvent, PistolControl},
+    CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
+    PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
+};
+use leafwing_input_manager::prelude::*;
+
+const PLAYER_COLLISION_GROUP: u32 = 1;
+
+#[derive(Component)]
+pub struct Player;
+
+/// DEBUG EXPERIMENT (env-gated): a tick-native drag that replaces the spine
+/// controller entirely.
+///
+/// When `VELLO_TICK_DRAG=1`, every FixedUpdate tick pulls the spine particles
+/// toward `DRAG_VY` (px/s) with per-tick blend `DRAG_GAIN`. No per-frame event
+/// bridge — the drag lives entirely inside the fixed step, so its behavior
+/// cannot depend on render fps.
+fn tick_drag(
+    spine_q: Query<&SpineController>,
+    particle_q: Query<&VelloParticle>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+    roots: Query<Entity, With<CharacterRoot>>,
+) {
+    if std::env::var("VELLO_TICK_DRAG").as_deref() != Ok("1") {
+        return;
+    }
+    let target_y: f32 = std::env::var("DRAG_VY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500.0);
+    let gain: f32 = std::env::var("DRAG_GAIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.1);
+    let Ok(root) = roots.single() else {
+        return;
+    };
+    // Match each physics frame particle to the mirrored Bevy particle by
+    // position (the mirror is one sync stale, which is fine for a drag).
+    let Some(infos) = constraint_world.frame_info(root) else {
+        return;
+    };
+    for info in &infos {
+        // find the mirrored velocity for this physics particle
+        let mut vel = None;
+        for spine in spine_q.iter() {
+            for e in spine.particles.iter() {
+                if let Ok(vp) = particle_q.get(*e) {
+                    let p = vp.particle.pos;
+                    if (p.x - info.pos_x).abs() < 1.0 && (p.y - info.pos_y).abs() < 1.0 {
+                        vel = Some(vp.particle.velocity);
+                        break;
+                    }
+                }
+            }
+            if vel.is_some() {
+                break;
+            }
+        }
+        let Some(v) = vel else { continue };
+        // Δv per tick toward the target; ExternalForce::Impulse applies
+        // delta_pos = impulse * inv_mass * dt, so impulse = Δv / inv_mass.
+        let dvx = (0.0 - v.x) * gain;
+        let dvy = (target_y - v.y) * gain;
+        constraint_world.queue_external_force(
+            root,
+            vello_physics::soft_body::ExternalForce::Impulse(
+                info.index,
+                dvx / info.inv_mass.max(f32::EPSILON),
+                dvy / info.inv_mass.max(f32::EPSILON),
+            ),
+        );
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
+enum GameState {
+    #[default]
+    Loading,
+    Game,
+}
+
+/// Tracks whether the pistol collider has been registered to the character.
+/// Used to guard the UnregisterPart event so we don't try to unregister twice.
+#[derive(Resource, Default)]
+struct PistolState {
+    registered: bool,
+    character: Option<Entity>,
+    pistol: Option<Entity>,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::default();
+    app.insert_resource(ClearColor(Color::BLACK))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Vello Character Tuning".into(),
+                        // PresentMode::AutoNoVsync is usually the best for Linux/NVIDIA.
+                        present_mode: PresentMode::AutoNoVsync,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    meta_check: AssetMetaCheck::Never,
+                    ..default()
+                })
+                .set(bevy::log::LogPlugin { ..default() }),
+        )
+        .init_state::<GameState>()
+        .add_plugins(VelloCharacterPlugin::default())
+        .insert_resource(PistolState::default())
+        .add_plugins(VelloPlugin)
+        .add_plugins(VelloCollisionResponsePlugin)
+        .add_plugins(particles::VelloPartclePlugin)
+        .add_systems(
+            FixedUpdate,
+            tick_drag.before(CollisionSystems::CollisionResponsePhysics),
+        )
+        .add_systems(Startup, setup_back_ground)
+        .add_systems(Startup, add_light)
+        .add_systems(Startup, setup_resources)
+        .add_systems(
+            Update,
+            check_assets_loaded.run_if(in_state(GameState::Loading)),
+        )
+        .add_systems(
+            OnEnter(GameState::Game),
+            (
+                setup_entity,
+                setup_pistol
+                    .after(setup_entity)
+                    .before(GameLabSystems::WriteCharacterPartEvent),
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                edge_pan_camera::update_edge_pan_camera,
+                spine_indicator::draw_spine_indicator,
+            )
+                .run_if(in_state(GameState::Game)),
+        )
+        .run();
+
+    Ok(())
+}
+
+//make a white background
+fn setup_back_ground(mut commands: Commands) {
+    commands.spawn((
+        Camera2d::default(),
+        edge_pan_camera::EdgePanCamera {
+            edge_margin: -10.0,
+            ..Default::default()
+        },
+    ));
+    let mut scene: VelloScene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgb(1.0, 1.0, 1.0),
+        None,
+        &kurbo::Rect::new(-2048.0, -2048.0, 2048.0, 2048.0),
+    );
+
+    commands.spawn((VelloSceneBundle {
+        scene,
+        ..Default::default()
+    },));
+}
+
+fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
+    make_static_scene(&mut commands);
+    let mut scene: VelloScene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgb(1.0, 0.0, 0.0),
+        None,
+        &kurbo::Rect::new(-10.0, -10.0, 10.0, 10.0),
+    );
+
+    pistol_state.character = Some(
+        commands
+            .spawn((
+                VelloSceneBundle {
+                    transform: Transform {
+                        translation: Vec3::new(0.0, 0.0, 100.0),
+                        scale: Vec3::new(0.5, 0.5, 1.0),
+                        ..Default::default()
+                    },
+                    scene,
+                    ..Default::default()
+                },
+                CharacterRoot {
+                    svg_asset_id: "V8.character.svg".to_owned(),
+                    blueprint_asset_id: "v8.character.json".to_owned(),
+                    collision_group: PLAYER_COLLISION_GROUP,
+                },
+                CharacterController {
+                    move_vector: Vec2::ZERO,
+                    point_vector: Vec2::ZERO,
+                    ..Default::default()
+                },
+                Player,
+                PlayerMarker,
+                default_input_map(),
+                ActionState::<PlayerAction>::default(),
+            ))
+            .id(),
+    );
+
+    let _player_entity = pistol_state
+        .character
+        .expect("player must be spawned first");
+}
+
+/// Spawn a pistol collider and connect it to the character's PRLA particle
+/// via a bilinear joint. Runs after [`setup_entity`] so the character and its
+/// particles are fully assembled.
+fn setup_pistol(
+    mut commands: Commands,
+    mut events: EventWriter<AttachPistolToCharacterEvent>,
+    character_q: Query<(Entity, &ConnectivityRoot), With<CharacterRoot>>,
+    mut pistol_state: ResMut<PistolState>,
+) {
+    // There is only one character — get its entity and ConnectivityRoot.
+    let (character_entity, _root) = character_q.get(pistol_state.character.unwrap()).unwrap();
+
+    let soft_body_init_transform = Transform {
+        translation: Vec3::new(325.0, -90.0, 0.0),
+        rotation: Quat::from_rotation_z(0.0_f32.to_radians()),
+        scale: Vec3::new(0.1, 0.1, 1.0),
+    };
+
+    let softbody_config = SoftBodyInitConfig::default();
+
+    let pistol_entity = commands
+        .spawn((
+            VelloSceneBundle {
+                ..Default::default()
+            },
+            ColliderRoot {
+                svg_asset_id: "pistol.collider.svg".to_string(),
+                albedo_asset_id: "pistol_albedo.png".to_string(),
+                normal_asset_id: "pistol_normal.png".to_string(),
+                metallic: 0.9,
+                roughness: 0.2,
+                softbody_config,
+                collision_config: CollisionConstraintConfig::default(),
+                soft_body_init_transform,
+                initial_velocity: Vec2::ZERO,
+                collision_group: PLAYER_COLLISION_GROUP,
+                collision_inverse_mass: softbody_config.total_inv_mass,
+            },
+            PistolControl {
+                wrist_binding_uv: Vec2::new(0.15, 0.75),
+                gun_point_uv: Vec2::new(1.0, 0.125),
+                ..Default::default()
+            },
+        ))
+        .observe(on_collision_spawn_particle)
+        .id();
+    events.write(AttachPistolToCharacterEvent {
+        character: character_entity,
+        pistol: pistol_entity,
+    });
+    pistol_state.registered = true;
+    pistol_state.pistol = Some(pistol_entity);
+}
+
+fn make_static_scene(commands: &mut Commands) {
+    let make_long_rect = || {
+        let rect: kurbo::Rect = kurbo::Rect::new(-1940.0, -20.0, 1940.0, 20.0);
+        let rect_path = rect.to_path(0.1);
+        (rect_path, rect)
+    };
+    //aabb will only take the effect of position ignoring entity rotation and scale.
+    //in other words if your static collider contains rotation or scaling you need to account for that
+    let make_short_rect = || {
+        let rect = kurbo::Rect::new(-20.0, -1120.0, 20.0, 1120.0);
+        let rect_path = rect.to_path(0.1);
+        (rect_path, rect)
+    };
+    make_static_collision_shape(
+        commands,
+        Vec4::new(0.0, 1080.0, 0.0, 1.0),
+        make_long_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, 0.0),
+        0.0,
+        false,
+    );
+
+    make_static_collision_shape(
+        commands,
+        Vec4::new(0.0, -1080.0, 0.0, 1.0),
+        make_long_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, 0.0),
+        0.0,
+        false,
+    );
+
+    make_static_collision_shape(
+        commands,
+        Vec4::new(-1920.0, 0.0, 0.0, 1.0),
+        make_short_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(-0.0, 0.0),
+        0.0,
+        false,
+    );
+
+    make_static_collision_shape(
+        commands,
+        Vec4::new(1920.0, 0.0, 0.0, 1.0),
+        make_short_rect,
+        GlowColor {
+            color: peniko::Color::rgb(1.0, 0.0, 0.0),
+            glow: 1.0,
+        },
+        Vec2::new(-0.0, 0.0),
+        0.0,
+        false,
+    );
+}
+
+fn make_collision_shape(
+    commands: &mut Commands,
+    transform: Vec4,
+    f: impl Fn() -> (BezPath, kurbo::Rect),
+    color: peniko::Brush,
+    velocity: Vec2,
+    inverse_mass: f32,
+    is_soft_body: bool,
+    soft_body_init_config: Option<SoftBodyInitConfig>,
+    collision_config: Option<CollisionConstraintConfig>,
+    collision_group: u32,
+) -> Entity {
+    let mut scene: VelloScene = VelloScene::default();
+    let (s, rect) = f();
+    let shape = path_to_ccw_quad_path(&s);
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgba(0.0, 1.0, 0.0, 0.7),
+        None,
+        &shape,
+    );
+    let uvs = match &color {
+        peniko::Brush::Image(_) | peniko::Brush::PBRImage(_) => Some(generate_uvs(&shape, &rect)),
+        _ => None,
+    };
+    let soft_body_init_transform = Transform {
+        translation: Vec3::new(transform.x, transform.y, 0.0),
+        rotation: Quat::from_rotation_z(transform.z.to_radians()),
+        scale: Vec3::new(transform.w, transform.w, 1.0),
+    };
+    let entity = commands
+        .spawn((
+            VelloSceneBundle {
+                scene,
+                transform: Transform {
+                    translation: Vec3::new(transform.x, transform.y, 0.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            VelloCollider::new(
+                &shape,
+                None,
+                &rect,
+                velocity,
+                color,
+                inverse_mass,
+                is_soft_body,
+                uvs,
+                soft_body_init_config,
+                collision_config,
+                collision_group,
+                soft_body_init_transform,
+                VELLO_COLLISION_COOL_DOWN_TIME,
+            ),
+        ))
+        .id();
+    entity
+}
+
+fn make_static_collision_shape(
+    commands: &mut Commands,
+    transform: Vec4,
+    f: impl Fn() -> (BezPath, kurbo::Rect),
+    color: peniko::GlowColor,
+    velocity: Vec2,
+    inverse_mass: f32,
+    _is_soft_body: bool,
+) {
+    let _entity = make_collision_shape(
+        commands,
+        transform,
+        f,
+        peniko::Brush::SolidGlow(color),
+        velocity,
+        inverse_mass,
+        false,
+        None,
+        None,
+        0,
+    );
+}
+
+fn check_assets_loaded(
+    mut sc_asset: EventReader<AssetEvent<SvgColliderAsset>>,
+    mut im_asset: EventReader<AssetEvent<VelloImageAsset>>,
+    mut cs_asset: EventReader<AssetEvent<SvgCharacterAsset>>,
+    mut cb_asset: EventReader<AssetEvent<BlueprintCharacterAsset>>,
+    mut colliders: ResMut<SvgColliderAssetManager>,
+    mut images: ResMut<VelloImageAssetManager>,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut character_svg: ResMut<SvgCharacterAssetManager>,
+    mut character_blueprint: ResMut<BlueprintCharacterAssetManager>,
+) {
+    for sc in sc_asset.read() {
+        match sc {
+            AssetEvent::LoadedWithDependencies { id } => {
+                colliders.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    for im in im_asset.read() {
+        match im {
+            AssetEvent::LoadedWithDependencies { id } => {
+                images.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    for cs in cs_asset.read() {
+        match cs {
+            AssetEvent::LoadedWithDependencies { id } => {
+                character_svg.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    for cb in cb_asset.read() {
+        match cb {
+            AssetEvent::LoadedWithDependencies { id } => {
+                character_blueprint.mark_as_loaded(id);
+            }
+            _ => {}
+        }
+    }
+
+    if colliders.all_loaded()
+        && images.all_loaded()
+        && character_svg.all_loaded()
+        && character_blueprint.all_loaded()
+    {
+        next_state.set(GameState::Game);
+    }
+}
+
+fn setup_resources(
+    mut colliders: ResMut<SvgColliderAssetManager>,
+    mut images: ResMut<VelloImageAssetManager>,
+    mut character_svg: ResMut<SvgCharacterAssetManager>,
+    mut character_blueprint: ResMut<BlueprintCharacterAssetManager>,
+    asset_server: Res<AssetServer>,
+) {
+    let mut collider = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        colliders.push(
+            asset_server.load(path),
+            VelloColliderAssetMetaData::default(),
+            name,
+        );
+    };
+    let mut image = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        images.push(
+            asset_server.load(path),
+            VelloImageAssetMetaData::default(),
+            name,
+        );
+    };
+    let mut c_svg = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        character_svg.push(
+            asset_server.load(path),
+            SvgCharacterAssetMetaData::default(),
+            name,
+        );
+    };
+    let mut c_blueprint = |path: &str| {
+        let (_, name) = path
+            .split_once("/")
+            .expect(&format!("wrong asset path {}", path));
+        character_blueprint.push(
+            asset_server.load(path),
+            BlueprintCharacterAssetMetaData::default(),
+            name,
+        );
+    };
+    collider("colliders/ammo.collider.svg");
+    collider("colliders/pistol.collider.svg");
+    image("image/ammo_albedo.png");
+    image("image/ammo_normal.png");
+    image("image/pistol_albedo.png");
+    image("image/pistol_normal.png");
+    c_svg("character/V8.character.svg");
+    c_blueprint("character/v8.character.json");
+}
+
+pub fn add_light(mut commands: Commands) {
+    let mut light_scene: VelloScene = VelloScene::default();
+    let light_radius = 800.0;
+    //let light_shape_ratio = 1.0 / 40.0;
+    info!("Add Light");
+    light_scene.push_point_light(
+        kurbo::Affine::scale(light_radius * 2.0),
+        &[1.0, 1.0, 1.0],
+        200.0 / (light_radius as f32),
+    );
+    commands.spawn((VelloSceneBundle {
+        scene: light_scene,
+        ..Default::default()
+    },));
+}
+
+fn on_collision_spawn_particle(trigger: Trigger<VelloCollisionTrigger>, mut commands: Commands) {
+    let event = trigger.event();
+    let pos = event.collision_point;
+    let mut scene = VelloScene::default();
+    scene.push_instance_with_transforms(&[]);
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::default(),
+        peniko::Color::rgba(1.0, 0.0, 0.0, 0.5),
+        None,
+        &kurbo::Circle::new((0.0, 0.0), 20.0),
+    );
+    scene.pop_instance();
+
+    commands.spawn((
+        VelloSceneBundle {
+            scene,
+            transform: Transform::from_translation(pos.extend(100.0)),
+            ..Default::default()
+        },
+        ExplosionEffect::new(
+            particles::GravityParticleConfig {
+                gravity: Vec2::new(0.0, -98.0),
+                drag: 0.0,
+                persistent: false,
+            },
+            particles::BurstEmitterConfig {
+                count: 100,
+                speed_range: (10.0, 100.0),
+                lifetime_range: (1.0, 1.2),
+                origin: Vec2::new(0.0, 0.0),
+            },
+            500,
+        ),
+    ));
+}

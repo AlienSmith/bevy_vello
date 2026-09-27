@@ -7,6 +7,12 @@ repository.workspace = true
 publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# Standalone character-tuning entry point (duplicate of src/main.rs).
+# Runs from: cargo run -p collision_detection --bin character_tuning_main
+[[bin]]
+name = "character_tuning_main"
+path = "src/character_tuning_main.rs"
+
 [dependencies]
 ron = "0.8"
 #particle won't work with multi-threaded

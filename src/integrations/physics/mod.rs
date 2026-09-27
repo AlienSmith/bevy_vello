@@ -77,6 +77,15 @@ impl VelloConstraintWorld {
         }
     }
 
+    pub fn queue_character_one_time_external_position_constraint(
+        &mut self,
+        event: &CharacterExternalPositionConstraintEvent,
+    ) {
+        if let Ok(group) = self.data.get_group_mut(event.character_entity) {
+            group.add_one_time_external_position_constraint(&event.joint_entity, &event.config);
+        }
+    }
+
     /// Queue an idempotent velocity overwrite on one connection particle of
     /// a character group. Applied at the start of the next physics step;
     /// last write wins (HashMap insert), so a duplicated or lost application
@@ -108,8 +117,9 @@ pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 pub use vello_physics::ConnectionConstraintInitConfig;
 use vello_physics::{
     collision_response::PartcileShapeMatchingConfig, utility::BalancedCoreFrame,
-    AngularConstraintConfig, ConnectionConstraint, ConstraintWorld, FrameInitConfig,
-    FramePositionConstraintConfig, FRAME_PARTICLES_COUNT,
+    AngularConstraintConfig, ConnectionConstraint, ConstraintWorld,
+    ExternalPositionConstraintConfig, FrameInitConfig, FramePositionConstraintConfig,
+    FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -157,6 +167,14 @@ pub struct CharacterAngularConstraintEvent {
     pub joint_entity: Entity,
     pub config: AngularConstraintConfig,
 }
+
+#[derive(Event)]
+pub struct CharacterExternalPositionConstraintEvent {
+    pub character_entity: Entity,
+    pub joint_entity: Entity,
+    pub config: ExternalPositionConstraintConfig,
+}
+
 //in vello space
 #[derive(Event)]
 pub struct CharacterPivotPositionEvent {
