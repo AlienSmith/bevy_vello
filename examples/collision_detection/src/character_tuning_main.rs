@@ -11,6 +11,7 @@
 
 mod edge_pan_camera;
 mod spine_indicator;
+mod spine_position_constraint;
 
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 
@@ -158,9 +159,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_plugins(particles::VelloPartclePlugin)
+        .add_observer(spine_indicator::spawn_spine_indicator)
         .add_systems(
             FixedUpdate,
-            tick_drag.before(CollisionSystems::CollisionResponsePhysics),
+            (
+                tick_drag,
+                spine_position_constraint::spine_position_constraint,
+            )
+                .before(CollisionSystems::CollisionResponsePhysics),
         )
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
