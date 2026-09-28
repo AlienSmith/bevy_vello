@@ -377,10 +377,6 @@
           143.75
         ],
         "inv_mass": 0.25
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -392,10 +388,6 @@
           202.74998
         ],
         "inv_mass": 0.25
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -407,10 +399,6 @@
           275.74997
         ],
         "inv_mass": 0.25
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -422,10 +410,6 @@
           345.75
         ],
         "inv_mass": 0.25
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -437,10 +421,6 @@
           451.75
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -452,10 +432,6 @@
           448.75
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -467,10 +443,6 @@
           201.74998
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -482,10 +454,6 @@
           202.74998
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -497,10 +465,6 @@
           94.75
         ],
         "inv_mass": 0.25
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -512,10 +476,6 @@
           202.74998
         ],
         "inv_mass": 2.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -527,10 +487,6 @@
           201.74998
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -542,10 +498,6 @@
           551.75006
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -557,10 +509,6 @@
           557.75006
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -572,10 +520,6 @@
           202.74998
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -587,10 +531,6 @@
           202.74998
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -602,10 +542,6 @@
           346.75
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     },
     {
@@ -617,10 +553,6 @@
           346.45502
         ],
         "inv_mass": 1.0
-      },
-      "frame_conn": {
-        "compliance": 0.01,
-        "damping": 0.1
       }
     }
   ],

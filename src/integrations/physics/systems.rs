@@ -9,9 +9,9 @@ use crate::{
     },
     integrations::physics::{
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotImpulseEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
-        ColliderExternalImpulseEvent, PivotVisualizer, VelloCharacterPhysicsRoot,
-        VelloConstraintWorld, VelloJoint, VelloParticle,
+        CharacterPivotImpulseEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
+        PivotVisualizer, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
+        VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -519,11 +519,6 @@ pub fn generate_connection(
             )
             .expect("character missing particles to form frame");
     }
-    //add shape matching constraints
-    for (e, p) in query_p.iter() {
-        let group = constraint_world.data.get_group_mut(p.root_entity).unwrap();
-        group.add_connect_particle_shape_matching(&e, &p.shape_matching_init);
-    }
     //add onther constraints
     for (e, c) in query_c.iter() {
         constraint_world
@@ -544,12 +539,6 @@ pub fn update_connection_particles(
         if let Ok(group) = constraint_world.data.get_group_ref(character) {
             if let Some(item) = group.get_connect_particle(&e) {
                 joint.particle = item;
-            }
-            if let Some(item) = group.get_connect_particle_shape_matching_config(&e) {
-                if joint.shape_matching_init_local_pos.is_none() {
-                    joint.shape_matching_init_local_pos = Some(item.local_target);
-                }
-                joint.shape_matching = item;
             }
         }
     }
@@ -593,7 +582,6 @@ pub fn apply_explicit_impulse_on_connection_particle(
     mut v_events: EventReader<CharacterPivotVelocityEvent>,
     mut frame_events: EventReader<CharacterFrameForceEvent>,
     mut angular_event: EventReader<CharacterAngularConstraintEvent>,
-    mut position_event: EventReader<CharacterPivotPositionEvent>,
 ) {
     for event in events.read() {
         // Guard against stale events targeting a group whose root was removed
@@ -631,12 +619,6 @@ pub fn apply_explicit_impulse_on_connection_particle(
             continue;
         };
         group.set_connect_angular_config(&event.joint_entity, &event.config);
-    }
-    for event in position_event.read() {
-        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
-            continue;
-        };
-        group.set_connect_particle_shahep_matching_config(&event.joint_entity, &event.target);
     }
 }
 

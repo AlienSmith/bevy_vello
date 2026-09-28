@@ -35,8 +35,8 @@ use bevy_vello::{
             update_constraint_world,
         },
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotImpulseEvent, CharacterPivotPositionEvent, CharacterPivotVelocityEvent,
-        ColliderExternalImpulseEvent, VelloConstraintWorld, VelloParticle,
+        CharacterPivotImpulseEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
+        VelloConstraintWorld, VelloParticle,
     },
     prelude::*,
 };
@@ -94,42 +94,43 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(60.0);
     let mut app = App::default();
-    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-        1.0 / fps, // controller runs per app update; override with PROBE_FPS
-    ))))
-        .add_plugins(bevy::log::LogPlugin::default())
-        .add_plugins(AssetPlugin {
-            meta_check: AssetMetaCheck::Never,
-            file_path: "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets".into(),
-            ..default()
-        })
-        .add_plugins(bevy::input::InputPlugin)
-        .add_plugins(VelloCharacterPlugin)
-        // Physics resources (mirrors VelloCollisionResponsePlugin, minus GPU parts)
-        .insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, 0.0)))
-        .insert_resource(Time::<Fixed>::from_hz(90.0))
-        .insert_resource(VelloCollisionWorld::default())
-        .insert_resource(RemovedColliders::default())
-        .insert_resource(CollisionEventBatch::default())
-        .add_event::<ColliderExternalImpulseEvent>()
-        .add_event::<CharacterPivotForceEvent>()
-        .add_event::<CharacterPivotVelocityEvent>()
-        .add_event::<CharacterPivotImpulseEvent>()
-        .add_event::<CharacterAngularConstraintEvent>()
-        .add_event::<CharacterPivotPositionEvent>()
-        .add_event::<CharacterFrameForceEvent>()
-        .add_event::<VelloRayTraceCommand>()
-        .insert_resource(Probe {
-            character: None,
-            t0: 0.0,
-            log: vec![],
-            next_log: 0.0,
-            exited: false,
-            input_vec: scenario().0,
-            input_end: scenario().1,
-            exit_at: scenario().2,
-            log_period: scenario().3,
-        });
+    app.add_plugins(
+        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / fps, // controller runs per app update; override with PROBE_FPS
+        ))),
+    )
+    .add_plugins(bevy::log::LogPlugin::default())
+    .add_plugins(AssetPlugin {
+        meta_check: AssetMetaCheck::Never,
+        file_path: "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets".into(),
+        ..default()
+    })
+    .add_plugins(bevy::input::InputPlugin)
+    .add_plugins(VelloCharacterPlugin)
+    // Physics resources (mirrors VelloCollisionResponsePlugin, minus GPU parts)
+    .insert_resource(VelloConstraintWorld::new(Vec2::new(0.0, 0.0)))
+    .insert_resource(Time::<Fixed>::from_hz(90.0))
+    .insert_resource(VelloCollisionWorld::default())
+    .insert_resource(RemovedColliders::default())
+    .insert_resource(CollisionEventBatch::default())
+    .add_event::<ColliderExternalImpulseEvent>()
+    .add_event::<CharacterPivotForceEvent>()
+    .add_event::<CharacterPivotVelocityEvent>()
+    .add_event::<CharacterPivotImpulseEvent>()
+    .add_event::<CharacterAngularConstraintEvent>()
+    .add_event::<CharacterFrameForceEvent>()
+    .add_event::<VelloRayTraceCommand>()
+    .insert_resource(Probe {
+        character: None,
+        t0: 0.0,
+        log: vec![],
+        next_log: 0.0,
+        exited: false,
+        input_vec: scenario().0,
+        input_end: scenario().1,
+        exit_at: scenario().2,
+        log_period: scenario().3,
+    });
 
     // Real physics stepping, same order as VelloCollisionResponsePlugin,
     // minus run_broad_phase / run_gpu_collision / raytrace.
@@ -208,7 +209,10 @@ fn synth_hit_inject(
     let Some(spec) = std::env::var("SYNTH_HIT").ok().filter(|s| !s.is_empty()) else {
         return;
     };
-    let parts: Vec<f32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    let parts: Vec<f32> = spec
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
     if parts.len() != 5 {
         error!("SYNTH_HIT must be \"t,px,py,vx,vy\"");
         *fired = true;
@@ -282,7 +286,9 @@ fn probe_driver(
         return;
     }
 
-    let Some(character) = probe.character else { return };
+    let Some(character) = probe.character else {
+        return;
+    };
     let t = time.elapsed_secs() - probe.t0;
 
     // Physics root must be initialized before the controller acts (same gate
@@ -331,7 +337,10 @@ fn probe_driver(
                 if let Ok(p) = particle_q.get(*e) {
                     row += &format!(
                         ",{:.2},{:.2},{:.2},{:.2}",
-                        p.particle.pos.x, p.particle.pos.y, p.particle.velocity.x, p.particle.velocity.y
+                        p.particle.pos.x,
+                        p.particle.pos.y,
+                        p.particle.velocity.x,
+                        p.particle.velocity.y
                     );
                     if i < 4 {
                         center += p.particle.pos;
@@ -342,7 +351,11 @@ fn probe_driver(
                 }
             }
             let _ = names;
-            let (cx, cy) = if n > 0.0 { (center.x / n, center.y / n) } else { (f32::NAN, f32::NAN) };
+            let (cx, cy) = if n > 0.0 {
+                (center.x / n, center.y / n)
+            } else {
+                (f32::NAN, f32::NAN)
+            };
             row += &format!(",{cx:.2},{cy:.2}");
             // Mean body-part (collider) position: measures how the 16 soft-body
             // parts follow the skeleton (follow-lag metric for one-way coupling).
@@ -352,7 +365,11 @@ fn probe_driver(
                 cc += Vec2::new(tr.translation.x, tr.translation.y);
                 cn += 1.0;
             }
-            let (ccx, ccy) = if cn > 0.0 { (cc.x / cn, cc.y / cn) } else { (f32::NAN, f32::NAN) };
+            let (ccx, ccy) = if cn > 0.0 {
+                (cc.x / cn, cc.y / cn)
+            } else {
+                (f32::NAN, f32::NAN)
+            };
             row += &format!(",{ccx:.2},{ccy:.2},{cn:.0}");
             probe.log.push(row);
         }

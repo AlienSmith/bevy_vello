@@ -303,23 +303,6 @@
         "frame_particles_damping"
       ]
     },
-    "FramePositionConstraintConfig": {
-      "type": "object",
-      "properties": {
-        "compliance": {
-          "type": "number",
-          "format": "float"
-        },
-        "damping": {
-          "type": "number",
-          "format": "float"
-        }
-      },
-      "required": [
-        "compliance",
-        "damping"
-      ]
-    },
     "JointConfig": {
       "type": "object",
       "properties": {
@@ -364,9 +347,6 @@
     "ParticleConfig": {
       "type": "object",
       "properties": {
-        "frame_conn": {
-          "$ref": "#/$defs/FramePositionConstraintConfig"
-        },
         "particle": {
           "$ref": "#/$defs/Particle"
         },
@@ -380,8 +360,7 @@
       "required": [
         "svg_id",
         "path_id",
-        "particle",
-        "frame_conn"
+        "particle"
       ]
     },
     "ShapeMatchingConfig": {

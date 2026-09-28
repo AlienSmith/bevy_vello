@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use vello::kurbo::{BezPath, Rect};
 use vello_physics::{
     collision_response::Particle, CollisionConstraintConfig, ConnectionConstraintInitConfig,
-    FramePositionConstraintConfig, SoftBodyInitConfig,
+    SoftBodyInitConfig,
 };
 
 mod observers;
@@ -42,8 +42,6 @@ pub enum CharacterPartEvent {
         path_id: String,
         /// Initial particle state (position, inverse mass, etc.).
         particle: Particle,
-        /// Shape-matching constraint config for this particle.
-        shape_matching: FramePositionConstraintConfig,
     },
     /// Add a joint where the constraint's entity references are given as string
     /// path_ids (e.g. "PRLA", "pistol") instead of raw entity handles.

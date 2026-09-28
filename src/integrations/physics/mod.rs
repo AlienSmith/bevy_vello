@@ -116,10 +116,8 @@ pub use vello_physics::soft_body::ParticleInfo;
 pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 pub use vello_physics::ConnectionConstraintInitConfig;
 use vello_physics::{
-    collision_response::PartcileShapeMatchingConfig, utility::BalancedCoreFrame,
-    AngularConstraintConfig, ConnectionConstraint, ConstraintWorld,
-    ExternalPositionConstraintConfig, FrameInitConfig, FramePositionConstraintConfig,
-    FRAME_PARTICLES_COUNT,
+    utility::BalancedCoreFrame, AngularConstraintConfig, ConnectionConstraint, ConstraintWorld,
+    ExternalPositionConstraintConfig, FrameInitConfig, FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -173,14 +171,6 @@ pub struct CharacterExternalPositionConstraintEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,
     pub config: ExternalPositionConstraintConfig,
-}
-
-//in vello space
-#[derive(Event)]
-pub struct CharacterPivotPositionEvent {
-    pub character_entity: Entity,
-    pub joint_entity: Entity,
-    pub target: PartcileShapeMatchingConfig,
 }
 
 #[derive(Component)]
@@ -247,25 +237,15 @@ impl Component for VelloJoint {
 pub struct VelloParticle {
     pub particle_init: Particle,
     pub particle: Particle,
-    pub shape_matching_init: FramePositionConstraintConfig,
-    pub shape_matching_init_local_pos: Option<Vec2>, //remove this and use PartcileShapeMatchingConfig in the character json
-    pub shape_matching: PartcileShapeMatchingConfig,
     pub root_entity: Entity,
 }
 
 impl VelloParticle {
-    pub fn new(
-        particle: Particle,
-        entity: Entity,
-        shape_matching_init: FramePositionConstraintConfig,
-    ) -> Self {
+    pub fn new(particle: Particle, entity: Entity) -> Self {
         Self {
             particle_init: particle,
             particle,
-            shape_matching_init,
-            shape_matching: Default::default(),
             root_entity: entity,
-            shape_matching_init_local_pos: None,
         }
     }
 }

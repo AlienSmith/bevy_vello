@@ -213,8 +213,8 @@ use vello::{
 };
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
-    CollisionConstraintConfig, ConnectionConstraintInitConfig, FramePositionConstraintConfig,
-    SoftBodyInitConfig, FRAME_PARTICLES_COUNT,
+    CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
+    FRAME_PARTICLES_COUNT,
 };
 
 use crate::{
@@ -295,15 +295,10 @@ pub fn spawn_character_parts(
                 character,
                 path_id,
                 particle,
-                shape_matching,
             } => {
                 info!("[spawn] spawning particle '{path_id}' for character {character:?}");
                 let particle_entity = commands
-                    .spawn(VelloParticle::new(
-                        *particle,
-                        *character,
-                        shape_matching.clone(),
-                    ))
+                    .spawn(VelloParticle::new(*particle, *character))
                     .id();
                 let name = string_pool.pool.intern(path_id);
                 commands
@@ -721,8 +716,7 @@ pub fn assemble_character(
     for item in blueprint.data.particles.iter() {
         let mut particle = item.particle.clone();
         apply_transform_to_particle(&mut particle);
-        let config = item.frame_conn.clone();
-        let entity = make_particle(&mut commands, particle, &root_entity, config);
+        let entity = make_particle(&mut commands, particle, &root_entity);
         let particle_name = string_pool.pool.intern(&item.path_id);
         colliders_particle_entity.insert(
             item.path_id.to_string(),
@@ -880,18 +874,9 @@ pub fn assemble_character(
     }
 }
 
-fn make_particle(
-    commands: &mut Commands,
-    particle: Particle,
-    root_entity: &Entity,
-    frame_connect_config: FramePositionConstraintConfig,
-) -> Entity {
+fn make_particle(commands: &mut Commands, particle: Particle, root_entity: &Entity) -> Entity {
     commands
-        .spawn(VelloParticle::new(
-            particle,
-            *root_entity,
-            frame_connect_config,
-        ))
+        .spawn(VelloParticle::new(particle, *root_entity))
         .id()
 }
 

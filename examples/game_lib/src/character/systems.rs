@@ -1,10 +1,9 @@
 use bevy::{ecs::error::info, math::VectorSpace, prelude::*};
 use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, CharacterPivotPositionEvent,
-    VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
+    CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, VelloCharacterPhysicsRoot,
+    VelloConstraintWorld, VelloJoint, VelloParticle,
 };
 use vello_physics::{
-    collision_response::PartcileShapeMatchingConfig,
     utility::{cos_sin, BalancedCoreFrame},
     ConnectionConstraint,
 };
@@ -271,22 +270,18 @@ fn calculate_arm_ik(
     _joints: &Vec<VelloJoint>,
     config: &ArmConfig,
     blend_core: &BalancedCoreFrame,
-) -> (
-    Vec<CharacterAngularConstraintEvent>,
-    Vec<CharacterPivotPositionEvent>,
-) {
+) -> Vec<CharacterAngularConstraintEvent> {
     const ARM_PARTICLE_COUNT: usize = 4; // P1, P12, P13, PRLA
     const ARM_JOINT_COUNT: usize = 2; // shoulder, elbow
 
     let mut angular_events = vec![];
-    let mut position_events = vec![];
 
     // Early exit if disabled or missing particles/joints
     if matches!(config.ik_mode, IkMode::Disabled)
         || particles.len() < ARM_PARTICLE_COUNT
         || joints_entity.len() < ARM_JOINT_COUNT
     {
-        return (angular_events, position_events);
+        return angular_events;
     }
 
     let p1 = particles[0].particle.pos; // spine base
@@ -298,7 +293,7 @@ fn calculate_arm_ik(
     let dist_to_target = (prla - true_target).length();
 
     if dist_to_target <= config.convergence_threshold {
-        return (angular_events, position_events);
+        return angular_events;
     }
 
     // Convert everything to local space so angular + shape matching agree
@@ -311,7 +306,7 @@ fn calculate_arm_ik(
     let upper_len = (p13_local - p12_local).length();
     let forearm_len = (prla_local - p13_local).length();
     if upper_len <= f32::EPSILON || forearm_len <= f32::EPSILON {
-        return (angular_events, position_events);
+        return angular_events;
     }
 
     // Compute the frame's max angular delta from the rate
@@ -349,7 +344,7 @@ fn calculate_arm_ik(
             .clamp(-1.0, 1.0);
         let angle_err = cos_err.acos();
         if angle_err <= FOREARM_ANGULAR_EPSILON {
-            return (angular_events, position_events);
+            return angular_events;
         }
     }
 
@@ -401,88 +396,7 @@ fn calculate_arm_ik(
         });
     }
 
-    // ---- Shape matching position constraints (local space, damped) ----
-    // Helper: damp a local target direction using rotate_toward so the shape
-    // matching target doesn't jump suddenly and fight the solver.
-    let damp_local_target = |current_local: Vec2, pivot_local: Vec2, desired_local: Vec2| -> Vec2 {
-        let current_offset = current_local - pivot_local;
-        let desired_offset = desired_local - pivot_local;
-        let current_len = current_offset.length();
-        let desired_len = desired_offset.length();
-        if current_len > f32::EPSILON && desired_len > f32::EPSILON {
-            let current_dir = current_offset / current_len;
-            let desired_dir = desired_offset / desired_len;
-            let (blended_cos, blended_sin) = rotate_toward(
-                current_dir.x,
-                current_dir.y,
-                desired_dir.x,
-                desired_dir.y,
-                max_delta,
-            );
-            let blended_dir = Vec2::new(blended_cos, blended_sin);
-            pivot_local + blended_dir * desired_len
-        } else {
-            desired_local
-        }
-    };
-
-    // Shoulder SM (particle index 1) — SKIP in elbow-only mode.
-    // In elbow-only mode the shoulder is frozen, so emitting any SM target
-    // (even snapped to current p13) would exert a lingering force that fights
-    // the frozen-shoulder assumption.
-    if !is_elbow_only {
-        let mut shoulder_sm = particles[1].shape_matching;
-        let desired_shoulder_local =
-            damp_local_target(shoulder_sm.local_target, p12_local, desired_p13_local);
-        shoulder_sm.local_target = desired_shoulder_local;
-        shoulder_sm.compliance = config.shape_matching_compliance;
-        shoulder_sm.damping = config.shape_matching_damping;
-        position_events.push(CharacterPivotPositionEvent {
-            character_entity,
-            joint_entity: particles_entity[1],
-            target: shoulder_sm,
-        });
-    }
-
-    // Elbow SM (particle index 2) — SKIP in elbow-only mode.
-    // The forearm position is driven solely by the elbow angular constraint.
-    // Adding an SM target here creates a two-force conflict that fights the
-    // angular constraint, producing oscillation between the two systems.
-    if !is_elbow_only {
-        let mut elbow_sm = particles[2].shape_matching;
-        let desired_elbow_local =
-            damp_local_target(elbow_sm.local_target, desired_p13_local, desired_prla_local);
-        elbow_sm.local_target = desired_elbow_local;
-        elbow_sm.compliance = config.shape_matching_compliance;
-        elbow_sm.damping = config.shape_matching_damping;
-        position_events.push(CharacterPivotPositionEvent {
-            character_entity,
-            joint_entity: particles_entity[2],
-            target: elbow_sm,
-        });
-    }
-
-    // Wrist SM (particle index 3) — always emit in Aim mode.
-    // Uses the IK-computed desired_prla_local (which accounts for weapon offset)
-    // as the direction target, NOT the raw local_target.  This ensures the wrist
-    // SM guides the hand to the weapon-offset-corrected position.
-    let mut wrist_sm = particles[3].shape_matching;
-    let pos_e = if is_elbow_only {
-        desired_p13_local // frozen elbow as pivot
-    } else {
-        particles[2].shape_matching.local_target // blended elbow SM target
-    };
-    let desired_wrist_local = damp_local_target(wrist_sm.local_target, pos_e, desired_prla_local);
-    wrist_sm.local_target = desired_wrist_local;
-    wrist_sm.compliance = config.shape_matching_compliance;
-    wrist_sm.damping = config.shape_matching_damping;
-    position_events.push(CharacterPivotPositionEvent {
-        character_entity,
-        joint_entity: particles_entity[3],
-        target: wrist_sm,
-    });
-
-    (angular_events, position_events)
+    angular_events
 }
 
 /// Rotate unit vector (cos_a, sin_a) toward (cos_b, sin_b) by at most `max_delta` radians.
@@ -536,7 +450,6 @@ pub fn update_character_movement(
     j_q: Query<&VelloJoint>,
     mut velocity_events: EventWriter<CharacterPivotImpulseEvent>,
     mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
-    mut position_events: EventWriter<CharacterPivotPositionEvent>,
 ) {
     let dt = time.delta_secs();
 
@@ -553,7 +466,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let (arm_angular, arm_position) = calculate_arm_ik(
+        let arm_angular = calculate_arm_ik(
             arm.target,
             dt,
             &p_e,
@@ -565,7 +478,6 @@ pub fn update_character_movement(
         );
 
         angular_events.write_batch(arm_angular);
-        position_events.write_batch(arm_position);
     }
 
     // ---- Left arm ----
@@ -581,7 +493,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let (arm_angular_events, arm_position_events) = calculate_arm_ik(
+        let arm_angular_events = calculate_arm_ik(
             arm.target,
             dt,
             &p_e,
@@ -593,41 +505,22 @@ pub fn update_character_movement(
         );
 
         angular_events.write_batch(arm_angular_events);
-        position_events.write_batch(arm_position_events);
     }
 }
 
 pub fn reset_arm_constraint_event(
     mut reader: EventReader<ResetArmControlConstraintsEvent>,
     query_control: Query<(&LeftArmController, &RightArmController)>,
-    query_p: Query<&VelloParticle>,
     query_a: Query<&VelloJoint>,
     mut angular_writer: EventWriter<CharacterAngularConstraintEvent>,
-    mut position_writer: EventWriter<CharacterPivotPositionEvent>,
 ) {
-    let mut pos_events = vec![];
     let mut angular_events = vec![];
     for item in reader.read() {
         let (left, right) = query_control.get(item.character).unwrap();
-        let (particles, angulars) = match item.arm {
-            super::WhichArm::Left => (left.particles, left.joints),
-            super::WhichArm::Right => (right.particles, right.joints),
+        let angulars = match item.arm {
+            super::WhichArm::Left => left.joints,
+            super::WhichArm::Right => right.joints,
         };
-        particles.iter().for_each(|e| {
-            let c = query_p.get(*e).unwrap();
-
-            pos_events.push(CharacterPivotPositionEvent {
-                character_entity: item.character,
-                joint_entity: *e,
-                target: PartcileShapeMatchingConfig {
-                    local_target: c.shape_matching_init_local_pos.expect(
-                        "please don't drop the weapon the same frame character being assembled",
-                    ),
-                    compliance: c.shape_matching_init.compliance,
-                    damping: c.shape_matching_init.damping,
-                },
-            });
-        });
         angulars.iter().for_each(|e| {
             let j = query_a.get(*e).unwrap();
             if let ConnectionConstraint::Angular(config) = j.init_constrats.unwrap() {
@@ -640,5 +533,4 @@ pub fn reset_arm_constraint_event(
         });
     }
     angular_writer.write_batch(angular_events);
-    position_writer.write_batch(pos_events);
 }
