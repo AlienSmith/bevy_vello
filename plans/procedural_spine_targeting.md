@@ -96,15 +96,14 @@ pose = current + clamp_dir( step, 0, max_step )   # clamp to [0, max_step] along
 
 This is what was previously labelled "ease-in-out". The lingering "ease-in" notion is **retired**: with a fresh start every frame it degenerates into the monotonic decay above, and a slow-start on large error would only make the character feel unresponsive to big commands.
 
-## Constants / tuning knobs (proposed, to confirm with implementation)
+## Constants / tuning knobs
 
 - `pos_alpha` — interpolation factor per frame for the target center position.
 - `ang_alpha` — interpolation factor per frame for the target heading angle.
 - `max_pos_speed` — max center speed in px/s; `max_pos_step = max_pos_speed * dt` is the per-frame position cap.
 - `max_ang_speed` — max heading turn rate in rad/s; `max_ang_step = max_ang_speed * dt` is the per-frame angular cap.
-- `command_reach` — how far ahead of the current center the commanded target is placed (e.g. 40 px).
-- `heading_range` — allowed absolute heading range / clamp (e.g. ±max steering delta); out-of-range mid is wrapped/clamped into it.
-- `lean_gain` — maps heading error → `P1_P2_P3` rest-angle lean.
+- `command_reach` — how far ahead of the current center the commanded target is placed (e.g. 40 px). The **rotation axis works identically**: a commanded heading offset that likewise introduces a small, controlled lag/damping phase (the angular analogue of the 40 px slow-down).
+- `lean_gain` — maps **per-frame angular step (rotation speed this frame)** → `P1_P2_P3` rest-angle lean. Faster actual turn ⇒ bigger lean.
 - Existing `SpineConfig.{compliance, damping}` and the angular compliance drive the physics-side smoothing.
 
 ## Files
@@ -121,7 +120,11 @@ This is what was previously labelled "ease-in-out". The lingering "ease-in" noti
 - Lean sign/orientation: target right ⇒ +bend; symmetric for left.
 - Existing `vello_physics` / `game_lib` suites must remain green.
 
+## Resolved decisions
+
+- **Heading clamp**: rotation works exactly like position — a **per-frame max turn step** (`max_ang_step = max_ang_speed · dt`), no absolute heading range. It introduces a small controlled lag (the angular analogue of the 40 px slow-down phase).
+- **Lean driver**: the `P1_P2_P3` rest-angle lean is based on **rotation speed**, i.e. the interpolated per-frame angular step actually applied this frame (rad/frame → turn rate); `lean_gain` maps it to the rest angle. Orientation: target to the character's right ⇒ `P1_P2_P3` bends toward its right (+), symmetric for left.
+
 ## Open questions
 
-1. **Heading range / clamp**: does `heading_range` bound the per-frame step (max α-scaled delta), an absolute heading range, or both? *(default assumption: an absolute per-frame max delta via α, plus an optional absolute range)*
-2. **Lean driver**: angular error vs. the interpolated per-frame angular step — and sign/orientation confirmation (symmetry toward the turn side assumed).
+*None — both prior open questions are resolved (see above).*
