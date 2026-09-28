@@ -26,7 +26,7 @@ If the three particles are byte-identical to the previous frame and the player i
 Consequences:
 - **No stateful / accumulated values** in the controller (no time-integrated velocity, no stored smoothed rotation/position that drifts independently of particle state).
 - "Rotation velocity" (used to scale lean) must be **derived from current state**, e.g. from the heading error, not from a time history.
-- The eased/interpolated pose must itself be a purely re-derived function of state + input.
+- The interpolated pose must itself be a purely re-derived function of state + input.
 - This makes the whole controller **unit-testable** as a pure function (feed identical inputs, assert identical outputs).
 
 ## Architecture
@@ -37,8 +37,7 @@ The indicator stays as the thin input + visualization front-end; a controller mo
 flowchart TD
   A[Current pose: P1 P2 P3 + current heading from particles] --> E
   B[Arrow target heading - world space] --> E
-  E["Compute eased interpolated pose center + raw-angle heading"] --> F[Clamp within range]
-  F --> D[Interpolated pose this frame - deterministic]
+  E["Interpolate partway toward target (lerp alpha) + clamp to range"] --> D[Interpolated pose this frame - deterministic]
   D --> G["Rotation velocity proxy from heading error"]
   G --> H["P1 P2 P3 tilt rest angle - lean toward turn"]
   D --> I["Virtual targets from interpolated pose - P2 centered"]
@@ -58,8 +57,7 @@ flowchart TD
 
 3. **Virtual pose (new controller, [`character/systems.rs`](bevy_vello/examples/game_lib/src/character/systems.rs) or new module)**
    - `target_pose = (P2 center, arrow heading)`.
-   - Per frame, re-derive an **eased interpolated pose** from current state toward target.
-   - **Distance-based** easing for the center; **angle-based** easing for the heading (raw angle).
+   - Per frame, re-derive an **interpolated pose** from current state toward target (see **Interpolation / damping** below).
    - Clamp the interpolated pose "within range".
 
 4. **Lean / tilt (new math, deterministic)**
@@ -69,28 +67,43 @@ flowchart TD
 5. **Drive (reuse existing plumbing)**
    - External position constraints: reuse the `compute_bevy_targets` shape (translate + rotate P2-centred local offsets) fed by the **interpolated** pose. P2's virtual target = interpolated center.
    - Angular constraint: set the lean rest pose on `P1_P2_P3`.
-   - Physics damping on P1/P2/P3 (existing solver behavior) is the second, time-backed smoothing layer that turns the eased pose into controllable motion.
+   - Physics damping on P1/P2/P3 (existing solver behavior) is the second, time-backed smoothing layer that turns the interpolated pose into controllable motion.
 
-## Ease-in-out interpolation — TO BE CONFIRMED
+## Interpolation / damping (RESOLVED)
 
-> **Open question.** A conventional `smoothstep(t)` needs elapsed time, which is forbidden by the determinism invariant. The proposed resolution is **error-based easing**: no accumulated `t`; each frame the correction step is shaped purely by the current error magnitude.
+> **Mechanism.** There is no time-based ease-in/ease-out curve, because the target is re-derived every frame and determinism forbids accumulated time. Instead we **always interpolate partway toward a fixed/held target each frame, clamped by max speed**, and rely on the resulting asymptotic approach as the damping/ease-out.
 
-Position uses `dist = |target_center − current_center|`; rotation uses the angular error `Δθ` between current heading and target heading.
+### Worked example (position, 90 fps)
 
-Three candidate shapes (bounded by "no time" constraint):
+- **Max-speed cap** bounds the per-frame step: `max_speed` (px/s) × `dt` → e.g. 900 px/s at 90 fps = **10 px/frame**. The virtual point must never exceed this per-frame displacement (the character's virtual point can't teleport faster than max speed).
+- **Command (press right):** place the target 40 px away from the current center. `mid = lerp(current, target, α)` returns 20 px (α = 0.5). Clamp the resulting step into the allowed per-frame band — effectively between 10 px and 20 px — tuned by the **stiffness of the external distance constraint** (stiffer constraint ⇒ tighter cap toward the low end). So the virtual point advances at most the per-frame max.
+- **Release:** the target is **frozen** at the last commanded pose (it does **not** snap back to the current pose). We keep interpolating the virtual point toward that fixed target each frame, asymptotically closer but **never reaching** it — this continuous decay **is** the damping.
 
-- **A. Proportional** `new = current + k·(target − current)`: iterated → exponential, **ease-out only**, never eases in. Simple/stable; does not meet "ease-in AND ease-out".
-- **B. Bell over normalized error** (recommended): `u = clamp(error / L, 0, 1)`, `rate = g(u)` peaked at `u = 0.5`, e.g. `4·u·(1−u)` or composed smoothstep; step = `max_step · rate` along the error direction. Genuine ease-in-out, deterministic, pure. **Pitfall:** `rate → 0` at very large error (`u → 1`); pick `L` as practical max error / taper tails gracefully.
-- **C. Eased proportional** `step = k0 · shaped(u) · (target − current)`: smoothed proportional, approximates ease-out unless the far end is also bent.
+### Per-frame computation (position and heading follow the same pattern)
 
-Split easing per axis: linear `L` ("easing length") and angular `L_θ` ("easing angle") as tunable constants.
+```
+step = target - current                      # commanded delta
+mid  = current + α * step                    # interpolate partway (α in (0,1))
+step_len = |mid - current|                   # candidate per-frame displacement
+pose = current + clamp_dir( step, 0, max_step )   # clamp to [0, max_step] along step direction
+# (for angle: same but with max_step = ang_max_speed * dt, plus the heading range clamp)
+```
+
+- Because `current` re-derives from the live particles each frame and we take only a fraction `α` of the remaining gap, we get **asymptotically closer to the target but never reach it** — this is the ease-out / damping.
+- **On release** the target freezes at the last commanded pose; the virtual point keeps decaying toward it, and the physics damping settles the particles cleanly. Nothing snaps back.
+- Fully deterministic: `mid` is a pure function of `(current, target, dt)`. Unit-testable.
+- Position and rotation each use their own `α` and their own `max_speed`, so linear and angular response are tuned independently.
+
+This is what was previously labelled "ease-in-out". The lingering "ease-in" notion is **retired**: with a fresh start every frame it degenerates into the monotonic decay above, and a slow-start on large error would only make the character feel unresponsive to big commands.
 
 ## Constants / tuning knobs (proposed, to confirm with implementation)
 
-- `easing_length` — characteristic position error for the position ease.
-- `easing_angle` — characteristic heading error for the angle ease.
-- `max_pos_step` — max per-frame target center displacement.
-- `max_ang_step` — max per-frame target heading change.
+- `pos_alpha` — interpolation factor per frame for the target center position.
+- `ang_alpha` — interpolation factor per frame for the target heading angle.
+- `max_pos_speed` — max center speed in px/s; `max_pos_step = max_pos_speed * dt` is the per-frame position cap.
+- `max_ang_speed` — max heading turn rate in rad/s; `max_ang_step = max_ang_speed * dt` is the per-frame angular cap.
+- `command_reach` — how far ahead of the current center the commanded target is placed (e.g. 40 px).
+- `heading_range` — allowed absolute heading range / clamp (e.g. ±max steering delta); out-of-range mid is wrapped/clamped into it.
 - `lean_gain` — maps heading error → `P1_P2_P3` rest-angle lean.
 - Existing `SpineConfig.{compliance, damping}` and the angular compliance drive the physics-side smoothing.
 
@@ -104,12 +117,11 @@ Split easing per axis: linear `L` ("easing length") and angular `L_θ` ("easing 
 ## Tests
 
 - Pure-function unit tests: identical (particles, input) ⇒ identical (pose, lean).
-- Easing shape tests: bell peaks at mid error; zero step at error 0; bounds respected.
+- Interpolation/damping tests: `current + α·(target − current)` clamped to `max_step`; monotonic toward target, never overshoots; per-frame step never exceeds `max_speed · dt`; frozen target on release keeps decaying asymptotically (never reaches); clamp in-range and out-of-range cases.
 - Lean sign/orientation: target right ⇒ +bend; symmetric for left.
 - Existing `vello_physics` / `game_lib` suites must remain green.
 
 ## Open questions
 
-1. **Easing shape**: A, B, or C (see above). Recommend **B**.
-2. **Clamp semantics**: does "clamp within range" bound (a) per-frame step toward target, (b) absolute heading range, or both?
-3. **Lean driver**: angular error vs. eased per-frame angular step (see discussion) — and sign/orientation confirmation (symmetry assumed).
+1. **Heading range / clamp**: does `heading_range` bound the per-frame step (max α-scaled delta), an absolute heading range, or both? *(default assumption: an absolute per-frame max delta via α, plus an optional absolute range)*
+2. **Lean driver**: angular error vs. the interpolated per-frame angular step — and sign/orientation confirmation (symmetry toward the turn side assumed).
