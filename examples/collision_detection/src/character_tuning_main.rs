@@ -14,6 +14,8 @@ mod spine_indicator;
 mod spine_position_constraint;
 
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
+use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use spine_indicator::{IndicatorControl, IndicatorVisibility, MoveSpeed, RotateSpeed};
 
 use bevy_vello::{
     collision::{
@@ -156,6 +158,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init_state::<GameState>()
         .add_plugins(VelloCharacterPlugin::default())
         .insert_resource(PistolState::default())
+        .insert_resource(RotateSpeed::default())
+        .insert_resource(MoveSpeed::default())
+        .insert_resource(IndicatorControl::default())
+        .insert_resource(IndicatorVisibility::default())
+        .add_plugins(EguiPlugin {
+            enable_multipass_for_primary_context: false,
+        })
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_plugins(particles::VelloPartclePlugin)
@@ -189,6 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (
                 edge_pan_camera::update_edge_pan_camera,
                 spine_indicator::draw_spine_indicator,
+                indicator_ui,
             )
                 .run_if(in_state(GameState::Game)),
         )
@@ -582,6 +592,40 @@ fn setup_resources(
     image("image/pistol_normal.png");
     c_svg("character/V8.character.svg");
     c_blueprint("character/v8.character.json");
+}
+
+/// egui window that prints the current indicator rotation speed in degrees/sec,
+/// the active control mode, and lets the user edit the speed directly via a
+/// slider (mirrors the `K`/`L` keys).
+fn indicator_ui(
+    mut contexts: EguiContexts,
+    mut rotate_speed: ResMut<RotateSpeed>,
+    mut move_speed: ResMut<MoveSpeed>,
+    control: Res<IndicatorControl>,
+    visibility: Res<IndicatorVisibility>,
+) {
+    egui::Window::new("Indicator Rotation").show(contexts.ctx_mut(), |ui| {
+        ui.label(format!(
+            "Rotation speed: {:.1} deg/s (Q/E to rotate, K faster, L slower)",
+            rotate_speed.angle_per_second
+        ));
+        ui.label("Hold K/L to repeat every 0.5 s");
+        ui.add(egui::Slider::new(&mut rotate_speed.angle_per_second, 0.0..=720.0).text("deg/s"));
+        ui.label("0 ..= 720 deg/s");
+        ui.separator();
+        ui.label("Arrow move speed (px/s):");
+        ui.add(egui::Slider::new(&mut move_speed.px_per_second, 0.0..=2000.0).text("px/s"));
+        ui.separator();
+        let mode = match *control {
+            IndicatorControl::Mouse => "Mouse (follows cursor)",
+            IndicatorControl::Arrow => "Arrows (move with arrow keys)",
+        };
+        ui.label(format!("Control: {mode}  (O to toggle)"));
+        ui.label(format!(
+            "Visualization: {}  (P to toggle)",
+            if visibility.0 { "On" } else { "Off" }
+        ));
+    });
 }
 
 pub fn add_light(mut commands: Commands) {

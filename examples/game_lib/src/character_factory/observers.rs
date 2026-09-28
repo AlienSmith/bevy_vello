@@ -807,9 +807,9 @@ pub fn assemble_character(
         particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
         angulars: [get("PH_P0_P1"), get("P0_P1_P2"), get("P1_P2_P3")],
         config: SpineConfig {
-            tangent_impulse_scaler: spine_drive.tangent_impulse_scaler,
-            normal_impulse_scaler: spine_drive.normal_impulse_scaler,
             steer_angle: spine_drive.steer_angle / 180.0 * PI,
+            compliance: spine_drive.compliance,
+            damping: spine_drive.damping,
         },
         move_vector: Vec2::ZERO,
     };

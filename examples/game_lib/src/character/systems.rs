@@ -187,26 +187,26 @@ fn calculate_spine_drive(
     let mut angular_events = vec![];
     let mut impulse_events = vec![];
     let control = remap_spine_control(move_vector_vello, Vec2::ZERO);
-    let tangent_impulse_magnitude = control.x * dt * config.tangent_impulse_scaler;
-    let normal_impulse_magnituide = control.y * dt * config.normal_impulse_scaler;
-    let tangents = compute_spine_tangents(particles);
+    // let tangent_impulse_magnitude = control.x * dt * config.tangent_impulse_scaler;
+    // let normal_impulse_magnituide = control.y * dt * config.normal_impulse_scaler;
+    // let tangents = compute_spine_tangents(particles);
 
-    for i in 0..particles.len() {
-        let sign = SIGN[i];
-        let e = entities[i];
-        let p = &particles[i];
-        let tangent = tangents[i];
-        let normal = Vec2::new(-tangent.y, tangent.x);
-        let tangent_impulse = tangent * tangent_impulse_magnitude / p.particle.inv_mass;
-        let normal_impulse = normal * sign * normal_impulse_magnituide / p.particle.inv_mass;
-        let impulse = tangent_impulse + normal_impulse;
-        info!("{}", impulse);
-        impulse_events.push(CharacterPivotImpulseEvent {
-            character_entity: p.root_entity,
-            joint_entity: e,
-            impulse: tangent_impulse + normal_impulse,
-        })
-    }
+    // for i in 0..particles.len() {
+    //     let sign = SIGN[i];
+    //     let e = entities[i];
+    //     let p = &particles[i];
+    //     let tangent = tangents[i];
+    //     let normal = Vec2::new(-tangent.y, tangent.x);
+    //     let tangent_impulse = tangent * tangent_impulse_magnitude / p.particle.inv_mass;
+    //     let normal_impulse = normal * sign * normal_impulse_magnituide / p.particle.inv_mass;
+    //     let impulse = tangent_impulse + normal_impulse;
+    //     info!("{}", impulse);
+    //     impulse_events.push(CharacterPivotImpulseEvent {
+    //         character_entity: p.root_entity,
+    //         joint_entity: e,
+    //         impulse: tangent_impulse + normal_impulse,
+    //     })
+    // }
 
     let steer_angle = control.y * config.steer_angle;
     let target = Vec2::new(steer_angle.cos(), steer_angle.sin());

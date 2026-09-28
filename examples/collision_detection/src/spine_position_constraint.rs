@@ -98,8 +98,8 @@ pub fn spine_position_constraint(
                     joint_entity: particle_entity,
                     config: vello_physics::ExternalPositionConstraintConfig {
                         target: targets_vello[k],
-                        compliance: DEFAULT_POSITION_COMPLIANCE,
-                        damping: DEFAULT_POSITION_DAMPING,
+                        compliance: spine.config.compliance,
+                        damping: spine.config.damping,
                     },
                 },
             );

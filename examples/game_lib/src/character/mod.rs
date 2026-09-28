@@ -1,8 +1,11 @@
+use std::f32::consts::PI;
+
 use bevy::{
     ecs::intern::{Interned, Interner},
     platform::collections::{HashMap, HashSet},
     prelude::*,
 };
+
 mod ik;
 mod observers;
 pub mod plugin;
@@ -61,8 +64,8 @@ pub enum IkMode {
 #[derive(Clone)]
 pub struct SpineConfig {
     /// Forward/back linear impulse scaler (y-axis in Vello space).
-    pub tangent_impulse_scaler: f32,
-    pub normal_impulse_scaler: f32,
+    pub compliance: f32,
+    pub damping: f32,
     /// Max angular velocity for the rest-angle blend (rad/s).
     pub steer_angle: f32,
 }
@@ -70,9 +73,9 @@ pub struct SpineConfig {
 impl Default for SpineConfig {
     fn default() -> Self {
         Self {
-            tangent_impulse_scaler: 100.0,
-            normal_impulse_scaler: 10.0,
-            steer_angle: 0.15 * std::f32::consts::PI,
+            compliance: 1e-7,
+            damping: 0.1,
+            steer_angle: 0.15 * PI,
         }
     }
 }

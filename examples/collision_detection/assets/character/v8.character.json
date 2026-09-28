@@ -1412,8 +1412,8 @@
   ],
   "controllers": {
     "spine_drive": {
-      "tangent_impulse_scaler": 100.0,
-      "normal_impulse_scaler": 100.0,
+      "compliance": 1e-4,
+      "damping": 0.1,
       "steer_angle": 30.0
     }
   }
