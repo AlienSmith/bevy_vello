@@ -216,6 +216,13 @@ pub fn spawn_spine_indicator(
         }
     }
 
+    // The character's rest world heading (P2→P1 direction). The latched desired
+    // goal must start HERE, not at 0.0 — otherwise, with no user input, the
+    // drive would interpolate the spine toward world heading 0 (*right*, i.e.
+    // horizontal) and tip the character over. Latched to the rest pose, current
+    // == desired == rest, so nothing moves until an arrow key is pressed.
+    let rest_heading = local_points[0].y.atan2(local_points[0].x);
+
     // The *virtual pose* scene (solid cyan/red/green/blue) — what the physics
     // are actually pulling toward this frame.
     let scene = build_indicator_scene(&local_points);
@@ -226,10 +233,10 @@ pub fn spawn_spine_indicator(
             ..Default::default()
         },
         SpineIndicator {
-            angle: 0.0,
+            angle: rest_heading,
             center: centre_pos,
             // Latched goal starts at the rest pose (no input yet).
-            desired_angle: 0.0,
+            desired_angle: rest_heading,
             desired_center: centre_pos,
             local_points,
             character: trigger.target(),
@@ -265,6 +272,15 @@ pub fn draw_spine_indicator(
     let Ok((_entity, indicator, mut transform, mut vis)) = q_indicator.single_mut() else {
         return;
     };
+    // Rest world heading of the baked shape, derived from the P2-centred rest
+    // offsets (local_points[0] = P2→P1) — never assumed. The shape is baked in
+    // its rest frame, and `angle`/`desired_angle` are *world* headings (Vello
+    // y-down). A Bevy Z-rotation θ maps to a Vello rotation of `-θ`, so to make
+    // the baked shape point at a world heading `h` we must rotate it relative to
+    // its own rest heading: Bevy angle = `rest_heading - h`.
+    let rest_heading = indicator.local_points[0]
+        .y
+        .atan2(indicator.local_points[0].x);
     // Apply the P-key visibility toggle to both the virtual-pose and desired-goal
     // rendered entities.
     let vis_value = if visibility.0 {
@@ -276,14 +292,14 @@ pub fn draw_spine_indicator(
     for (mut d_transform, mut d_vis) in q_desired.iter_mut() {
         *d_vis = vis_value;
         d_transform.translation = vello_to_bevy(indicator.desired_center).extend(990.0);
-        d_transform.rotation = Quat::from_rotation_z(indicator.desired_angle);
+        d_transform.rotation = Quat::from_rotation_z(rest_heading - indicator.desired_angle);
     }
 
     // ---- Render the virtual pose ----
     // `tick_spine_drive` wrote the interpolated, capped virtual pose back onto
     // the indicator; the visual simply mirrors it (Vello y-down → Bevy y-up).
     transform.translation = vello_to_bevy(indicator.center).extend(1000.0);
-    transform.rotation = Quat::from_rotation_z(indicator.angle);
+    transform.rotation = Quat::from_rotation_z(rest_heading - indicator.angle);
 }
 
 /// Spine control input: translate the *desired centre* with the arrow keys.
@@ -331,10 +347,20 @@ pub fn spine_control_input(
         dir.x += 1.0;
     }
     if dir.length_squared() > 0.0 {
+        // The 4 arrow keys map to 8 global directions (Vello y-down world coords:
+        // screen up = -y, screen right = +x). The heading the spine should point
+        // along is this direction's angle. Both the movement dir and the rotation
+        // target are re-derived every held frame, so a new direction takes effect
+        // immediately.
         indicator.commanded_dir = dir.normalize();
         indicator.command_active = true;
+        // Desired heading target = atan2 of the 8-direction vector (Vello y-down
+        // convention: atan2(y,x), 0 = right, +90 = down, etc.).
+        indicator.desired_angle = dir.y.atan2(dir.x);
     } else {
         indicator.command_active = false;
+        // Freeze the last desired heading on release (no snap-back), mirroring
+        // how command_active freezes desired_center when no arrow is held.
     }
 }
 

@@ -13,6 +13,7 @@ use crate::character::{
     ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
     SpineConfig, SpineController, SpineIndicator,
 };
+use crate::utility::linear_to_angle;
 
 pub fn tick_spine_drive(
     time: Res<Time>,
@@ -219,6 +220,25 @@ fn interpolate_toward(current: f32, target: f32, alpha: f32, max_step: f32) -> f
     current + clamped
 }
 
+/// Shortest-path variant of [`interpolate_toward`] for **angles** (radians).
+///
+/// Naive `target - current` breaks on the ±π wrap: going from Up (-π/2) to
+/// Left (π) the raw diff is `3π/2` (the long way) and, once `current` is re-
+/// wrapped to just under -π (≈ -3.1) near the target, the diff jumps to ~6.24
+/// (≈ 358°), so the pose spins a full turn each frame and never settles. Here
+/// the difference is normalised into `(-π, π]` before interpolating + clamping,
+/// so it always takes the shortest arc and converges cleanly.
+#[inline]
+fn interpolate_toward_angle(current: f32, target: f32, alpha: f32, max_step: f32) -> f32 {
+    let delta = (target - current).rem_euclid(std::f32::consts::TAU);
+    let step = if delta > std::f32::consts::PI {
+        delta - std::f32::consts::TAU
+    } else {
+        delta
+    };
+    current + (step * alpha).clamp(-max_step, max_step)
+}
+
 /// Vector variant of [`interpolate_toward`]: move `current` partway toward
 /// `target` and clamp the per-frame displacement length to `max_step`.
 #[inline]
@@ -296,25 +316,45 @@ fn calculate_spine_drive(
         };
     }
     let p2 = particles[3].particle.pos;
+    let p1 = particles[2].particle.pos;
 
-    // Drive: interpolate + cap the centre partway toward the latched desired
-    // goal, and build a *rigid posed spine* from it. The three external targets
-    // are P1/P2/P3 = virtual_center + R(virtual_angle) · local_point. We rotate
-    // by the latched `desired_angle` (stable user input), NOT a heading re-derived
-    // from live geometry each frame, so there is no angular feedback loop to spin
-    // the body — yet every particle gets a real commanded goal, so all three
-    // constraints take effect and hold the spine's orientation.
+    // Rotation + translation drive, all in Vello (y-down) **world space**.
+    //
+    // `current_angle` is the live world heading of the P2→P1 bone
+    // (atan2(y, x), 0 = right, +90 = down, -90 = up). `desired_angle` is the
+    // world heading from the arrow keys (8 global dirs). Both are world
+    // headings, so interpolating between them yields the world angle the spine
+    // should rotate to, with natural damping via alpha 0.5 + the angular cap.
+    // The pose is built by rotating the P2-centred rest offsets *relative to*
+    // their own rest heading (`virtual_angle - rest_heading`), so we never
+    // assume the spine's initial orientation.
     let center = p2;
     let max_pos_step = config.max_pos_speed * dt;
-    // Interpolate toward the midpoint (alpha 0.5) with a per-frame cap. The
-    // previous `pos_alpha`/`ang_alpha` fields were always 0.5 (never overridden
-    // by the blueprint), so they simplify to a constant halfway step.
+    // Live world heading of the P2→P1 bone (Vello y-down: 0 = right, +90 = down).
+    let current_angle = (p1.y - p2.y).atan2(p1.x - p2.x);
+    // Rest world heading of the spine, derived from the P2-centred rest offsets
+    // (local_points[0] = P2→P1). This is the spine's heading at `angle == 0`, so
+    // we never *assume* an initial orientation — we read it from the particle
+    // layout. Rotating the pose by `virtual_angle - rest_heading` makes the
+    // posed world heading equal `virtual_angle`.
+    let rest_heading = local_points[0].y.atan2(local_points[0].x);
+    // Lever arm of the rotation about P2 = max |local_point| (P2-to-tip), used
+    // to convert the linear speed cap into an angular one.
+    let p2_to_tip_radius = local_points
+        .iter()
+        .map(|p| p.length())
+        .fold(0.0_f32, f32::max);
+    let max_ang_step = linear_to_angle(config.max_pos_speed * dt, p2_to_tip_radius);
     let virtual_center = interpolate_toward_vec(center, desired_center, 0.5, max_pos_step);
-    let virtual_angle = interpolate_toward(/* current */ 0.0, desired_angle, 0.5, f32::MAX);
+    // Both current and target are world headings, so interpolation yields the
+    // world heading the spine should rotate to (natural damping via alpha 0.5 +
+    // the angular cap). Angular variant takes the *shortest* arc so it never
+    // spins the long way round (e.g. Up → Left must swing 90°, not 270°).
+    let virtual_angle = interpolate_toward_angle(current_angle, desired_angle, 0.5, max_ang_step);
 
     let motion = FrameMotion {
         linear: (desired_center - center).length(),
-        angular: desired_angle.abs(),
+        angular: (desired_angle - current_angle).abs(),
     };
 
     // Command each P1/P2/P3 (indices 2/3/4) to its position in the posed spine:
@@ -326,7 +366,7 @@ fn calculate_spine_drive(
             character_entity: particles[0].root_entity,
             joint_entity: entities[i],
             config: vello_physics::ExternalPositionConstraintConfig {
-                target: virtual_center + rotate_local(*local, virtual_angle),
+                target: virtual_center + rotate_local(*local, virtual_angle - rest_heading),
                 compliance: config.compliance,
                 damping: config.damping,
             },
