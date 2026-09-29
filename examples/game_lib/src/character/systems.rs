@@ -50,6 +50,20 @@ pub fn tick_spine_drive(
         .collect();
     let config = spine.config.clone();
 
+    // Re-anchor the desired goal to the live P2 each fixed tick. While a
+    // movement command is active, the desired centre is `P2 + commanded_dir *
+    // command_reach` — a *constant distance* ahead of the spine, so a held arrow
+    // never lets the goal drift away from or clamp down onto the body. When the
+    // command is released, `command_active` is false and the last re-anchored
+    // `desired_center` is left untouched (frozen); the virtual pose keeps
+    // decaying asymptotically toward it.
+    if indicator.command_active {
+        let p2_current = p_q.get(spine.particles[3]).map(|p| p.particle.pos);
+        if let Ok(p2) = p2_current {
+            indicator.desired_center = p2 + indicator.commanded_dir * indicator.command_reach;
+        }
+    }
+
     let result = calculate_spine_drive(
         &entities,
         &particles,

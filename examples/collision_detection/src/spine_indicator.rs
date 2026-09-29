@@ -121,7 +121,14 @@ const CIRCLE_RADIUS: f32 = 12.0;
 /// Stroke width of the connecting lines, in local Vello units.
 const LINE_WIDTH: f64 = 4.0;
 
-/// Build the fixed indicator shape once (local coords, centred at the origin).
+/// Marker on the *desired-goal* outline scene entity, so [`draw_spine_indicator`]
+/// can update it alongside the virtual-pose entity without confusing the two.
+#[derive(Component)]
+pub struct DesiredIndicator;
+
+/// Build the fixed "virtual pose" indicator shape once (local coords, centred at
+/// the origin). Solid triangle line + filled circles → reads as the *current*
+/// commanded pose the physics are pulling toward.
 fn build_indicator_scene(points: &[Vec2; 3]) -> VelloScene {
     let mut scene = VelloScene::default();
 
@@ -149,6 +156,49 @@ fn build_indicator_scene(points: &[Vec2; 3]) -> VelloScene {
         let circle = kurbo::Circle::new((point.x as f64, point.y as f64), CIRCLE_RADIUS as f64);
         scene.fill(
             peniko::Fill::NonZero,
+            kurbo::Affine::IDENTITY,
+            *color,
+            None,
+            &circle,
+        );
+    }
+
+    scene
+}
+
+/// Build the "desired goal" indicator shape (local coords, centred at origin).
+/// Same P1/P2/P3 geometry but drawn as an *outline* in orange so it clearly
+/// reads as the latched target the virtual pose interpolates toward (distinct
+/// from the cyan/red/green/blue virtual pose).
+fn build_desired_scene(points: &[Vec2; 3]) -> VelloScene {
+    let mut scene = VelloScene::default();
+
+    // Outline triangle (P1→P2→P3→P1) in orange.
+    let mut line_path = kurbo::BezPath::new();
+    line_path.push(kurbo::PathEl::MoveTo((points[0].x, points[0].y).into()));
+    line_path.push(kurbo::PathEl::LineTo((points[1].x, points[1].y).into()));
+    line_path.push(kurbo::PathEl::LineTo((points[2].x, points[2].y).into()));
+    line_path.push(kurbo::PathEl::LineTo((points[0].x, points[0].y).into()));
+    scene.stroke(
+        &kurbo::Stroke::new(LINE_WIDTH),
+        kurbo::Affine::IDENTITY,
+        peniko::GlowColor::new(peniko::Color::rgba(1.0, 0.6, 0.0, 0.9), 1.0),
+        None,
+        &line_path,
+    );
+
+    // Outlined circles at the particle positions, one distinct colour each
+    // (matching the virtual pose's P1/P2/P3 red/green/blue scheme) so the goal
+    // pose stays readable even when it overlaps the virtual pose.
+    let circle_colors = [
+        peniko::Color::rgba(1.0, 0.2, 0.2, 0.9), // P1 — red
+        peniko::Color::rgba(0.2, 0.8, 0.3, 0.9), // P2 — green (centre)
+        peniko::Color::rgba(0.2, 0.4, 1.0, 0.9), // P3 — blue
+    ];
+    for (point, color) in points.iter().zip(circle_colors.iter()) {
+        let circle = kurbo::Circle::new((point.x as f64, point.y as f64), CIRCLE_RADIUS as f64);
+        scene.stroke(
+            &kurbo::Stroke::new(LINE_WIDTH * 0.75),
             kurbo::Affine::IDENTITY,
             *color,
             None,
@@ -189,6 +239,8 @@ pub fn spawn_spine_indicator(
         }
     }
 
+    // The *virtual pose* scene (solid cyan/red/green/blue) — what the physics
+    // are actually pulling toward this frame.
     let scene = build_indicator_scene(&local_points);
     commands.spawn((
         VelloSceneBundle {
@@ -207,6 +259,18 @@ pub fn spawn_spine_indicator(
             ..Default::default()
         },
     ));
+
+    // The *desired goal* scene (orange outline) — the latched target the virtual
+    // pose interpolates toward. Tracked separately, so arrow-key input is visible
+    // even before the body has caught up.
+    commands.spawn((
+        VelloSceneBundle {
+            scene: build_desired_scene(&local_points),
+            transform: Transform::from_translation(vello_to_bevy(centre_pos).extend(1000.0)),
+            ..Default::default()
+        },
+        DesiredIndicator,
+    ));
 }
 
 /// Snap the indicator to the mouse and rotate it about its centre with Q/E.
@@ -220,6 +284,10 @@ pub fn draw_spine_indicator(
     mut visibility: ResMut<IndicatorVisibility>,
     move_speed: Res<MoveSpeed>,
     mut q_indicator: Query<(Entity, &mut SpineIndicator, &mut Transform, &mut Visibility)>,
+    mut q_desired: Query<
+        (&mut Transform, &mut Visibility),
+        (With<DesiredIndicator>, Without<SpineIndicator>),
+    >,
     mut repeat: Local<RepeatHold>,
 ) {
     let dt = time.delta_secs();
@@ -272,33 +340,51 @@ pub fn draw_spine_indicator(
     let Ok((_entity, mut indicator, mut transform, mut vis)) = q_indicator.single_mut() else {
         return;
     };
-    // Apply the P-key visibility toggle to the rendered entity.
-    *vis = if visibility.0 {
+    // Apply the P-key visibility toggle to both the virtual-pose and desired-goal
+    // rendered entities.
+    let vis_value = if visibility.0 {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
+    *vis = vis_value;
+    for (mut d_transform, mut d_vis) in q_desired.iter_mut() {
+        *d_vis = vis_value;
+        d_transform.translation = vello_to_bevy(indicator.desired_center).extend(990.0);
+        d_transform.rotation = Quat::from_rotation_z(indicator.desired_angle);
+    }
 
-    // ---- Command the latched desired goal (input is authoritative) ----
-    // The arrow keys translate the desired centre in world axes. The drive is
-    // position-only and `desired_center` lives in Vello space, which is
-    // y-DOWN; the render flips y (vello_to_bevy = (x, -y)). So to move the
-    // character up on screen we subtract from the Vello y, and right on
-    // screen is a positive Vello x.
-    //     screen up    -> Vello -y    screen down  -> Vello +y
-    //     screen left  -> Vello -x    screen right -> Vello +x
-    let speed = move_speed.px_per_second * dt;
+    // ---- Command the movement direction (input is authoritative) ----
+    // The arrow keys set a unit-length *direction* (Vello y-down world coords,
+    // so screen up = Vello -y, screen right = Vello +x). When any arrow is held,
+    // `command_active` is set and `tick_spine_drive` re-anchors the desired
+    // centre to the live P2 (`P2 + commanded_dir * command_reach`) every fixed
+    // tick. That keeps the goal a *constant distance* ahead of the spine while
+    // held — it never drifts away from or clamps down onto the body. When no
+    // arrow is held, `command_active` clears and the last re-anchored
+    // `desired_center` stays frozen (virtual pose keeps decaying toward it).
+    // The aim distance `command_reach` is driven by the `MoveSpeed` resource
+    // (exposed as the "arrow move speed" slider): higher move speed ⇒ the
+    // commanded target sits farther ahead of the current P2.
+    indicator.command_reach = move_speed.px_per_second;
+    let mut dir = Vec2::ZERO;
     if keys.pressed(KeyCode::ArrowUp) {
-        indicator.desired_center.y -= speed;
+        dir.y -= 1.0;
     }
     if keys.pressed(KeyCode::ArrowDown) {
-        indicator.desired_center.y += speed;
+        dir.y += 1.0;
     }
     if keys.pressed(KeyCode::ArrowLeft) {
-        indicator.desired_center.x -= speed;
+        dir.x -= 1.0;
     }
     if keys.pressed(KeyCode::ArrowRight) {
-        indicator.desired_center.x += speed;
+        dir.x += 1.0;
+    }
+    if dir.length_squared() > 0.0 {
+        indicator.commanded_dir = dir.normalize();
+        indicator.command_active = true;
+    } else {
+        indicator.command_active = false;
     }
 
     // ---- Render the virtual pose ----

@@ -178,6 +178,21 @@ pub struct SpineIndicator {
     pub local_points: [Vec2; 3],
     /// Root entity of the driven character (for resolving its SpineController).
     pub character: Entity,
+    /// Unit-length movement direction commanded by the arrow keys (Vello y-down
+    /// world coords). While a movement command is *active* the desired centre is
+    /// re-anchored each fixed tick to `P2 + commanded_dir * command_reach`, so a
+    /// held key keeps the goal a constant distance ahead of the spine (it never
+    /// drifts away from or clamps down onto P2).
+    pub commanded_dir: Vec2,
+    /// Fixed distance ahead of the current P2 at which the desired target is
+    /// held while a movement command is active (px in Vello space). The example
+    /// derives this from its `MoveSpeed` resource (exposed as the "arrow move
+    /// speed" slider) so the gap is user-tunable.
+    pub command_reach: f32,
+    /// `true` while a movement command is held. When it flips `false`, the last
+    /// re-anchored `desired_center` is **frozen** so the virtual pose keeps
+    /// decaying asymptotically toward it (no snap-back).
+    pub command_active: bool,
     /// Per-frame linear speed (px/s).
     pub linear_speed: f32,
     /// Per-frame angular speed (rad/s).
@@ -193,6 +208,9 @@ impl Default for SpineIndicator {
             desired_center: Vec2::ZERO,
             local_points: [Vec2::ZERO; 3],
             character: Entity::PLACEHOLDER,
+            commanded_dir: Vec2::X,
+            command_reach: 40.0,
+            command_active: false,
             linear_speed: 0.0,
             angular_speed: 0.0,
         }
