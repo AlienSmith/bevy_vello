@@ -51,17 +51,52 @@ pub fn tick_spine_drive(
         .collect();
     let config = indicator.config.clone();
 
-    // Re-anchor the desired goal to the live P2 each fixed tick. While a
-    // movement command is active, the desired centre is `P2 + commanded_dir *
-    // command_reach` — a *constant distance* ahead of the spine, so a held arrow
-    // never lets the goal drift away from or clamp down onto the body. When the
-    // command is released, `command_active` is false and the last re-anchored
-    // `desired_center` is left untouched (frozen); the virtual pose keeps
-    // decaying asymptotically toward it.
+    // Re-anchor the desired goal to the live body every fixed tick so the three
+    // external position constraints behave as *pure damping* rather than active
+    // drag:
+    // - While a movement command is active, the desired centre is `P2 +
+    //   commanded_dir * command_reach` (a constant distance ahead of the spine) and
+    //   the desired angle is the input heading — the controller steers/resists.
+    // - When the command is released (player let go), BOTH references are
+    //   re-derived from the live body pose (`desired_center` = live P2,
+    //   `desired_angle` = live P2→P1 heading). With rest offset ≈ 0 the springs
+    //   only damp velocity, so an external knock can freely rotate/translate the
+    //   body and that motion *persists* instead of being dragged back to a stale
+    //   pose.
     if indicator.command_active {
         let p2_current = p_q.get(spine.particles[3]).map(|p| p.particle.pos);
         if let Ok(p2) = p2_current {
             indicator.desired_center = p2 + indicator.commanded_dir * indicator.command_reach;
+        }
+    } else {
+        // Idle: mirror the P2 re-anchor for the heading, but *predict* the
+        // reference a half step ahead of the live body instead of snapping it to
+        // the current pose. Setting the target exactly at the live position makes
+        // the spring rest offset ~0, so it applies no damping force and the body
+        // decelerates abruptly on its own (jitter). Offsetting each reference by
+        // `0.5 * velocity * dt` keeps the spring pulling smoothly along the motion.
+        //
+        // Linear:  predicted_center = P2 + 0.5 * v2 * dt
+        // Angular: heading = atan2(P1 - P2), ω = cross(P1-P2, v1-v2)/|P1-P2|^2,
+        //          predicted_angle = heading + 0.5 * ω * dt
+        let p1 = p_q.get(spine.particles[2]).ok();
+        let p2 = p_q.get(spine.particles[3]).ok();
+        if let (Some(p1), Some(p2)) = (p1, p2) {
+            let pos1 = p1.particle.pos;
+            let pos2 = p2.particle.pos;
+            let vel1 = p1.particle.velocity;
+            let vel2 = p2.particle.velocity;
+            let half_dt = 0.5 * dt;
+            indicator.desired_center = pos2 + vel2 * half_dt;
+            let arm = pos1 - pos2;
+            let dvel = vel1 - vel2;
+            let len_sq = arm.length_squared();
+            let ang_vel = if len_sq > f32::EPSILON {
+                (arm.x * dvel.y - arm.y * dvel.x) / len_sq
+            } else {
+                0.0
+            };
+            indicator.desired_angle = arm.y.atan2(arm.x) + ang_vel * half_dt;
         }
     }
 
