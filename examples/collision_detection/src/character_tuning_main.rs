@@ -11,11 +11,10 @@
 
 mod edge_pan_camera;
 mod spine_indicator;
-mod spine_position_constraint;
 
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
-use spine_indicator::{IndicatorControl, IndicatorVisibility, MoveSpeed, RotateSpeed};
+use spine_indicator::{IndicatorVisibility, MoveSpeed, RotateSpeed};
 
 use bevy_vello::{
     collision::{
@@ -134,7 +133,7 @@ struct PistolState {
     character: Option<Entity>,
     pistol: Option<Entity>,
 }
-
+//cargo run --package collision_detection --bin character_tuning_main --release
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::default();
     app.insert_resource(ClearColor(Color::BLACK))
@@ -160,7 +159,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(PistolState::default())
         .insert_resource(RotateSpeed::default())
         .insert_resource(MoveSpeed::default())
-        .insert_resource(IndicatorControl::default())
         .insert_resource(IndicatorVisibility::default())
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
@@ -171,11 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_observer(spine_indicator::spawn_spine_indicator)
         .add_systems(
             FixedUpdate,
-            (
-                tick_drag,
-                spine_position_constraint::spine_position_constraint,
-            )
-                .before(CollisionSystems::CollisionResponsePhysics),
+            tick_drag.before(CollisionSystems::CollisionResponsePhysics),
         )
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
@@ -601,14 +595,14 @@ fn indicator_ui(
     mut contexts: EguiContexts,
     mut rotate_speed: ResMut<RotateSpeed>,
     mut move_speed: ResMut<MoveSpeed>,
-    control: Res<IndicatorControl>,
     visibility: Res<IndicatorVisibility>,
 ) {
     egui::Window::new("Indicator Rotation").show(contexts.ctx_mut(), |ui| {
         ui.label(format!(
-            "Rotation speed: {:.1} deg/s (Q/E to rotate, K faster, L slower)",
+            "Rotation speed: {:.1} deg/s (Q/D & E/A rotate, K faster, L slower)",
             rotate_speed.angle_per_second
         ));
+        ui.label("Arrows move the desired centre; Q/D & E/A rotate the desired heading.");
         ui.label("Hold K/L to repeat every 0.5 s");
         ui.add(egui::Slider::new(&mut rotate_speed.angle_per_second, 0.0..=720.0).text("deg/s"));
         ui.label("0 ..= 720 deg/s");
@@ -616,11 +610,6 @@ fn indicator_ui(
         ui.label("Arrow move speed (px/s):");
         ui.add(egui::Slider::new(&mut move_speed.px_per_second, 0.0..=2000.0).text("px/s"));
         ui.separator();
-        let mode = match *control {
-            IndicatorControl::Mouse => "Mouse (follows cursor)",
-            IndicatorControl::Arrow => "Arrows (move with arrow keys)",
-        };
-        ui.label(format!("Control: {mode}  (O to toggle)"));
         ui.label(format!(
             "Visualization: {}  (P to toggle)",
             if visibility.0 { "On" } else { "Off" }

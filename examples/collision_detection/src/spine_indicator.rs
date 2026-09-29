@@ -1,10 +1,11 @@
 //! Spine indicator / spine-drive input handle.
 //!
-//! A single scene entity that the user drags around with the mouse (it snaps to
-//! the cursor) and rotates around its center with the `Q` / `E` keys. It draws a
-//! small triangle + three linking circles in a local, origin-centred frame that
-//! mirrors the relative positions of the character's quad spine particles P1/P2/P3
-//! (a vertical pole in the character blueprint).
+//! A single scene entity the user commanders with the keyboard: `Q`/`E`/`A`/`D`
+//! rotate the *desired heading* absolutely and the arrow keys translate the
+//! *desired centre* in the current facing direction. It draws a small triangle +
+//! three linking circles in a local, origin-centred frame that mirrors the
+//! relative positions of the character's quad spine particles P1/P2/P3 (a
+//! vertical pole in the character blueprint).
 //!
 //! The *shape* is baked once at spawn; position and rotation live on the entity's
 //! [`Transform`]. This makes it a convenient, moving/rotating target that the
@@ -23,18 +24,17 @@
 //! The particle rest positions in [`VelloParticle::particle_init`] are in Vello
 //! (y-down) world space, already scaled by the character root's transform during
 //! assembly. We store `local_points` centred on P2 in the same Vello y-down space;
-//! [`compute_bevy_targets`] (in `spine_position_constraint`) and the baked scene
-//! understand that convention, so the indicator shape and the constraint targets
-//! both land exactly on the particles.
+//! the baked scene and `calculate_spine_drive` (game_lib) understand that
+//! convention, so the indicator shape and the constraint targets both land
+//! exactly on the particles.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use bevy_vello::{
     integrations::physics::VelloParticle,
     prelude::{kurbo, peniko},
     VelloScene, VelloSceneBundle,
 };
-use game_lib::SpineController;
+use game_lib::{SpineController, SpineIndicator};
 
 /// Rotation speed of the spine indicator, in degrees per second.
 ///
@@ -73,16 +73,6 @@ pub struct RepeatHold {
     l: f32,
 }
 
-/// Which input drives the indicator's position.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum IndicatorControl {
-    /// Follow the mouse cursor.
-    #[default]
-    Mouse,
-    /// Move with the arrow keys.
-    Arrow,
-}
-
 /// Whether the spine indicator visualization is shown (toggled with the `P` key).
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct IndicatorVisibility(pub bool);
@@ -114,24 +104,11 @@ const QUAD_INDICES: [usize; 3] = [2, 3, 4];
 /// The quad index that is the shape centre (P2 → `particles[3]`).
 const CENTRE_INDEX: usize = QUAD_INDICES[1];
 
-/// Marker + input state for the single spine-indicator entity.
-#[derive(Component)]
-pub struct SpineIndicator {
-    /// Current rotation about the shape centre, in radians (bevy Z-rotation).
-    pub angle: f32,
-    /// The three quad-particle offsets, in local Vello (y-down) coords, centred
-    /// on P2. Computed from the real assembled particles at spawn.
-    pub local_points: [Vec2; 3],
-}
-
-impl Default for SpineIndicator {
-    fn default() -> Self {
-        Self {
-            angle: 0.0,
-            local_points: [Vec2::ZERO; 3],
-        }
-    }
-}
+/// Input state for the single spine-indicator entity.
+///
+/// The `SpineIndicator` component type now lives in `game_lib` (it owns the
+/// pose + linear/angular speed fields used by `calculate_spine_drive`). This
+/// example keeps the Vello scene/visual spawn only.
 
 /// Convert a Vello (y-down) point to Bevy (y-up).
 #[inline]
@@ -221,7 +198,13 @@ pub fn spawn_spine_indicator(
         },
         SpineIndicator {
             angle: 0.0,
+            center: centre_pos,
+            // Latched goal starts at the rest pose (no input yet).
+            desired_angle: 0.0,
+            desired_center: centre_pos,
             local_points,
+            character: trigger.target(),
+            ..Default::default()
         },
     ));
 }
@@ -231,12 +214,9 @@ pub fn spawn_spine_indicator(
 /// The indicator entity itself is spawned by [`spawn_spine_indicator`]; this
 /// system only moves/rotates the existing entity, and is a no-op if it is absent.
 pub fn draw_spine_indicator(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut rotate_speed: ResMut<RotateSpeed>,
-    mut control: ResMut<IndicatorControl>,
     mut visibility: ResMut<IndicatorVisibility>,
     move_speed: Res<MoveSpeed>,
     mut q_indicator: Query<(Entity, &mut SpineIndicator, &mut Transform, &mut Visibility)>,
@@ -244,13 +224,6 @@ pub fn draw_spine_indicator(
 ) {
     let dt = time.delta_secs();
 
-    // Toggle between mouse control and arrow-key control with the O key.
-    if keys.just_pressed(KeyCode::KeyO) {
-        *control = match *control {
-            IndicatorControl::Mouse => IndicatorControl::Arrow,
-            IndicatorControl::Arrow => IndicatorControl::Mouse,
-        };
-    }
     // Toggle the indicator visualization on/off with the P key.
     if keys.just_pressed(KeyCode::KeyP) {
         visibility.0 = !visibility.0;
@@ -306,56 +279,31 @@ pub fn draw_spine_indicator(
         Visibility::Hidden
     };
 
-    // Rotate about the shape centre with Q/E at the current adjustable speed
-    // (the resource is stored in degrees/second, so convert to radians/second).
-    let speed_rad_per_s = rotate_speed.angle_per_second.to_radians();
-    if keys.pressed(KeyCode::KeyQ) {
-        indicator.angle += speed_rad_per_s * dt;
+    // ---- Command the latched desired goal (input is authoritative) ----
+    // The arrow keys translate the desired centre in world axes. The drive is
+    // position-only and `desired_center` lives in Vello space, which is
+    // y-DOWN; the render flips y (vello_to_bevy = (x, -y)). So to move the
+    // character up on screen we subtract from the Vello y, and right on
+    // screen is a positive Vello x.
+    //     screen up    -> Vello -y    screen down  -> Vello +y
+    //     screen left  -> Vello -x    screen right -> Vello +x
+    let speed = move_speed.px_per_second * dt;
+    if keys.pressed(KeyCode::ArrowUp) {
+        indicator.desired_center.y -= speed;
     }
-    if keys.pressed(KeyCode::KeyE) {
-        indicator.angle -= speed_rad_per_s * dt;
+    if keys.pressed(KeyCode::ArrowDown) {
+        indicator.desired_center.y += speed;
     }
-
-    match *control {
-        // Mouse control: snap to the cursor.
-        IndicatorControl::Mouse => {
-            let Some(mouse) = windows
-                .iter()
-                .next()
-                .and_then(|window| window.cursor_position())
-            else {
-                return;
-            };
-            let Ok((camera, camera_transform)) = camera_query.single() else {
-                return;
-            };
-            let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, mouse) else {
-                return;
-            };
-            transform.translation = world_pos.extend(1000.0);
-        }
-        // Arrow-key control: move with the arrow keys.
-        IndicatorControl::Arrow => {
-            let mut delta = Vec2::ZERO;
-            if keys.pressed(KeyCode::ArrowUp) {
-                delta.y += 1.0;
-            }
-            if keys.pressed(KeyCode::ArrowDown) {
-                delta.y -= 1.0;
-            }
-            if keys.pressed(KeyCode::ArrowLeft) {
-                delta.x -= 1.0;
-            }
-            if keys.pressed(KeyCode::ArrowRight) {
-                delta.x += 1.0;
-            }
-            if delta != Vec2::ZERO {
-                delta = delta.normalize() * move_speed.px_per_second;
-                transform.translation.x += delta.x * dt;
-                transform.translation.y += delta.y * dt;
-            }
-        }
+    if keys.pressed(KeyCode::ArrowLeft) {
+        indicator.desired_center.x -= speed;
+    }
+    if keys.pressed(KeyCode::ArrowRight) {
+        indicator.desired_center.x += speed;
     }
 
+    // ---- Render the virtual pose ----
+    // `tick_spine_drive` wrote the interpolated, capped virtual pose back onto
+    // the indicator; the visual simply mirrors it (Vello y-down → Bevy y-up).
+    transform.translation = vello_to_bevy(indicator.center).extend(1000.0);
     transform.rotation = Quat::from_rotation_z(indicator.angle);
 }

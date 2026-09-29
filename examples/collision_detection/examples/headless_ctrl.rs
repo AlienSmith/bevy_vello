@@ -305,17 +305,17 @@ fn probe_driver(
         // Optional A/B overrides for tuning sweeps (no game-default changes).
         if let Ok(g) = std::env::var("ROT_GAIN") {
             if let Ok(v) = g.parse::<f32>() {
-                spine.config.rotation_gain = v;
+                spine.config.ang_alpha = v;
             }
         }
         if let Ok(g) = std::env::var("V_SCALE") {
             if let Ok(v) = g.parse::<f32>() {
-                spine.config.velocity_scale = v;
+                spine.config.max_pos_speed = v;
             }
         }
         if let Ok(g) = std::env::var("BRAKE") {
             if let Ok(v) = g.parse::<f32>() {
-                spine.config.brake_blending = v;
+                spine.config.lean_gain = v;
             }
         }
         spine.move_vector = if t >= BASELINE_END && t < probe.input_end {

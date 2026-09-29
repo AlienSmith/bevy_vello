@@ -49,6 +49,34 @@ pub fn crate_capsuele(distance: f32, radius: f32) -> (BezPath, Rect) {
     (rect_path, rect)
 }
 
+/// Convert a linear per-frame displacement into the angular step that sweeps
+/// the same arc about a pivot at distance `radius`. `θ = s / r`.
+///
+/// Used to derive the per-frame angular speed cap from the position speed cap
+/// (`max_ang_step = max_pos_step / r_m`), so both caps describe the *same*
+/// physical motion of the spine endpoints sweeping circular arcs about the P2
+/// pivot — rather than two independently tuned numbers.
+#[inline]
+pub fn linear_to_angle(linear: f32, radius: f32) -> f32 {
+    // Radius of zero means "no lever arm" — any finite linear step is an
+    // arbitrarily large angular step (degenerate: the pivot coincides with
+    // the point being moved).
+    if radius.abs() <= f32::EPSILON {
+        return f32::INFINITY;
+    }
+    linear / radius
+}
+
+/// Inverse of [`linear_to_angle`]: the arc length swept by an angular step at
+/// distance `radius`. `s = θ · r`.
+///
+/// Use to back an authored `max_ang_speed` out to the implied linear cap
+/// (e.g. for validation/tests), or to keep the two speed caps consistent.
+#[inline]
+pub fn angle_to_linear(angle: f32, radius: f32) -> f32 {
+    angle * radius
+}
+
 pub fn nlerp_cos_sin(start: (f32, f32), end: (f32, f32), t: f32) -> (f32, f32) {
     // 1. Linear interpolation
     let cos_blend = start.0 + (end.0 - start.0) * t;

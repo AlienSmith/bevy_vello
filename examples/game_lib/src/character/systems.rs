@@ -1,7 +1,8 @@
 use bevy::{ecs::error::info, math::VectorSpace, prelude::*};
 use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent, CharacterPivotImpulseEvent, VelloCharacterPhysicsRoot,
-    VelloConstraintWorld, VelloJoint, VelloParticle,
+    CharacterAngularConstraintEvent, CharacterExternalPositionConstraintEvent,
+    CharacterPivotImpulseEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
+    VelloParticle,
 };
 use vello_physics::{
     utility::{cos_sin, BalancedCoreFrame},
@@ -10,53 +11,74 @@ use vello_physics::{
 
 use crate::character::{
     ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
-    SpineConfig, SpineController,
+    SpineConfig, SpineController, SpineIndicator,
 };
 
 pub fn tick_spine_drive(
     time: Res<Time>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
+    mut indicator_q: Query<&mut SpineIndicator>,
     p_q: Query<&VelloParticle>,
     p_j: Query<&VelloJoint>,
     mut world: ResMut<VelloConstraintWorld>,
 ) {
     let dt = time.delta_secs();
-    for (spine, p_root) in &spine_q {
-        if p_root.initial_frame_coordinates.is_none() {
-            continue;
-        }
-        let entities: Vec<Entity> = spine.particles.to_vec();
-        let particles: Vec<VelloParticle> = entities
-            .iter()
-            .map(|e| p_q.get(*e).unwrap().clone())
-            .collect();
-        let angular_entities: Vec<Entity> = spine.angulars.to_vec();
-        let angulars: Vec<VelloJoint> = angular_entities
-            .iter()
-            .map(|e| p_j.get(*e).unwrap().clone())
-            .collect();
-        // Same pure math as the legacy path, with rate-converted gains.
-        let config = spine.config.clone();
-
-        let events = calculate_spine_drive(
-            &entities,
-            &particles,
-            &angular_entities,
-            &angulars,
-            &config,
-            bevy_to_vello(spine.move_vector),
-            dt,
-        );
-
-        events
-            .0
-            .iter()
-            .for_each(|e| world.queue_character_external_force(e));
-        events
-            .1
-            .iter()
-            .for_each(|e| world.queue_character_angular_constraints(e));
+    // The spine indicator carries the commanded pose AND the root entity of the
+    // character it drives. We resolve that character's SpineController directly
+    // (all 5 particles + 3 angular joints, per the calculate_spine_drive
+    // contract) and queue drive events just for those.
+    let Ok(mut indicator) = indicator_q.single_mut() else {
+        return;
+    };
+    // Guard: no known character yet (or it was despawned).
+    let Ok((spine, p_root)) = spine_q.get(indicator.character) else {
+        return;
+    };
+    if p_root.initial_frame_coordinates.is_none() {
+        return;
     }
+
+    let entities: Vec<Entity> = spine.particles.to_vec();
+    let particles: Vec<VelloParticle> = entities
+        .iter()
+        .map(|e| p_q.get(*e).unwrap().clone())
+        .collect();
+    let angular_entities: Vec<Entity> = spine.angulars.to_vec();
+    let angulars: Vec<VelloJoint> = angular_entities
+        .iter()
+        .map(|e| p_j.get(*e).unwrap().clone())
+        .collect();
+    let config = spine.config.clone();
+
+    let result = calculate_spine_drive(
+        &entities,
+        &particles,
+        &angular_entities,
+        &angulars,
+        &config,
+        indicator.desired_center,
+        indicator.desired_angle,
+        &indicator.local_points,
+        dt,
+    );
+
+    result
+        .position_events
+        .iter()
+        .for_each(|e| world.queue_character_one_time_external_position_constraint(e));
+    result
+        .angular_events
+        .iter()
+        .for_each(|e| world.queue_character_angular_constraints(e));
+
+    // The virtual pose is exactly what the physics pull toward AND what the
+    // indicator visual is drawn at — write it back so they never diverge.
+    indicator.center = result.virtual_center;
+    indicator.angle = result.virtual_angle;
+    // Store the frame motion (re-derived, deterministic) for the lean scale.
+    let dt_safe = dt.max(f32::EPSILON);
+    indicator.linear_speed = result.motion.linear / dt_safe;
+    indicator.angular_speed = result.motion.angular / dt_safe;
 }
 
 use super::ik::compute_ik_positions;
@@ -171,63 +193,146 @@ fn remap_spine_control(input: Vec2, heading: Vec2) -> Vec2 {
 
 const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
 const SIGN: [f32; 5] = [-1.0, -1.0, 0.0, 1.0, 1.0];
+/// Interpolate `current` partway toward `target` (`current + alpha*step`) and
+/// clamp the resulting per-frame displacement to `max_step`. Pure function of
+/// `(current, target, max_step, alpha)` — deterministic, unit-testable.
+#[inline]
+fn interpolate_toward(current: f32, target: f32, alpha: f32, max_step: f32) -> f32 {
+    let step = target - current;
+    let mid = current + alpha * step;
+    let step_len = mid - current;
+    let clamped = step_len.clamp(-max_step, max_step);
+    current + clamped
+}
+
+/// Vector variant of [`interpolate_toward`]: move `current` partway toward
+/// `target` and clamp the per-frame displacement length to `max_step`.
+#[inline]
+fn interpolate_toward_vec(current: Vec2, target: Vec2, alpha: f32, max_step: f32) -> Vec2 {
+    let delta = target - current;
+    let step = (delta * alpha).clamp_length_max(max_step);
+    current + step
+}
+
+/// The motion the drive actually applied this frame (linear distance in px and
+/// signed heading change in radians). Re-derived from the poses each frame, so
+/// the controller stays deterministic (no accumulated state).
+#[derive(Clone, Copy, Default)]
+struct FrameMotion {
+    linear: f32,
+    angular: f32,
+}
+
+/// Result of a [`calculate_spine_drive`] tick: the queued constraint events,
+/// the virtual pose (which is ALSO what the indicator is drawn at and what the
+/// external position constraints pull the spine toward — one shared target),
+/// and the frame motion used to scale the lean.
+struct SpineDriveResult {
+    position_events: Vec<CharacterExternalPositionConstraintEvent>,
+    angular_events: Vec<CharacterAngularConstraintEvent>,
+    virtual_center: Vec2,
+    virtual_angle: f32,
+    motion: FrameMotion,
+}
+
+/// Rotate a P2-centred local offset by `angle` (radians). Vello y-down world
+/// convention: the same local-space rotation used by the old indicator handle.
+#[inline]
+fn rotate_local(point: Vec2, angle: f32) -> Vec2 {
+    let (sin, cos) = angle.sin_cos();
+    Vec2::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos)
+}
+
+/// Compute a single drive tick from the *latched desired goal* (set by input +
+/// P2 in [`tick_spine_drive`]) down to the queued constraints.
+///
+/// **Position-only drive.** Every tick the current centre (P2) is interpolated
+/// partway toward the latched desired centre and clamped by the per-frame
+/// position cap; the resulting **virtual centre** is both (a) written back onto
+/// the `SpineIndicator` (so the visual is the same thing the physics see) and
+/// (b) turned into the three external position targets. The P1/P2/P3 shape keeps
+/// its *current* orientation (no rotational command), so no angular event is
+/// emitted and no angular feedback loop can induce a perpetual spin. Pure: given
+/// the same desired goal / current pose / caps it returns the same thing, so the
+/// "keep last status on no input" latching lives entirely in how the desired
+/// goal is stored, not in this function.
 fn calculate_spine_drive(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
-    angular_entities: &Vec<Entity>,
-    angulars: &Vec<VelloJoint>,
+    _angular_entities: &Vec<Entity>,
+    _angulars: &Vec<VelloJoint>,
     config: &SpineConfig,
-    move_vector_vello: Vec2,
+    desired_center: Vec2,
+    desired_angle: f32,
+    local_points: &[Vec2; 3],
     dt: f32,
-) -> (
-    Vec<CharacterPivotImpulseEvent>,
-    Vec<CharacterAngularConstraintEvent>,
-) {
+) -> SpineDriveResult {
     let mut angular_events = vec![];
-    let mut impulse_events = vec![];
-    let control = remap_spine_control(move_vector_vello, Vec2::ZERO);
-    // let tangent_impulse_magnitude = control.x * dt * config.tangent_impulse_scaler;
-    // let normal_impulse_magnituide = control.y * dt * config.normal_impulse_scaler;
-    // let tangents = compute_spine_tangents(particles);
+    let mut position_events = vec![];
 
-    // for i in 0..particles.len() {
-    //     let sign = SIGN[i];
-    //     let e = entities[i];
-    //     let p = &particles[i];
-    //     let tangent = tangents[i];
-    //     let normal = Vec2::new(-tangent.y, tangent.x);
-    //     let tangent_impulse = tangent * tangent_impulse_magnitude / p.particle.inv_mass;
-    //     let normal_impulse = normal * sign * normal_impulse_magnituide / p.particle.inv_mass;
-    //     let impulse = tangent_impulse + normal_impulse;
-    //     info!("{}", impulse);
-    //     impulse_events.push(CharacterPivotImpulseEvent {
-    //         character_entity: p.root_entity,
-    //         joint_entity: e,
-    //         impulse: tangent_impulse + normal_impulse,
-    //     })
-    // }
-
-    let steer_angle = control.y * config.steer_angle;
-    let target = Vec2::new(steer_angle.cos(), steer_angle.sin());
-
-    for (i, joint_entity) in angular_entities.iter().enumerate() {
-        let compliance = match angulars[i].init_config {
-            vello_physics::ConnectionConstraintInitConfig::Angular(_, _, _, c) => c,
-            _ => 0.0,
+    // Out-of-contract guard: we drive P1/P2/P3, so we need the full particle set
+    // (entities[2..=4]) resolvable against the particles list.
+    if particles.len() < 5 {
+        return SpineDriveResult {
+            position_events,
+            angular_events,
+            virtual_center: Vec2::ZERO,
+            virtual_angle: 0.0,
+            motion: FrameMotion::default(),
         };
+    }
+    let p2 = particles[3].particle.pos;
 
-        angular_events.push(CharacterAngularConstraintEvent {
+    // Drive: interpolate + cap the centre partway toward the latched desired
+    // goal, and build a *rigid posed spine* from it. The three external targets
+    // are P1/P2/P3 = virtual_center + R(virtual_angle) · local_point. We rotate
+    // by the latched `desired_angle` (stable user input), NOT a heading re-derived
+    // from live geometry each frame, so there is no angular feedback loop to spin
+    // the body — yet every particle gets a real commanded goal, so all three
+    // constraints take effect and hold the spine's orientation.
+    let center = p2;
+    let max_pos_step = config.max_pos_speed * dt;
+    let virtual_center =
+        interpolate_toward_vec(center, desired_center, config.pos_alpha, max_pos_step);
+    // Interpolate the angle toward the latched desired heading using the
+    // angular interpolation factor (no hard per-frame cap field on SpineConfig).
+    let virtual_angle = interpolate_toward(
+        /* current */ 0.0,
+        desired_angle,
+        config.ang_alpha,
+        f32::MAX,
+    );
+
+    let motion = FrameMotion {
+        linear: (desired_center - center).length(),
+        angular: desired_angle.abs(),
+    };
+
+    // Command each P1/P2/P3 (indices 2/3/4) to its position in the posed spine:
+    // the virtual centre plus the P2-centred local offset rotated by the virtual
+    // heading. All three must share the exact same virtual_center/angle so the
+    // spine holds as one rigid pose (no free rotation, no spin feedback).
+    for (i, local) in [2usize, 3, 4].into_iter().zip(local_points.iter()) {
+        position_events.push(CharacterExternalPositionConstraintEvent {
             character_entity: particles[0].root_entity,
-            joint_entity: *joint_entity,
-            config: vello_physics::AngularConstraintConfig {
-                rest_cos: target.x,
-                rest_sin: target.y,
-                compliance,
+            joint_entity: entities[i],
+            config: vello_physics::ExternalPositionConstraintConfig {
+                target: virtual_center + rotate_local(*local, virtual_angle),
+                compliance: config.compliance,
+                damping: config.damping,
             },
         });
     }
 
-    (impulse_events, angular_events)
+    // No angular constraint events are emitted (position-only drive).
+
+    SpineDriveResult {
+        position_events,
+        angular_events,
+        virtual_center,
+        virtual_angle,
+        motion,
+    }
 }
 
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
