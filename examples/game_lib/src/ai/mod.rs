@@ -486,32 +486,28 @@ pub fn ai_travel_system(
     }
 }
 
-/// Drives `SpineController.move_vector` each frame for all AI-controlled
-/// characters, applying chase/flee direction and wall avoidance.
+/// Reads enemy/player spine geometry each frame. `SpineController` no longer
+/// carries a `move_vector` (it was write-only dead code); AI movement is now
+/// commanded through the `SpineIndicator`, so this system keeps only the
+/// read side (positions for travel/phase bookkeeping) alive.
 ///
 /// Particle positions (P3 = spine base) are read from `VelloParticle` in
 /// vello y-down space and converted to bevy y-up.
 ///
-/// A single `Query<&mut SpineController>` is used for both the player's and
+/// A single `Query<&SpineController>` is used for both the player's and
 /// the enemies' spines (readable via `Query::get`), avoiding the B0001
 /// read/write conflict of two separate `SpineController` queries.
 pub fn ai_steer_system(
     ai_q: Query<(Entity, Option<&AiChaseTarget>, Option<&AiFleeTarget>), With<AiState>>,
     particle_q: Query<&VelloParticle>,
-    mut all_spines: Query<&mut SpineController>,
+    all_spines: Query<&SpineController>,
 ) {
     for (enemy, chase_target, flee_target) in &ai_q {
-        // No active steering marker (e.g. IDLE phase): the character must stop.
-        // Zeroing here guarantees a stale flee `move_vector` can't keep pushing
-        // the enemy into a wall after the AI gate flips to IDLE.
         let (player, toward_player) = if let Some(chase) = chase_target {
             (chase.player, true)
         } else if let Some(flee) = flee_target {
             (flee.player, false)
         } else {
-            if let Ok(mut spine) = all_spines.get_mut(enemy) {
-                spine.move_vector = Vec2::ZERO;
-            }
             continue;
         };
 
@@ -533,27 +529,6 @@ pub fn ai_steer_system(
             .and_then(|spine| get_bevy_pos(&spine, &particle_q))
         else {
             continue;
-        };
-
-        let dir = if toward_player {
-            (player_pos - enemy_pos).normalize_or_zero()
-        } else {
-            (enemy_pos - player_pos).normalize_or_zero()
-        };
-
-        let avoid = compute_wall_avoidance(enemy_pos);
-
-        // Flee by heading to the safe anchor currently farthest from the
-        // player, so the enemy never aims into a wall.
-        let flee_dir = choose_flee_direction(enemy_pos, player_pos, avoid);
-
-        let Ok(mut spine) = all_spines.get_mut(enemy) else {
-            continue;
-        };
-        spine.move_vector = if toward_player {
-            dir * AI_SPEED + avoid * AVOID_FORCE
-        } else {
-            flee_dir * AI_SPEED + avoid * AVOID_FORCE
         };
     }
 }

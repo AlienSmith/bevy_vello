@@ -48,7 +48,7 @@ pub fn tick_spine_drive(
         .iter()
         .map(|e| p_j.get(*e).unwrap().clone())
         .collect();
-    let config = spine.config.clone();
+    let config = indicator.config.clone();
 
     // Re-anchor the desired goal to the live P2 each fixed tick. While a
     // movement command is active, the desired centre is `P2 + commanded_dir *
@@ -306,16 +306,11 @@ fn calculate_spine_drive(
     // constraints take effect and hold the spine's orientation.
     let center = p2;
     let max_pos_step = config.max_pos_speed * dt;
-    let virtual_center =
-        interpolate_toward_vec(center, desired_center, config.pos_alpha, max_pos_step);
-    // Interpolate the angle toward the latched desired heading using the
-    // angular interpolation factor (no hard per-frame cap field on SpineConfig).
-    let virtual_angle = interpolate_toward(
-        /* current */ 0.0,
-        desired_angle,
-        config.ang_alpha,
-        f32::MAX,
-    );
+    // Interpolate toward the midpoint (alpha 0.5) with a per-frame cap. The
+    // previous `pos_alpha`/`ang_alpha` fields were always 0.5 (never overridden
+    // by the blueprint), so they simplify to a constant halfway step.
+    let virtual_center = interpolate_toward_vec(center, desired_center, 0.5, max_pos_step);
+    let virtual_angle = interpolate_toward(/* current */ 0.0, desired_angle, 0.5, f32::MAX);
 
     let motion = FrameMotion {
         linear: (desired_center - center).length(),

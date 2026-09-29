@@ -9,8 +9,8 @@
 //! `run_gpu_collision`, raytrace) is omitted — this test walks the character
 //! through empty space, so collision detection would produce no contacts.
 //!
-//! Phases: 0–2 s baseline (no input) → 2–4.4 s `move_vector = (50, 0)`
-//! (equivalent of holding D) → 4.4–6.5 s release. Logs spine-particle
+//! Phases: 0–2 s baseline (no input) → 2–4.4 s `commanded_dir = (1, 0),
+//! reach = 50` (equivalent of holding D) → 4.4–6.5 s release. Logs spine-particle
 //! positions/velocities to CSV every 50 ms, then exits.
 
 use std::time::Duration;
@@ -45,7 +45,7 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    CharacterController, CharacterRoot, SpineController, VelloCharacterPlugin,
+    CharacterController, CharacterRoot, SpineController, SpineIndicator, VelloCharacterPlugin,
 };
 
 const D_INPUT: Vec2 = Vec2::new(50.0, 0.0); // what read_player_input writes for KeyD
@@ -253,6 +253,7 @@ fn probe_driver(
     mut character_svg: ResMut<SvgCharacterAssetManager>,
     mut character_blueprint: ResMut<BlueprintCharacterAssetManager>,
     mut spine_q: Query<&mut SpineController>,
+    mut indicator_q: Query<&mut SpineIndicator>,
     root_q: Query<Entity, With<CharacterRoot>>,
     particle_q: Query<&VelloParticle>,
     collider_tq: Query<&Transform, With<VelloCollider>>,
@@ -279,6 +280,12 @@ fn probe_driver(
                     CharacterController::default(),
                 ))
                 .id();
+            // The SpineIndicator drives this same root entity, so back-fill the
+            // character field after we know the spawn id.
+            commands.entity(entity).insert(SpineIndicator {
+                character: entity,
+                ..Default::default()
+            });
             probe.character = Some(entity);
             probe.t0 = time.elapsed_secs();
             info!("character spawned, test clock starts");
@@ -301,27 +308,26 @@ fn probe_driver(
         "released"
     };
 
-    if let Ok(mut spine) = spine_q.get_mut(character) {
+    if let Ok(mut indicator) = indicator_q.single_mut() {
         // Optional A/B overrides for tuning sweeps (no game-default changes).
-        if let Ok(g) = std::env::var("ROT_GAIN") {
-            if let Ok(v) = g.parse::<f32>() {
-                spine.config.ang_alpha = v;
-            }
-        }
         if let Ok(g) = std::env::var("V_SCALE") {
             if let Ok(v) = g.parse::<f32>() {
-                spine.config.max_pos_speed = v;
+                indicator.config.max_pos_speed = v;
             }
         }
-        if let Ok(g) = std::env::var("BRAKE") {
-            if let Ok(v) = g.parse::<f32>() {
-                spine.config.lean_gain = v;
-            }
-        }
-        spine.move_vector = if t >= BASELINE_END && t < probe.input_end {
-            probe.input_vec
+        // Command movement through the SpineIndicator: while the input window is
+        // active, point the command vector along probe.input_vec, otherwise idle.
+        let active = t >= BASELINE_END && t < probe.input_end;
+        indicator.commanded_dir = if active {
+            probe.input_vec.normalize_or_zero()
         } else {
             Vec2::ZERO
+        };
+        indicator.command_active = active;
+        indicator.command_reach = if active {
+            probe.input_vec.length()
+        } else {
+            0.0
         };
     }
 

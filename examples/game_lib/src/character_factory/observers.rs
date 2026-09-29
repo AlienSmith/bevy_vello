@@ -127,19 +127,8 @@ pub fn on_delayed_detach(
 /// physics solver a chance to propagate the last hit's momentum through the
 /// intact skeleton, so the *whole* body flies apart — not just the part that
 /// took the killing blow.
-pub fn on_character_root_death(
-    trigger: Trigger<Die>,
-    mut commands: Commands,
-    mut spine_q: Query<&mut SpineController>,
-) {
+pub fn on_character_root_death(trigger: Trigger<Die>, mut commands: Commands) {
     let root_entity = trigger.target();
-
-    // Stop the dead body from emitting movement events. update_character_movement
-    // skips a spine whose move_vector is ~zero, so clearing it here prevents stale
-    // CharacterPivotVelocityEvent(s) targeting this root after it is despawned.
-    if let Ok(mut spine) = spine_q.get_mut(root_entity) {
-        spine.move_vector = Vec2::ZERO;
-    }
 
     commands
         .spawn((
@@ -794,18 +783,12 @@ pub fn assemble_character(
     };
 
     // Spine particles: [PH, P0, P1, P2, P3]
-    // Driving config comes from the blueprint's controllers.spine_drive block
-    // so it can be tuned by editing the character JSON without recompiling.
-    let spine_drive = &blueprint.data.controllers.spine_drive;
+    // Driving config (compliance, damping, max_pos_speed) is now owned by the
+    // SpineIndicator and UI-controlled, so it is intentionally NOT read from the
+    // blueprint here anymore.
     let spine = SpineController {
         particles: [get("PH"), get("P0"), get("P1"), get("P2"), get("P3")],
         angulars: [get("PH_P0_P1"), get("P0_P1_P2"), get("P1_P2_P3")],
-        config: SpineConfig {
-            compliance: spine_drive.compliance,
-            damping: spine_drive.damping,
-            ..Default::default()
-        },
-        move_vector: Vec2::ZERO,
     };
 
     // Right arm particles: [P1, P12, P13, PRLA]

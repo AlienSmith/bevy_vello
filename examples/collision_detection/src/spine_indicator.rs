@@ -34,43 +34,35 @@ use bevy_vello::{
     prelude::{kurbo, peniko},
     VelloScene, VelloSceneBundle,
 };
-use game_lib::{SpineController, SpineIndicator};
+use game_lib::{SpineConfig, SpineController, SpineIndicator};
 
-/// Rotation speed of the spine indicator, in degrees per second.
+/// Consolidated, runtime-tuneable spine parameters (a single UI-editable Resource).
 ///
-/// Adjustable at runtime with the `K` (faster) / `L` (slower) keys and clamped
-/// to the `0..=720` degree-per-second range. Holding a key keeps applying the
-/// step every [`REPEAT_DELAY`] seconds.
+/// All of the values the mouse/egui tuning UI can edit live in this one Resource:
+/// the physics drive config ([`SpineConfig`] — compliance/damping/max speed) and
+/// the arrow-command reach (`command_reach` — how far the desired target sits
+/// from the current P2). The UI edits this resource directly; the [`apply_spine_config`]
+/// system copies the `SpineConfig` portion onto the live [`SpineIndicator`] each frame,
+/// so changes take effect immediately with no restarts.
+///
+/// Only the *control* keys (arrow keys = desired-centre translation, `P` =
+/// visibility toggle) remain on the keyboard; value tuning is mouse/UI driven.
 #[derive(Resource)]
-pub struct RotateSpeed {
-    pub angle_per_second: f32,
+pub struct SpineTuneParams {
+    /// Physics drive config pushed onto the [`SpineIndicator`] by [`apply_spine_config`].
+    pub config: SpineConfig,
+    /// How far the desired target sits from the current P2, in px. Fed into
+    /// `SpineIndicator::command_reach`, so higher = target farther ahead.
+    pub command_reach: f32,
 }
 
-impl Default for RotateSpeed {
+impl Default for SpineTuneParams {
     fn default() -> Self {
         Self {
-            angle_per_second: 720.0,
+            config: SpineConfig::default(),
+            command_reach: 400.0,
         }
     }
-}
-
-/// How much [`RotateSpeed`] changes per `K`/`L` key step (degrees per second).
-const SPEED_STEP: f32 = 30.0;
-/// Minimum allowed rotation speed, in degrees per second.
-const MIN_SPEED: f32 = 0.0;
-/// Maximum allowed rotation speed, in degrees per second.
-const MAX_SPEED: f32 = 720.0;
-/// How long a `K`/`L` key must be held before its step starts repeating.
-const REPEAT_DELAY: f32 = 0.5;
-
-/// Tracks how long the `K`/`L` keys have been held so the speed step repeats
-/// while a key stays down.
-#[derive(Default)]
-pub struct RepeatHold {
-    /// Accumulated hold time for the `K` (faster) key, in seconds.
-    k: f32,
-    /// Accumulated hold time for the `L` (slower) key, in seconds.
-    l: f32,
 }
 
 /// Whether the spine indicator visualization is shown (toggled with the `P` key).
@@ -80,21 +72,6 @@ pub struct IndicatorVisibility(pub bool);
 impl Default for IndicatorVisibility {
     fn default() -> Self {
         Self(true)
-    }
-}
-
-/// Movement speed of the indicator while using arrow-key control, in px/s
-/// (adjustable in the UI).
-#[derive(Resource)]
-pub struct MoveSpeed {
-    pub px_per_second: f32,
-}
-
-impl Default for MoveSpeed {
-    fn default() -> Self {
-        Self {
-            px_per_second: 400.0,
-        }
     }
 }
 
@@ -278,66 +255,14 @@ pub fn spawn_spine_indicator(
 /// The indicator entity itself is spawned by [`spawn_spine_indicator`]; this
 /// system only moves/rotates the existing entity, and is a no-op if it is absent.
 pub fn draw_spine_indicator(
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    mut rotate_speed: ResMut<RotateSpeed>,
-    mut visibility: ResMut<IndicatorVisibility>,
-    move_speed: Res<MoveSpeed>,
+    visibility: Res<IndicatorVisibility>,
     mut q_indicator: Query<(Entity, &mut SpineIndicator, &mut Transform, &mut Visibility)>,
     mut q_desired: Query<
         (&mut Transform, &mut Visibility),
         (With<DesiredIndicator>, Without<SpineIndicator>),
     >,
-    mut repeat: Local<RepeatHold>,
 ) {
-    let dt = time.delta_secs();
-
-    // Toggle the indicator visualization on/off with the P key.
-    if keys.just_pressed(KeyCode::KeyP) {
-        visibility.0 = !visibility.0;
-    }
-
-    // Returns `true` once per step: immediately on the press, then again every
-    // REPEAT_DELAY seconds while the key stays held (key auto-repeat).
-    fn step(hold: &mut f32, delta: f32, pressed_now: bool, held: bool) -> bool {
-        if pressed_now {
-            *hold = 0.0;
-            return true;
-        }
-        if held {
-            *hold += delta;
-            if *hold >= REPEAT_DELAY {
-                // Keep the remainder so repeat cadence stays even.
-                *hold -= REPEAT_DELAY;
-                return true;
-            }
-        } else {
-            *hold = 0.0;
-        }
-        false
-    }
-
-    // Adjust rotation speed with K (faster) / L (slower), clamped to the
-    // 0..=720 degree-per-second range.
-    if step(
-        &mut repeat.k,
-        dt,
-        keys.just_pressed(KeyCode::KeyK),
-        keys.pressed(KeyCode::KeyK),
-    ) {
-        rotate_speed.angle_per_second =
-            (rotate_speed.angle_per_second + SPEED_STEP).clamp(MIN_SPEED, MAX_SPEED);
-    }
-    if step(
-        &mut repeat.l,
-        dt,
-        keys.just_pressed(KeyCode::KeyL),
-        keys.pressed(KeyCode::KeyL),
-    ) {
-        rotate_speed.angle_per_second =
-            (rotate_speed.angle_per_second - SPEED_STEP).clamp(MIN_SPEED, MAX_SPEED);
-    }
-    let Ok((_entity, mut indicator, mut transform, mut vis)) = q_indicator.single_mut() else {
+    let Ok((_entity, indicator, mut transform, mut vis)) = q_indicator.single_mut() else {
         return;
     };
     // Apply the P-key visibility toggle to both the virtual-pose and desired-goal
@@ -354,19 +279,44 @@ pub fn draw_spine_indicator(
         d_transform.rotation = Quat::from_rotation_z(indicator.desired_angle);
     }
 
-    // ---- Command the movement direction (input is authoritative) ----
-    // The arrow keys set a unit-length *direction* (Vello y-down world coords,
-    // so screen up = Vello -y, screen right = Vello +x). When any arrow is held,
-    // `command_active` is set and `tick_spine_drive` re-anchors the desired
-    // centre to the live P2 (`P2 + commanded_dir * command_reach`) every fixed
-    // tick. That keeps the goal a *constant distance* ahead of the spine while
-    // held — it never drifts away from or clamps down onto the body. When no
-    // arrow is held, `command_active` clears and the last re-anchored
-    // `desired_center` stays frozen (virtual pose keeps decaying toward it).
-    // The aim distance `command_reach` is driven by the `MoveSpeed` resource
-    // (exposed as the "arrow move speed" slider): higher move speed ⇒ the
-    // commanded target sits farther ahead of the current P2.
-    indicator.command_reach = move_speed.px_per_second;
+    // ---- Render the virtual pose ----
+    // `tick_spine_drive` wrote the interpolated, capped virtual pose back onto
+    // the indicator; the visual simply mirrors it (Vello y-down → Bevy y-up).
+    transform.translation = vello_to_bevy(indicator.center).extend(1000.0);
+    transform.rotation = Quat::from_rotation_z(indicator.angle);
+}
+
+/// Spine control input: translate the *desired centre* with the arrow keys.
+///
+/// The arrow keys set a unit-length *direction* (Vello y-down world coords, so
+/// screen up = Vello -y, screen right = Vello +x) on the single `SpineIndicator`.
+/// When any arrow is held, `command_active` is set and `tick_spine_drive`
+/// re-anchors the desired centre to the live P2 (`P2 + commanded_dir *
+/// command_reach`) every fixed tick. That keeps the goal a *constant distance*
+/// ahead of the spine while held — it never drifts away from or clamps down
+/// onto the body. When no arrow is held, `command_active` clears and the last
+/// re-anchored `desired_center` stays frozen (virtual pose keeps decaying
+/// toward it).
+///
+/// The aim distance `command_reach` is driven by the `SpineTuneParams` resource
+/// (exposed as the "arrow move speed" slider in the UI): higher move speed ⇒ the
+/// commanded target sits farther ahead of the current P2.
+pub fn spine_control_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    params: Res<SpineTuneParams>,
+    mut visibility: ResMut<IndicatorVisibility>,
+    mut q_indicator: Query<&mut SpineIndicator>,
+) {
+    let Ok(mut indicator) = q_indicator.single_mut() else {
+        return;
+    };
+
+    // Toggle the indicator visualization on/off with the P key.
+    if keys.just_pressed(KeyCode::KeyP) {
+        visibility.0 = !visibility.0;
+    }
+
+    indicator.command_reach = params.command_reach;
     let mut dir = Vec2::ZERO;
     if keys.pressed(KeyCode::ArrowUp) {
         dir.y -= 1.0;
@@ -386,10 +336,17 @@ pub fn draw_spine_indicator(
     } else {
         indicator.command_active = false;
     }
+}
 
-    // ---- Render the virtual pose ----
-    // `tick_spine_drive` wrote the interpolated, capped virtual pose back onto
-    // the indicator; the visual simply mirrors it (Vello y-down → Bevy y-up).
-    transform.translation = vello_to_bevy(indicator.center).extend(1000.0);
-    transform.rotation = Quat::from_rotation_z(indicator.angle);
+/// Copy the UI-tuned [`SpineConfig`] from the [`SpineTuneParams`] resource onto
+/// the live [`SpineIndicator`] each frame, so slider edits take effect
+/// immediately (no restarts).
+pub fn apply_spine_config(
+    params: Res<SpineTuneParams>,
+    mut q_indicator: Query<&mut SpineIndicator>,
+) {
+    let Ok(mut indicator) = q_indicator.single_mut() else {
+        return;
+    };
+    indicator.config = params.config.clone();
 }

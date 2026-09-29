@@ -67,16 +67,9 @@ pub struct SpineConfig {
     pub compliance: f32,
     /// Damping for the external position constraints (0..1, higher = more).
     pub damping: f32,
-    /// Interpolation factor per frame for the target centre position.
-    pub pos_alpha: f32,
-    /// Interpolation factor per frame for the target heading angle.
-    pub ang_alpha: f32,
     /// Max centre speed in px/s; `max_pos_step = max_pos_speed * dt` is the
     /// per-frame position cap.
     pub max_pos_speed: f32,
-    /// Maps per-frame angular step (turn speed this frame) to the P1_P2_P3
-    /// rest-angle lean. Faster turn ⇒ bigger lean.
-    pub lean_gain: f32,
 }
 
 impl Default for SpineConfig {
@@ -84,10 +77,7 @@ impl Default for SpineConfig {
         Self {
             compliance: 1e-7,
             damping: 0.1,
-            pos_alpha: 0.5,
-            ang_alpha: 0.5,
             max_pos_speed: 900.0,
-            lean_gain: 0.06,
         }
     }
 }
@@ -139,9 +129,6 @@ impl Default for ArmConfig {
 pub struct SpineController {
     pub particles: [Entity; 5],
     pub angulars: [Entity; 3],
-    pub config: SpineConfig,
-    /// Movement direction. Written by player_movement, AI, etc.
-    pub move_vector: Vec2,
 }
 
 /// The spine "virtual handle": the commanded pose the external position
@@ -183,6 +170,15 @@ pub struct SpineIndicator {
     /// re-anchored each fixed tick to `P2 + commanded_dir * command_reach`, so a
     /// held key keeps the goal a constant distance ahead of the spine (it never
     /// drifts away from or clamps down onto P2).
+    /// Drive tuning for the external position constraints. Lives on the
+    /// indicator so it can be edited at runtime (e.g. via the tuning UI)
+    /// rather than baked in from the blueprint JSON (which needs a restart).
+    pub config: SpineConfig,
+    /// Unit-length movement direction commanded by the arrow keys (Vello y-down
+    /// world coords). While a movement command is *active* the desired centre is
+    /// re-anchored each fixed tick to `P2 + commanded_dir * command_reach`, so a
+    /// held key keeps the goal a constant distance ahead of the spine (it never
+    /// drifts away from or clamps down onto P2).
     pub commanded_dir: Vec2,
     /// Fixed distance ahead of the current P2 at which the desired target is
     /// held while a movement command is active (px in Vello space). The example
@@ -208,6 +204,7 @@ impl Default for SpineIndicator {
             desired_center: Vec2::ZERO,
             local_points: [Vec2::ZERO; 3],
             character: Entity::PLACEHOLDER,
+            config: SpineConfig::default(),
             commanded_dir: Vec2::X,
             command_reach: 40.0,
             command_active: false,

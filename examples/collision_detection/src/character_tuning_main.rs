@@ -14,7 +14,7 @@ mod spine_indicator;
 
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
-use spine_indicator::{IndicatorVisibility, MoveSpeed, RotateSpeed};
+use spine_indicator::{IndicatorVisibility, SpineTuneParams};
 
 use bevy_vello::{
     collision::{
@@ -157,8 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init_state::<GameState>()
         .add_plugins(VelloCharacterPlugin::default())
         .insert_resource(PistolState::default())
-        .insert_resource(RotateSpeed::default())
-        .insert_resource(MoveSpeed::default())
+        .insert_resource(SpineTuneParams::default())
         .insert_resource(IndicatorVisibility::default())
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
@@ -191,7 +190,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             (
                 edge_pan_camera::update_edge_pan_camera,
+                spine_indicator::spine_control_input,
                 spine_indicator::draw_spine_indicator,
+                spine_indicator::apply_spine_config,
                 indicator_ui,
             )
                 .run_if(in_state(GameState::Game)),
@@ -593,23 +594,31 @@ fn setup_resources(
 /// slider (mirrors the `K`/`L` keys).
 fn indicator_ui(
     mut contexts: EguiContexts,
-    mut rotate_speed: ResMut<RotateSpeed>,
-    mut move_speed: ResMut<MoveSpeed>,
+    mut params: ResMut<SpineTuneParams>,
     visibility: Res<IndicatorVisibility>,
 ) {
-    egui::Window::new("Indicator Rotation").show(contexts.ctx_mut(), |ui| {
-        ui.label(format!(
-            "Rotation speed: {:.1} deg/s (Q/D & E/A rotate, K faster, L slower)",
-            rotate_speed.angle_per_second
-        ));
-        ui.label("Arrows move the desired centre; Q/D & E/A rotate the desired heading.");
-        ui.label("Hold K/L to repeat every 0.5 s");
-        ui.add(egui::Slider::new(&mut rotate_speed.angle_per_second, 0.0..=720.0).text("deg/s"));
-        ui.label("0 ..= 720 deg/s");
+    egui::Window::new("Indicator Tuning").show(contexts.ctx_mut(), |ui| {
+        ui.label("Arrows move the desired centre (control input, not UI).");
+        ui.label("P toggles the visualization.");
         ui.separator();
-        ui.label("Arrow move speed (px/s):");
-        ui.add(egui::Slider::new(&mut move_speed.px_per_second, 0.0..=2000.0).text("px/s"));
+
+        ui.heading("Desired-target reach");
+        ui.label("How far the desired target sits from the current P2 (px).");
+        ui.add(egui::Slider::new(&mut params.command_reach, 0.0..=2000.0).text("px"));
         ui.separator();
+
+        ui.heading("Spine drive config (applied to the indicator)");
+        ui.add(
+            egui::Slider::new(&mut params.config.compliance, 1e-9..=1e-5)
+                .logarithmic(true)
+                .text("compliance"),
+        );
+        ui.add(egui::Slider::new(&mut params.config.damping, 0.0..=1.0).text("damping"));
+        ui.add(
+            egui::Slider::new(&mut params.config.max_pos_speed, 0.0..=3000.0).text("max_pos_speed"),
+        );
+        ui.separator();
+
         ui.label(format!(
             "Visualization: {}  (P to toggle)",
             if visibility.0 { "On" } else { "Off" }

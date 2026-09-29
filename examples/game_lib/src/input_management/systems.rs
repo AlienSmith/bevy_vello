@@ -38,7 +38,6 @@ pub struct Player;
 pub fn read_player_input(
     mouse: Res<MouseWorldPosition>,
     action_state_q: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
-    mut spine_q: Query<&mut SpineController>,
     mut pistol_q: Query<(Entity, &mut PistolControl, &Connectivity)>,
     mut arm_q: Query<&mut RightArmController>,
     mut legacy_q: Query<&mut CharacterController>,
@@ -63,10 +62,9 @@ pub fn read_player_input(
             direction.x += 50.0;
         }
 
-        // Set movement only on THIS character's spine controller
-        if let Ok(mut spine) = spine_q.get_mut(character_entity) {
-            spine.move_vector = direction;
-        }
+        // Movement is commanded via SpineIndicator.commanded_dir (see
+        // spine_control_input / the tuning app) rather than SpineController,
+        // so nothing is written here.
 
         // ---- Aim, Fire, Drop ----
         for (pistol_entity, mut pistol, connectivity) in pistol_q.iter_mut() {
