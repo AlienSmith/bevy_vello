@@ -70,6 +70,14 @@ pub struct SpineConfig {
     /// Max centre speed in px/s; `max_pos_step = max_pos_speed * dt` is the
     /// per-frame position cap.
     pub max_pos_speed: f32,
+    /// Max lean deflection (rad) of the tip P3, reached at full angular
+    /// acceleration. 0.35 ≈ 20°.
+    pub lean_max_angle: f32,
+    /// X-PBD compliance for the `P1_P2_P3` angular constraint while the lean is
+    /// active. Soft enough not to overpower the position constraints but stiff
+    /// enough to hold the bend. Re-rest every frame so it agrees with the
+    /// commanded bent pose (no position-vs-angular fighting).
+    pub lean_compliance: f32,
 }
 
 impl Default for SpineConfig {
@@ -78,6 +86,8 @@ impl Default for SpineConfig {
             compliance: 1e-7,
             damping: 0.1,
             max_pos_speed: 900.0,
+            lean_max_angle: 0.35,
+            lean_compliance: 1e-5,
         }
     }
 }
@@ -193,6 +203,14 @@ pub struct SpineIndicator {
     pub linear_speed: f32,
     /// Per-frame angular speed (rad/s).
     pub angular_speed: f32,
+    /// Commanded lean deflection (rad) of the tip P3 about P2, scaled from the
+    /// angular acceleration. Single source of truth: the draw system rebuilds the
+    /// bent virtual-pose shape from this, and `theta_lean` is directly the
+    /// `P1_P2_P3` angular-rest deviation.
+    pub lean_angle: f32,
+    /// Signed angular velocity of the previous frame (rad/s, shortest-path sign),
+    /// used to differentiate angular acceleration. One frame of history only.
+    pub omega_prev: f32,
 }
 
 impl Default for SpineIndicator {
@@ -210,6 +228,8 @@ impl Default for SpineIndicator {
             command_active: false,
             linear_speed: 0.0,
             angular_speed: 0.0,
+            lean_angle: 0.0,
+            omega_prev: 0.0,
         }
     }
 }

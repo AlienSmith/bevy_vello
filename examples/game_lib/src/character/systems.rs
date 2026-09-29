@@ -74,6 +74,7 @@ pub fn tick_spine_drive(
         indicator.desired_center,
         indicator.desired_angle,
         &indicator.local_points,
+        indicator.omega_prev,
         dt,
     );
 
@@ -90,10 +91,14 @@ pub fn tick_spine_drive(
     // indicator visual is drawn at — write it back so they never diverge.
     indicator.center = result.virtual_center;
     indicator.angle = result.virtual_angle;
-    // Store the frame motion (re-derived, deterministic) for the lean scale.
+    // Store the frame motion (re-derived, deterministic) for the lean scale, plus
+    // the commanded lean (drawn as a bent P3) and this frame's smoothed omega
+    // (becomes `omega_prev` next tick for differentiating angular acceleration).
     let dt_safe = dt.max(f32::EPSILON);
     indicator.linear_speed = result.motion.linear / dt_safe;
     indicator.angular_speed = result.motion.angular / dt_safe;
+    indicator.lean_angle = result.lean_angle;
+    indicator.omega_prev = result.omega;
 }
 
 use super::ik::compute_ik_positions;
@@ -239,6 +244,43 @@ fn interpolate_toward_angle(current: f32, target: f32, alpha: f32, max_step: f32
     current + (step * alpha).clamp(-max_step, max_step)
 }
 
+/// The signed *shortest-path* angular displacement from `current` to `target`
+/// (radians), in `(-π, π]`. Used so the per-frame angular *velocity* carries the
+/// true rotation direction (e.g. Up → Left is −π/2, not +3π/2), which the lean
+/// needs to tilt the correct way.
+#[inline]
+fn shortest_signed_delta(current: f32, target: f32) -> f32 {
+    let delta = (target - current).rem_euclid(std::f32::consts::TAU);
+    if delta > std::f32::consts::PI {
+        delta - std::f32::consts::TAU
+    } else {
+        delta
+    }
+}
+
+/// Mirror of the solver's `P1_P2_P3` angle measurement
+/// ([`constraints.rs`](study_vello/integrations/vello_physics/src/constraints.rs:437)):
+/// `v1 = P1→P2`, `v2 = P2→P3`, `cos = u1·u2`, `sin = u1.y*u2.x - u1.x*u2.y`.
+/// Recomputing the angular joint's rest `cos/sin` from the *same* commanded bent
+/// positions the external position constraints target makes the solver's angular
+/// error (`current − rest`) zero at the commanded pose, so the position and
+/// angular constraints agree by construction and never fight.
+#[inline]
+fn angle_basis(pos0: Vec2, pos1: Vec2, pos2: Vec2) -> Option<(Vec2, Vec2, f32, f32)> {
+    let v1 = pos1 - pos0;
+    let v2 = pos2 - pos1;
+    let l1 = v1.length();
+    let l2 = v2.length();
+    if l1 < 1e-6 || l2 < 1e-6 {
+        return None;
+    }
+    let u1 = v1 / l1;
+    let u2 = v2 / l2;
+    let cos = u1.dot(u2);
+    let sin = u1.y * u2.x - u1.x * u2.y;
+    Some((u1, u2, cos, sin))
+}
+
 /// Vector variant of [`interpolate_toward`]: move `current` partway toward
 /// `target` and clamp the per-frame displacement length to `max_step`.
 #[inline]
@@ -260,12 +302,19 @@ struct FrameMotion {
 /// Result of a [`calculate_spine_drive`] tick: the queued constraint events,
 /// the virtual pose (which is ALSO what the indicator is drawn at and what the
 /// external position constraints pull the spine toward — one shared target),
-/// and the frame motion used to scale the lean.
+/// the frame motion used to scale the lean, and the lean itself (the commanded
+/// tip deflection + this frame's signed angular velocity for next-frame diff).
 struct SpineDriveResult {
     position_events: Vec<CharacterExternalPositionConstraintEvent>,
     angular_events: Vec<CharacterAngularConstraintEvent>,
     virtual_center: Vec2,
     virtual_angle: f32,
+    /// Commanded tip (P3) lean deflection (rad), single source of truth for the
+    /// draw and the `P1_P2_P3` angular-rest deviation.
+    lean_angle: f32,
+    /// This frame's signed angular velocity (rad/s) — stored on the indicator to
+    /// become `omega_prev` next tick (for differentiating angular acceleration).
+    omega: f32,
     motion: FrameMotion,
 }
 
@@ -293,12 +342,13 @@ fn rotate_local(point: Vec2, angle: f32) -> Vec2 {
 fn calculate_spine_drive(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
-    _angular_entities: &Vec<Entity>,
-    _angulars: &Vec<VelloJoint>,
+    angular_entities: &Vec<Entity>,
+    angulars: &Vec<VelloJoint>,
     config: &SpineConfig,
     desired_center: Vec2,
     desired_angle: f32,
     local_points: &[Vec2; 3],
+    omega_prev: f32,
     dt: f32,
 ) -> SpineDriveResult {
     let mut angular_events = vec![];
@@ -312,6 +362,8 @@ fn calculate_spine_drive(
             angular_events,
             virtual_center: Vec2::ZERO,
             virtual_angle: 0.0,
+            lean_angle: 0.0,
+            omega: 0.0,
             motion: FrameMotion::default(),
         };
     }
@@ -354,36 +406,77 @@ fn calculate_spine_drive(
 
     let motion = FrameMotion {
         linear: (desired_center - center).length(),
-        angular: (desired_angle - current_angle).abs(),
+        // Signed angular displacement (shortest-path sign), so the angular
+        // *velocity* below carries the true rotation direction for the lean.
+        angular: shortest_signed_delta(desired_angle, current_angle),
     };
 
-    // Command each P1/P2/P3 (indices 2/3/4) to its position in the posed spine:
-    // the virtual centre plus the P2-centred local offset rotated by the virtual
-    // heading. All three must share the exact same virtual_center/angle so the
-    // spine holds as one rigid pose (no free rotation, no spin feedback).
-    for (i, local) in [2usize, 3, 4].into_iter().zip(local_points.iter()) {
+    // ---- Lean (P3-only tilt) ----
+    // This frame's raw signed angular velocity (shortest-path direction), then
+    // EMA-smoothed across frames (omega_prev already holds the previous smoothed
+    // value) so the differentiated acceleration below is stable.
+    let dt_safe = dt.max(f32::EPSILON);
+    let omega_raw = motion.angular / dt_safe;
+    let omega = omega_raw * 0.5 + omega_prev * 0.5;
+    // Angular acceleration = change in the smoothed signed angular velocity.
+    let alpha = (omega - omega_prev) / dt_safe;
+    // Reference acceleration at which the lean reads full: the frame-scale
+    // angular velocity `max_ang_step / dt` reaching its cap within one frame, so
+    // `max_ang_step / dt / dt`.
+    let lean_accel_ref = (max_ang_step / dt_safe) / dt_safe;
+    let ratio = (alpha / lean_accel_ref).clamp(-1.0, 1.0);
+    let theta_lean = ratio * config.lean_max_angle;
+
+    // Command each P1/P2/P3 (indices 2/3/4): P1 (2) and P2 (3) stay on the rigid
+    // base heading (`virtual_angle`), **P3 (4) only** is deflected by `theta_lean`
+    // about P2 so the spine tilts toward the rotation direction.
+    let p1_target = virtual_center + rotate_local(local_points[0], virtual_angle - rest_heading);
+    let p2_target = virtual_center;
+    let p3_target =
+        virtual_center + rotate_local(local_points[2], virtual_angle - rest_heading + theta_lean);
+    let bent_targets = [p1_target, p2_target, p3_target];
+
+    for (i, target) in [2usize, 3, 4].into_iter().zip(bent_targets.iter()) {
         position_events.push(CharacterExternalPositionConstraintEvent {
             character_entity: particles[0].root_entity,
             joint_entity: entities[i],
             config: vello_physics::ExternalPositionConstraintConfig {
-                target: virtual_center + rotate_local(*local, virtual_angle - rest_heading),
+                target: *target,
                 compliance: config.compliance,
                 damping: config.damping,
             },
         });
     }
 
-    // No angular constraint events are emitted (position-only drive).
+    // Re-rest the driven quad's angular joint at P2 (`angulars[2]` == P1_P2_P3)
+    // to the SAME commanded bent positions the external position constraints
+    // target. With rest == commanded, the solver's angular error (`current -
+    // rest`) is zero at the commanded pose, so the position and angular
+    // constraints can never fight. `angle_basis(P1,P2,P3)` below mirrors the
+    // solver's measurement (constraints.rs:437).
+    if let Some((_, _, rest_cos, rest_sin)) = angle_basis(p1_target, p2_target, p3_target) {
+        angular_events.push(CharacterAngularConstraintEvent {
+            character_entity: particles[0].root_entity,
+            joint_entity: angular_entities[2],
+            config: vello_physics::AngularConstraintConfig {
+                rest_cos,
+                rest_sin,
+                compliance: config.lean_compliance,
+            },
+        });
+    }
+    let _ = angulars; // reserved for future multi-joint spine pose use.
 
     SpineDriveResult {
         position_events,
         angular_events,
         virtual_center,
         virtual_angle,
+        lean_angle: theta_lean,
+        omega,
         motion,
     }
 }
-
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.
 ///
 /// # Arm topology

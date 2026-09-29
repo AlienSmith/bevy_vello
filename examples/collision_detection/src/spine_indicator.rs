@@ -105,6 +105,14 @@ pub struct DesiredIndicator;
 
 /// Build the fixed "virtual pose" indicator shape once (local coords, centred at
 /// the origin). Solid triangle line + filled circles → reads as the *current*
+/// Rotate a P2-centred local offset by `angle` (radians) in the Vello y-down
+/// world convention — matches the drive's `rotate_local`.
+#[inline]
+fn rotate_local(point: Vec2, angle: f32) -> Vec2 {
+    let (sin, cos) = angle.sin_cos();
+    Vec2::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos)
+}
+
 /// commanded pose the physics are pulling toward.
 fn build_indicator_scene(points: &[Vec2; 3]) -> VelloScene {
     let mut scene = VelloScene::default();
@@ -263,13 +271,24 @@ pub fn spawn_spine_indicator(
 /// system only moves/rotates the existing entity, and is a no-op if it is absent.
 pub fn draw_spine_indicator(
     visibility: Res<IndicatorVisibility>,
-    mut q_indicator: Query<(Entity, &mut SpineIndicator, &mut Transform, &mut Visibility)>,
+    mut q_indicator: Query<
+        (
+            Entity,
+            &mut SpineIndicator,
+            &mut Transform,
+            &mut Visibility,
+            &mut VelloScene,
+        ),
+        (),
+    >,
     mut q_desired: Query<
         (&mut Transform, &mut Visibility),
         (With<DesiredIndicator>, Without<SpineIndicator>),
     >,
 ) {
-    let Ok((_entity, indicator, mut transform, mut vis)) = q_indicator.single_mut() else {
+    let Ok((_entity, indicator, mut transform, mut vis, mut virtual_scene)) =
+        q_indicator.single_mut()
+    else {
         return;
     };
     // Rest world heading of the baked shape, derived from the P2-centred rest
@@ -297,7 +316,18 @@ pub fn draw_spine_indicator(
 
     // ---- Render the virtual pose ----
     // `tick_spine_drive` wrote the interpolated, capped virtual pose back onto
-    // the indicator; the visual simply mirrors it (Vello y-down → Bevy y-up).
+    // the indicator. A rigid `Transform` rotation can't show the spine's P1_P2_P3
+    // lean (a non-180 interior angle), so we rebuild the shape each frame with the
+    // *bent* local offsets — exactly the same formula the physics pull toward:
+    // P1/P2 stay on the base heading, P3 only is deflected by `lean_angle`.
+    // The scene is built in the origin-centred rest frame; the transform supplies
+    // the base-heading rotation + translation (Vello y-down → Bevy y-up).
+    let bent_points = [
+        indicator.local_points[0],
+        indicator.local_points[1],
+        rotate_local(indicator.local_points[2], indicator.lean_angle),
+    ];
+    *virtual_scene = build_indicator_scene(&bent_points);
     transform.translation = vello_to_bevy(indicator.center).extend(1000.0);
     transform.rotation = Quat::from_rotation_z(rest_heading - indicator.angle);
 }

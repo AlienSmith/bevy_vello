@@ -617,6 +617,18 @@ fn indicator_ui(
         ui.add(
             egui::Slider::new(&mut params.config.max_pos_speed, 0.0..=3000.0).text("max_pos_speed"),
         );
+
+        ui.heading("Spine lean (acceleration-based tilt)");
+        ui.label("Tip P3 tilts about P2 when the spine rotates faster.");
+        ui.add(
+            egui::Slider::new(&mut params.config.lean_max_angle, 0.0..=1.2)
+                .text("lean_max_angle (rad)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut params.config.lean_compliance, 1e-9..=1e-4)
+                .logarithmic(true)
+                .text("lean_compliance"),
+        );
         ui.separator();
 
         ui.label(format!(
