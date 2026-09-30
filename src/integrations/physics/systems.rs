@@ -24,7 +24,7 @@ use vello::{
 };
 use vello_physics::{
     utility::{vector2_to_kurbo_point, BalancedCoreFrame},
-    Particle, FRAME_PARTICLES_COUNT,
+    Particle, SpineFrameParticles, FRAME_PARTICLES_COUNT, SPINE_FRAME_PARTICLES_COUNT,
 };
 #[inline]
 fn vec2_to_vector2_inverse_y(v: &Vec2) -> Vec2 {
@@ -507,14 +507,19 @@ pub fn generate_connection(
     }
     //initliaze shape matching frame
     for (e, c) in query_r.iter() {
+        // The frame is now a 3-particle spine triple [spine_start, spine_mid,
+        // spine_end] (stored at frame_entities[0..3], with slot 3 repeating
+        // spine_mid for the legacy 4-wide collision buffer). Pass the first
+        // three particles as the SpineFrameParticles triple.
         constraint_world
             .data
             .initial_frame(
                 &e,
-                &c.frame_entities[0],
-                &c.frame_entities[1],
-                &c.frame_entities[2],
-                &c.frame_entities[3],
+                SpineFrameParticles::new(
+                    &c.frame_entities[0],
+                    &c.frame_entities[1],
+                    &c.frame_entities[2],
+                ),
                 &c.shape_matching_frame_config,
             )
             .expect("character missing particles to form frame");
@@ -545,9 +550,13 @@ pub fn update_connection_particles(
     for (character, mut joint) in query_c.iter_mut() {
         if let Ok(group) = constraint_world.data.get_group_ref(character) {
             let item = group.get_frame_connect_particle();
-            if item.len() == FRAME_PARTICLES_COUNT {
-                let frame_coordinates =
-                    BalancedCoreFrame::new(item[0].pos, item[1].pos, item[2].pos, item[3].pos);
+            if item.len() == SPINE_FRAME_PARTICLES_COUNT {
+                // `frame_particles` is the 3-particle spine triple
+                // [spine_start (P1), spine_mid (P2), spine_end (P3)]. Arm IK anchors
+                // to the P1->P2 segment, so build the `frame_start_mid` frame
+                // (basis_y along spine_mid - spine_start, origin at spine_mid) from
+                // its two particles P1 (item[0]) and P2 (item[1], the pivot).
+                let frame_coordinates = BalancedCoreFrame::new(item[0].pos, item[1].pos);
                 if joint.initial_frame_coordinates.is_none() {
                     joint.initial_frame_coordinates = Some(frame_coordinates.clone());
                 }

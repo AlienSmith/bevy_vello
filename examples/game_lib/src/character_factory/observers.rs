@@ -203,7 +203,7 @@ use vello::{
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
     CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
-    FRAME_PARTICLES_COUNT,
+    SPINE_FRAME_PARTICLES_COUNT,
 };
 
 use crate::{
@@ -821,32 +821,35 @@ pub fn assemble_character(
     commands
         .entity(root_entity)
         .observe(on_character_root_death);
+    // The rigid collision frame is now defined by THREE spine particles:
+    //   spine_start -> P1 (upper spine / shoulders; the arm-IK segment anchor)
+    //   spine_mid   -> P2 (waist; the shared pivot / rotation center)
+    //   spine_end   -> P3 (lower spine / hips)
+    // (see plans/two_particle_spine_frames.md — "frame particles = P1/P2/P3").
     let frame_config = blueprint.data.frame.init_config.clone();
-    let left_hip = colliders_particle_entity
-        .get(&frame_config.left_hip)
+    let spine_start = colliders_particle_entity
+        .get(&frame_config.spine_start)
         .unwrap()
         .0
         .clone();
-    let right_hip = colliders_particle_entity
-        .get(&frame_config.right_hip)
-        .unwrap()
-        .0
-        .clone();
-    let base_spine = colliders_particle_entity
-        .get(&frame_config.spine_base)
-        .unwrap()
-        .0
-        .clone();
-    let mid_spine = colliders_particle_entity
+    let spine_mid = colliders_particle_entity
         .get(&frame_config.spine_mid)
         .unwrap()
         .0
         .clone();
-    let frame_entites: [Entity; FRAME_PARTICLES_COUNT] =
-        [left_hip, right_hip, base_spine, mid_spine];
+    let spine_end = colliders_particle_entity
+        .get(&frame_config.spine_end)
+        .unwrap()
+        .0
+        .clone();
+    // The spine frame is the 3-particle triple `[spine_start, spine_mid,
+    // spine_end]` (`SPINE_FRAME_PARTICLES_COUNT`), matching the library's
+    // `SoftBodyConnections.frame_particles`. The quad-collider frame (4 corners)
+    // is a separate `SoftBody` concept and is not passed here.
+    let frame_entities: [Entity; SPINE_FRAME_PARTICLES_COUNT] = [spine_start, spine_mid, spine_end];
 
     commands.entity(root_entity).insert((
-        VelloCharacterPhysicsRoot::new(frame_config, frame_entites),
+        VelloCharacterPhysicsRoot::new(frame_config, frame_entities),
         spine,
         right_arm,
         left_arm,

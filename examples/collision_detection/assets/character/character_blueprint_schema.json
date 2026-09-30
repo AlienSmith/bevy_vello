@@ -278,28 +278,24 @@
     "FrameInitConfig": {
       "type": "object",
       "properties": {
-        "frame_particles_damping": {
-          "type": "number",
-          "format": "float"
-        },
-        "left_hip": {
-          "type": "string"
-        },
-        "right_hip": {
-          "type": "string"
-        },
-        "spine_base": {
+        "spine_start": {
           "type": "string"
         },
         "spine_mid": {
           "type": "string"
+        },
+        "spine_end": {
+          "type": "string"
+        },
+        "frame_particles_damping": {
+          "type": "number",
+          "format": "float"
         }
       },
       "required": [
-        "left_hip",
-        "right_hip",
-        "spine_base",
+        "spine_start",
         "spine_mid",
+        "spine_end",
         "frame_particles_damping"
       ]
     },

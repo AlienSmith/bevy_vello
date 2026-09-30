@@ -118,6 +118,7 @@ pub use vello_physics::ConnectionConstraintInitConfig;
 use vello_physics::{
     utility::BalancedCoreFrame, AngularConstraintConfig, ConnectionConstraint, ConstraintWorld,
     ExternalPositionConstraintConfig, FrameInitConfig, FRAME_PARTICLES_COUNT,
+    SPINE_FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -276,13 +277,16 @@ impl Component for VelloParticle {
 #[derive(Clone)]
 pub struct VelloCharacterPhysicsRoot {
     pub shape_matching_frame_config: FrameInitConfig,
-    pub frame_entities: [Entity; FRAME_PARTICLES_COUNT],
+    pub frame_entities: [Entity; SPINE_FRAME_PARTICLES_COUNT],
     pub frame_coordinates: BalancedCoreFrame,
     pub initial_frame_coordinates: Option<BalancedCoreFrame>, //this is used to indicate that the physics world is in sync with game world.
 }
 
 impl VelloCharacterPhysicsRoot {
-    pub fn new(config: FrameInitConfig, frame_entities: [Entity; FRAME_PARTICLES_COUNT]) -> Self {
+    pub fn new(
+        config: FrameInitConfig,
+        frame_entities: [Entity; SPINE_FRAME_PARTICLES_COUNT],
+    ) -> Self {
         Self {
             shape_matching_frame_config: config,
             frame_entities,
