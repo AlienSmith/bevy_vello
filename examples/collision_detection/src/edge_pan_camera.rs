@@ -1,6 +1,14 @@
 use bevy::input::mouse::MouseWheel;
 pub use bevy::prelude::*;
 pub use bevy::window::PrimaryWindow;
+
+/// Marker resource: when present, the mouse-wheel zoom handled by this camera
+/// is disabled. Used by the character-tuning cannon, which owns the wheel for
+/// aiming, while leaving the pan/zoom behavior untouched for examples that
+/// don't opt in.
+#[derive(Resource, Default)]
+pub struct DisableEdgePanZoom;
+
 #[derive(Component)]
 pub struct EdgePanCamera {
     pub pan_speed: f32,
@@ -25,6 +33,7 @@ pub fn update_edge_pan_camera(
     mut scroll_events: EventReader<MouseWheel>,
     mut cameras: Query<(&mut Transform, &mut EdgePanCamera, &mut Projection)>,
     time: Res<Time>,
+    disable_zoom: Option<Res<DisableEdgePanZoom>>,
 ) {
     let window = windows.single().unwrap();
 
@@ -32,8 +41,14 @@ pub fn update_edge_pan_camera(
         return;
     };
 
+    let zoom_disabled = disable_zoom.is_some();
+
     if let Projection::Orthographic(ref mut ortho) = *projection {
         for event in scroll_events.read() {
+            if zoom_disabled {
+                // Wheel is owned by the cannon in this app; skip camera zoom.
+                continue;
+            }
             // Update your custom zoom_level
             camera.zoom_level = (camera.zoom_level - event.y * 0.1).clamp(0.01, 5.0);
         }

@@ -9,6 +9,7 @@
 //! Run:
 //!   cargo run -p collision_detection --bin character_tuning_main --release
 
+mod cannon;
 mod edge_pan_camera;
 mod spine_indicator;
 
@@ -159,6 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(PistolState::default())
         .insert_resource(SpineTuneParams::default())
         .insert_resource(IndicatorVisibility::default())
+        .insert_resource(cannon::CannonParams::default())
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
@@ -173,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
+        .add_systems(Startup, cannon::spawn_cannon_indicator)
         .add_systems(
             Update,
             check_assets_loaded.run_if(in_state(GameState::Loading)),
@@ -194,6 +197,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 spine_indicator::draw_spine_indicator,
                 spine_indicator::apply_spine_config,
                 indicator_ui,
+                cannon::cannon_ui,
+                cannon::move_cannon_with_wasd,
+                cannon::update_cannon_indicator,
+                cannon::fire_cannon,
             )
                 .run_if(in_state(GameState::Game)),
         )
