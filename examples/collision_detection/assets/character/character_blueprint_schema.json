@@ -287,7 +287,7 @@
         "spine_end": {
           "type": "string"
         },
-        "frame_particles_damping": {
+        "fk_target_damping": {
           "type": "number",
           "format": "float"
         }
@@ -296,7 +296,7 @@
         "spine_start",
         "spine_mid",
         "spine_end",
-        "frame_particles_damping"
+        "fk_target_damping"
       ]
     },
     "JointConfig": {

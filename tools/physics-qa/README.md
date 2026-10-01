@@ -29,7 +29,7 @@ Editable per collider: `softbody` (`max_complexity`, `resititution`,
 `frame_constraints_scaler`, `substeps`, `self_collision_complaince`,
 `self_collision_distance_threhold`, `shape_matching_damping`), `collision`
 (`push_compliance_penetration_scaler`, `friction_compliance_scaler`,
-`pull_compliance_scaler`), `frame.frame_particles_damping`, and per-particle
+`pull_compliance_scaler`), `frame.fk_target_damping`, and per-particle
 `frame_conn.compliance`.
 
 ## Components

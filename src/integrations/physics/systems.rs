@@ -545,6 +545,9 @@ pub fn update_connection_particles(
             if let Some(item) = group.get_connect_particle(&e) {
                 joint.particle = item;
             }
+            // Pull the persistent rigid-FK target the same way we pull the
+            // particle position, so the game side can visualise it.
+            joint.fk_target = group.get_connect_fk_target(&e);
         }
     }
     for (character, mut joint) in query_c.iter_mut() {
@@ -650,6 +653,22 @@ pub fn create_update_pivot_visualizer(
         peniko::GlowColor::new(peniko::Color::rgba(0.0, 0.0, 1.0, 0.9), 1.0),
         None,
         &path,
+    );
+    // FK target points, drawn in a distinct color so they are easy to tell apart
+    // from the particle positions (blue) above.
+    let mut fk_target_path = BezPath::new();
+    for p in q_p.iter() {
+        if let Some(target) = p.fk_target {
+            fk_target_path.push(PathEl::MoveTo((target.x, target.y).into()));
+            fk_target_path.push(PathEl::LineTo((target.x + 0.01, target.y).into()));
+        }
+    }
+    scene.stroke(
+        &Stroke::new(6.0),
+        Affine::IDENTITY,
+        peniko::GlowColor::new(peniko::Color::rgba(1.0, 1.0, 0.0, 0.95), 1.0),
+        None,
+        &fk_target_path,
     );
     let mut frame_coordinate_path = BezPath::new();
     for f_p in q_f_p.iter() {

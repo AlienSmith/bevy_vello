@@ -239,6 +239,10 @@ pub struct VelloParticle {
     pub particle_init: Particle,
     pub particle: Particle,
     pub root_entity: Entity,
+    /// The most recent rigid-FK target position for this particle, pulled from
+    /// the physics group each sync (same path as `particle`). Used by the game
+    /// side for debug rendering of the FK target.
+    pub fk_target: Option<Vec2>,
 }
 
 impl VelloParticle {
@@ -247,6 +251,7 @@ impl VelloParticle {
             particle_init: particle,
             particle,
             root_entity: entity,
+            fk_target: None,
         }
     }
 }

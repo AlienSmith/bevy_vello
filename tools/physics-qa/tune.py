@@ -96,9 +96,9 @@ KNOBS = {
         "type": "float", "range": [0.0, 2.0], "group": "collision",
         "why": "how hard contacts pull together",
     },
-    "frame.frame_particles_damping": {
+    "frame.fk_target_damping": {
         # Lives under frame.init_config, not directly on frame.
-        "apply": "frame", "field": "frame_particles_damping", "type": "float",
+        "apply": "frame", "field": "fk_target_damping", "type": "float",
         "range": [0.0, 0.99],
         "why": "damping on the frame particles",
     },
