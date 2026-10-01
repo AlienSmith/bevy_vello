@@ -7,7 +7,6 @@
       "spine_mid": "P2",
       "spine_end": "P3",
       "fk_target_damping": 0.1,
-      "skeleton_drives_body": true,
       "rotation_resistance": 0.0,
       "collision_damping": 1.0
     }

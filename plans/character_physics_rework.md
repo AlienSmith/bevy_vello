@@ -220,10 +220,31 @@ Upper (`P1-P2`) and lower (`P2-P3`) solved separately about P2 means:
   segment.
 - The torso gains an independent bend at the waist (P2) vs the hip (P3) — more
   natural, but we **lose the fully-rigid chain**.
-- Needs decisions:
-  - Does `rotation_resistance` apply per-segment?
-  - How does the **shared-pivot translation `V`** reconcile between the two
-    solves? (both write P2; last-write or blended?)
+- **RESOLVED — implemented in
+  [`apply_collision_correction()`](study_vello/integrations/vello_physics/src/soft_body_connection.rs:150):**
+  each coarse-contact offset is tagged with its `frame_side` (from
+  `TransmissionGraph::get_meta`) and a **depth-scaled strength**
+  `collision_damping * 2^(2-depth)` (Point 5). The tagged offsets are then split
+  into an **upper group** (frame_side 1 / P1 side) and a **lower group**
+  (frame_side 2 / P3 side).
+- Each group is solved independently about the **original** P2 via the new
+  per-segment helper
+  [`resolve_spine_segment()`](study_vello/integrations/vello_physics/src/utility.rs:1029),
+  returning a `SegmentCorrection { translation, angle }`.
+- **P2 is the coupling pivot**: it receives the **SUM** of the upper + lower
+  translations (so neither segment's translation is dropped), and the moved
+  P2 becomes the fixed pivot. Upper then rotates **P1** about the moved P2,
+  lower rotates **P3** about the moved P2 — **two independent rotations**.
+- Decision outcomes:
+  - `rotation_resistance` **applies per-segment** (each solve passes it through).
+  - Shared-pivot translation **reconciles by summing** both segment
+    translations into P2 (last-write would drop half the response; summing keeps
+    both segments' contributions). The per-particle direct `apply_kinematic_delta`
+    is untouched.
+  - Valid because the `P1-P2` and `P2-P3` distance constraints are treated as
+    near-rigid, so each segment rotates without stretching.
+  - Pure position correction preserved: the same delta is applied to `pos` and
+    `previous_pos`, so implied velocity is unchanged (no energy injected).
 
 ### Q2 — Depth → strength mapping (Point 5)
 
@@ -233,6 +254,16 @@ Upper (`P1-P2`) and lower (`P2-P3`) solved separately about P2 means:
   `P1`/`P3` (depth 1), shoulders (depth 2), elbows (depth 3), hands (depth 4).
 - Confirm whether to store strength per particle (baked map) or compute on the
   fly from depth.
+- **RESOLVED — static per-particle metadata lives in the transmission graph:**
+  the `depth` map value was expanded from a bare `u32` to
+  `NodeMeta { depth: u32, frame_side: usize }`
+  ([`TransmissionGraph`](study_vello/integrations/vello_physics/src/transmission_graph.rs:70)).
+  `depth` is the BFS tree depth (Point 5); `frame_side` is which depth-1 frame
+  child the particle descends from — `frame_nodes[1]` (P1 / upper body) or
+  `frame_nodes[2]` (P3 / lower body) — for Point 4. Both are constant for a
+  built graph, computed once in `build()` / `place()` and inherited down the
+  tree. Exposed via `get_depth` (unchanged) and a new `get_meta -> Option<NodeMeta>`.
+  Strength is computed on the fly from `meta.depth` (no baked per-particle map).
 
 ### Q3 — Persistent FK storage (Point 3)
 
