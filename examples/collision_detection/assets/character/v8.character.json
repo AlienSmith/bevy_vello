@@ -8,7 +8,7 @@
       "spine_end": "P3",
       "fk_target_damping": 0.1,
       "rotation_resistance": 0.0,
-      "collision_damping": 1.0
+      "collision_damping": 0.0
     }
   },
   "colliders": [

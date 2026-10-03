@@ -49,7 +49,7 @@ const PROJECTILE_RADIUS: f32 = 14.0;
 /// the broad phase does not filter out projectile-vs-playable pairs.
 pub const PROJECTILE_COLLISION_GROUP: u32 = 3;
 /// Default muzzle speed, in px/s.
-const DEFAULT_MUZZLE_SPEED: f32 = 1200.0;
+const DEFAULT_MUZZLE_SPEED: f32 = 900.0;
 /// Default projectile inverse mass.
 const DEFAULT_PROJECTILE_INV_MASS: f32 = 1.0;
 

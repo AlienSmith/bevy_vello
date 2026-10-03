@@ -70,13 +70,16 @@ pub fn tick_spine_drive(
         }
     } else {
         // Idle: mirror the P2 re-anchor for the heading, but *predict* the
-        // reference a half step ahead of the live body instead of snapping it to
+        // reference a full step ahead of the live body instead of snapping it to
         // the current pose. Setting the target exactly at the live position makes
         // the spring rest offset ~0, so it applies no damping force and the body
-        // decelerates abruptly on its own (jitter). Offsetting each reference by
-        // `0.5 * velocity * dt` keeps the spring pulling smoothly along the motion.
+        // decelerates abruptly on its own (jitter). Offsetting each reference
+        // keeps the spring pulling smoothly along the motion.
         //
-        // Linear:  predicted_center = P2 + 0.5 * v2 * dt
+        // Linear:  predicted_center = P2 + 2.0 * v2 * dt  (the 0.5 interpolate in
+        //           calculate_spine_drive cancels the 2.0 -> effective full v2*dt
+        //           step, so with a stiff constraint the spring is a post-predict
+        //           no-op and the stored velocity coasts unchanged = no damping).
         // Angular: heading = atan2(P1 - P2), ω = cross(P1-P2, v1-v2)/|P1-P2|^2,
         //          predicted_angle = heading + 0.5 * ω * dt
         let p1 = p_q.get(spine.particles[2]).ok();
@@ -87,7 +90,10 @@ pub fn tick_spine_drive(
             let vel1 = p1.particle.velocity;
             let vel2 = p2.particle.velocity;
             let half_dt = 0.5 * dt;
-            indicator.desired_center = pos2 + vel2 * half_dt;
+            // Full velocity lead on the linear reference so the spring (after the
+            // 0.5 lerp to the live pose) behaves like pure prediction: hold the
+            // particle at the exactly predicted next position, preserving `v`.
+            indicator.desired_center = pos2 + vel2 * (2.0 * dt);
             let arm = pos1 - pos2;
             let dvel = vel1 - vel2;
             let len_sq = arm.length_squared();
