@@ -169,24 +169,53 @@ implementation.
 
 ### Point 6 — Humanoid *possible-shape* limits on the angular constraints
 
-Status: **early / vague**. Added as a reminder to develop.
+Status: **implemented** — hard angular break on `AngularConstraint`.
 
-- Motivation: prevent the spine and limbs from **snapping into impossible
-  shapes** for a humanoid character.
-- Current [`AngularConstraint::solve()`](study_vello/integrations/vello_physics/src/constraints.rs:444)
-  only enforces the *rest* angle (a single signed turn) with a soft XPBD
-  compliance. It does **not** bound the achievable range of motion — so a
-  joint can fold past a human-plausible limit.
-- Idea: give joints (shoulder / elbow / hip / knee / spine, via the same angular
-  constraints) a **valid angular range** around the rest basis, so the solver
-  clamps / limits the pose instead of snapping.
-- Unknowns (to flesh out before implementation):
-  - Where the per-joint limits come from (JSON / character tool).
-  - Whether to clamp the **FK target** (Point 2) and/or enforce in the
-    **solver** (or both).
-  - Interaction with active FK external-position targets (Point 2) and the
-    depth-based strengths (Point 5).
-  - Links to Point 7: beta-damping helps stability when range-clamps engage.
+Motivation: prevent the spine and limbs from **snapping into impossible shapes**
+for a humanoid character. The previous solver only enforced the *rest* angle
+(a single signed turn) with a soft XPBD compliance, so a joint could fold past
+a human-plausible limit.
+
+**Locked design — a three-section 360° split with hard walls:**
+
+- Each joint gets a **signed `max_angle` (degrees)** in config. Because the
+  character starts symmetric, a single number describes both limits: the joint
+  is allowed to turn **up to ±`max_angle`** away from its rest basis.
+- The two walls split the circle into **three sections**, both taken relative to
+  the **center basis captured at init**:
+  - **Within `[min, max]`** (`-max_angle ≤ θ ≤ max_angle`): use the **live rest
+    pair** and **normal compliance** — the solver behaves exactly as before.
+  - **Outside the positive wall** (`θ > max_angle`): use the **max wall rest-pair**
+    with a **hardcoded stiff compliance `LIMIT_COMPLIANCE = 1e-7`**.
+  - **Outside the negative wall** (`θ < -max_angle`): use the **min wall
+    rest-pair** with the same `LIMIT_COMPLIANCE`.
+- Walls are computed once at init, from the **initial rest basis**:
+  `min wall = center rotated by -max_angle`, `max wall = center rotated by
+  +max_angle`.
+- **`max_angle == π` disables the break**: the band always contains the current
+  angle, so it degrades to the original un-bounded behaviour.
+- **No `limit_compliance` config field** — the stiffness is hardcoded `1e-7`
+  (combined with the XPBD substeps it acts effectively rigid).
+- **Walls are FIXED relative to the INITIAL rest.** `update_rest_angle()` and
+  `set_config()` update **only** the live rest pair — they never re-derive the
+  walls from a moving rest. Consequence: `AngularConstraintConfig.max_angle`
+  written by FK/IK live-rest events is **ignored** (those sites pass `None`).
+
+**Implementation notes:**
+
+- [`AngularConstraint`](study_vello/integrations/vello_physics/src/constraints.rs:376)
+  gains `min_cos/min_sin`, `max_cos/max_sin`, `center_cos/center_sin`, and
+  `max_angle` fields; `break_disabled()` builds a constraint with no break.
+- [`AngularConstraintConfig`](study_vello/integrations/vello_physics/src/constraints.rs:403)
+  adds `#[serde(default)] max_angle: Option<f32>` (degrees). Deserialization of
+  the tuple-variant now requires a **5-element** `"Angular": [p0, p1, p2,
+  compliance, max_angle]` array.
+- Config plumbing changed everywhere:
+  `ConnectionInitConfig::Angular` / `ConnectionConstraintInitConfig::Angular`
+  are now 5-tuples; `add_angular_constraint` takes a `max_angle`.
+- `v8.character.json` now authors per-joint `max_angle` values for all 15 angular
+  joints.
+- `set_config()` updates only rest/rest_sin/compliance (ignores `max_angle`).
 
 ### Point 7 — XPBD beta-damping term
 
@@ -307,13 +336,23 @@ Upper (`P1-P2`) and lower (`P2-P3`) solved separately about P2 means:
 
 ### Q6 — Humanoid range limits source & enforcement (Point 6)
 
-- Where do per-joint angular min/max limits come from (new JSON fields /
-  character tool)?
-- Enforce in the FK **target** calculation, in the **constraint solve**, or both?
-  (Clamping only FK could still let the solver overshoot; limiting only solve
-  could fight the FK target.)
-- How to express the valid range — min/max absolute angles relative to the
-  rest basis, per `rest_sin` orientation?
+**Resolved** (see Point 6). Answers:
+
+- **Source:** a single signed `max_angle` (degrees) per angular joint, optional in
+  `AngularConstraintConfig` / the `"Angular"` JSON tuple (5th element). Defaults
+  (via `#[serde(default)]`) to `None` → no break. Authored per joint in
+  `v8.character.json`.
+- **Enforcement:** in the **constraint solve** (a three-section selection — live
+  rest inside the band, fixed wall pair outside). The FK/IK live-rest updates in
+  `systems.rs` write only the rest pair and leave `max_angle` at `None`, so the
+  walls (fixed at init) are never disturbed by live-rest events.
+- **Range expression:** one signed `max_angle` splitting 360° into three sections
+  around the **center basis captured at init**; valid when
+  `-max_angle ≤ θ ≤ max_angle`, hard walls at `±max_angle`.
+- **Stiffness:** no separate limit compliance config; hardcoded `1e-7`.
+- **Resolved interactions:** Point 2 (active FK external-position targets) and
+  Point 5 (depth-based strengths) continue to drive pose inside the band; the
+  break only engages past the walls. Point 7 (beta-damping) is a separate item.
 
 ### Q7 — Beta-damping form & scope (Point 7)
 

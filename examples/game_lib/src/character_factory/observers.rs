@@ -357,7 +357,7 @@ pub fn spawn_character_parts(
                 };
                 ConnectionConstraintInitConfig::Distance(pa, pb, *c)
             }
-            ConnectionConstraintInitConfig::Angular(a, b, c, d) => {
+            ConnectionConstraintInitConfig::Angular(a, b, c, d, max_angle) => {
                 let Some(pa) = resolve(a) else {
                     warn!("[spawn] AddJoint: character missing part '{a}' for joint '{path_id}'");
                     continue;
@@ -370,7 +370,7 @@ pub fn spawn_character_parts(
                     warn!("[spawn] AddJoint: character missing part '{c}' for joint '{path_id}'");
                     continue;
                 };
-                ConnectionConstraintInitConfig::Angular(pa, pb, pc, *d)
+                ConnectionConstraintInitConfig::Angular(pa, pb, pc, *d, *max_angle)
             }
         };
         let joint_entity = commands
@@ -438,7 +438,7 @@ fn connected_entities_from_config(config: &ConnectionConstraintInitConfig<Entity
     match config {
         ConnectionConstraintInitConfig::Bilinear(a, b, _, _) => vec![*a, *b],
         ConnectionConstraintInitConfig::Distance(a, b, _) => vec![*a, *b],
-        ConnectionConstraintInitConfig::Angular(a, b, c, _) => vec![*a, *b, *c],
+        ConnectionConstraintInitConfig::Angular(a, b, c, _, _) => vec![*a, *b, *c],
     }
 }
 
@@ -745,11 +745,17 @@ pub fn assemble_character(
                 let e1 = process_name(&colliders_particle_entity, &mut sibling, s1, &item.path_id);
                 ConnectionConstraintInitConfig::<Entity>::Distance(e0, e1, *compliance)
             }
-            ConnectionInitConfig::Angular(s0, s1, s2, compliance) => {
+            ConnectionInitConfig::Angular(s0, s1, s2, compliance, max_angle) => {
                 let e0 = process_name(&colliders_particle_entity, &mut sibling, s0, &item.path_id);
                 let e1 = process_name(&colliders_particle_entity, &mut sibling, s1, &item.path_id);
                 let e2 = process_name(&colliders_particle_entity, &mut sibling, s2, &item.path_id);
-                ConnectionConstraintInitConfig::<Entity>::Angular(e0, e1, e2, *compliance)
+                ConnectionConstraintInitConfig::<Entity>::Angular(
+                    e0,
+                    e1,
+                    e2,
+                    *compliance,
+                    *max_angle,
+                )
             }
         };
         let joint_name = string_pool.pool.intern(&item.path_id);

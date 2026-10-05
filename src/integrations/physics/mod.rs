@@ -193,7 +193,7 @@ impl VelloJoint {
         let constraint = match connection_config {
             ConnectionConstraintInitConfig::Bilinear(_, _, _, _) => ConnectionConstraint::Bilinear,
             ConnectionConstraintInitConfig::Distance(_, _, _) => ConnectionConstraint::Distance,
-            ConnectionConstraintInitConfig::Angular(_, _, _, _) => {
+            ConnectionConstraintInitConfig::Angular(_, _, _, _, _) => {
                 ConnectionConstraint::Angular(AngularConstraintConfig::default())
             }
         };
