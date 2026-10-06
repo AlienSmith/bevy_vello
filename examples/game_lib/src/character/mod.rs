@@ -103,14 +103,22 @@ pub struct ArmConfig {
     /// Distance threshold: when |wrist - true_target| < this, stop updating.
     pub convergence_threshold: f32,
     /// Compliance for angular constraints on arm joints.
-    /// Must be significantly softer than the default 0.000001 from the character
-    /// JSON so the XPBD solver can actually move the arm. 0.1 is a good start.
+    /// 5e-8 is empirically what lets the IK actually move the arm — far stiffer
+    /// than the softbody default. Much softer (e.g. 0.1) and the solver cannot
+    /// move the arm at all; stiffer and it overshoots (waggles).
     pub angular_compliance: f32,
+    /// XPBD damping time constant (seconds) for the arm's angular constraints.
+    /// Opposes joint angular velocity — the derivative (D) term of the PD pair.
+    /// 0 = no damping.
+    pub angular_damping: f32,
     /// Maximum angular velocity for the constraint rest angle, in radians per second.
     /// The rest angle chases the IK target at this rate, preventing sudden jumps
     /// that cause overshoot and body wobble.
     /// π rad/s = 180°/s — fast enough to be responsive, slow enough to prevent overshoot.
     pub max_angle_rate: f32,
+    /// Angular error dead zone (radians) below which no constraint event is
+    /// emitted for shoulder and forearm. Prevents the IK↔physics feedback loop.
+    pub angular_dead_zone: f32,
     /// Bend direction for the arm IK.
     /// -1.0 = bend downward (elbow below shoulder-wrist line, default for right arm).
     /// +1.0 = bend upward (elbow above shoulder-wrist line, default for left arm).
@@ -125,7 +133,9 @@ impl Default for ArmConfig {
             target_blend: 0.3,
             convergence_threshold: 2.0,
             angular_compliance: 5e-8,
+            angular_damping: 0.005,
             max_angle_rate: std::f32::consts::PI,
+            angular_dead_zone: 0.003,
             bend_sign: -1.0,
             ik_mode: IkMode::Disabled,
         }
