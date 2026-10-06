@@ -13,7 +13,6 @@ use crate::character::{
     ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
     SpineConfig, SpineController, SpineIndicator,
 };
-use crate::utility::linear_to_angle;
 
 pub fn tick_spine_drive(
     time: Res<Time>,
@@ -51,58 +50,84 @@ pub fn tick_spine_drive(
         .collect();
     let config = indicator.config.clone();
 
-    // Re-anchor the desired goal to the live body every fixed tick so the three
-    // external position constraints behave as *pure damping* rather than active
-    // drag:
-    // - While a movement command is active, the desired centre is `P2 +
-    //   commanded_dir * command_reach` (a constant distance ahead of the spine) and
-    //   the desired angle is the input heading — the controller steers/resists.
-    // - When the command is released (player let go), BOTH references are
-    //   re-derived from the live body pose (`desired_center` = live P2,
-    //   `desired_angle` = live P2→P1 heading). With rest offset ≈ 0 the springs
-    //   only damp velocity, so an external knock can freely rotate/translate the
-    //   body and that motion *persists* instead of being dragged back to a stale
-    //   pose.
+    // Live P1/P2/P3 (particle indices 2/3/4) — whichever branch below re-anchors
+    // the desired goal uses these.
+    let p1 = p_q.get(spine.particles[2]).ok();
+    let p2 = p_q.get(spine.particles[3]).ok();
+    let p3 = p_q.get(spine.particles[4]).ok();
+
+    // Re-anchor the desired goal (one centre P2 + two independent bone headings)
+    // to the live body every fixed tick so the three external position constraints
+    // behave as *pure damping* rather than active drag.
     if indicator.command_active {
-        let p2_current = p_q.get(spine.particles[3]).map(|p| p.particle.pos);
-        if let Ok(p2) = p2_current {
-            indicator.desired_center = p2 + indicator.commanded_dir * indicator.command_reach;
+        // Command: the desired centre is `P2 + commanded_dir * command_reach` (a
+        // constant distance ahead of the spine), the upper heading is the input
+        // direction heading, and the lower heading keeps the *live* upper→lower
+        // bend so steering the upper bone doesn't yank the spine straight.
+        if let Some(p2) = p2 {
+            indicator.desired_center =
+                p2.particle.pos + indicator.commanded_dir * indicator.command_reach;
+            let heading_cmd = indicator
+                .commanded_dir
+                .y
+                .atan2(indicator.commanded_dir.x);
+            indicator.desired_heading_upper = heading_cmd;
+            let live_bend = match (p1, p3) {
+                (Some(p1), Some(p3)) => {
+                    let upper = (p1.particle.pos.y - p2.particle.pos.y)
+                        .atan2(p1.particle.pos.x - p2.particle.pos.x);
+                    let lower = (p3.particle.pos.y - p2.particle.pos.y)
+                        .atan2(p3.particle.pos.x - p2.particle.pos.x);
+                    shortest_signed_delta(upper, lower)
+                }
+                _ => 0.0,
+            };
+            indicator.desired_heading_lower = heading_cmd + live_bend;
         }
     } else {
-        // Idle: mirror the P2 re-anchor for the heading, but *predict* the
-        // reference a full step ahead of the live body instead of snapping it to
-        // the current pose. Setting the target exactly at the live position makes
-        // the spring rest offset ~0, so it applies no damping force and the body
-        // decelerates abruptly on its own (jitter). Offsetting each reference
-        // keeps the spring pulling smoothly along the motion.
-        //
-        // Linear:  predicted_center = P2 + 2.0 * v2 * dt  (the 0.5 interpolate in
-        //           calculate_spine_drive cancels the 2.0 -> effective full v2*dt
-        //           step, so with a stiff constraint the spring is a post-predict
-        //           no-op and the stored velocity coasts unchanged = no damping).
-        // Angular: heading = atan2(P1 - P2), ω = cross(P1-P2, v1-v2)/|P1-P2|^2,
-        //          predicted_angle = heading + 0.5 * ω * dt
-        let p1 = p_q.get(spine.particles[2]).ok();
-        let p2 = p_q.get(spine.particles[3]).ok();
-        if let (Some(p1), Some(p2)) = (p1, p2) {
+        // Idle: *predict* each DOF a full step ahead of the live body instead of
+        // snapping it to the current pose. Setting the target exactly at the live
+        // pose makes the spring rest offset ~0, so it applies no damping force and
+        // the body decelerates abruptly on its own (jitter). The 0.5 lerp in
+        // calculate_spine_drive cancels the 2.0 lead → effective full-step
+        // prediction, so a stiff spring is a post-predict no-op and the stored
+        // velocity coasts unchanged (no damping). BOTH angular DOFs now use the
+        // same 2.0·dt lead as the linear one (previously only the linear DOF had
+        // the full 2.0·dt lead while angular used 0.5·dt → rotation was damped 4×
+        // harder than translation, which was the push-but-no-rotate bug).
+        if let (Some(p1), Some(p2), Some(p3)) = (p1, p2, p3) {
             let pos1 = p1.particle.pos;
             let pos2 = p2.particle.pos;
+            let pos3 = p3.particle.pos;
             let vel1 = p1.particle.velocity;
             let vel2 = p2.particle.velocity;
-            let half_dt = 0.5 * dt;
-            // Full velocity lead on the linear reference so the spring (after the
-            // 0.5 lerp to the live pose) behaves like pure prediction: hold the
-            // particle at the exactly predicted next position, preserving `v`.
+            let vel3 = p3.particle.velocity;
+
             indicator.desired_center = pos2 + vel2 * (2.0 * dt);
-            let arm = pos1 - pos2;
-            let dvel = vel1 - vel2;
-            let len_sq = arm.length_squared();
-            let ang_vel = if len_sq > f32::EPSILON {
-                (arm.x * dvel.y - arm.y * dvel.x) / len_sq
+
+            // Upper bone (P2→P1): heading = atan2(P1-P2), ω = cross(arm, dvel)/|arm|².
+            let arm_upper = pos1 - pos2;
+            let dvel_upper = vel1 - vel2;
+            let len_sq_upper = arm_upper.length_squared();
+            let ang_vel_upper = if len_sq_upper > f32::EPSILON {
+                (arm_upper.x * dvel_upper.y - arm_upper.y * dvel_upper.x) / len_sq_upper
             } else {
                 0.0
             };
-            indicator.desired_angle = arm.y.atan2(arm.x) + ang_vel * half_dt;
+            indicator.desired_heading_upper =
+                arm_upper.y.atan2(arm_upper.x) + ang_vel_upper * (2.0 * dt);
+
+            // Lower bone (P2→P3): independent heading + angular velocity about P2.
+            let arm_lower = pos3 - pos2;
+            let dvel_lower = vel3 - vel2;
+            let len_sq_lower = arm_lower.length_squared();
+            let ang_vel_lower = if len_sq_lower > f32::EPSILON {
+                (arm_lower.x * dvel_lower.y - arm_lower.y * dvel_lower.x) / len_sq_lower
+            } else {
+                0.0
+            };
+            indicator.desired_heading_lower =
+                arm_lower.y.atan2(arm_lower.x) + ang_vel_lower * (2.0 * dt);
         }
     }
 
@@ -113,9 +138,9 @@ pub fn tick_spine_drive(
         &angulars,
         &config,
         indicator.desired_center,
-        indicator.desired_angle,
+        indicator.desired_heading_upper,
+        indicator.desired_heading_lower,
         &indicator.local_points,
-        indicator.omega_prev,
         dt,
     );
 
@@ -131,15 +156,8 @@ pub fn tick_spine_drive(
     // The virtual pose is exactly what the physics pull toward AND what the
     // indicator visual is drawn at — write it back so they never diverge.
     indicator.center = result.virtual_center;
-    indicator.angle = result.virtual_angle;
-    // Store the frame motion (re-derived, deterministic) for the lean scale, plus
-    // the commanded lean (drawn as a bent P3) and this frame's smoothed omega
-    // (becomes `omega_prev` next tick for differentiating angular acceleration).
-    let dt_safe = dt.max(f32::EPSILON);
-    indicator.linear_speed = result.motion.linear / dt_safe;
-    indicator.angular_speed = result.motion.angular / dt_safe;
-    indicator.lean_angle = result.lean_angle;
-    indicator.omega_prev = result.omega;
+    indicator.heading_upper = result.virtual_heading_upper;
+    indicator.heading_lower = result.virtual_heading_lower;
 }
 
 use super::ik::compute_ik_positions;
@@ -331,32 +349,16 @@ fn interpolate_toward_vec(current: Vec2, target: Vec2, alpha: f32, max_step: f32
     current + step
 }
 
-/// The motion the drive actually applied this frame (linear distance in px and
-/// signed heading change in radians). Re-derived from the poses each frame, so
-/// the controller stays deterministic (no accumulated state).
-#[derive(Clone, Copy, Default)]
-struct FrameMotion {
-    linear: f32,
-    angular: f32,
-}
-
-/// Result of a [`calculate_spine_drive`] tick: the queued constraint events,
+/// Result of a [`calculate_spine_drive`] tick: the queued constraint events and
 /// the virtual pose (which is ALSO what the indicator is drawn at and what the
-/// external position constraints pull the spine toward — one shared target),
-/// the frame motion used to scale the lean, and the lean itself (the commanded
-/// tip deflection + this frame's signed angular velocity for next-frame diff).
+/// external position constraints pull the spine toward — one shared target).
+/// The pose is **one centre + two independent bone headings** about P2.
 struct SpineDriveResult {
     position_events: Vec<CharacterExternalPositionConstraintEvent>,
     angular_events: Vec<CharacterAngularConstraintEvent>,
     virtual_center: Vec2,
-    virtual_angle: f32,
-    /// Commanded tip (P3) lean deflection (rad), single source of truth for the
-    /// draw and the `P1_P2_P3` angular-rest deviation.
-    lean_angle: f32,
-    /// This frame's signed angular velocity (rad/s) — stored on the indicator to
-    /// become `omega_prev` next tick (for differentiating angular acceleration).
-    omega: f32,
-    motion: FrameMotion,
+    virtual_heading_upper: f32,
+    virtual_heading_lower: f32,
 }
 
 /// Rotate a P2-centred local offset by `angle` (radians). Vello y-down world
@@ -370,16 +372,19 @@ fn rotate_local(point: Vec2, angle: f32) -> Vec2 {
 /// Compute a single drive tick from the *latched desired goal* (set by input +
 /// P2 in [`tick_spine_drive`]) down to the queued constraints.
 ///
-/// **Position-only drive.** Every tick the current centre (P2) is interpolated
-/// partway toward the latched desired centre and clamped by the per-frame
-/// position cap; the resulting **virtual centre** is both (a) written back onto
-/// the `SpineIndicator` (so the visual is the same thing the physics see) and
-/// (b) turned into the three external position targets. The P1/P2/P3 shape keeps
-/// its *current* orientation (no rotational command), so no angular event is
-/// emitted and no angular feedback loop can induce a perpetual spin. Pure: given
-/// the same desired goal / current pose / caps it returns the same thing, so the
-/// "keep last status on no input" latching lives entirely in how the desired
-/// goal is stored, not in this function.
+/// **One position + two angles drive.** Every tick the current centre (P2), the
+/// upper heading (P2→P1) and the lower heading (P2→P3) are each interpolated
+/// partway toward their latched desired values and clamped by their per-frame
+/// caps (0.5 lerp + clamp, kept from the original controller). The resulting
+/// virtual pose is both (a) written back onto the `SpineIndicator` (so the
+/// visual is the same thing the physics see) and (b) turned into the three
+/// external position targets: P1 from `heading_upper`, P3 from `heading_lower`,
+/// P2 from `desired_center`. Each bone is a pure rotation about the shared P2
+/// pivot, so the P1–P2 and P2–P3 lengths are preserved exactly and the distance
+/// constraints stay satisfied while the bend opens/closes. Pure: given the same
+/// desired goal / current pose / caps it returns the same thing, so the "keep
+/// last status on no input" latching lives entirely in how the desired goal is
+/// stored, not in this function.
 fn calculate_spine_drive(
     entities: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
@@ -387,9 +392,9 @@ fn calculate_spine_drive(
     angulars: &Vec<VelloJoint>,
     config: &SpineConfig,
     desired_center: Vec2,
-    desired_angle: f32,
+    desired_heading_upper: f32,
+    desired_heading_lower: f32,
     local_points: &[Vec2; 3],
-    omega_prev: f32,
     dt: f32,
 ) -> SpineDriveResult {
     let mut angular_events = vec![];
@@ -402,79 +407,49 @@ fn calculate_spine_drive(
             position_events,
             angular_events,
             virtual_center: Vec2::ZERO,
-            virtual_angle: 0.0,
-            lean_angle: 0.0,
-            omega: 0.0,
-            motion: FrameMotion::default(),
+            virtual_heading_upper: 0.0,
+            virtual_heading_lower: 0.0,
         };
     }
     let p2 = particles[3].particle.pos;
     let p1 = particles[2].particle.pos;
+    let p3 = particles[4].particle.pos;
 
     // Rotation + translation drive, all in Vello (y-down) **world space**.
     //
-    // `current_angle` is the live world heading of the P2→P1 bone
-    // (atan2(y, x), 0 = right, +90 = down, -90 = up). `desired_angle` is the
-    // world heading from the arrow keys (8 global dirs). Both are world
-    // headings, so interpolating between them yields the world angle the spine
+    // Each bone heading is a world heading (atan2(y, x), 0 = right, +90 = down).
+    // Interpolating between current + desired yields the world heading each bone
     // should rotate to, with natural damping via alpha 0.5 + the angular cap.
     // The pose is built by rotating the P2-centred rest offsets *relative to*
-    // their own rest heading (`virtual_angle - rest_heading`), so we never
+    // their own rest heading (`virtual_heading - rest_heading`), so we never
     // assume the spine's initial orientation.
     let center = p2;
     let max_pos_step = config.max_pos_speed * dt;
-    // Live world heading of the P2→P1 bone (Vello y-down: 0 = right, +90 = down).
-    let current_angle = (p1.y - p2.y).atan2(p1.x - p2.x);
-    // Rest world heading of the spine, derived from the P2-centred rest offsets
-    // (local_points[0] = P2→P1). This is the spine's heading at `angle == 0`, so
-    // we never *assume* an initial orientation — we read it from the particle
-    // layout. Rotating the pose by `virtual_angle - rest_heading` makes the
-    // posed world heading equal `virtual_angle`.
-    let rest_heading = local_points[0].y.atan2(local_points[0].x);
-    // Lever arm of the rotation about P2 = max |local_point| (P2-to-tip), used
-    // to convert the linear speed cap into an angular one.
-    let p2_to_tip_radius = local_points
-        .iter()
-        .map(|p| p.length())
-        .fold(0.0_f32, f32::max);
-    let max_ang_step = linear_to_angle(config.max_pos_speed * dt, p2_to_tip_radius);
+    // Live world headings of the two bones about P2.
+    let current_heading_upper = (p1.y - p2.y).atan2(p1.x - p2.x);
+    let current_heading_lower = (p3.y - p2.y).atan2(p3.x - p2.x);
+    // Rest world headings derived from the P2-centred offsets (local_points[0] =
+    // P2→P1 upper, local_points[2] = P2→P3 lower) — never assumed.
+    let rest_heading_upper = local_points[0].y.atan2(local_points[0].x);
+    let rest_heading_lower = local_points[2].y.atan2(local_points[2].x);
+    let max_ang_step = config.max_ang_speed * dt;
+
     let virtual_center = interpolate_toward_vec(center, desired_center, 0.5, max_pos_step);
-    // Both current and target are world headings, so interpolation yields the
-    // world heading the spine should rotate to (natural damping via alpha 0.5 +
-    // the angular cap). Angular variant takes the *shortest* arc so it never
-    // spins the long way round (e.g. Up → Left must swing 90°, not 270°).
-    let virtual_angle = interpolate_toward_angle(current_angle, desired_angle, 0.5, max_ang_step);
+    // Angular variant takes the *shortest* arc so each bone never spins the long
+    // way round (e.g. Up → Left must swing 90°, not 270°).
+    let virtual_heading_upper =
+        interpolate_toward_angle(current_heading_upper, desired_heading_upper, 0.5, max_ang_step);
+    let virtual_heading_lower =
+        interpolate_toward_angle(current_heading_lower, desired_heading_lower, 0.5, max_ang_step);
 
-    let motion = FrameMotion {
-        linear: (desired_center - center).length(),
-        // Signed angular displacement (shortest-path sign), so the angular
-        // *velocity* below carries the true rotation direction for the lean.
-        angular: shortest_signed_delta(desired_angle, current_angle),
-    };
-
-    // ---- Lean (P3-only tilt) ----
-    // This frame's raw signed angular velocity (shortest-path direction), then
-    // EMA-smoothed across frames (omega_prev already holds the previous smoothed
-    // value) so the differentiated acceleration below is stable.
-    let dt_safe = dt.max(f32::EPSILON);
-    let omega_raw = motion.angular / dt_safe;
-    let omega = omega_raw * 0.5 + omega_prev * 0.5;
-    // Angular acceleration = change in the smoothed signed angular velocity.
-    let alpha = (omega - omega_prev) / dt_safe;
-    // Reference acceleration at which the lean reads full: the frame-scale
-    // angular velocity `max_ang_step / dt` reaching its cap within one frame, so
-    // `max_ang_step / dt / dt`.
-    let lean_accel_ref = (max_ang_step / dt_safe) / dt_safe;
-    let ratio = (alpha / lean_accel_ref).clamp(-1.0, 1.0);
-    let theta_lean = ratio * config.lean_max_angle;
-
-    // Command each P1/P2/P3 (indices 2/3/4): P1 (2) and P2 (3) stay on the rigid
-    // base heading (`virtual_angle`), **P3 (4) only** is deflected by `theta_lean`
-    // about P2 so the spine tilts toward the rotation direction.
-    let p1_target = virtual_center + rotate_local(local_points[0], virtual_angle - rest_heading);
+    // Each bone is a pure rotation about P2 by its own heading delta → the P1–P2
+    // and P2–P3 lengths are preserved exactly, so the distance constraints stay
+    // satisfied while the bend opens/closes.
+    let p1_target =
+        virtual_center + rotate_local(local_points[0], virtual_heading_upper - rest_heading_upper);
     let p2_target = virtual_center;
     let p3_target =
-        virtual_center + rotate_local(local_points[2], virtual_angle - rest_heading + theta_lean);
+        virtual_center + rotate_local(local_points[2], virtual_heading_lower - rest_heading_lower);
     let bent_targets = [p1_target, p2_target, p3_target];
 
     for (i, target) in [2usize, 3, 4].into_iter().zip(bent_targets.iter()) {
@@ -490,7 +465,7 @@ fn calculate_spine_drive(
     }
 
     // Re-rest the driven quad's angular joint at P2 (`angulars[2]` == P1_P2_P3)
-    // to the SAME commanded bent positions the external position constraints
+    // to the SAME two-heading commanded bend the external position constraints
     // target. With rest == commanded, the solver's angular error (`current -
     // rest`) is zero at the commanded pose, so the position and angular
     // constraints can never fight. `angle_basis(P1,P2,P3)` below mirrors the
@@ -502,7 +477,7 @@ fn calculate_spine_drive(
             config: vello_physics::AngularConstraintConfig {
                 rest_cos,
                 rest_sin,
-                compliance: config.lean_compliance,
+                compliance: config.bend_compliance,
                 max_angle: None,
             },
         });
@@ -513,10 +488,8 @@ fn calculate_spine_drive(
         position_events,
         angular_events,
         virtual_center,
-        virtual_angle,
-        lean_angle: theta_lean,
-        omega,
-        motion,
+        virtual_heading_upper,
+        virtual_heading_lower,
     }
 }
 /// 2-bone IK for the arm, driven by angular constraints + shape matching in local space.

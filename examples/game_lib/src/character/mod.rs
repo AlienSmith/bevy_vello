@@ -70,24 +70,27 @@ pub struct SpineConfig {
     /// Max centre speed in px/s; `max_pos_step = max_pos_speed * dt` is the
     /// per-frame position cap.
     pub max_pos_speed: f32,
-    /// Max lean deflection (rad) of the tip P3, reached at full angular
-    /// acceleration. 0.35 ≈ 20°.
-    pub lean_max_angle: f32,
-    /// X-PBD compliance for the `P1_P2_P3` angular constraint while the lean is
-    /// active. Soft enough not to overpower the position constraints but stiff
-    /// enough to hold the bend. Re-rest every frame so it agrees with the
-    /// commanded bent pose (no position-vs-angular fighting).
-    pub lean_compliance: f32,
+    /// Max angular speed (rad/s) for each spine heading; `max_ang_step =
+    /// max_ang_speed * dt` is the per-frame per-heading angular cap. The two
+    /// headings independently carry angular velocity now (no more derived
+    /// `linear_to_angle` estimate), so this is a first-class, directly tuned cap.
+    pub max_ang_speed: f32,
+    /// X-PBD compliance for the `P1_P2_P3` angular constraint. Re-rest every
+    /// frame against the two-heading commanded pose so the position and angular
+    /// constraints agree by construction (no fighting). Soft enough to let the
+    /// spine bend against incoming knocks, stiff enough to hold the commanded
+    /// bend.
+    pub bend_compliance: f32,
 }
 
 impl Default for SpineConfig {
     fn default() -> Self {
         Self {
             compliance: 1e-7,
-            damping: 0.1,
+            damping: 0.01,
             max_pos_speed: 900.0,
-            lean_max_angle: 0.35,
-            lean_compliance: 1e-5,
+            max_ang_speed: 10.0,
+            bend_compliance: 1e-5,
         }
     }
 }
@@ -144,42 +147,46 @@ pub struct SpineController {
 /// The spine "virtual handle": the commanded pose the external position
 /// constraints pull P1/P2/P3 toward.
 ///
-/// The virtual pose (`center` + `angle`) is per-frame interpolated + capped
-/// toward a *latched* desired goal (`desired_center` + `desired_angle`):
+/// The virtual pose is **one centre (P2) + two independent bone headings**
+/// (`heading_upper` = P2→P1, `heading_lower` = P2→P3). Each DOF is per-frame
+/// interpolated + capped toward a *latched* desired goal:
 ///
-/// - `desired_center` / `desired_angle` are the goal. While the player holds
-///   input they are derived from the input direction + the current P2 position
-///   (`P2 + heading_dir * reach`); when input stops they are **frozen** so the
-///   character keeps its last commanded pose instead of resetting/chasing.
-/// - `center` / `angle` are the virtual pose: the per-frame interpolation
-///   toward the desired goal, clamped by `max_pos_step` / `max_ang_step`. This
-///   is exactly what the indicator visual is drawn at AND what the external
-///   position constraints pull the spine toward (one shared target).
-/// - `local_points` are the three P2-centred quad-particle offsets (P1/P2/P3),
-///   in local Vello (y-down) coords, derived once from the assembled particles.
+/// - `desired_center` / `desired_heading_upper` / `desired_heading_lower` are
+///   the goal. While the player holds input, `desired_center` is derived from
+///   `P2 + commanded_dir * command_reach` and `desired_heading_upper` from the
+///   input direction heading; `desired_heading_lower` follows the upper heading
+///   plus the *live* bend (so the lower bone keeps its current deflection while
+///   steering). With no input both references are frozen (no snap-back).
+/// - `center` / `heading_upper` / `heading_lower` are the virtual pose: the
+///   per-frame interpolation toward the desired goal, each clamped by its own
+///   `max_pos_step` / `max_ang_step`. This is exactly what the indicator
+///   visual is drawn at AND what the external position constraints pull P1/P2/P3
+///   toward (one shared target).
+/// - `local_points` are the three P2-centred offsets (P1/P2/P3), in local Vello
+///   (y-down) coords, derived once from the assembled particles.
 /// - `character` is the root entity of the driven character (for resolving its
 ///   [`SpineController`] particles/joints directly).
-/// - `linear_speed` / `angular_speed` store the per-frame speeds (for scaling
-///   the `P1_P2_P3` rest-angle lean), re-derived each frame — no accumulated state.
 #[derive(Component, Clone)]
 pub struct SpineIndicator {
-    /// Virtual heading (world/Vello radians), interpolated toward `desired_angle`.
-    pub angle: f32,
-    /// Virtual centre (P2 world position, Vello y-down), interpolated toward `desired_center`.
+    /// Virtual upper heading (P2→P1, world/Vello radians), interpolated toward
+    /// `desired_heading_upper`.
+    pub heading_upper: f32,
+    /// Virtual lower heading (P2→P3, world/Vello radians), interpolated toward
+    /// `desired_heading_lower`.
+    pub heading_lower: f32,
+    /// Virtual centre (P2 world position, Vello y-down), interpolated toward
+    /// `desired_center`.
     pub center: Vec2,
-    /// Latched desired heading goal (world/Vello radians).
-    pub desired_angle: f32,
+    /// Latched desired upper heading (P2→P1, world/Vello radians).
+    pub desired_heading_upper: f32,
+    /// Latched desired lower heading (P2→P3, world/Vello radians).
+    pub desired_heading_lower: f32,
     /// Latched desired centre goal (P2 world position, Vello y-down).
     pub desired_center: Vec2,
     /// The three quad-particle offsets (P1/P2/P3), P2-centred, in Vello y-down coords.
     pub local_points: [Vec2; 3],
     /// Root entity of the driven character (for resolving its SpineController).
     pub character: Entity,
-    /// Unit-length movement direction commanded by the arrow keys (Vello y-down
-    /// world coords). While a movement command is *active* the desired centre is
-    /// re-anchored each fixed tick to `P2 + commanded_dir * command_reach`, so a
-    /// held key keeps the goal a constant distance ahead of the spine (it never
-    /// drifts away from or clamps down onto P2).
     /// Drive tuning for the external position constraints. Lives on the
     /// indicator so it can be edited at runtime (e.g. via the tuning UI)
     /// rather than baked in from the blueprint JSON (which needs a restart).
@@ -199,26 +206,16 @@ pub struct SpineIndicator {
     /// re-anchored `desired_center` is **frozen** so the virtual pose keeps
     /// decaying asymptotically toward it (no snap-back).
     pub command_active: bool,
-    /// Per-frame linear speed (px/s).
-    pub linear_speed: f32,
-    /// Per-frame angular speed (rad/s).
-    pub angular_speed: f32,
-    /// Commanded lean deflection (rad) of the tip P3 about P2, scaled from the
-    /// angular acceleration. Single source of truth: the draw system rebuilds the
-    /// bent virtual-pose shape from this, and `theta_lean` is directly the
-    /// `P1_P2_P3` angular-rest deviation.
-    pub lean_angle: f32,
-    /// Signed angular velocity of the previous frame (rad/s, shortest-path sign),
-    /// used to differentiate angular acceleration. One frame of history only.
-    pub omega_prev: f32,
 }
 
 impl Default for SpineIndicator {
     fn default() -> Self {
         Self {
-            angle: 0.0,
+            heading_upper: 0.0,
+            heading_lower: 0.0,
             center: Vec2::ZERO,
-            desired_angle: 0.0,
+            desired_heading_upper: 0.0,
+            desired_heading_lower: 0.0,
             desired_center: Vec2::ZERO,
             local_points: [Vec2::ZERO; 3],
             character: Entity::PLACEHOLDER,
@@ -226,10 +223,6 @@ impl Default for SpineIndicator {
             commanded_dir: Vec2::X,
             command_reach: 40.0,
             command_active: false,
-            linear_speed: 0.0,
-            angular_speed: 0.0,
-            lean_angle: 0.0,
-            omega_prev: 0.0,
         }
     }
 }

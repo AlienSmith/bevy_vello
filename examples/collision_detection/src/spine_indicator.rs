@@ -224,12 +224,13 @@ pub fn spawn_spine_indicator(
         }
     }
 
-    // The character's rest world heading (P2→P1 direction). The latched desired
-    // goal must start HERE, not at 0.0 — otherwise, with no user input, the
-    // drive would interpolate the spine toward world heading 0 (*right*, i.e.
+    // The character's two rest world headings (P2→P1 and P2→P3). The latched
+    // desired goal must start HERE, not at 0.0 — otherwise, with no user input,
+    // the drive would interpolate the spine toward world heading 0 (*right*, i.e.
     // horizontal) and tip the character over. Latched to the rest pose, current
     // == desired == rest, so nothing moves until an arrow key is pressed.
-    let rest_heading = local_points[0].y.atan2(local_points[0].x);
+    let rest_heading_upper = local_points[0].y.atan2(local_points[0].x);
+    let rest_heading_lower = local_points[2].y.atan2(local_points[2].x);
 
     // The *virtual pose* scene (solid cyan/red/green/blue) — what the physics
     // are actually pulling toward this frame.
@@ -241,10 +242,12 @@ pub fn spawn_spine_indicator(
             ..Default::default()
         },
         SpineIndicator {
-            angle: rest_heading,
+            heading_upper: rest_heading_upper,
+            heading_lower: rest_heading_lower,
             center: centre_pos,
             // Latched goal starts at the rest pose (no input yet).
-            desired_angle: rest_heading,
+            desired_heading_upper: rest_heading_upper,
+            desired_heading_lower: rest_heading_lower,
             desired_center: centre_pos,
             local_points,
             character: trigger.target(),
@@ -282,7 +285,7 @@ pub fn draw_spine_indicator(
         (),
     >,
     mut q_desired: Query<
-        (&mut Transform, &mut Visibility),
+        (&mut Transform, &mut Visibility, &mut VelloScene),
         (With<DesiredIndicator>, Without<SpineIndicator>),
     >,
 ) {
@@ -291,13 +294,17 @@ pub fn draw_spine_indicator(
     else {
         return;
     };
-    // Rest world heading of the baked shape, derived from the P2-centred rest
-    // offsets (local_points[0] = P2→P1) — never assumed. The shape is baked in
-    // its rest frame, and `angle`/`desired_angle` are *world* headings (Vello
-    // y-down). A Bevy Z-rotation θ maps to a Vello rotation of `-θ`, so to make
-    // the baked shape point at a world heading `h` we must rotate it relative to
-    // its own rest heading: Bevy angle = `rest_heading - h`.
-    let rest_heading = indicator.local_points[0]
+    // Rest world headings of the baked shape, derived from the P2-centred rest
+    // offsets (local_points[0] = P2→P1, local_points[2] = P2→P3) — never
+    // assumed. The shape is baked in its rest frame, and `heading_upper` /
+    // `heading_lower` are *world* headings (Vello y-down). A Bevy Z-rotation θ
+    // maps to a Vello rotation of `-θ`, so to make the baked upper bone point at
+    // a world heading `h` we must rotate it relative to its own rest heading:
+    // Bevy angle = `rest_heading_upper - h`. The lower bone's bend is baked into
+    // the scene geometry itself (a rigid `Transform` rotation can't show a
+    // non-straight P1_P2_P3 interior angle), exactly the same formula the physics
+    // target.
+    let rest_heading_upper = indicator.local_points[0]
         .y
         .atan2(indicator.local_points[0].x);
     // Apply the P-key visibility toggle to both the virtual-pose and desired-goal
@@ -308,28 +315,54 @@ pub fn draw_spine_indicator(
         Visibility::Hidden
     };
     *vis = vis_value;
-    for (mut d_transform, mut d_vis) in q_desired.iter_mut() {
+    // Rebuild the *desired goal* shape too: the lower bone follows its own desired
+    // heading while the rigid transform carries the desired upper heading.
+    for (mut d_transform, mut d_vis, mut d_scene) in q_desired.iter_mut() {
         *d_vis = vis_value;
+        let d_points = build_bent_points(
+            &indicator.local_points,
+            indicator.desired_heading_upper,
+            indicator.desired_heading_lower,
+        );
+        *d_scene = build_desired_scene(&d_points);
         d_transform.translation = vello_to_bevy(indicator.desired_center).extend(990.0);
-        d_transform.rotation = Quat::from_rotation_z(rest_heading - indicator.desired_angle);
+        d_transform.rotation =
+            Quat::from_rotation_z(rest_heading_upper - indicator.desired_heading_upper);
     }
 
     // ---- Render the virtual pose ----
     // `tick_spine_drive` wrote the interpolated, capped virtual pose back onto
-    // the indicator. A rigid `Transform` rotation can't show the spine's P1_P2_P3
-    // lean (a non-180 interior angle), so we rebuild the shape each frame with the
-    // *bent* local offsets — exactly the same formula the physics pull toward:
-    // P1/P2 stay on the base heading, P3 only is deflected by `lean_angle`.
-    // The scene is built in the origin-centred rest frame; the transform supplies
-    // the base-heading rotation + translation (Vello y-down → Bevy y-up).
-    let bent_points = [
-        indicator.local_points[0],
-        indicator.local_points[1],
-        rotate_local(indicator.local_points[2], indicator.lean_angle),
-    ];
+    // the indicator. The scene is built in the origin-centred rest frame with the
+    // lower bone pre-rotated to its own heading relative to the upper bone; the
+    // transform supplies the upper-heading rotation + translation (Vello y-down →
+    // Bevy y-up).
+    let bent_points = build_bent_points(
+        &indicator.local_points,
+        indicator.heading_upper,
+        indicator.heading_lower,
+    );
     *virtual_scene = build_indicator_scene(&bent_points);
     transform.translation = vello_to_bevy(indicator.center).extend(1000.0);
-    transform.rotation = Quat::from_rotation_z(rest_heading - indicator.angle);
+    transform.rotation = Quat::from_rotation_z(rest_heading_upper - indicator.heading_upper);
+}
+
+/// Build the two-heading bent pose in the baked scene's rest frame: P1 stays on
+/// the base rest heading (the transform rotates it to `heading_upper`), P2 stays
+/// at the centre, and P3 is pre-rotated so that after the same rigid upper
+/// rotation it lands on `heading_lower`.
+fn build_bent_points(
+    local_points: &[Vec2; 3],
+    heading_upper: f32,
+    heading_lower: f32,
+) -> [Vec2; 3] {
+    let rest_heading_upper = local_points[0].y.atan2(local_points[0].x);
+    let rest_heading_lower = local_points[2].y.atan2(local_points[2].x);
+    let lower_baked =
+        rotate_local(
+            local_points[2],
+            heading_lower - heading_upper + rest_heading_upper - rest_heading_lower,
+        );
+    [local_points[0], local_points[1], lower_baked]
 }
 
 /// Spine control input: translate the *desired centre* with the arrow keys.
@@ -384,9 +417,11 @@ pub fn spine_control_input(
         // immediately.
         indicator.commanded_dir = dir.normalize();
         indicator.command_active = true;
-        // Desired heading target = atan2 of the 8-direction vector (Vello y-down
-        // convention: atan2(y,x), 0 = right, +90 = down, etc.).
-        indicator.desired_angle = dir.y.atan2(dir.x);
+        // Desired upper heading target = atan2 of the 8-direction vector (Vello
+        // y-down convention: atan2(y,x), 0 = right, +90 = down, etc.). The lower
+        // heading is re-anchored by `tick_spine_drive` (command branch) to keep
+        // the live upper→lower bend while steering.
+        indicator.desired_heading_upper = dir.y.atan2(dir.x);
     } else {
         indicator.command_active = false;
         // Freeze the last desired heading on release (no snap-back), mirroring
