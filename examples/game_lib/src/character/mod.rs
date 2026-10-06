@@ -90,7 +90,7 @@ impl Default for SpineConfig {
             damping: 0.01,
             max_pos_speed: 900.0,
             max_ang_speed: 10.0,
-            bend_compliance: 1e-5,
+            bend_compliance: 1e-7,
         }
     }
 }
