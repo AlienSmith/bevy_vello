@@ -124,8 +124,8 @@ impl Default for ArmConfig {
         Self {
             target_blend: 0.3,
             convergence_threshold: 2.0,
-            angular_compliance: 1e-8,
-            max_angle_rate: 5.0 * std::f32::consts::PI,
+            angular_compliance: 5e-8,
+            max_angle_rate: 2.0 * std::f32::consts::PI,
             bend_sign: -1.0,
             ik_mode: IkMode::Disabled,
         }

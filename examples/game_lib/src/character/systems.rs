@@ -483,7 +483,6 @@ fn calculate_spine_drive(
                 rest_cos,
                 rest_sin,
                 compliance: config.bend_compliance,
-                damping: 0.0,
                 max_angle: None,
             },
         });
@@ -644,7 +643,6 @@ fn calculate_arm_ik(
                     rest_cos: blended_cos,
                     rest_sin: blended_sin,
                     compliance: config.angular_compliance,
-                    damping: 0.0,
                     max_angle: None,
                 },
             });
@@ -671,7 +669,6 @@ fn calculate_arm_ik(
                 rest_cos: blended_cos,
                 rest_sin: blended_sin,
                 compliance: config.angular_compliance,
-                damping: 0.0,
                 max_angle: None,
             },
         });
@@ -701,8 +698,7 @@ pub fn update_character_movement(
     mut left_arm_q: Query<(&mut LeftArmController, &VelloCharacterPhysicsRoot)>,
     p_q: Query<&VelloParticle>,
     j_q: Query<&VelloJoint>,
-    mut velocity_events: EventWriter<CharacterPivotImpulseEvent>,
-    mut angular_events: EventWriter<CharacterAngularConstraintEvent>,
+    mut world: ResMut<VelloConstraintWorld>,
 ) {
     let dt = time.delta_secs();
 
@@ -719,7 +715,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let arm_angular = calculate_arm_ik(
+        let arm_angular_events: Vec<CharacterAngularConstraintEvent> = calculate_arm_ik(
             arm.target,
             dt,
             &p_e,
@@ -730,7 +726,9 @@ pub fn update_character_movement(
             &p_root.frame_coordinates,
         );
 
-        angular_events.write_batch(arm_angular);
+        arm_angular_events
+        .iter()
+        .for_each(|e| world.queue_character_angular_constraints(e));
     }
 
     // ---- Left arm ----
@@ -757,7 +755,9 @@ pub fn update_character_movement(
             &p_root.frame_coordinates,
         );
 
-        angular_events.write_batch(arm_angular_events);
+        arm_angular_events
+        .iter()
+        .for_each(|e| world.queue_character_angular_constraints(e));
     }
 }
 
