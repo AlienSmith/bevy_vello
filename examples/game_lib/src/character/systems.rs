@@ -67,10 +67,7 @@ pub fn tick_spine_drive(
         if let Some(p2) = p2 {
             indicator.desired_center =
                 p2.particle.pos + indicator.commanded_dir * indicator.command_reach;
-            let heading_cmd = indicator
-                .commanded_dir
-                .y
-                .atan2(indicator.commanded_dir.x);
+            let heading_cmd = indicator.commanded_dir.y.atan2(indicator.commanded_dir.x);
             indicator.desired_heading_upper = heading_cmd;
             let live_bend = match (p1, p3) {
                 (Some(p1), Some(p3)) => {
@@ -437,10 +434,18 @@ fn calculate_spine_drive(
     let virtual_center = interpolate_toward_vec(center, desired_center, 0.5, max_pos_step);
     // Angular variant takes the *shortest* arc so each bone never spins the long
     // way round (e.g. Up → Left must swing 90°, not 270°).
-    let virtual_heading_upper =
-        interpolate_toward_angle(current_heading_upper, desired_heading_upper, 0.5, max_ang_step);
-    let virtual_heading_lower =
-        interpolate_toward_angle(current_heading_lower, desired_heading_lower, 0.5, max_ang_step);
+    let virtual_heading_upper = interpolate_toward_angle(
+        current_heading_upper,
+        desired_heading_upper,
+        0.5,
+        max_ang_step,
+    );
+    let virtual_heading_lower = interpolate_toward_angle(
+        current_heading_lower,
+        desired_heading_lower,
+        0.5,
+        max_ang_step,
+    );
 
     // Each bone is a pure rotation about P2 by its own heading delta → the P1–P2
     // and P2–P3 lengths are preserved exactly, so the distance constraints stay
@@ -615,24 +620,33 @@ fn calculate_arm_ik(
         let desired_shoulder_cs = cos_sin(p1_local, p12_local, desired_p13_local);
         let current_shoulder_cs = cos_sin(p1_local, p12_local, p13_local);
 
-        let (blended_cos, blended_sin) = rotate_toward(
-            current_shoulder_cs.x,
-            current_shoulder_cs.y,
-            desired_shoulder_cs.x,
-            desired_shoulder_cs.y,
-            max_delta,
-        );
+        // Dead zone on the shoulder angular error (mirror of the forearm guard):
+        // without it the shoulder chases on every sub-frame correction, feeding
+        // the IK↔physics oscillation that manifests as waggle.
+        let shoulder_cos_err = (current_shoulder_cs.x * desired_shoulder_cs.x
+            + current_shoulder_cs.y * desired_shoulder_cs.y)
+            .clamp(-1.0, 1.0);
+        let shoulder_angle_err = shoulder_cos_err.acos();
+        if shoulder_angle_err > FOREARM_ANGULAR_EPSILON {
+            let (blended_cos, blended_sin) = rotate_toward(
+                current_shoulder_cs.x,
+                current_shoulder_cs.y,
+                desired_shoulder_cs.x,
+                desired_shoulder_cs.y,
+                max_delta,
+            );
 
-        angular_events.push(CharacterAngularConstraintEvent {
-            character_entity,
-            joint_entity: joints_entity[0],
-            config: vello_physics::AngularConstraintConfig {
-                rest_cos: blended_cos,
-                rest_sin: blended_sin,
-                compliance: config.angular_compliance,
-                max_angle: None,
-            },
-        });
+            angular_events.push(CharacterAngularConstraintEvent {
+                character_entity,
+                joint_entity: joints_entity[0],
+                config: vello_physics::AngularConstraintConfig {
+                    rest_cos: blended_cos,
+                    rest_sin: blended_sin,
+                    compliance: config.angular_compliance,
+                    max_angle: None,
+                },
+            });
+        }
     }
 
     // ---- Elbow angular constraint (P12_P13_PRLA) — always emit in Aim mode ----
@@ -666,43 +680,15 @@ fn calculate_arm_ik(
 /// Rotate unit vector (cos_a, sin_a) toward (cos_b, sin_b) by at most `max_delta` radians.
 /// Returns the new (cos, sin) after the rotation.
 ///
-/// Uses the tangent half-angle error metric, matching the angular constraint solver's
-/// own error function (`-delta_sin / (1 + delta_cos)`). This ensures the clamped result
-/// is compatible with how the constraint interprets the rest angle, avoiding feedback
-/// mismatches that cause wobble or sluggish response.
-///
-/// `max_delta` is clamped to `[0, PI)` internally to keep `tan(max_delta/2)` well-defined
-/// (tan has asymptotes at odd multiples of PI/2). An angular change larger than PI radians
-/// would go the long way around the circle anyway.
+/// Uses the spine-proven `interpolate_toward_angle` interpolate-then-clamp scheme.
+/// The previous tanh half-angle soft saturation only reached ~76% of `max_delta`
+/// near the target, which read as a sluggish arm; the hard clamp moves at full
+/// rate until the angular error closes.
 fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32) -> (f32, f32) {
-    // sin(θ_b - θ_a) = sin_b*cos_a - cos_b*sin_a = -(sin_a*cos_b - cos_a*sin_b) = -cross
-    // cos(θ_b - θ_a) = cos_b*cos_a + sin_b*sin_a = dot
-    let cross = sin_a * cos_b - cos_a * sin_b; // sin(θ_a - θ_b)
-    let dot = cos_a * cos_b + sin_a * sin_b; // cos(θ_b - θ_a)
-
-    // Tangent half-angle: tan((θ_b - θ_a)/2) = sin(θ_b - θ_a) / (1 + cos(θ_b - θ_a))
-    // sin(θ_b - θ_a) = -cross
-    let error = -cross / (1.0 + dot);
-    let max_error = (max_delta * 0.5).tan();
-    // Soft saturation instead of a hard clamp: `tanh` keeps large errors near the
-    // max rate (so a moving target is tracked immediately) but smoothly tapers the
-    // step as the error shrinks, removing the square-wave feel of the previous hard
-    // clamp. Equivalent energy behaviour, just a smooth velocity profile.
-    let clamped_error = max_error * (error / max_error).tanh();
-
-    // Convert back: cos(Δ) = (1 - t²) / (1 + t²), sin(Δ) = 2t / (1 + t²)
-    let error_sq = clamped_error * clamped_error;
-    let denom = 1.0 + error_sq;
-    let new_delta_cos = (1.0 - error_sq) / denom;
-    let new_delta_sin = 2.0 * clamped_error / denom;
-
-    // Rotate current by the clamped delta: rest = current + clamped_delta
-    // cos(θ_a + Δ) = cos_a * cos(Δ) - sin_a * sin(Δ)
-    // sin(θ_a + Δ) = sin_a * cos(Δ) + cos_a * sin(Δ)
-    let new_cos = cos_a * new_delta_cos - sin_a * new_delta_sin;
-    let new_sin = sin_a * new_delta_cos + cos_a * new_delta_sin;
-
-    (new_cos, new_sin)
+    let angle_a = sin_a.atan2(cos_a);
+    let angle_b = sin_b.atan2(cos_b);
+    let blended = interpolate_toward_angle(angle_a, angle_b, 1.0, max_delta);
+    (blended.cos(), blended.sin())
 }
 
 pub fn update_character_movement(
