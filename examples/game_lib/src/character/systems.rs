@@ -483,6 +483,7 @@ fn calculate_spine_drive(
                 rest_cos,
                 rest_sin,
                 compliance: config.bend_compliance,
+                damping: 0.0,
                 max_angle: None,
             },
         });
@@ -643,6 +644,7 @@ fn calculate_arm_ik(
                     rest_cos: blended_cos,
                     rest_sin: blended_sin,
                     compliance: config.angular_compliance,
+                    damping: 0.0,
                     max_angle: None,
                 },
             });
@@ -669,6 +671,7 @@ fn calculate_arm_ik(
                 rest_cos: blended_cos,
                 rest_sin: blended_sin,
                 compliance: config.angular_compliance,
+                damping: 0.0,
                 max_angle: None,
             },
         });
