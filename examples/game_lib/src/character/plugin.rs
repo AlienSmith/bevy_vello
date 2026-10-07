@@ -23,11 +23,10 @@ impl Plugin for GameCharacterPlugin {
             .add_observer(on_remove_connectivity_root)
             .add_systems(
                 FixedUpdate,
-                tick_spine_drive.before(update_constraint_world),
-            )
-            .add_systems(
-                PostUpdate,
-                update_character_movement.before(CollisionSystems::CollisionResponsePhysics),
+                (
+                    tick_spine_drive.before(update_character_movement),
+                    update_character_movement.before(update_constraint_world),
+                ),
             );
         //we would intensionally make the reset event being resolved frame later so it won't got mixed with control event.
         app.add_systems(
