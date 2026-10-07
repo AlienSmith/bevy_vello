@@ -102,10 +102,67 @@ pub struct ArmConfig {
     pub target_blend: f32,
     /// Distance threshold: when |wrist - true_target| < this, stop updating.
     pub convergence_threshold: f32,
-    /// Compliance for angular constraints on arm joints.
-    /// Must be significantly softer than the default 0.000001 from the character
-    /// JSON so the XPBD solver can actually move the arm. 0.1 is a good start.
+    /// Compliance for angular constraints on arm joints, expressed at the
+    /// reference bone length [`Self::compliance_ref_length`].
+    ///
+    /// The `AngularConstraint` solve divides its gradients by bone length
+    /// (`∇C ~ 1/l`), so `wSum ~ w/l²` and the same compliance value behaves
+    /// `l²`-softer on longer bones. The emitted compliance is therefore
+    /// pre-scaled per joint by `(compliance_ref_length / bone_length)²` (see
+    /// `calculate_arm_ik`), making this knob a length-independent stiffness:
+    /// it means the same thing for every character scale / bone length.
     pub angular_compliance: f32,
+    /// Reference bone length (px) at which [`Self::angular_compliance`] is
+    /// calibrated. Joints emit `angular_compliance * (ref/l)²` so stiffness
+    /// stays consistent across bone lengths. Tuning rule: if the arm feels too
+    /// stiff on long bones / too soft on short ones, this constant is wrong —
+    /// match it to the character's typical upper-arm length.
+    pub compliance_ref_length: f32,
+    /// Angular speed (rad/s) at which the ω-compliance schedule saturates to
+    /// its softest. Each joint measures the ω of its own rotating bone
+    /// (shoulder → upper arm, elbow → forearm) and softens its compliance as
+    /// `s = min(|ω| / omega_ref, 1)` grows — the back-EMF analogy: a fast-
+    /// spinning motor has less torque authority left, so the spring withholds
+    /// correction power during fast swings instead of fighting/pumping them
+    /// (which is what manufactures the overshoot ring). 0 or less disables
+    /// the schedule (always stiff).
+    pub omega_ref: f32,
+    /// Maximum softening multiple at `|ω| >= omega_ref`: compliance is scaled
+    /// by up to this factor while the joint is swinging fast, and returns to
+    /// 1× (full [`Self::angular_compliance`] stiffness) at rest, so the aim
+    /// line locks crisply. 1.0 disables the schedule. Start ~8; raise toward
+    /// 30+ if fast swings still ring, lower if the arm feels floaty mid-swing.
+    pub soft_scale: f32,
+    /// Velocity-feedback (D-term) time constant, in seconds.
+    ///
+    /// Each joint's desired rest angle is rotated *behind* the IK-desired angle
+    /// so the XPBD spring pulls against motion instead of only against position
+    /// error. The constraint angle is `θ = φ_in − φ_out` while `ω` measures the
+    /// OUTGOING bone, so `θ̇ ≈ −ω` and the textbook `−kd·θ̇` offset becomes
+    /// `rest_offset = +kd·ω` (see the derivation in `calculate_arm_ik`). This
+    /// is the D half of a PD controller implemented in target space — the
+    /// solver stays untouched. Time-independent by design: `kd·ω` is an angle
+    /// ([s]·[rad/s]), recomputed statelessly each tick; kd IS the time
+    /// constant, so it must NOT be multiplied by dt.
+    ///
+    /// - Fast swing: the trailing target brakes the arm *before* it overshoots,
+    ///   so the waggle ring never starts.
+    /// - At-rest noise: solver jitter velocities are *subtracted* from the
+    ///   target instead of being fought by the stiff spring, killing the
+    ///   residual shimmer that the ω-schedule can't reach (it is stiffest at
+    ///   rest, by design).
+    ///
+    /// `kd = 0.1` means the rest target trails by 0.1 s worth of rotation.
+    /// 0 or less disables the term. Too large → aim feels rubber-banded when
+    /// tracking a moving target (the trail never closes).
+    pub kd: f32,
+    /// Hard clamp (radians) on the `kd·ω` rest-angle offset. Safety bound so a
+    /// velocity spike can never swing the rest target wildly away from the IK
+    /// solution; the offset additionally passes through the normal
+    /// `max_angle_rate` chase clamp. Keep the D contribution small relative to
+    /// P: ~0.12 rad (≈7°) is a sane ceiling — larger values make the rest
+    /// target whipsaw at swing frequency during fast flicks.
+    pub kd_max_offset: f32,
     /// Maximum angular velocity for the constraint rest angle, in radians per second.
     /// The rest angle chases the IK target at this rate, preventing sudden jumps
     /// that cause overshoot and body wobble.
@@ -125,6 +182,11 @@ impl Default for ArmConfig {
             target_blend: 0.3,
             convergence_threshold: 2.0,
             angular_compliance: 5e-8,
+            compliance_ref_length: 30.0,
+            omega_ref: 8.0,
+            soft_scale: 8.0,
+            kd: 0.1,
+            kd_max_offset: 0.12,
             max_angle_rate: 2.0 * std::f32::consts::PI,
             bend_sign: -1.0,
             ik_mode: IkMode::Disabled,

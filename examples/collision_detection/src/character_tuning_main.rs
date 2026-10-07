@@ -197,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 spine_indicator::draw_spine_indicator,
                 spine_indicator::apply_spine_config,
                 indicator_ui,
+                arm_tuning_ui,
                 cannon::cannon_ui,
                 cannon::move_cannon_with_wasd,
                 cannon::update_cannon_indicator,
@@ -642,6 +643,65 @@ fn indicator_ui(
             "Visualization: {}  (P to toggle)",
             if visibility.0 { "On" } else { "Off" }
         ));
+    });
+}
+
+/// egui window that edits the live `ArmConfig` on the player's right arm
+/// directly (no resource mirror needed — the controller component holds the
+/// config and `update_character_movement` reads it each FixedUpdate).
+///
+/// Exposes the ω-scheduled compliance knobs (`omega_ref`, `soft_scale`) plus
+/// the base stiffness pair (`angular_compliance` at `compliance_ref_length`)
+/// so arm waggle vs. aim crispness can be tuned live.
+fn arm_tuning_ui(
+    mut contexts: EguiContexts,
+    player_q: Query<Entity, With<Player>>,
+    mut arm_q: Query<&mut game_lib::RightArmController>,
+) {
+    let Ok(player) = player_q.get_single() else {
+        return;
+    };
+    let Ok(mut arm) = arm_q.get_mut(player) else {
+        return;
+    };
+    let config = &mut arm.config;
+    egui::Window::new("Arm IK Tuning").show(contexts.ctx_mut(), |ui| {
+        ui.heading("Base stiffness (length-normalized)");
+        ui.add(
+            egui::Slider::new(&mut config.angular_compliance, 1e-9..=1e-4)
+                .logarithmic(true)
+                .text("angular_compliance @ ref"),
+        );
+        ui.add(
+            egui::Slider::new(&mut config.compliance_ref_length, 5.0..=100.0)
+                .text("compliance_ref_length (px)"),
+        );
+        ui.separator();
+
+        ui.heading("ω-scheduled softening (back-EMF style)");
+        ui.label("Softer compliance while the joint's bone spins fast; stiff at rest.");
+        ui.add(
+            egui::Slider::new(&mut config.omega_ref, 0.0..=40.0).text("omega_ref (rad/s)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut config.soft_scale, 1.0..=50.0).text("soft_scale (×)"),
+        );
+        ui.separator();
+
+        ui.heading("kd velocity feedback (D term)");
+        ui.label("Rest target trails behind motion by kd·ω — brakes overshoot, subtracts at-rest noise.");
+        ui.add(egui::Slider::new(&mut config.kd, 0.0..=0.5).text("kd (s)"));
+        ui.add(
+            egui::Slider::new(&mut config.kd_max_offset, 0.0..=1.5)
+                .text("kd_max_offset (rad)"),
+        );
+        ui.separator();
+
+        ui.heading("Rest-angle chase");
+        ui.add(
+            egui::Slider::new(&mut config.max_angle_rate, 0.0..=40.0)
+                .text("max_angle_rate (rad/s)"),
+        );
     });
 }
 

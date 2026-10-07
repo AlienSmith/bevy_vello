@@ -5,7 +5,7 @@ use bevy_vello::integrations::physics::{
     VelloParticle,
 };
 use vello_physics::{
-    utility::{cos_sin, BalancedCoreFrame},
+    utility::{angular_compliance_at_length, cos_sin, BalancedCoreFrame},
     ConnectionConstraint,
 };
 
@@ -267,7 +267,13 @@ fn remap_spine_control(input: Vec2, heading: Vec2) -> Vec2 {
     Vec2::new(move_axis, steer_axis)
 }
 
-const FOREARM_ANGULAR_EPSILON: f32 = 0.003;
+/// Event-spam guard, NOT a settle mechanism: below this angular error (rad)
+/// the IK stops re-queuing constraint events, so exact convergence doesn't
+/// re-emit identical corrections 60×/sec. Deliberately tiny (~0.006°) — the
+/// IK↔physics limit cycle it once masked is now handled by the ω-scheduled
+/// compliance, and a small floor keeps the aim line from freezing with a
+/// visible residual tilt the way the old 0.003 deadband did.
+const FOREARM_ANGULAR_EPSILON: f32 = 1e-4;
 const SIGN: [f32; 5] = [-1.0, -1.0, 0.0, 1.0, 1.0];
 /// Interpolate `current` partway toward `target` (`current + alpha*step`) and
 /// clamp the resulting per-frame displacement to `max_step`. Pure function of
@@ -580,6 +586,83 @@ fn calculate_arm_ik(
     let max_delta = config.max_angle_rate * dt;
     let character_entity = particles[0].root_entity;
 
+    // ---- ω-scheduled compliance (back-EMF style gain scheduling) ----
+    // Each joint measures the angular velocity of its OWN rotating bone
+    // (shoulder → upper arm P12→P13, elbow → forearm P13→PRLA) and softens
+    // its compliance linearly in stiffness space as `s = min(|ω|/omega_ref, 1)`
+    // grows: fast swing → soft spring (withholds correction authority instead
+    // of fighting/pumping the motion, the overshoot source), at rest → full
+    // stiffness so the aim line locks crisply. Passive: only ever reduces
+    // spring authority, never adds energy — cannot destabilize the solver.
+    let v12 = particles[1].particle.velocity;
+    let v13 = particles[2].particle.velocity;
+    let v_rla = particles[3].particle.velocity;
+
+    let scheduled_compliance = |omega: f32| -> f32 {
+        if config.omega_ref > 0.0 && config.soft_scale > 1.0 {
+            let s = (omega.abs() / config.omega_ref).min(1.0);
+            config.angular_compliance * (1.0 + s * (config.soft_scale - 1.0))
+        } else {
+            config.angular_compliance
+        }
+    };
+
+    // ---- kd velocity feedback (game-layer D term) ----
+    // Textbook PD: `correction = kp·(θ_desired − θ_current) − kd·θ̇`. In
+    // target-space form the rest angle is offset by `−kd·θ̇` so the spring
+    // opposes motion, not just position error.
+    //
+    // SIGN DERIVATION (θ̇ = −ω — do not "simplify" this away):
+    // - `cos_sin(p0,p1,p2)` represents the joint angle as θ = φ₁ − φ₂
+    //   (incoming bone angle minus outgoing bone angle): its `sin` component is
+    //   `u1.y*u2.x − u1.x*u2.y = −cross(u1,u2) = −sin(φ₂−φ₁) = sin(φ₁−φ₂)`.
+    // - `bone_angular_velocity(arm, dvel)` measures ω = dφ₂/dt of the OUTGOING
+    //   bone (upper arm at the shoulder, forearm at the elbow).
+    // - The spine/incoming bone rotates slowly and is common-mode (handled by
+    //   P), so θ̇ = d(φ₁−φ₂)/dt ≈ −ω.
+    // Therefore: rest_offset = −kd·θ̇ = −kd·(−ω) = **+kd·ω**.
+    // (A previous −kd·ω here was positive velocity feedback — the rest target
+    // ran AHEAD of the motion and pumped energy every tick, sustaining a
+    // never-decaying swing.)
+    //
+    // - Swing: the trailing target brakes the arm before it overshoots.
+    // - Rest: solver-noise velocities are subtracted instead of fought by the
+    //   (deliberately stiff) rest spring, killing residual shimmer.
+    // Note kd·ω has units [s]·[rad/s] = [rad] and is recomputed statelessly
+    // every tick — it must NOT be multiplied by dt (kd IS the time constant,
+    // mirroring the spine's `ω·(2·dt)` lead where `2·dt` occupies that slot).
+    // Bounded by `kd_max_offset` AND the existing `max_delta` chase clamp, so
+    // it cannot destabilize the solver. kd ≤ 0 disables.
+    let kd_offset = |omega: f32| -> f32 {
+        if config.kd > 0.0 {
+            (config.kd * omega).clamp(-config.kd_max_offset, config.kd_max_offset)
+        } else {
+            0.0
+        }
+    };
+
+    // Length-normalized compliance per joint: the solver's angular stiffness
+    // scales with `1/l²` of the rotating bone, so the (ω-scheduled) base
+    // compliance — calibrated at `compliance_ref_length` — is rescaled to each
+    // joint's actual lever arm: shoulder rotates `upper_len`, elbow rotates
+    // `forearm_len`. Keeps the tuned stiffness meaning the same across
+    // character scales and bone lengths.
+    //
+    // ω is measured once per joint and reused for both the compliance schedule
+    // and the kd rest-angle offset.
+    let shoulder_omega = bone_angular_velocity(p13 - p12, v13 - v12);
+    let elbow_omega = bone_angular_velocity(prla - p13, v_rla - v13);
+    let shoulder_compliance = angular_compliance_at_length(
+        scheduled_compliance(shoulder_omega),
+        config.compliance_ref_length,
+        upper_len,
+    );
+    let elbow_compliance = angular_compliance_at_length(
+        scheduled_compliance(elbow_omega),
+        config.compliance_ref_length,
+        forearm_len,
+    );
+
     // Compute IK positions directly each frame.  The FOREARM_ANGULAR_EPSILON dead
     // zone below prevents the feedback loop between IK and physics — the cache was
     // previously needed to avoid that same loop, but the dead zone is a cleaner
@@ -619,20 +702,22 @@ fn calculate_arm_ik(
     if !is_elbow_only {
         let desired_shoulder_cs = cos_sin(p1_local, p12_local, desired_p13_local);
         let current_shoulder_cs = cos_sin(p1_local, p12_local, p13_local);
+        // kd velocity feedback: trail the desired angle behind the motion.
+        let damped_shoulder_cs = rotate_cs(desired_shoulder_cs, kd_offset(shoulder_omega));
 
         // Dead zone on the shoulder angular error (mirror of the forearm guard):
         // without it the shoulder chases on every sub-frame correction, feeding
         // the IK↔physics oscillation that manifests as waggle.
-        let shoulder_cos_err = (current_shoulder_cs.x * desired_shoulder_cs.x
-            + current_shoulder_cs.y * desired_shoulder_cs.y)
+        let shoulder_cos_err = (current_shoulder_cs.x * damped_shoulder_cs.x
+            + current_shoulder_cs.y * damped_shoulder_cs.y)
             .clamp(-1.0, 1.0);
         let shoulder_angle_err = shoulder_cos_err.acos();
         if shoulder_angle_err > FOREARM_ANGULAR_EPSILON {
             let (blended_cos, blended_sin) = rotate_toward(
                 current_shoulder_cs.x,
                 current_shoulder_cs.y,
-                desired_shoulder_cs.x,
-                desired_shoulder_cs.y,
+                damped_shoulder_cs.x,
+                damped_shoulder_cs.y,
                 max_delta,
             );
 
@@ -642,7 +727,7 @@ fn calculate_arm_ik(
                 config: vello_physics::AngularConstraintConfig {
                     rest_cos: blended_cos,
                     rest_sin: blended_sin,
-                    compliance: config.angular_compliance,
+                    compliance: shoulder_compliance,
                     max_angle: None,
                 },
             });
@@ -653,12 +738,14 @@ fn calculate_arm_ik(
     {
         let desired_elbow_cs = cos_sin(p12_local, desired_p13_local, desired_prla_local);
         let current_elbow_cs = cos_sin(p12_local, p13_local, prla_local);
+        // kd velocity feedback: trail the desired angle behind the motion.
+        let damped_elbow_cs = rotate_cs(desired_elbow_cs, kd_offset(elbow_omega));
 
         let (blended_cos, blended_sin) = rotate_toward(
             current_elbow_cs.x,
             current_elbow_cs.y,
-            desired_elbow_cs.x,
-            desired_elbow_cs.y,
+            damped_elbow_cs.x,
+            damped_elbow_cs.y,
             max_delta,
         );
 
@@ -668,7 +755,7 @@ fn calculate_arm_ik(
             config: vello_physics::AngularConstraintConfig {
                 rest_cos: blended_cos,
                 rest_sin: blended_sin,
-                compliance: config.angular_compliance,
+                compliance: elbow_compliance,
                 max_angle: None,
             },
         });
@@ -677,17 +764,49 @@ fn calculate_arm_ik(
     angular_events
 }
 
+/// Angular velocity (rad/s, signed) of a rigid bone `arm` whose far end moves
+/// with relative velocity `dvel` (end − pivot), about the pivot:
+/// `ω = cross(arm, dvel) / |arm|²`. Same estimator `tick_spine_drive` uses for
+/// its heading prediction. Returns 0 for degenerate (zero-length) bones.
+#[inline]
+fn bone_angular_velocity(arm: Vec2, dvel: Vec2) -> f32 {
+    let len_sq = arm.length_squared();
+    if len_sq > f32::EPSILON {
+        (arm.x * dvel.y - arm.y * dvel.x) / len_sq
+    } else {
+        0.0
+    }
+}
+
+/// Rotate a unit `(cos, sin)` pair by `delta` radians (CCW in atan2 convention).
+/// Used to apply the kd velocity-feedback offset to the IK-desired joint angle
+/// before the rest-angle chase: `rest_target = desired − kd·ω̂`.
+#[inline]
+fn rotate_cs(cs: Vec2, delta: f32) -> Vec2 {
+    let (sin_d, cos_d) = delta.sin_cos();
+    Vec2::new(
+        cs.x * cos_d - cs.y * sin_d,
+        cs.y * cos_d + cs.x * sin_d,
+    )
+}
+
 /// Rotate unit vector (cos_a, sin_a) toward (cos_b, sin_b) by at most `max_delta` radians.
 /// Returns the new (cos, sin) after the rotation.
 ///
-/// Uses the spine-proven `interpolate_toward_angle` interpolate-then-clamp scheme.
-/// The previous tanh half-angle soft saturation only reached ~76% of `max_delta`
-/// near the target, which read as a sluggish arm; the hard clamp moves at full
-/// rate until the angular error closes.
+/// Uses the spine-proven `interpolate_toward_angle` interpolate-then-clamp scheme
+/// with `alpha = 0.5` (same as the spine controller):
+///
+/// - **Far from target**: `alpha * step` exceeds `max_delta`, so the clamp
+///   dominates and the rest angle travels at full `max_angle_rate` (no sluggish
+///   undershoot — the old tanh soft saturation only reached ~76% of `max_delta`).
+/// - **Near target**: the halved step gives a geometric decay tail — the rest
+///   angle eases into the desired angle instead of slamming onto it in one frame.
+///   This removes the step excitation that made the stiff P spring overshoot and
+///   waggle, matching the spine's clean settle.
 fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32) -> (f32, f32) {
     let angle_a = sin_a.atan2(cos_a);
     let angle_b = sin_b.atan2(cos_b);
-    let blended = interpolate_toward_angle(angle_a, angle_b, 1.0, max_delta);
+    let blended = interpolate_toward_angle(angle_a, angle_b, 0.5, max_delta);
     (blended.cos(), blended.sin())
 }
 
