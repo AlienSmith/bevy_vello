@@ -621,11 +621,11 @@
       }
     },
     {
-      "svg_id": "Angular/P2_P13_PRLA",
-      "path_id": "P2_P13_PRLA",
+      "svg_id": "Angular/P1_P13_PRLA",
+      "path_id": "P1_P13_PRLA",
       "config": {
         "Angular": [
-          "P2",
+          "P1",
           "P13",
           "PRLA",
           1e-6,
@@ -634,11 +634,11 @@
       }
     },
     {
-      "svg_id": "Angular/P2_P10_PLLA",
-      "path_id": "P2_P10_PLLA",
+      "svg_id": "Angular/P1_P10_PLLA",
+      "path_id": "P1_P10_PLLA",
       "config": {
         "Angular": [
-          "P2",
+          "P1",
           "P10",
           "PLLA",
           1e-6,
