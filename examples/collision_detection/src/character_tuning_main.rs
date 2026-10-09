@@ -51,6 +51,10 @@ use leafwing_input_manager::prelude::*;
 
 const PLAYER_COLLISION_GROUP: u32 = 1;
 
+/// Gravity applied when the toggle is on. Vello coordinates: x right, y down
+/// (matches the XPBD default `GRAVITY` in `collision_response.rs`).
+const GRAVITY_ON: Vec2 = Vec2::new(0.0, 98.0);
+
 #[derive(Component)]
 pub struct Player;
 
@@ -134,6 +138,22 @@ struct PistolState {
     character: Option<Entity>,
     pistol: Option<Entity>,
 }
+
+/// Open/close toggle for gravity. Kept as a standalone resource so the UI
+/// checkbox can persist its state across frames and the world gravity only
+/// changes when the user actually flips the checkbox.
+#[derive(Resource)]
+struct GravityToggle {
+    enabled: bool,
+}
+
+impl Default for GravityToggle {
+    fn default() -> Self {
+        // Off by default: the physics plugin boots the world with zero gravity,
+        // so the character starts weightless until the box is checked.
+        Self { enabled: false }
+    }
+}
 //cargo run --package collision_detection --bin character_tuning_main --release
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::default();
@@ -161,6 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(SpineTuneParams::default())
         .insert_resource(IndicatorVisibility::default())
         .insert_resource(cannon::CannonParams::default())
+        .insert_resource(GravityToggle::default())
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
@@ -198,6 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 spine_indicator::apply_spine_config,
                 indicator_ui,
                 arm_tuning_ui,
+                gravity_toggle_ui,
                 cannon::cannon_ui,
                 cannon::move_cannon_with_wasd,
                 cannon::update_cannon_indicator,
@@ -697,6 +719,22 @@ fn arm_tuning_ui(
             egui::Slider::new(&mut config.max_angle_rate, 0.0..=40.0)
                 .text("max_angle_rate (rad/s)"),
         );
+    });
+}
+
+/// Simple gravity toggle: an open/close checkbox that sets the world gravity
+/// to the vello-frame default (98.0 px/s² down) or zero.
+fn gravity_toggle_ui(
+    mut contexts: EguiContexts,
+    mut toggle: ResMut<GravityToggle>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    egui::Window::new("Gravity").show(contexts.ctx_mut(), |ui| {
+        let mut enabled = toggle.enabled;
+        if ui.checkbox(&mut enabled, "gravity on / off").changed() {
+            toggle.enabled = enabled;
+            constraint_world.set_gravity(if enabled { GRAVITY_ON } else { Vec2::ZERO });
+        }
     });
 }
 

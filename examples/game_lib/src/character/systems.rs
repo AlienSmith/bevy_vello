@@ -100,7 +100,8 @@ pub fn tick_spine_drive(
             let vel2 = p2.particle.velocity;
             let vel3 = p3.particle.velocity;
 
-            indicator.desired_center = pos2 + vel2 * (2.0 * dt);
+            let gravity = world.gravity();
+            indicator.desired_center = pos2 + vel2 * (2.0 * dt) + gravity * (2.0 * dt * dt);
 
             // Upper bone (P2→P1): heading = atan2(P1-P2), ω = cross(arm, dvel)/|arm|².
             let arm_upper = pos1 - pos2;
@@ -784,10 +785,7 @@ fn bone_angular_velocity(arm: Vec2, dvel: Vec2) -> f32 {
 #[inline]
 fn rotate_cs(cs: Vec2, delta: f32) -> Vec2 {
     let (sin_d, cos_d) = delta.sin_cos();
-    Vec2::new(
-        cs.x * cos_d - cs.y * sin_d,
-        cs.y * cos_d + cs.x * sin_d,
-    )
+    Vec2::new(cs.x * cos_d - cs.y * sin_d, cs.y * cos_d + cs.x * sin_d)
 }
 
 /// Rotate unit vector (cos_a, sin_a) toward (cos_b, sin_b) by at most `max_delta` radians.
@@ -846,8 +844,8 @@ pub fn update_character_movement(
         );
 
         arm_angular_events
-        .iter()
-        .for_each(|e| world.queue_character_angular_constraints(e));
+            .iter()
+            .for_each(|e| world.queue_character_angular_constraints(e));
     }
 
     // ---- Left arm ----
@@ -875,8 +873,8 @@ pub fn update_character_movement(
         );
 
         arm_angular_events
-        .iter()
-        .for_each(|e| world.queue_character_angular_constraints(e));
+            .iter()
+            .for_each(|e| world.queue_character_angular_constraints(e));
     }
 }
 

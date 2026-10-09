@@ -35,6 +35,11 @@ impl VelloConstraintWorld {
         self.data.gravity = gravity;
     }
 
+    /// Current gravity in vello coordinates (x right, y down).
+    pub fn gravity(&self) -> Vec2 {
+        self.data.gravity
+    }
+
     /// Test support: queue a synthetic collision hit on the soft body of
     /// `collider`. Consumed by the next physics step; the body frame receives
     /// the kinematic delta and the skeleton sees the same offsets through
