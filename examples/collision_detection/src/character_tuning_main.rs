@@ -258,8 +258,8 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                     ..Default::default()
                 },
                 CharacterRoot {
-                    svg_asset_id: "V8.character.svg".to_owned(),
-                    blueprint_asset_id: "v8.character.json".to_owned(),
+                    svg_asset_id: "v10.character.svg".to_owned(),
+                    blueprint_asset_id: "v10.character.json".to_owned(),
                     collision_group: PLAYER_COLLISION_GROUP,
                 },
                 CharacterController {
@@ -593,8 +593,8 @@ fn setup_resources(
     image("image/ammo_normal.png");
     image("image/pistol_albedo.png");
     image("image/pistol_normal.png");
-    c_svg("character/V8.character.svg");
-    c_blueprint("character/v8.character.json");
+    c_svg("character/v10.character.svg");
+    c_blueprint("character/v10.character.json");
 }
 
 /// egui window that prints the current indicator rotation speed in degrees/sec,
@@ -680,21 +680,16 @@ fn arm_tuning_ui(
 
         ui.heading("ω-scheduled softening (back-EMF style)");
         ui.label("Softer compliance while the joint's bone spins fast; stiff at rest.");
-        ui.add(
-            egui::Slider::new(&mut config.omega_ref, 0.0..=40.0).text("omega_ref (rad/s)"),
-        );
-        ui.add(
-            egui::Slider::new(&mut config.soft_scale, 1.0..=50.0).text("soft_scale (×)"),
-        );
+        ui.add(egui::Slider::new(&mut config.omega_ref, 0.0..=40.0).text("omega_ref (rad/s)"));
+        ui.add(egui::Slider::new(&mut config.soft_scale, 1.0..=50.0).text("soft_scale (×)"));
         ui.separator();
 
         ui.heading("kd velocity feedback (D term)");
-        ui.label("Rest target trails behind motion by kd·ω — brakes overshoot, subtracts at-rest noise.");
-        ui.add(egui::Slider::new(&mut config.kd, 0.0..=0.5).text("kd (s)"));
-        ui.add(
-            egui::Slider::new(&mut config.kd_max_offset, 0.0..=1.5)
-                .text("kd_max_offset (rad)"),
+        ui.label(
+            "Rest target trails behind motion by kd·ω — brakes overshoot, subtracts at-rest noise.",
         );
+        ui.add(egui::Slider::new(&mut config.kd, 0.0..=0.5).text("kd (s)"));
+        ui.add(egui::Slider::new(&mut config.kd_max_offset, 0.0..=1.5).text("kd_max_offset (rad)"));
         ui.separator();
 
         ui.heading("Rest-angle chase");

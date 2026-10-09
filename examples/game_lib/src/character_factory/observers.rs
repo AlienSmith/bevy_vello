@@ -202,8 +202,8 @@ use vello::{
 };
 use vello_physics::{
     collision_response::Particle, generate_uvs, soft_body_connection::ConnectionInitConfig,
-    CollisionConstraintConfig, ConnectionConstraintInitConfig, SoftBodyInitConfig,
-    SPINE_FRAME_PARTICLES_COUNT,
+    ArmControllerConfig, CollisionConstraintConfig, ConnectionConstraintInitConfig,
+    SoftBodyInitConfig, SPINE_FRAME_PARTICLES_COUNT,
 };
 
 use crate::{
@@ -797,10 +797,19 @@ pub fn assemble_character(
         angulars: [get("PH_P0_P1"), get("P0_P1_P2"), get("P1_P2_P3")],
     };
 
-    // Right arm particles: [P1, P12, P13, PRLA]
+    // Arm particle/joint bindings come from the blueprint's `controllers`
+    // block (per-character topology: V8 has shoulder/hip particles, V10 does
+    // not). The `#[serde(default)]`/`Default` on `ArmControllerConfig` falls
+    // back to the V10 names for older blueprints that omit the fields.
+    let right_arm_cfg = &blueprint.data.controllers.right_arm;
     let right_arm = RightArmController {
-        particles: [get("P1"), get("P12"), get("P13"), get("PRLA")],
-        joints: [get("P1_P12_P13"), get("P12_P13_PRLA")],
+        particles: [
+            get(&right_arm_cfg.particles[0]),
+            get(&right_arm_cfg.particles[1]),
+            get(&right_arm_cfg.particles[2]),
+            get(&right_arm_cfg.particles[3]),
+        ],
+        joints: [get(&right_arm_cfg.joints[0]), get(&right_arm_cfg.joints[1])],
         config: ArmConfig {
             bend_sign: 1.0,
             ..Default::default()
@@ -808,10 +817,15 @@ pub fn assemble_character(
         target: Vec2::ZERO,
     };
 
-    // Left arm particles: [P1, P11, P10, PLLA]
+    let left_arm_cfg = &blueprint.data.controllers.left_arm;
     let left_arm = LeftArmController {
-        particles: [get("P1"), get("P11"), get("P10"), get("PLLA")],
-        joints: [get("P1_P11_P10"), get("P11_P10_PLLA")],
+        particles: [
+            get(&left_arm_cfg.particles[0]),
+            get(&left_arm_cfg.particles[1]),
+            get(&left_arm_cfg.particles[2]),
+            get(&left_arm_cfg.particles[3]),
+        ],
+        joints: [get(&left_arm_cfg.joints[0]), get(&left_arm_cfg.joints[1])],
         config: ArmConfig {
             bend_sign: 1.0,
             ..Default::default()

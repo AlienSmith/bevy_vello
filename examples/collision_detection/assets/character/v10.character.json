@@ -1014,6 +1014,30 @@
       "compliance": 1e-7,
       "damping": 0.9,
       "steer_angle": 30.0
+    },
+    "right_arm": {
+      "particles": [
+        "P2",
+        "P1",
+        "P13",
+        "PRLA"
+      ],
+      "joints": [
+        "P2_P1_P13",
+        "P1_P13_PRLA"
+      ]
+    },
+    "left_arm": {
+      "particles": [
+        "P2",
+        "P1",
+        "P10",
+        "PLLA"
+      ],
+      "joints": [
+        "P2_P1_P10",
+        "P1_P10_PLLA"
+      ]
     }
   }
 }
