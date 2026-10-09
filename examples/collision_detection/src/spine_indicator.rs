@@ -34,7 +34,7 @@ use bevy_vello::{
     prelude::{kurbo, peniko},
     VelloScene, VelloSceneBundle,
 };
-use game_lib::{SpineConfig, SpineController, SpineIndicator};
+use game_lib::{SpineConfig, SpineController, SpineIndicator, WalkConfig};
 
 /// Consolidated, runtime-tuneable spine parameters (a single UI-editable Resource).
 ///
@@ -253,6 +253,11 @@ pub fn spawn_spine_indicator(
             character: trigger.target(),
             ..Default::default()
         },
+        // Flat-floor walking PoC config. `tick_spine_drive` reads this through an
+        // `Option`, so its presence is what switches the drive from the zero-g
+        // "point where you steer" thruster into walking. Edited live by
+        // `walk_tuning_ui` in the tuning app.
+        WalkConfig::default(),
     ));
 
     // The *desired goal* scene (orange outline) — the latched target the virtual
@@ -357,11 +362,10 @@ fn build_bent_points(
 ) -> [Vec2; 3] {
     let rest_heading_upper = local_points[0].y.atan2(local_points[0].x);
     let rest_heading_lower = local_points[2].y.atan2(local_points[2].x);
-    let lower_baked =
-        rotate_local(
-            local_points[2],
-            heading_lower - heading_upper + rest_heading_upper - rest_heading_lower,
-        );
+    let lower_baked = rotate_local(
+        local_points[2],
+        heading_lower - heading_upper + rest_heading_upper - rest_heading_lower,
+    );
     [local_points[0], local_points[1], lower_baked]
 }
 
@@ -385,10 +389,17 @@ pub fn spine_control_input(
     params: Res<SpineTuneParams>,
     mut visibility: ResMut<IndicatorVisibility>,
     mut q_indicator: Query<&mut SpineIndicator>,
+    q_walk: Query<&WalkConfig>,
 ) {
     let Ok(mut indicator) = q_indicator.single_mut() else {
         return;
     };
+    // Under the upright lock, `tick_spine_drive` re-derives both headings from the
+    // rest pose every fixed tick. Writing the input heading here too would make
+    // the *drawn* desired-goal outline flicker horizontal between ticks even
+    // though the physics never follow it, so skip it — facing is decoupled from
+    // movement direction while walking.
+    let upright_lock = q_walk.single().map(|w| w.upright_lock).unwrap_or(false);
 
     // Toggle the indicator visualization on/off with the P key.
     if keys.just_pressed(KeyCode::KeyP) {
@@ -421,7 +432,14 @@ pub fn spine_control_input(
         // y-down convention: atan2(y,x), 0 = right, +90 = down, etc.). The lower
         // heading is re-anchored by `tick_spine_drive` (command branch) to keep
         // the live upper→lower bend while steering.
-        indicator.desired_heading_upper = dir.y.atan2(dir.x);
+        //
+        // This is the zero-g "point where you steer" behaviour: holding Right
+        // targets heading 0, i.e. the spine *horizontal*. Walking overrides it
+        // with the rest pose (see `apply_walk_overrides`), so only write it when
+        // the upright lock is off.
+        if !upright_lock {
+            indicator.desired_heading_upper = dir.y.atan2(dir.x);
+        }
     } else {
         indicator.command_active = false;
         // Freeze the last desired heading on release (no snap-back), mirroring

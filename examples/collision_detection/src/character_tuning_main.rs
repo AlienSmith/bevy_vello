@@ -219,6 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 spine_indicator::apply_spine_config,
                 indicator_ui,
                 arm_tuning_ui,
+                walk_tuning_ui,
                 gravity_toggle_ui,
                 cannon::cannon_ui,
                 cannon::move_cannon_with_wasd,
@@ -719,6 +720,93 @@ fn arm_tuning_ui(
             egui::Slider::new(&mut config.max_angle_rate, 0.0..=40.0)
                 .text("max_angle_rate (rad/s)"),
         );
+    });
+}
+
+/// egui window for the flat-floor walking PoC (`plans/walking_poc_flat_floor.md`).
+///
+/// Edits the live [`WalkConfig`] on the spine-indicator entity directly (same
+/// pattern as [`arm_tuning_ui`] — the component holds the config and
+/// `tick_spine_drive` reads it each FixedUpdate), so every slider takes effect
+/// immediately with no restart.
+///
+/// The readouts at the bottom are the point of this window: they turn "does it
+/// look right?" into numbers, which is what the PoC's pass criteria are written
+/// against (hip error settling under ~5 px, no y-drift while sliding).
+fn walk_tuning_ui(
+    mut contexts: EguiContexts,
+    mut walk_q: Query<&mut game_lib::WalkConfig>,
+    indicator_q: Query<&game_lib::SpineIndicator>,
+    spine_q: Query<&SpineController>,
+    particle_q: Query<&VelloParticle>,
+) {
+    let Ok(mut walk) = walk_q.single_mut() else {
+        return;
+    };
+
+    // Live P2 (hip) state, resolved through the indicator's character root the
+    // same way `tick_spine_drive` does: SpineController.particles[3] == P2.
+    let hip = indicator_q
+        .single()
+        .ok()
+        .and_then(|ind| spine_q.get(ind.character).ok())
+        .and_then(|spine| particle_q.get(spine.particles[3]).ok())
+        .map(|p| (p.particle.pos, p.particle.velocity));
+
+    egui::Window::new("Walking (flat-floor PoC)").show(contexts.ctx_mut(), |ui| {
+        ui.label("Arrows slide the character left/right. Gravity must be ON.");
+        ui.separator();
+
+        ui.heading("Mechanism 1 — upright posture lock");
+        ui.label("Lock both spine headings to the rest pose, so facing is decoupled");
+        ui.label("from movement direction. OFF restores the zero-g thruster.");
+        ui.checkbox(&mut walk.upright_lock, "upright_lock");
+        ui.separator();
+
+        ui.heading("Mechanism 2 — vertical pin (the puppet string)");
+        ui.label("0 = pure physics (free-fall), 1 = hard stand at floor − stand_height.");
+        ui.add(
+            egui::Slider::new(&mut walk.pin_vertical_weight, 0.0..=1.0).text("pin_vertical_weight"),
+        );
+        ui.add(egui::Slider::new(&mut walk.stand_height, 60.0..=220.0).text("stand_height (px)"));
+        ui.add(
+            egui::DragValue::new(&mut walk.flat_floor_y_vello)
+                .speed(1.0)
+                .prefix("flat_floor_y_vello: "),
+        );
+        ui.separator();
+
+        ui.heading("Mechanism 3 — horizontal drive");
+        ui.add(egui::Slider::new(&mut walk.walk_reach, 0.0..=1200.0).text("walk_reach (px)"));
+        ui.label("Braking on release: the goal is aimed this far behind the live P2");
+        ui.label("along its velocity. 0 = coast forever (the constraint applies no");
+        ui.label("force when the target equals the live position).");
+        ui.add(egui::Slider::new(&mut walk.stop_lead_time, 0.0..=0.6).text("stop_lead_time (s)"));
+        ui.separator();
+
+        ui.heading("Readouts (Vello y-down)");
+        let stand_y = walk.flat_floor_y_vello - walk.stand_height;
+        match hip {
+            Some((pos, vel)) => {
+                ui.label(format!(
+                    "P2.y        = {:8.2}   (stand target {:.2})",
+                    pos.y, stand_y
+                ));
+                ui.label(format!("hip error   = {:8.2} px", (pos.y - stand_y).abs()));
+                ui.label(format!("P2.x        = {:8.2}", pos.x));
+                ui.label(format!("P2 velocity = ({:7.2}, {:7.2}) px/s", vel.x, vel.y));
+                ui.label(format!("speed       = {:8.2} px/s", vel.length()));
+            }
+            None => {
+                ui.label("P2 not resolved yet (character still assembling).");
+            }
+        }
+        ui.label(format!("desired_center = {:?}", {
+            indicator_q
+                .single()
+                .map(|i| i.desired_center)
+                .unwrap_or(Vec2::ZERO)
+        }));
     });
 }
 

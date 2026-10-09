@@ -289,6 +289,77 @@ impl Default for SpineIndicator {
     }
 }
 
+/// Flat-floor locomotion config (PoC — see `plans/walking_poc_flat_floor.md`).
+///
+/// Lives on the same entity as [`SpineIndicator`] and is read by
+/// [`crate::character::systems::tick_spine_drive`] through an `Option`, so
+/// entities without it keep the original zero-g "point where you steer"
+/// behaviour bit-for-bit (other examples are unaffected).
+///
+/// The one idea behind it is **decoupling**. Today a single 2D `desired_center`
+/// plus an input-derived heading carry three jobs at once, which is why holding
+/// Right rotates the spine to heading 0 (*horizontal*) instead of walking right.
+/// Each job gets its own authority here, and each can be turned off independently
+/// so it can be validated in isolation:
+///
+/// 1. `upright_lock` — facing, decoupled from movement direction.
+/// 2. `pin_vertical_weight` — height (the "puppet string" at the hips).
+/// 3. `walk_reach` / `stop_lead_time` — horizontal translation.
+#[derive(Component, Clone, Copy)]
+pub struct WalkConfig {
+    /// Floor surface height in Vello y-down world coords. A constant for the PoC
+    /// (the tuning app's floor rect tops out at Vello `y = +1060`); a terrain
+    /// oracle replaces it later.
+    pub flat_floor_y_vello: f32,
+    /// Desired P2 (hip) height above the floor, px. v10's rest pose puts the
+    /// lowest foot 282 blueprint units below P2 → ~141 px at the 0.5 spawn scale.
+    /// Exposed as a slider because legs bend under load.
+    pub stand_height: f32,
+    /// Vertical pin authority. `0` = pure physics (the drive feed-forwards
+    /// gravity, so the character free-falls exactly as before); `1` = hard stand
+    /// at `flat_floor_y_vello - stand_height`.
+    pub pin_vertical_weight: f32,
+    /// Horizontal goal distance while an arrow is held, px. Together with
+    /// `SpineConfig::max_pos_speed` this sets cruise speed.
+    pub walk_reach: f32,
+    /// On key release the horizontal goal is aimed this many seconds *behind* the
+    /// live P2 along its velocity — that offset is what actually brakes the body.
+    ///
+    /// It exists because `ExternalPositionConstraint::solve` skips any target
+    /// within `1e-6` of the particle, so a goal equal to the live position applies
+    /// **zero** force and the character coasts forever. `0` = no braking force
+    /// (coast); ~`0.15` = crisp stop.
+    pub stop_lead_time: f32,
+    /// `false` = keep the input-driven heading (zero-g thruster behaviour).
+    /// `true` = lock both spine headings to the rest pose, which makes the torso a
+    /// self-righting pendulum: `current == desired == rest` at spawn, so there is
+    /// no angular error until physics disturbs it, and the drive pulls it back.
+    pub upright_lock: bool,
+}
+
+impl Default for WalkConfig {
+    fn default() -> Self {
+        Self {
+            flat_floor_y_vello: 1060.0,
+            stand_height: 141.0,
+            pin_vertical_weight: 1.0,
+            walk_reach: 400.0,
+            stop_lead_time: 0.15,
+            upright_lock: true,
+        }
+    }
+}
+
+impl WalkConfig {
+    /// `true` when at least one walking mechanism is enabled. When `false`,
+    /// `tick_spine_drive` must take the original code path untouched — that is
+    /// the regression guarantee for the existing zero-g work.
+    #[inline]
+    pub fn active(&self) -> bool {
+        self.upright_lock || self.pin_vertical_weight > 0.0
+    }
+}
+
 /// Right arm controller with pre-cached entity handles + per-frame input.
 /// Particles: [P1, P12, P13, PRLA]
 /// Joints: [P1_P12_P13, P12_P13_PRLA]

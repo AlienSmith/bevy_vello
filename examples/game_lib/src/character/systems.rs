@@ -11,13 +11,13 @@ use vello_physics::{
 
 use crate::character::{
     ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
-    SpineConfig, SpineController, SpineIndicator,
+    SpineConfig, SpineController, SpineIndicator, WalkConfig,
 };
 
 pub fn tick_spine_drive(
     time: Res<Time>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
-    mut indicator_q: Query<&mut SpineIndicator>,
+    mut indicator_q: Query<(&mut SpineIndicator, Option<&WalkConfig>)>,
     p_q: Query<&VelloParticle>,
     p_j: Query<&VelloJoint>,
     mut world: ResMut<VelloConstraintWorld>,
@@ -27,9 +27,13 @@ pub fn tick_spine_drive(
     // character it drives. We resolve that character's SpineController directly
     // (all 5 particles + 3 angular joints, per the calculate_spine_drive
     // contract) and queue drive events just for those.
-    let Ok(mut indicator) = indicator_q.single_mut() else {
+    //
+    // `WalkConfig` is optional: entities without it (other examples, the headless
+    // probe) keep the zero-g "point where you steer" behaviour bit-for-bit.
+    let Ok((mut indicator, walk)) = indicator_q.single_mut() else {
         return;
     };
+    let walk = walk.copied();
     // Guard: no known character yet (or it was despawned).
     let Ok((spine, p_root)) = spine_q.get(indicator.character) else {
         return;
@@ -129,6 +133,16 @@ pub fn tick_spine_drive(
         }
     }
 
+    // Walking overrides (flat-floor PoC). Applied *after* the branches above so
+    // each mechanism can selectively replace one authority while the others keep
+    // their zero-g values. `WalkConfig::active()` is false when both
+    // `upright_lock` and `pin_vertical_weight` are off, in which case this block
+    // is skipped entirely and the original behaviour is reproduced exactly.
+    if let Some(walk) = walk.filter(|w| w.active()) {
+        let gravity = world.gravity();
+        apply_walk_overrides(&mut indicator, walk, p2, dt, gravity);
+    }
+
     let result = calculate_spine_drive(
         &entities,
         &particles,
@@ -156,6 +170,88 @@ pub fn tick_spine_drive(
     indicator.center = result.virtual_center;
     indicator.heading_upper = result.virtual_heading_upper;
     indicator.heading_lower = result.virtual_heading_lower;
+}
+
+/// Re-anchor the desired goal for **flat-floor walking** (PoC — see
+/// `plans/walking_poc_flat_floor.md`).
+///
+/// The zero-g path above entangles three jobs into one 2D `desired_center` plus
+/// one input-derived heading, which is why holding Right rotates the spine to
+/// heading 0 (*horizontal*) rather than walking right. Here each job gets its own
+/// authority, and each is independently switchable so it can be validated alone:
+///
+/// 1. **Posture** — both headings locked to the rest pose ⇒ facing is decoupled
+///    from movement direction, and the torso becomes a self-righting pendulum
+///    (`current == desired == rest` at spawn ⇒ zero angular error until physics
+///    disturbs it, then the drive pulls it back upright).
+/// 2. **Height** — `desired_center.y` pinned to `floor − stand_height`, blended
+///    against the same gravity feed-forward the idle branch uses, so
+///    `pin_vertical_weight = 0` reproduces free-fall exactly.
+/// 3. **Translation** — only `.x` follows input; on release the goal is aimed
+///    *behind* the live P2 along its velocity so the constraint actually brakes.
+///
+/// `calculate_spine_drive` is deliberately **not** modified: the α0.5
+/// interpolate-then-clamp and the XPBD compliance/damping downstream are what
+/// turn these goals into a soft landing and a jitter-free hold.
+fn apply_walk_overrides(
+    indicator: &mut SpineIndicator,
+    walk: WalkConfig,
+    p2: Option<&VelloParticle>,
+    dt: f32,
+    gravity: Vec2,
+) {
+    let Some(p2) = p2 else { return };
+    let pos2 = p2.particle.pos;
+    let vel2 = p2.particle.velocity;
+
+    // --- Mechanism 1: upright posture lock -------------------------------
+    if walk.upright_lock {
+        // Rest headings derived from the same P2-centred offsets
+        // `calculate_spine_drive` uses (`local_points[0]` = P2→P1,
+        // `local_points[2]` = P2→P3), so the position and angular constraints
+        // agree by construction and cannot fight. For v10 these are −π/2 and
+        // +π/2 — the spine stays vertical forever.
+        let lp = indicator.local_points;
+        indicator.desired_heading_upper = lp[0].y.atan2(lp[0].x);
+        indicator.desired_heading_lower = lp[2].y.atan2(lp[2].x);
+    }
+
+    // --- Mechanism 3: horizontal drive (x only) --------------------------
+    // `signum` rather than the raw normalized component so a diagonal hold
+    // (Right+Up) does not halve the walk speed; Up/Down carry no horizontal
+    // authority in the PoC.
+    let dir_x = if indicator.command_active {
+        indicator.commanded_dir.x.signum()
+    } else {
+        0.0
+    };
+    let goal_x = if dir_x != 0.0 {
+        pos2.x + dir_x * walk.walk_reach
+    } else {
+        // Released: aim *behind* the live P2 along its velocity. This offset is
+        // load-bearing — `ExternalPositionConstraint::solve` skips any target
+        // within 1e-6 of the particle, so a goal equal to the live position
+        // applies **zero** force and the body coasts forever. The trailing goal
+        // is what produces the braking pull, and it fades out naturally as
+        // `vel2.x → 0` (no snap, no overshoot).
+        pos2.x - vel2.x * walk.stop_lead_time
+    };
+
+    // --- Mechanism 2: vertical pin ---------------------------------------
+    let w = walk.pin_vertical_weight.clamp(0.0, 1.0);
+    // Same gravity feed-forward the idle branch uses, so `w = 0` is a true
+    // fallback to free-fall rather than a separate code path.
+    let free_y = pos2.y + vel2.y * (2.0 * dt) + gravity.y * (2.0 * dt * dt);
+    // Vello is y-down and the floor is *below* the character, so standing means
+    // floor_y MINUS stand_height. Sign guard (parent plan §8, "the bug that cost
+    // a session"): character underground ⇒ the sign is flipped; character floats
+    // at spawn height ⇒ stand_height is being added instead of subtracted.
+    let stand_y = walk.flat_floor_y_vello - walk.stand_height;
+    // Explicit arithmetic rather than `f32::lerp`: both `VectorSpace` and
+    // `FloatExt` are in scope here, so the method call is ambiguous.
+    let goal_y = free_y + (stand_y - free_y) * w;
+
+    indicator.desired_center = Vec2::new(goal_x, goal_y);
 }
 
 use super::ik::compute_ik_positions;

@@ -31,7 +31,7 @@ pub use crate::{
     character::{
         ArmConfig, CharacterController, ConnectivityRoot, IkMode, LeftArmController,
         ResetArmControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
-        SpineIndicator, StringPool, WhichArm,
+        SpineIndicator, StringPool, WalkConfig, WhichArm,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},
