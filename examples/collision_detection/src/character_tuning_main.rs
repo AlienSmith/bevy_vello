@@ -53,7 +53,8 @@ const PLAYER_COLLISION_GROUP: u32 = 1;
 
 /// Gravity applied when the toggle is on. Vello coordinates: x right, y down
 /// (matches the XPBD default `GRAVITY` in `collision_response.rs`).
-const GRAVITY_ON: Vec2 = Vec2::new(0.0, 98.0);
+/// We are using 100px = 1m and the character in this scene is about 170px hight.
+const GRAVITY_ON: Vec2 = Vec2::new(0.0, 980.0);
 
 #[derive(Component)]
 pub struct Player;
@@ -151,7 +152,7 @@ impl Default for GravityToggle {
     fn default() -> Self {
         // Off by default: the physics plugin boots the world with zero gravity,
         // so the character starts weightless until the box is checked.
-        Self { enabled: false }
+        Self { enabled: true }
     }
 }
 //cargo run --package collision_detection --bin character_tuning_main --release
@@ -346,7 +347,7 @@ fn setup_pistol(
                 ..Default::default()
             },
         ))
-        .observe(on_collision_spawn_particle)
+        //.observe(on_collision_spawn_particle)
         .id();
     events.write(AttachPistolToCharacterEvent {
         character: character_entity,
@@ -371,7 +372,7 @@ fn make_static_scene(commands: &mut Commands) {
     };
     make_static_collision_shape(
         commands,
-        Vec4::new(0.0, 1080.0, 0.0, 1.0),
+        Vec4::new(0.0, 540.0, 0.0, 1.0),
         make_long_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -384,7 +385,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_static_collision_shape(
         commands,
-        Vec4::new(0.0, -1080.0, 0.0, 1.0),
+        Vec4::new(0.0, -540.0, 0.0, 1.0),
         make_long_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -397,7 +398,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_static_collision_shape(
         commands,
-        Vec4::new(-1920.0, 0.0, 0.0, 1.0),
+        Vec4::new(-960.0, 0.0, 0.0, 1.0),
         make_short_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -410,7 +411,7 @@ fn make_static_scene(commands: &mut Commands) {
 
     make_static_collision_shape(
         commands,
-        Vec4::new(1920.0, 0.0, 0.0, 1.0),
+        Vec4::new(960.0, 0.0, 0.0, 1.0),
         make_short_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
