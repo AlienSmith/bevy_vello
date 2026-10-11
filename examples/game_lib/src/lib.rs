@@ -8,6 +8,7 @@ mod death_channel;
 mod decorations;
 mod health;
 mod input_management;
+mod lower_body;
 mod utility;
 pub mod weapons;
 use bevy::prelude::*;
@@ -42,6 +43,11 @@ pub use crate::{
         mouse::MouseWorldPosition,
         systems::Player as PlayerMarker,
         InputPlugin,
+    },
+    lower_body::{
+        compute_forward_target, compute_v_max, compute_x_max, solve_leg_ik, DebugInfo, GaitPhase,
+        LegState, LowerBodyConfig, LowerBodyController, LowerBodyParams, LowerBodyPose,
+        LowerBodySandboxPlugin, ResolverState,
     },
 };
 

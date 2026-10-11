@@ -13,6 +13,12 @@ publish = false
 name = "character_tuning_main"
 path = "src/character_tuning_main.rs"
 
+# Raibert lower-body kinematic sandbox.
+# Runs from: cargo run -p collision_detection --bin raibert_sandbox
+[[bin]]
+name = "raibert_sandbox"
+path = "src/raibert_sandbox_main.rs"
+
 [dependencies]
 ron = "0.8"
 #particle won't work with multi-threaded
