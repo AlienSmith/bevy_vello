@@ -45,9 +45,9 @@ pub use crate::{
         InputPlugin,
     },
     lower_body::{
-        compute_forward_target, compute_v_max, compute_x_max, solve_leg_ik, DebugInfo, GaitPhase,
-        LegState, LowerBodyConfig, LowerBodyController, LowerBodyParams, LowerBodyPose,
-        LowerBodySandboxPlugin, ResolverState,
+        compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max,
+        solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, LegState, LowerBodyConfig,
+        LowerBodyController, LowerBodyParams, LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
     },
 };
 

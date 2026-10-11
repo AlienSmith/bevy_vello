@@ -11,7 +11,7 @@ mod systems;
 
 pub use plugin::LowerBodySandboxPlugin;
 pub use resolver::{
-    compute_forward_target, compute_v_max, compute_x_max, solve_leg_ik, DebugInfo, GaitPhase,
-    LegState, LowerBodyConfig, LowerBodyPose, ResolverState,
+    compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max, solve_leg_ik,
+    DebugInfo, GaitLimits, GaitPhase, LegState, LowerBodyConfig, LowerBodyPose, ResolverState,
 };
 pub use systems::{drive_lower_body, reset_lower_body, LowerBodyController, LowerBodyParams};

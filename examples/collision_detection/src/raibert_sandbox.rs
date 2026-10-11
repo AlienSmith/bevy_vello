@@ -207,7 +207,9 @@ pub fn tuning_ui(
         ui.add(egui::Slider::new(&mut cfg.target_speed, 0.0..=600.0).text("target_speed (px/s)"));
         ui.add(egui::Slider::new(&mut cfg.accel, 10.0..=4000.0).text("accel (px/s²)"));
         ui.add(egui::Slider::new(&mut cfg.kv, 0.0..=0.5).text("kv (s)"));
+        ui.add(egui::Slider::new(&mut cfg.beta, 0.0..=1.0).text("beta (backward blend)"));
         ui.add(egui::Slider::new(&mut cfg.safety_margin, 0.1..=1.0).text("safety_margin"));
+        ui.add(egui::Slider::new(&mut cfg.prediction_margin, 0.05..=1.0).text("prediction_margin"));
         ui.separator();
 
         ui.heading("Knee bend");
@@ -226,8 +228,12 @@ pub fn tuning_ui(
             ui.heading("Telemetry");
             ui.label(format!("v_desired : {:.1} px/s", d.v_desired));
             ui.label(format!("v_clamped : {:.1} px/s", d.v_clamped));
+            ui.label(format!("v_support : {:.1} px/s", d.v_support));
             ui.label(format!("X_max     : {:.1} px", d.x_max));
             ui.label(format!("v_max     : {:.1} px/s", d.v_max));
+            ui.label(format!("a_max     : {:.0} px/s²", d.a_max));
+            ui.label(format!("v_abs     : {:.1} px/s", d.v_abs));
+            ui.label(format!("capture   : {:.1} px", d.capture_x));
             ui.label(format!("hip pos   : {:.1}, {:.1}", hip.x, hip.y));
             ui.label(format!(
                 "phases    : L={:?} R={:?}",

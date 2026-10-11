@@ -47,6 +47,10 @@ impl LowerBodyController {
             right_phase: state.right.phase,
             left_target_x: state.left.swing_to.x,
             right_target_x: state.right.swing_to.x,
+            a_max: 0.0,
+            v_abs: 0.0,
+            v_support: 0.0,
+            capture_x: 0.0,
         };
         Self { state, pose, debug }
     }

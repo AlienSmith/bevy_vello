@@ -46,9 +46,18 @@ pub struct LowerBodyConfig {
     /// Raibert proportional velocity-feedback gain (units: **seconds**). See
     /// the derivation in `plans/Raibert.md`.
     pub kv: f32,
+    /// Backward-solve blend gain (0..1]. `1.0` = deadbeat: at touchdown the hip
+    /// velocity fully adopts the support velocity inverted from the actual
+    /// plant offset. Lower values damp the correction, which is what the XPBD
+    /// integration will need once feet lag their kinematic targets.
+    pub beta: f32,
     /// Fraction of the geometric leg reach `X_max` that is actually usable
     /// (0..1). Lower = more conservative steps.
     pub safety_margin: f32,
+    /// Fraction of `X_max` (0..1) reserved for prediction error. The planner
+    /// keeps `½·a·T_swing² ≤ prediction_margin·X_max`, which bounds the hip
+    /// acceleration at `a_max` (see [`GaitLimits`]).
+    pub prediction_margin: f32,
     /// Swing arc apex height above the plant/floor line, px.
     pub step_height: f32,
     /// World y of the flat floor line.
@@ -71,7 +80,9 @@ impl Default for LowerBodyConfig {
             stance_duration_ts: 0.28,
             swing_duration_ts: 0.22,
             kv: 0.12,
+            beta: 1.0,
             safety_margin: 0.85,
+            prediction_margin: 0.5,
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
@@ -188,9 +199,9 @@ pub struct LowerBodyPose {
 pub struct DebugInfo {
     /// Geometric max reach at the current hip height (`X_max`).
     pub x_max: f32,
-    /// Velocity clamp ceiling (`v_max`).
+    /// Velocity clamp ceiling actually applied this tick (`v_ceil`).
     pub v_max: f32,
-    /// Desired horizontal speed (`v_desired`), signed.
+    /// Desired horizontal speed (`v_desired`), signed, after the plan cap.
     pub v_desired: f32,
     /// Clamped horizontal velocity actually applied this tick.
     pub v_clamped: f32,
@@ -199,6 +210,16 @@ pub struct DebugInfo {
     /// Forward step target x for each leg (world x), the last time each swung.
     pub left_target_x: f32,
     pub right_target_x: f32,
+    /// Max feasible hip acceleration from the prediction-error budget.
+    pub a_max: f32,
+    /// Absolute speed ceiling from the feasibility envelope.
+    pub v_abs: f32,
+    /// Backward-solved support velocity at the latest touchdown this tick
+    /// (0 when no touchdown event fired).
+    pub v_support: f32,
+    /// Signed capture-point offset from the hip while braking to a stop
+    /// (0 when not stopping).
+    pub capture_x: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -239,17 +260,110 @@ pub fn compute_x_max(thigh: f32, calf: f32, hip_height: f32, margin: f32) -> f32
     }
 }
 
-/// `v_max = (X_max + kv * v_desired_mag) / (Ts/2 + kv)`.
+/// Corrected cruise ceiling:
+/// `v_max = (X_max + kv * v_desired_mag) / (Ts/2 + kv + T_swing)`.
+///
+/// The `T_swing` term accounts for the hip's travel while the foot is airborne:
+/// a plant aimed `x_target` ahead of the *touchdown* hip sits
+/// `x_target + v·T_swing` ahead of the *lift-off* hip. The old denominator
+/// omitted it, so at speed the hip planted beyond its own reach and the IK
+/// ray-clamp lifted the stance foot off the floor (the "floating foot" bug).
 ///
 /// `v_desired_mag` is the magnitude of the desired cruise speed (non-negative);
 /// the result is a symmetric positive speed ceiling for both directions.
 #[inline]
-pub fn compute_v_max(x_max: f32, kv: f32, stance_ts: f32, v_desired_mag: f32) -> f32 {
-    let denom = stance_ts * 0.5 + kv;
+pub fn compute_v_max(
+    x_max: f32,
+    kv: f32,
+    stance_ts: f32,
+    swing_ts: f32,
+    v_desired_mag: f32,
+) -> f32 {
+    let denom = stance_ts * 0.5 + kv + swing_ts;
     if denom <= f32::EPSILON {
         return 0.0;
     }
     (x_max + kv * v_desired_mag) / denom
+}
+
+/// The generalized backward solve (foot → hip). Given the signed offset
+/// `delta_x` from the hip **at touchdown** to the support foot, returns the hip
+/// velocity whose forward plan would land exactly on that offset:
+///
+/// `v_support = (delta_x + kv * v_desired) / (Ts/2 + kv)`.
+///
+/// [`compute_v_max`] (old form) is this evaluated at `delta_x = X_max`.
+/// Composing backward∘forward is the identity: a plant error `e` maps to a
+/// velocity correction `e / (Ts/2 + kv)` that the next stride annihilates
+/// (deadbeat, one-stride convergence). `v_desired` is *signed*.
+#[inline]
+pub fn compute_support_velocity(delta_x: f32, kv: f32, stance_ts: f32, v_desired: f32) -> f32 {
+    let denom = stance_ts * 0.5 + kv;
+    if denom <= f32::EPSILON {
+        return 0.0;
+    }
+    (delta_x + kv * v_desired) / denom
+}
+
+/// Precomputed feasibility envelope for the gait at a given hip height.
+///
+/// All four limits are closed-form in the config, so the sandbox can clamp the
+/// planner *before* it produces unreachable targets instead of reacting to IK
+/// clamping after the fact. Derivations live in `plans/raibert_redesign.md`.
+#[derive(Debug, Clone, Copy)]
+pub struct GaitLimits {
+    /// Safety-margined geometric reach: `sqrt((L1+L2)² − H²) · margin`.
+    pub x_max: f32,
+    /// Max hip acceleration whose swing-phase prediction error `½·a·T_swing²`
+    /// still fits inside `prediction_margin · x_max`.
+    pub a_max: f32,
+    /// Absolute speed ceiling: at this speed the prediction error budget alone
+    /// saturates the reach, and the stop decel floor `v²/(2·X_max)` equals
+    /// `a_max` exactly.
+    pub v_abs: f32,
+    /// Cruise ceiling from the corrected backward solve (includes the
+    /// `T_swing` flight term so plants stay in reach at steady state).
+    pub v_cruise_max: f32,
+    /// Cap on the *desired* speed fed to the planner: the self-consistent
+    /// cruise ceiling `X_max / (T_swing + Ts/2)` where the kv feedback term
+    /// vanishes. Requesting more would leave a persistent kv bias
+    /// `kv·(v − v_d)` that pushes late-stance feet out of reach.
+    pub v_plan_cap: f32,
+}
+
+impl GaitLimits {
+    /// Evaluate the envelope for `config` at hip height `hip_height`, with
+    /// desired cruise speed magnitude `v_desired_mag`.
+    pub fn from_config(config: &LowerBodyConfig, hip_height: f32, v_desired_mag: f32) -> Self {
+        let x_max = compute_x_max(
+            config.thigh_len,
+            config.calf_len,
+            hip_height,
+            config.safety_margin,
+        );
+        let t_swing = config.swing_duration_ts.max(f32::EPSILON);
+        let m_e = config.prediction_margin.clamp(0.05, 1.0);
+        // ½·a·T_swing² ≤ m_e·X_max  ⇒  a_max = 2·m_e·X_max / T_swing²
+        let a_max = 2.0 * m_e * x_max / (t_swing * t_swing);
+        // v_abs: speed at which the stop floor v²/(2·X_max) equals a_max.
+        let v_abs = 2.0 * x_max * m_e.sqrt() / t_swing;
+        let v_plan_cap = x_max / (t_swing + config.stance_duration_ts * 0.5);
+        let v_d_eff = v_desired_mag.min(v_plan_cap);
+        let v_cruise_max = compute_v_max(
+            x_max,
+            config.kv,
+            config.stance_duration_ts,
+            config.swing_duration_ts,
+            v_d_eff,
+        );
+        Self {
+            x_max,
+            a_max,
+            v_abs,
+            v_cruise_max,
+            v_plan_cap,
+        }
+    }
 }
 
 /// The forward step planner: horizontal distance from the (moving) hip to the
@@ -317,9 +431,58 @@ pub fn solve_leg_ik(
 // Step
 // ---------------------------------------------------------------------------
 
-/// Minimum `|hip velocity|` required to initiate a step (px/s). Below this the
-/// character is treated as stationary and both feet stay planted.
+/// Minimum `|v_desired|` (move intent, px/s) required to initiate a step. With
+/// no intent the gait freezes: both feet stay planted and the stop-settle servo
+/// in [`step_lower_body`] glides the hip to the support centre. Gating on
+/// *intent* rather than actual velocity also prevents the settle motion itself
+/// from triggering phantom steps that would walk the character off with no
+/// input held.
 const SWING_TRIGGER_SPEED: f32 = 1.0;
+
+/// Per-tick planning context shared by both legs.
+#[derive(Debug, Clone, Copy)]
+struct StepPlan {
+    /// Safety-margined reach; swing targets are clamped to `hip ± x_max` so a
+    /// plant can never be aimed outside the workspace (which the IK would
+    /// ray-clamp into a foot floating off the floor).
+    x_max: f32,
+    /// True while braking to a stop: no move intent but the hip is still
+    /// travelling faster than the swing trigger.
+    stopping: bool,
+    /// Capture-point offset from the *current* hip while `stopping`:
+    /// `v·|v| / (2·a_eff)`. Aimed at the point where the hip will come to rest
+    /// under the effective deceleration, so the hip brakes *onto* its foot.
+    capture_offset: f32,
+}
+
+/// World-x swing target for a foot, given `t_flight` seconds remaining in the
+/// air. Used both at lift-off (`t_flight = T_swing`) and by the per-frame
+/// re-planning during swing.
+///
+/// While stopping, targets the capture point instead of the forward plan.
+/// The result is always clamped to `hip ± x_max`.
+fn plan_target_x(
+    hip_x: f32,
+    v: f32,
+    v_desired: f32,
+    t_flight: f32,
+    config: &LowerBodyConfig,
+    plan: &StepPlan,
+) -> f32 {
+    let raw = if plan.stopping {
+        hip_x + plan.capture_offset
+    } else {
+        let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
+        // Raibert's `x_target` is the offset from the hip **at touchdown**, not
+        // at lift-off: the hip keeps travelling while the foot is airborne, so
+        // predict that motion. Re-planning every frame with the shrinking
+        // `t_flight` keeps the world-space target stationary at constant
+        // velocity (hip advance `v·dt` cancels the prediction shrink) and makes
+        // the target track acceleration/braking transients mid-swing.
+        hip_x + v * t_flight + x_target
+    };
+    raw.clamp(hip_x - plan.x_max, hip_x + plan.x_max)
+}
 
 /// Advance a single leg through the stance → swing → plant state machine.
 ///
@@ -331,6 +494,10 @@ const SWING_TRIGGER_SPEED: f32 = 1.0;
 /// only lift off when the opposite foot is planted, which enforces a strict
 /// anti-phase alternating gait: at most one foot is airborne at any instant, so
 /// the two legs can never swing into each other.
+///
+/// Returns `Some(delta_x)` on the tick the foot touches down, where `delta_x`
+/// is the signed offset from the hip to the new support foot — the event that
+/// drives the backward solve in [`step_lower_body`].
 #[allow(clippy::too_many_arguments)]
 fn step_leg(
     leg: &mut LegState,
@@ -339,36 +506,42 @@ fn step_leg(
     v_desired: f32,
     other_swinging: bool,
     config: &LowerBodyConfig,
+    plan: &StepPlan,
     dt: f32,
-) {
+) -> Option<f32> {
     match leg.phase {
         GaitPhase::Stance => {
             // The stance foot is pinned in world space; the hip moves away and
             // the leg stretches through the IK solve.
             leg.foot_pos = leg.plant_pos;
             leg.phase_timer -= dt;
-            // Only step while actually moving; at rest the foot stays planted,
-            // and only while the opposite foot is planted (anti-phase swap).
-            if leg.phase_timer <= 0.0 && v.abs() > SWING_TRIGGER_SPEED && !other_swinging {
-                let x_target =
-                    compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
-                // Raibert's `x_target` is the offset from the hip **at touchdown**,
-                // not at lift-off: the hip keeps travelling `v * swing_duration`
-                // while the foot is airborne, so predict that motion and aim the
-                // plant ahead of where the hip *will be* when the foot lands.
-                // Without this term the hip outruns every step and both feet
-                // trail behind it.
+            // Step while there is move *intent*, or while braking to a stop
+            // (the capture-point plan needs a foot to land on). With neither,
+            // the gait freezes and the hip settles over the planted feet (see
+            // the stop-settle servo in `step_lower_body`). Steps also require
+            // the opposite foot to be planted (anti-phase swap).
+            let wants_step = v_desired.abs() > SWING_TRIGGER_SPEED
+                || (plan.stopping && v.abs() > SWING_TRIGGER_SPEED);
+            if leg.phase_timer <= 0.0 && wants_step && !other_swinging {
                 let mut swing_to = leg.plant_pos;
-                swing_to.x = hip_x + v * config.swing_duration_ts + x_target;
+                swing_to.x =
+                    plan_target_x(hip_x, v, v_desired, config.swing_duration_ts, config, plan);
                 swing_to.y = config.floor_y;
                 leg.phase = GaitPhase::Swing;
                 leg.phase_timer = config.swing_duration_ts;
                 leg.swing_from = leg.plant_pos;
                 leg.swing_to = swing_to;
             }
+            None
         }
         GaitPhase::Swing => {
             leg.phase_timer -= dt;
+            // Continuous re-planning: refresh the target from the current hip
+            // position, velocity and remaining flight time. Open-loop targets
+            // frozen at lift-off are what made sudden stops land both feet on
+            // one side of the hip.
+            leg.swing_to.x =
+                plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
             // Progress 1→0 over the swing duration (elapsed fraction).
             let total = config.swing_duration_ts.max(f32::EPSILON);
             let t = (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0);
@@ -383,21 +556,27 @@ fn step_leg(
                 leg.plant_pos = leg.swing_to;
                 leg.phase = GaitPhase::Stance;
                 leg.phase_timer = config.stance_duration_ts;
+                // Touchdown event: signed hip→foot offset for the backward solve.
+                return Some(leg.plant_pos.x - hip_x);
             }
+            None
         }
     }
 }
 
 /// Run one full resolver tick.
 ///
-/// # Pipeline (mirrors `plans/Raibert.md`)
+/// # Pipeline (mirrors `plans/raibert_redesign.md`)
 /// 1. Read target hip height (normal vs crouch).
-/// 2. `X_max` from the current `H`.
-/// 3. Backward math → `v_max`.
-/// 4. Clamp hip velocity to `v_max`.
-/// 5. Forward math → `x_target` for each leg in swing.
-/// 6. Flat floor ⇒ plant y is `floor_y`; parabolic lift during swing.
-/// 7. 2-bone IK for each leg → knees/feet.
+/// 2. Precomputed feasibility envelope ([`GaitLimits`]) at the current `H`.
+/// 3. Velocity shaping: accel clamped to `a_max`, stop decel floor
+///    `v²/(2·X_max)`, ceiling `min(v_abs, v_cruise_max)`.
+/// 4. Stop-settle servo once braking has bled the speed off.
+/// 5. Forward math with per-frame re-planning + capture-point stop; targets
+///    clamped to `hip ± X_max`.
+/// 6. Backward solve at each touchdown event, blended with gain `beta`.
+/// 7. Flat floor ⇒ plant y is `floor_y`; parabolic lift during swing.
+/// 8. 2-bone IK for each leg → knees/feet.
 pub fn step_lower_body(
     input_dir: Vec2,
     config: &LowerBodyConfig,
@@ -405,7 +584,6 @@ pub fn step_lower_body(
     dt: f32,
 ) -> (LowerBodyPose, DebugInfo) {
     let dir = input_dir.normalize_or_zero();
-    let v_desired_scalar = dir.x * config.target_speed;
 
     // 1. --- Hip height ---
     let h_target = if config.crouch {
@@ -416,21 +594,62 @@ pub fn step_lower_body(
     state.hip_height = approach(state.hip_height, h_target, config.hip_height * dt * 3.0);
     let h = state.hip_height;
 
-    // 2. --- X_max at current height ---
-    let x_max = compute_x_max(config.thigh_len, config.calf_len, h, config.safety_margin);
+    // 2. --- Feasibility envelope at the current height ---
+    let limits = GaitLimits::from_config(config, h, config.target_speed);
+    let x_max = limits.x_max;
+    // Cap the desired speed at the self-consistent cruise ceiling so the kv
+    // feedback term can never develop a persistent bias larger than the
+    // workspace (which would push late-stance feet out of reach).
+    let v_desired_scalar = dir.x * config.target_speed.min(limits.v_plan_cap);
 
-    // 3. --- Backward: v_max ---
-    let v_max = compute_v_max(
-        x_max,
-        config.kv,
-        config.stance_duration_ts,
-        config.target_speed,
-    );
+    // 3. --- Velocity shaping ---
+    // While braking to a stop, raise the deceleration to at least the stop
+    // floor `v²/(2·X_max)`: this guarantees the capture point stays within
+    // reach, so the hip can always brake onto its next foot instead of
+    // overshooting both plants.
+    let v_prev = state.hip_vel.x;
+    let stopping = v_desired_scalar == 0.0 && v_prev.abs() > SWING_TRIGGER_SPEED;
+    let a_cmd = config.accel.min(limits.a_max).max(f32::EPSILON);
+    let a_eff = if stopping {
+        let a_stop_floor = v_prev * v_prev / (2.0 * x_max.max(f32::EPSILON));
+        a_cmd.max(a_stop_floor)
+    } else {
+        a_cmd
+    };
+    // Ceiling: while braking, allow up to the absolute envelope (the hip may be
+    // faster than cruise from external pushes); under power, cap at the
+    // corrected cruise ceiling so plants stay in reach. Releasing input at
+    // speed therefore never snaps the velocity.
+    let v_ceil = if v_desired_scalar == 0.0 {
+        limits.v_abs
+    } else {
+        limits.v_abs.min(limits.v_cruise_max)
+    };
+    let mut v = approach(v_prev, v_desired_scalar, a_eff * dt).clamp(-v_ceil, v_ceil);
 
-    // 4. --- Clamp velocity ---
-    let accel_step = config.accel * dt;
-    let v_unclamped = approach(state.hip_vel.x, v_desired_scalar, accel_step);
-    let v = v_unclamped.clamp(-v_max, v_max);
+    // 4. --- Stop settle: the feet own the hip ---
+    // Once braking has bled the speed off and both feet are planted, glide the
+    // hip to the support centre (midpoint of the planted feet) so the
+    // character comes to rest balanced between them. The settle velocity is
+    // capped by the kinematic braking limit `sqrt(2·a·d)` so the hip
+    // decelerates smoothly into the midpoint without overshooting.
+    if v_desired_scalar == 0.0
+        && !stopping
+        && state.left.phase == GaitPhase::Stance
+        && state.right.phase == GaitPhase::Stance
+    {
+        let mid_x = (state.left.plant_pos.x + state.right.plant_pos.x) * 0.5;
+        let to_mid = mid_x - state.hip_pos.x;
+        if to_mid.abs() > 0.5 {
+            let settle_time = config.stance_duration_ts.max(f32::EPSILON);
+            let brake_limit = (2.0 * a_cmd * to_mid.abs()).sqrt();
+            let v_settle = (to_mid / settle_time).clamp(-brake_limit, brake_limit);
+            v = approach(v, v_settle, a_cmd * dt);
+        } else {
+            v = approach(v, 0.0, a_cmd * dt);
+        }
+    }
+
     state.hip_vel.x = v;
     // Kinematic sandbox: no vertical hip dynamics.
     state.hip_vel.y = 0.0;
@@ -439,25 +658,84 @@ pub fn step_lower_body(
     state.hip_pos.x += v * dt;
     state.hip_pos.y = config.floor_y + h;
 
-    // 5-7. --- Per-leg foot placement + IK ---
-    step_leg(
+    // 4c. --- Stance constraint: the hip may never outrun its pinned feet ---
+    // A stance foot is pinned in world space. If the hip travels beyond the
+    // (margined) horizontal reach of a planted foot — which the anti-phase
+    // gate can provoke during hard transients, when the rear foot's lift-off
+    // is delayed until the swinging foot plants — the IK ray-clamp would lift
+    // that foot off the floor. Clamp the hip into the intersection of the
+    // stance feet's windows `[plant ± X_max]`; the position stays continuous
+    // and the constraint releases as soon as the trailing foot re-plants.
+    {
+        let mut lo = f32::NEG_INFINITY;
+        let mut hi = f32::INFINITY;
+        for leg in [&state.left, &state.right] {
+            if leg.phase == GaitPhase::Stance {
+                lo = lo.max(leg.plant_pos.x - x_max);
+                hi = hi.min(leg.plant_pos.x + x_max);
+            }
+        }
+        if lo <= hi {
+            state.hip_pos.x = state.hip_pos.x.clamp(lo, hi);
+        }
+    }
+
+    // 5. --- Capture point + per-leg foot placement ---
+    // While stopping, aim the swing foot at the point where the hip will come
+    // to rest under `a_eff` (Pratt capture point), so the hip brakes onto its
+    // foot rather than past it.
+    let capture_offset = if stopping {
+        v * v.abs() / (2.0 * a_eff)
+    } else {
+        0.0
+    };
+    let plan = StepPlan {
+        x_max,
+        stopping,
+        capture_offset,
+    };
+    let left_td = step_leg(
         &mut state.left,
         state.hip_pos.x,
         v,
         v_desired_scalar,
         state.right.phase == GaitPhase::Swing,
         config,
+        &plan,
         dt,
     );
-    step_leg(
+    let right_td = step_leg(
         &mut state.right,
         state.hip_pos.x,
         v,
         v_desired_scalar,
         state.left.phase == GaitPhase::Swing,
         config,
+        &plan,
         dt,
     );
+
+    // 6. --- Backward solve at touchdown (foot → hip) ---
+    // Invert the *actual* plant offset to get the hip velocity whose next
+    // forward plan lands exactly on it, then blend with gain `beta` (1 =
+    // deadbeat). Skipped while stopping: capture plants encode "brake to rest
+    // here", which the cruise inversion would misread as a velocity command.
+    let mut v_support = 0.0;
+    if v_desired_scalar != 0.0 {
+        if let Some(delta) = left_td.or(right_td) {
+            v_support = compute_support_velocity(
+                delta,
+                config.kv,
+                config.stance_duration_ts,
+                v_desired_scalar,
+            );
+            let beta = config.beta.clamp(0.0, 1.0);
+            v = (v + beta * (v_support - v)).clamp(-v_ceil, v_ceil);
+            state.hip_vel.x = v;
+        }
+    }
+
+    // 7-8. --- IK ---
 
     // IK returns the *effective* foot (clamped to the reachable annulus), so the
     // rendered bones always satisfy thigh/calf length even when the hip briefly
@@ -487,13 +765,17 @@ pub fn step_lower_body(
 
     let debug = DebugInfo {
         x_max,
-        v_max,
+        v_max: v_ceil,
         v_desired: v_desired_scalar,
         v_clamped: v,
         left_phase: state.left.phase,
         right_phase: state.right.phase,
         left_target_x: state.left.swing_to.x,
         right_target_x: state.right.swing_to.x,
+        a_max: limits.a_max,
+        v_abs: limits.v_abs,
+        v_support,
+        capture_x: capture_offset,
     };
 
     (pose, debug)
@@ -528,14 +810,101 @@ mod tests {
         assert_eq!(compute_x_max(50.0, 50.0, 200.0, 1.0), 0.0);
     }
 
+    /// Non-stopping plan context for the direct `step_leg` unit tests.
+    fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
+        StepPlan {
+            x_max: compute_x_max(
+                cfg.thigh_len,
+                cfg.calf_len,
+                cfg.hip_height,
+                cfg.safety_margin,
+            ),
+            stopping: false,
+            capture_offset: 0.0,
+        }
+    }
+
     #[test]
     fn test_compute_v_max_formula() {
-        // v_max = (X_max + kv·v_desired) / (Ts/2 + kv)
-        let v_max = compute_v_max(66.33, 0.12, 0.28, 120.0);
-        let expected = (66.33 + 0.12 * 120.0) / (0.28 * 0.5 + 0.12);
+        // v_max = (X_max + kv·v_desired) / (Ts/2 + kv + T_swing)
+        let v_max = compute_v_max(66.33, 0.12, 0.28, 0.22, 120.0);
+        let expected = (66.33 + 0.12 * 120.0) / (0.28 * 0.5 + 0.12 + 0.22);
         assert!((v_max - expected).abs() < 1e-3);
         // Guard against degenerate denominator.
-        assert_eq!(compute_v_max(50.0, 0.0, 0.0, 0.0), 0.0);
+        assert_eq!(compute_v_max(50.0, 0.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_gait_limits_envelope() {
+        let cfg = default_config();
+        let limits = GaitLimits::from_config(&cfg, cfg.hip_height, cfg.target_speed);
+        // Hand-computed defaults: X_max = √(110²−90²)·0.85 ≈ 53.76
+        let x_max = (110.0f32 * 110.0 - 90.0 * 90.0).sqrt() * 0.85;
+        assert!(
+            (limits.x_max - x_max).abs() < 1e-2,
+            "x_max={}",
+            limits.x_max
+        );
+        // a_max = 2·m_e·X_max / T_swing²
+        let a_max = 2.0 * cfg.prediction_margin * x_max / (cfg.swing_duration_ts.powi(2));
+        assert!(
+            (limits.a_max - a_max).abs() < 1e-1,
+            "a_max={}",
+            limits.a_max
+        );
+        // v_abs = 2·X_max·√m_e / T_swing
+        let v_abs = 2.0 * x_max * cfg.prediction_margin.sqrt() / cfg.swing_duration_ts;
+        assert!(
+            (limits.v_abs - v_abs).abs() < 1e-1,
+            "v_abs={}",
+            limits.v_abs
+        );
+        // Consistency: at v_abs the stop decel floor v²/(2·X_max) equals a_max.
+        let a_stop_at_v_abs = v_abs * v_abs / (2.0 * x_max);
+        assert!(
+            (a_stop_at_v_abs - a_max).abs() / a_max < 1e-3,
+            "a_stop(v_abs)={a_stop_at_v_abs} != a_max={a_max}"
+        );
+        // Degenerate height (hip above full reach) collapses the envelope.
+        let degen = GaitLimits::from_config(&cfg, 200.0, cfg.target_speed);
+        assert_eq!(degen.x_max, 0.0);
+        assert_eq!(degen.a_max, 0.0);
+        assert_eq!(degen.v_abs, 0.0);
+    }
+
+    #[test]
+    fn test_backward_forward_identity() {
+        // backward∘forward = identity: the support velocity inverted from a
+        // forward-planned offset recovers the original velocity exactly.
+        let cfg = default_config();
+        for v in [-200.0, -50.0, 0.0, 37.5, 120.0, 300.0] {
+            for v_d in [-120.0, 0.0, 120.0] {
+                let delta = compute_forward_target(v, v_d, cfg.kv, cfg.stance_duration_ts);
+                let v_back = compute_support_velocity(delta, cfg.kv, cfg.stance_duration_ts, v_d);
+                assert!(
+                    (v_back - v).abs() < 1e-2,
+                    "v={v} v_d={v_d} → v_back={v_back}"
+                );
+            }
+        }
+        // Degenerate denominator guard.
+        assert_eq!(compute_support_velocity(10.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_support_velocity_corrects_plant_error() {
+        // A plant error `e` at touchdown maps to the velocity correction
+        // `e / (Ts/2 + kv)`, annihilated in one stride (deadbeat).
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let e = 7.5;
+        let delta = v * cfg.stance_duration_ts * 0.5 + e;
+        let v_support = compute_support_velocity(delta, cfg.kv, cfg.stance_duration_ts, v);
+        let expected = v + e / (cfg.stance_duration_ts * 0.5 + cfg.kv);
+        assert!(
+            (v_support - expected).abs() < 1e-3,
+            "v_support={v_support} expected={expected}"
+        );
     }
 
     #[test]
@@ -567,15 +936,17 @@ mod tests {
         };
 
         // Lift off with the hip at x = 0.
-        step_leg(&mut leg, 0.0, v, v, false, &cfg, 0.001);
+        let plan = cruise_plan(&cfg);
+        let _ = step_leg(&mut leg, 0.0, v, v, false, &cfg, &plan, 0.001);
         assert_eq!(leg.phase, GaitPhase::Swing);
 
         // Fly through the swing while the hip keeps moving.
         let dt = 0.01;
         let mut hip_x = 0.0;
+        let mut touchdown = None;
         for _ in 0..((cfg.swing_duration_ts / dt).ceil() as usize + 2) {
             hip_x += v * dt;
-            step_leg(&mut leg, hip_x, v, v, false, &cfg, dt);
+            touchdown = step_leg(&mut leg, hip_x, v, v, false, &cfg, &plan, dt);
             if leg.phase == GaitPhase::Stance {
                 break;
             }
@@ -592,6 +963,11 @@ mod tests {
             (offset - expected).abs() < v * dt * 2.0,
             "offset={offset:.1}px expected≈{expected:.1}px"
         );
+        // The touchdown event reports the same signed hip→foot offset.
+        assert!(
+            touchdown.is_some_and(|d| (d - offset).abs() < 1e-3),
+            "touchdown event missing or wrong: {touchdown:?} vs {offset}"
+        );
     }
 
     #[test]
@@ -605,22 +981,25 @@ mod tests {
         // Right leg is half a stance out of phase: after half a stance of
         // forward motion it swings while the left is still in stance.
         let dt = cfg.stance_duration_ts * 0.5;
-        step_leg(
+        let plan = cruise_plan(&cfg);
+        let _ = step_leg(
             &mut state.left,
             state.hip_pos.x,
             40.0,
             120.0,
             state.right.phase == GaitPhase::Swing,
             &cfg,
+            &plan,
             dt,
         );
-        step_leg(
+        let _ = step_leg(
             &mut state.right,
             state.hip_pos.x,
             40.0,
             120.0,
             state.left.phase == GaitPhase::Swing,
             &cfg,
+            &plan,
             dt,
         );
         assert_eq!(state.left.phase, GaitPhase::Stance);
@@ -633,22 +1012,25 @@ mod tests {
         let mut state = ResolverState::new(&cfg);
         // At standstill (v = 0, v_desired = 0) the stance never opens a swing.
         let dt = cfg.stance_duration_ts + cfg.swing_duration_ts + 0.1;
-        step_leg(
+        let plan = cruise_plan(&cfg);
+        let _ = step_leg(
             &mut state.left,
             state.hip_pos.x,
             0.0,
             0.0,
             state.right.phase == GaitPhase::Swing,
             &cfg,
+            &plan,
             dt,
         );
-        step_leg(
+        let _ = step_leg(
             &mut state.right,
             state.hip_pos.x,
             0.0,
             0.0,
             state.left.phase == GaitPhase::Swing,
             &cfg,
+            &plan,
             dt,
         );
         assert_eq!(state.left.phase, GaitPhase::Stance);
@@ -664,16 +1046,18 @@ mod tests {
         // A stance leg keeps its foot pinned even as the hip moves. Step in
         // small increments so the phase never times out into a swing.
         let dt = cfg.stance_duration_ts * 0.25;
+        let plan = cruise_plan(&cfg);
         let mut hip_x = state.hip_pos.x;
         for _ in 0..3 {
             hip_x += 40.0 * dt;
-            step_leg(
+            let _ = step_leg(
                 &mut state.left,
                 hip_x,
                 40.0,
                 120.0,
                 state.right.phase == GaitPhase::Swing,
                 &cfg,
+                &plan,
                 dt,
             );
             assert!(
@@ -799,5 +1183,215 @@ mod tests {
             "hip only straddled by the feet on {:.0}% of the stride at cruise",
             frac * 100.0
         );
+    }
+
+    #[test]
+    fn test_sudden_stop_hip_settles_between_feet() {
+        // Symptom: on a sudden stop both feet ended up ahead of the hip and
+        // the gait froze there. With the stop-settle servo the hip must glide
+        // to the support centre and come to rest between the planted feet.
+        let cfg = default_config();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+
+        // Cruise for 3 strides.
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for _ in 0..((stride * 3.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        let hip_at_stop = state.hip_pos.x;
+
+        // Sudden stop: release input and let it settle.
+        for _ in 0..(3.0 / dt) as usize {
+            step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+        }
+
+        assert_eq!(state.left.phase, GaitPhase::Stance);
+        assert_eq!(state.right.phase, GaitPhase::Stance);
+        let mid = (state.left.plant_pos.x + state.right.plant_pos.x) * 0.5;
+        assert!(
+            (state.hip_pos.x - mid).abs() < 2.0,
+            "hip did not settle between the feet: hip={:.1} mid={mid:.1}",
+            state.hip_pos.x
+        );
+        assert!(
+            state.hip_vel.x.abs() < 5.0,
+            "hip still sliding after settle: v={}",
+            state.hip_vel.x
+        );
+        // The settle must have actually moved the hip toward the feet (they
+        // were planted ahead of it at cruise-stop).
+        assert!(
+            (state.hip_pos.x - hip_at_stop).abs() > 1.0,
+            "hip never moved during settle"
+        );
+    }
+
+    #[test]
+    fn test_no_phantom_steps_after_stop() {
+        // With no move intent and the hip fully settled, the gait must freeze:
+        // the plants stay put, so the settle servo can never chain into a
+        // phantom walk-off. (Braking steps *while* the hip is still moving are
+        // legal — they are the capture-point stop — so settle fully first.)
+        let cfg = default_config();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for _ in 0..((stride * 3.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        // Brake + settle completely.
+        for _ in 0..(3.0 / dt) as usize {
+            step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+        }
+        assert!(state.hip_vel.x.abs() < SWING_TRIGGER_SPEED);
+        let (l_plant, r_plant) = (state.left.plant_pos, state.right.plant_pos);
+        for _ in 0..(2.0 / dt) as usize {
+            step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+        }
+        assert_eq!(state.left.phase, GaitPhase::Stance);
+        assert_eq!(state.right.phase, GaitPhase::Stance);
+        assert!(
+            (state.left.plant_pos - l_plant).length() < 1e-3,
+            "left foot re-planted with no input"
+        );
+        assert!(
+            (state.right.plant_pos - r_plant).length() < 1e-3,
+            "right foot re-planted with no input"
+        );
+    }
+
+    #[test]
+    fn test_no_floating_feet_at_max_speed() {
+        // Symptom: at high speed the stance foot floated in mid-air because
+        // the plant target exceeded the leg reach and the IK ray-clamped it
+        // off the floor. With the corrected ceiling + workspace clamp, every
+        // stance foot must stay on the floor and within reach at all times.
+        let mut cfg = default_config();
+        cfg.target_speed = 600.0; // far above the feasible envelope
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let reach = cfg.thigh_len + cfg.calf_len;
+        let limits = GaitLimits::from_config(&cfg, cfg.hip_height, cfg.target_speed);
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let frames = (stride * 6.0 / dt) as usize;
+        let mut v_peak = 0.0f32;
+        for frame in 0..frames {
+            let (pose, debug) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            v_peak = v_peak.max(debug.v_clamped.abs());
+            for (foot, phase, side) in [
+                (pose.left_foot, debug.left_phase, "left"),
+                (pose.right_foot, debug.right_phase, "right"),
+            ] {
+                if phase == GaitPhase::Stance {
+                    assert!(
+                        (foot.y - cfg.floor_y).abs() < 1e-2,
+                        "frame {frame} {side} stance foot off the floor: y={}",
+                        foot.y
+                    );
+                    let d = (foot - pose.hip).length();
+                    assert!(
+                        d <= reach + 1e-2,
+                        "frame {frame} {side} stance foot out of reach: d={d}"
+                    );
+                }
+            }
+        }
+        // The velocity must have been clamped to the feasible cruise ceiling.
+        assert!(
+            v_peak <= limits.v_cruise_max + 1e-2,
+            "v_peak={v_peak} exceeded cruise ceiling {}",
+            limits.v_cruise_max
+        );
+        assert!(
+            v_peak > 0.5 * limits.v_cruise_max,
+            "never reached a meaningful speed: v_peak={v_peak}"
+        );
+    }
+
+    #[test]
+    fn test_sudden_stop_from_high_speed() {
+        // Symptom: on a sudden stop from speed both feet ended up on one side
+        // of the hip. With the capture-point stop + decel floor the hip must
+        // brake onto its feet and come to rest between them, and the capture
+        // point must never leave the workspace.
+        let mut cfg = default_config();
+        cfg.target_speed = 350.0;
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for _ in 0..((stride * 4.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        assert!(
+            state.hip_vel.x > 100.0,
+            "did not reach speed before the stop: v={}",
+            state.hip_vel.x
+        );
+
+        // Sudden stop: release input, verify the capture point stays in reach
+        // while braking, then let it settle.
+        let limits = GaitLimits::from_config(&cfg, cfg.hip_height, cfg.target_speed);
+        for _ in 0..(4.0 / dt) as usize {
+            let (_pose, debug) = step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+            assert!(
+                debug.capture_x.abs() <= limits.x_max + 1e-2,
+                "capture point out of reach: {}",
+                debug.capture_x
+            );
+        }
+
+        assert_eq!(state.left.phase, GaitPhase::Stance);
+        assert_eq!(state.right.phase, GaitPhase::Stance);
+        let mid = (state.left.plant_pos.x + state.right.plant_pos.x) * 0.5;
+        assert!(
+            (state.hip_pos.x - mid).abs() < 2.0,
+            "hip did not settle between the feet: hip={:.1} mid={mid:.1}",
+            state.hip_pos.x
+        );
+        assert!(
+            state.hip_vel.x.abs() < 5.0,
+            "hip still sliding after settle: v={}",
+            state.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_velocity_continuity() {
+        // The hip velocity must change continuously: bounded by the effective
+        // acceleration (command accel clamped to a_max, or the stop decel
+        // floor) on every non-touchdown frame. Touchdown frames apply the
+        // backward-solve blend and are exempt.
+        let cfg = default_config();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let limits = GaitLimits::from_config(&cfg, cfg.hip_height, cfg.target_speed);
+        let a_bound = cfg.accel.min(limits.a_max);
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+
+        let mut v_prev = 0.0;
+        let frames = (stride * 8.0 / dt) as usize;
+        for frame in 0..frames {
+            // Cruise, then sudden stop halfway through.
+            let input = if frame < frames / 2 {
+                Vec2::X
+            } else {
+                Vec2::ZERO
+            };
+            let (_pose, debug) = step_lower_body(input, &cfg, &mut state, dt);
+            if debug.v_support == 0.0 {
+                // Stop decel floor: v²/(2·X_max), evaluated at the frame's
+                // starting speed.
+                let a_stop = v_prev * v_prev / (2.0 * limits.x_max);
+                let dv_max = a_bound.max(a_stop) * dt * 1.05 + 1e-3;
+                assert!(
+                    (debug.v_clamped - v_prev).abs() <= dv_max,
+                    "frame {frame}: velocity jumped {} → {} (dv_max={dv_max})",
+                    v_prev,
+                    debug.v_clamped
+                );
+            }
+            v_prev = debug.v_clamped;
+        }
     }
 }
