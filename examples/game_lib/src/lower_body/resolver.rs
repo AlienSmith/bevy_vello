@@ -260,30 +260,46 @@ pub fn compute_x_max(thigh: f32, calf: f32, hip_height: f32, margin: f32) -> f32
     }
 }
 
-/// Corrected cruise ceiling:
-/// `v_max = (X_max + kv * v_desired_mag) / (Ts/2 + kv + T_swing)`.
+/// Cruise ceiling from the two-sided stance-reach constraint.
 ///
-/// The `T_swing` term accounts for the hip's travel while the foot is airborne:
-/// a plant aimed `x_target` ahead of the *touchdown* hip sits
-/// `x_target + v·T_swing` ahead of the *lift-off* hip. The old denominator
-/// omitted it, so at speed the hip planted beyond its own reach and the IK
-/// ray-clamp lifted the stance foot off the floor (the "floating foot" bug).
+/// A pinned stance foot's offset from the hip sweeps monotonically from
+/// `+x_target` at touchdown to `−(v·Ts − x_target)` at lift-off, and the swing
+/// foot's offset interpolates between the same bounds, so the reach constraint
+/// is `|foot − hip| ≤ X_max` at both ends of the sweep:
+///
+/// `v·Ts/2 + kv·|v − v_desired| ≤ X_max`.
+///
+/// Solving for `v` on each side of `v_desired` gives two ceilings; the binding
+/// one is their minimum:
+/// - forward side (v ≥ v_d): `v ≤ (X_max + kv·v_d) / (Ts/2 + kv)`
+/// - backward side (v ≤ v_d): `v ≤ (X_max − kv·v_d) / (Ts/2 − kv)`
+///
+/// Note `T_swing` does **not** enter: the foot−hip offset is bounded by the
+/// same extremes during swing as during stance. The original "floating foot"
+/// bug came from an uncapped, infeasible `v_desired` (e.g. 600 px/s, where
+/// `v·Ts/2 = 168 > X_max`) violating the end-of-stance side — fixed by capping
+/// the desired speed itself (see [`GaitLimits::v_plan_cap`]).
 ///
 /// `v_desired_mag` is the magnitude of the desired cruise speed (non-negative);
 /// the result is a symmetric positive speed ceiling for both directions.
 #[inline]
-pub fn compute_v_max(
-    x_max: f32,
-    kv: f32,
-    stance_ts: f32,
-    swing_ts: f32,
-    v_desired_mag: f32,
-) -> f32 {
-    let denom = stance_ts * 0.5 + kv + swing_ts;
-    if denom <= f32::EPSILON {
+pub fn compute_v_max(x_max: f32, kv: f32, stance_ts: f32, v_desired_mag: f32) -> f32 {
+    let half = stance_ts * 0.5;
+    let fwd_denom = half + kv;
+    if fwd_denom <= f32::EPSILON {
         return 0.0;
     }
-    (x_max + kv * v_desired_mag) / denom
+    let fwd = (x_max + kv * v_desired_mag) / fwd_denom;
+    let back_denom = half - kv;
+    let back = if back_denom > f32::EPSILON {
+        ((x_max - kv * v_desired_mag) / back_denom).max(0.0)
+    } else if x_max >= kv * v_desired_mag {
+        // kv feedback never pushes past reach on the slow side.
+        f32::INFINITY
+    } else {
+        0.0
+    };
+    fwd.min(back)
 }
 
 /// The generalized backward solve (foot → hip). Given the signed offset
@@ -321,13 +337,14 @@ pub struct GaitLimits {
     /// saturates the reach, and the stop decel floor `v²/(2·X_max)` equals
     /// `a_max` exactly.
     pub v_abs: f32,
-    /// Cruise ceiling from the corrected backward solve (includes the
-    /// `T_swing` flight term so plants stay in reach at steady state).
+    /// Cruise ceiling from the two-sided stance-reach constraint
+    /// `v·Ts/2 + kv·|v − v_d| ≤ X_max` (see [`compute_v_max`]).
     pub v_cruise_max: f32,
     /// Cap on the *desired* speed fed to the planner: the self-consistent
-    /// cruise ceiling `X_max / (T_swing + Ts/2)` where the kv feedback term
-    /// vanishes. Requesting more would leave a persistent kv bias
-    /// `kv·(v − v_d)` that pushes late-stance feet out of reach.
+    /// cruise ceiling `2·X_max / Ts` where the kv feedback term vanishes
+    /// (`v == v_d` ⇒ offset peaks at `v·Ts/2`). Requesting more would leave a
+    /// persistent kv bias `kv·(v − v_d)` that pushes late-stance feet out of
+    /// reach.
     pub v_plan_cap: f32,
 }
 
@@ -347,15 +364,11 @@ impl GaitLimits {
         let a_max = 2.0 * m_e * x_max / (t_swing * t_swing);
         // v_abs: speed at which the stop floor v²/(2·X_max) equals a_max.
         let v_abs = 2.0 * x_max * m_e.sqrt() / t_swing;
-        let v_plan_cap = x_max / (t_swing + config.stance_duration_ts * 0.5);
+        let t_stance = config.stance_duration_ts.max(f32::EPSILON);
+        // v == v_d ⇒ offset peaks at v·Ts/2 ≤ X_max  ⇒  v ≤ 2·X_max/Ts.
+        let v_plan_cap = 2.0 * x_max / t_stance;
         let v_d_eff = v_desired_mag.min(v_plan_cap);
-        let v_cruise_max = compute_v_max(
-            x_max,
-            config.kv,
-            config.stance_duration_ts,
-            config.swing_duration_ts,
-            v_d_eff,
-        );
+        let v_cruise_max = compute_v_max(x_max, config.kv, config.stance_duration_ts, v_d_eff);
         Self {
             x_max,
             a_max,
@@ -826,12 +839,19 @@ mod tests {
 
     #[test]
     fn test_compute_v_max_formula() {
-        // v_max = (X_max + kv·v_desired) / (Ts/2 + kv + T_swing)
-        let v_max = compute_v_max(66.33, 0.12, 0.28, 0.22, 120.0);
-        let expected = (66.33 + 0.12 * 120.0) / (0.28 * 0.5 + 0.12 + 0.22);
-        assert!((v_max - expected).abs() < 1e-3);
+        // Two-sided constraint v·Ts/2 + kv·|v − v_d| ≤ X_max; the forward
+        // side binds when v ≥ v_d: (X_max + kv·v_d) / (Ts/2 + kv).
+        let v_max = compute_v_max(66.33, 0.12, 0.28, 120.0);
+        let fwd = (66.33 + 0.12 * 120.0) / (0.28 * 0.5 + 0.12);
+        let back = (66.33 - 0.12 * 120.0) / (0.28 * 0.5 - 0.12);
+        assert!(fwd < back, "forward side should bind at these params");
+        assert!((v_max - fwd).abs() < 1e-3, "v_max={v_max} fwd={fwd}");
+        // With kv = 0 both sides collapse to the geometric cruise limit
+        // 2·X_max/Ts.
+        let geo = compute_v_max(66.33, 0.0, 0.28, 120.0);
+        assert!((geo - 2.0 * 66.33 / 0.28).abs() < 1e-3, "geo={geo}");
         // Guard against degenerate denominator.
-        assert_eq!(compute_v_max(50.0, 0.0, 0.0, 0.0, 0.0), 0.0);
+        assert_eq!(compute_v_max(50.0, 0.0, 0.0, 0.0), 0.0);
     }
 
     #[test]
@@ -864,6 +884,13 @@ mod tests {
         assert!(
             (a_stop_at_v_abs - a_max).abs() / a_max < 1e-3,
             "a_stop(v_abs)={a_stop_at_v_abs} != a_max={a_max}"
+        );
+        // v_plan_cap = 2·X_max / Ts (self-consistent cruise ceiling, kv term 0).
+        let v_plan_cap = 2.0 * x_max / cfg.stance_duration_ts;
+        assert!(
+            (limits.v_plan_cap - v_plan_cap).abs() < 1e-2,
+            "v_plan_cap={} expected={v_plan_cap}",
+            limits.v_plan_cap
         );
         // Degenerate height (hip above full reach) collapses the envelope.
         let degen = GaitLimits::from_config(&cfg, 200.0, cfg.target_speed);
