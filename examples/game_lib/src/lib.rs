@@ -32,7 +32,7 @@ pub use crate::{
     character::{
         CharacterController, ConnectivityRoot, IkMode, LeftArmController, LimbConfig,
         ResetLimbControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
-        SpineIndicator, StringPool, WhichLimb,
+        SpineDriveEnabled, SpineIndicator, StringPool, WhichLimb,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},
@@ -46,8 +46,9 @@ pub use crate::{
     },
     lower_body::{
         compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max,
-        solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, LegState, LowerBodyConfig,
-        LowerBodyController, LowerBodyParams, LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
+        drive_hip_pin, reset_hip_pin, solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin,
+        HipPinParams, LegState, LowerBodyConfig, LowerBodyController, LowerBodyParams,
+        LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
     },
 };
 

@@ -104,6 +104,21 @@ impl Default for SpineConfig {
     }
 }
 
+/// Runtime kill-switch for the spine drive ([`systems::tick_spine_drive`]).
+///
+/// The hip-pin bridge (`lower_body::hip_pin`) owns the `P1/P2/P3` frame while it
+/// is enabled; setting `SpineDriveEnabled(false)` makes the drive emit nothing
+/// so the two actuators never fight over the same particles. Defaults to `true`
+/// (drive on) so every existing scene is unchanged.
+#[derive(Resource)]
+pub struct SpineDriveEnabled(pub bool);
+
+impl Default for SpineDriveEnabled {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 #[derive(Clone)]
 pub struct LimbConfig {
     /// Fraction of distance to blend toward true target each frame.

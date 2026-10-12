@@ -17,6 +17,7 @@ use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use spine_indicator::{IndicatorVisibility, SpineTuneParams};
 
+use bevy_vello::integrations::physics::systems::update_constraint_world;
 use bevy_vello::{
     collision::{
         generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
@@ -42,10 +43,11 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    default_input_map,
+    default_input_map, drive_hip_pin, reset_hip_pin,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
-    CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
-    PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
+    CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems, HipPin,
+    HipPinParams, PlayerAction, PlayerMarker, SpineController, SpineDriveEnabled,
+    VelloCharacterPlugin,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -183,6 +185,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(IndicatorVisibility::default())
         .insert_resource(cannon::CannonParams::default())
         .insert_resource(GravityToggle::default())
+        .insert_resource(HipPinParams::default())
+        // Pin mode is ON by default: the hip pin owns P1/P2/P3, so the spine
+        // drive is silenced (they must never both queue constraints on the same
+        // particles). Toggle both in the "Hip Pin" window.
+        .insert_resource(SpineDriveEnabled(false))
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
@@ -194,6 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             FixedUpdate,
             tick_drag.before(CollisionSystems::CollisionResponsePhysics),
         )
+        // Hip pin: step the Raibert resolver + queue the three P1/P2/P3 external
+        // position constraints before the constraint world is stepped.
+        .add_systems(FixedUpdate, drive_hip_pin.before(update_constraint_world))
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
@@ -225,6 +235,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cannon::move_cannon_with_wasd,
                 cannon::update_cannon_indicator,
                 cannon::fire_cannon,
+                hip_pin_ui,
+                reset_hip_pin,
             )
                 .run_if(in_state(GameState::Game)),
         )
@@ -294,6 +306,7 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                 PlayerMarker,
                 default_input_map(),
                 ActionState::<PlayerAction>::default(),
+                HipPin::new(&HipPinParams::default().config),
             ))
             .id(),
     );
@@ -370,18 +383,25 @@ fn make_static_scene(commands: &mut Commands) {
         let rect_path = rect.to_path(0.1);
         (rect_path, rect)
     };
-    make_static_collision_shape(
-        commands,
-        Vec4::new(0.0, 540.0, 0.0, 1.0),
-        make_long_rect,
-        GlowColor {
-            color: peniko::Color::rgb(1.0, 0.0, 0.0),
-            glow: 1.0,
-        },
-        Vec2::new(0.0, 0.0),
-        0.0,
-        false,
-    );
+    // GROUND WALL DISABLED for the hip-pin bridge (see hip_pin_integration.md
+    // §7.2). The character stands at world y≈0, so this wall at y=540 is the
+    // true "ground"; the pin places the rigid P1/P2/P3 frame, so foot↔floor
+    // collision would fight it. Dropping it scene-locally is enough — the leg
+    // soft-body colliders share the character-wide group and never self-collide,
+    // and the joint graph is untouched.
+    //
+    // make_static_collision_shape(
+    //     commands,
+    //     Vec4::new(0.0, 540.0, 0.0, 1.0),
+    //     make_long_rect,
+    //     GlowColor {
+    //         color: peniko::Color::rgb(1.0, 0.0, 0.0),
+    //         glow: 1.0,
+    //     },
+    //     Vec2::new(0.0, 0.0),
+    //     0.0,
+    //     false,
+    // );
 
     make_static_collision_shape(
         commands,
@@ -746,6 +766,48 @@ fn gravity_toggle_ui(
             toggle.enabled = enabled;
             constraint_world.set_gravity(if enabled { GRAVITY_ON } else { Vec2::ZERO });
         }
+    });
+}
+
+/// Hip-pin tuning window: master enable (which also gates the spine drive) plus
+/// the live Raibert resolver + pin-stiffness knobs.
+fn hip_pin_ui(
+    mut contexts: EguiContexts,
+    mut params: ResMut<HipPinParams>,
+    mut drive_enabled: ResMut<SpineDriveEnabled>,
+    mut pin_q: Query<&mut HipPin>,
+) {
+    egui::Window::new("Hip Pin").show(contexts.ctx_mut(), |ui| {
+        let mut enabled = pin_q.iter_mut().next().map(|p| p.enabled).unwrap_or(false);
+        if ui
+            .checkbox(&mut enabled, "hip pin enabled (drives P1/P2/P3)")
+            .changed()
+        {
+            for mut pin in pin_q.iter_mut() {
+                pin.enabled = enabled;
+            }
+            // The drive and the pin must never both own P1/P2/P3.
+            drive_enabled.0 = !enabled;
+        }
+        if let Some(mut pin) = pin_q.iter_mut().next() {
+            ui.add(egui::Slider::new(&mut pin.theta, -1.5..=1.5).text("theta (attitude)"));
+        }
+        ui.separator();
+        ui.label("Raibert lower-body resolver → rigid P1/P2/P3 frame.");
+        ui.add(
+            egui::Slider::new(&mut params.config.target_speed, 0.0..=600.0).text("target_speed"),
+        );
+        ui.add(egui::Slider::new(&mut params.config.hip_height, 40.0..=200.0).text("hip_height"));
+        ui.add(egui::Slider::new(&mut params.config.thigh_len, 20.0..=120.0).text("thigh_len"));
+        ui.add(egui::Slider::new(&mut params.config.calf_len, 20.0..=120.0).text("calf_len"));
+        ui.add(egui::Slider::new(&mut params.config.gravity, 0.0..=2000.0).text("gravity"));
+        ui.separator();
+        ui.add(
+            egui::Slider::new(&mut params.compliance, 1e-9..=1e-5)
+                .logarithmic(true)
+                .text("pin compliance"),
+        );
+        ui.add(egui::Slider::new(&mut params.damping, 0.0..=1.0).text("pin damping"));
     });
 }
 

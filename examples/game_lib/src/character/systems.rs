@@ -11,17 +11,25 @@ use vello_physics::{
 
 use crate::character::{
     IkMode, LeftArmController, LimbConfig, ResetLimbControlConstraintsEvent, RightArmController,
-    SpineConfig, SpineController, SpineIndicator,
+    SpineConfig, SpineController, SpineDriveEnabled, SpineIndicator,
 };
 
 pub fn tick_spine_drive(
     time: Res<Time>,
+    drive_enabled: Option<Res<SpineDriveEnabled>>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     mut indicator_q: Query<&mut SpineIndicator>,
     p_q: Query<&VelloParticle>,
     p_j: Query<&VelloJoint>,
     mut world: ResMut<VelloConstraintWorld>,
 ) {
+    // When the hip-pin bridge owns P1/P2/P3 the drive must stay silent, or the
+    // two actuators fight over the same particles. Absent resource = on.
+    if let Some(enabled) = drive_enabled {
+        if !enabled.0 {
+            return;
+        }
+    }
     let dt = time.delta_secs();
     // The spine indicator carries the commanded pose AND the root entity of the
     // character it drives. We resolve that character's SpineController directly
