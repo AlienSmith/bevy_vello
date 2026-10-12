@@ -39,9 +39,12 @@ pub struct LowerBodyConfig {
     pub target_speed: f32,
     /// Horizontal acceleration toward `v_desired`, px/s².
     pub accel: f32,
-    /// Stance duration `Ts` (seconds): how long a foot stays pinned.
+    /// Stance duration `Ts` (seconds): how long a foot stays pinned. The default
+    /// equals the swing duration, i.e. a **duty factor β = 0.5**: the airborne
+    /// half of a running/jumping cycle lasts exactly as long as the grounded half.
     pub stance_duration_ts: f32,
-    /// Swing duration (seconds): how long a foot is in the air.
+    /// Swing duration (seconds): how long a foot is in the air. Equal to
+    /// `stance_duration_ts` by default (β = 0.5).
     pub swing_duration_ts: f32,
     /// Raibert proportional velocity-feedback gain (units: **seconds**). See
     /// the derivation in `plans/Raibert.md`.
@@ -93,7 +96,8 @@ impl Default for LowerBodyConfig {
             target_speed: 120.0,
             accel: 800.0,
             stance_duration_ts: 0.28,
-            swing_duration_ts: 0.22,
+            // β = 0.5: airborne half-cycle == grounded half-cycle.
+            swing_duration_ts: 0.28,
             kv: 0.12,
             beta: 1.0,
             safety_margin: 0.85,
@@ -141,17 +145,11 @@ pub struct LegState {
     pub foot_pos: Vec2,
     /// Anchored foot world position used while in stance.
     pub plant_pos: Vec2,
-    /// Swing lift-off position.
+    /// Swing lift-off position (world). Holds the foot's world position at
+    /// lift-off for a normal ground swing.
     pub swing_from: Vec2,
     /// Swing plant target.
     pub swing_to: Vec2,
-    /// Foot offset from the hip (`foot_pos − hip_pos`), latched at lift-off.
-    /// While airborne the rendered foot is pinned to `hip_pos + airborne_offset`
-    /// (see §6b in [`step_lower_body`]) instead of the ground-plane target, so it
-    /// rides rigidly with the body and never strides in the air. The offset's
-    /// length is clamped to the IK's safe bend zone (`LIFT_REACH_SAFE_FRACTION`),
-    /// which keeps the leg from straightening into the `acos` singularity.
-    pub airborne_offset: Vec2,
 }
 
 /// Discrete phase of the vertical (loop 1) controller.
@@ -191,6 +189,26 @@ pub struct VerticalState {
     pub jump_requested: bool,
     /// Time spent in `Land`, used for the settle exit.
     pub land_timer: f32,
+    /// Vertical-lift amount of the airborne foot swing built at the `Launch →
+    /// Flight` edge: `FLIGHT_SWING_LIFT_FRACTION · step_height` (or a reduced
+    /// value if the hop is too shallow to clear it). Frozen for the whole hop.
+    pub swing_lift: f32,
+    /// Total airborne (swing) half-cycle time for the current hop, `2·v0/g`,
+    /// latched at the `Launch → Flight` edge from the launch speed. This is the
+    /// time base for the flight foot arc (it equals the observed flight time,
+    /// the descent ending at the same height it launched from).
+    pub swing_period: f32,
+    /// Elapsed time in the airborne swing, advanced every `Flight` tick. The
+    /// flight arc maps `swing_t / swing_period → [0, 1]`.
+    pub swing_t: f32,
+    /// Left / right foot **hip-relative offset** latched at the `Launch → Flight`
+    /// edge (clamped into the IK bend zone). The flight swing sweeps each leg from
+    /// its lift-off offset to the shared landing offset (see §6b in
+    /// [`step_lower_body`]). Held here — not in [`LegState::swing_from`] — because
+    /// `step_leg` overwrites `swing_from` with a world position if a stance leg
+    /// lifts off mid-flight; these fields are touched only by the flight swing.
+    pub swing_from_off_left: Vec2,
+    pub swing_from_off_right: Vec2,
 }
 
 impl Default for VerticalState {
@@ -203,6 +221,11 @@ impl Default for VerticalState {
             apex_latched: false,
             jump_requested: false,
             land_timer: 0.0,
+            swing_lift: 0.0,
+            swing_period: 0.0,
+            swing_t: 0.0,
+            swing_from_off_left: Vec2::ZERO,
+            swing_from_off_right: Vec2::ZERO,
         }
     }
 }
@@ -219,10 +242,14 @@ pub struct ResolverState {
     /// Loop-1 (vertical) controller state.
     pub vs: VerticalState,
     /// True on the most recent tick if the body was airborne (`Flight`). Used to
-    /// latch the rendered feet into place at lift-off, so the airborne
-    /// rate-limit starts from a continuous pose (no discontinuity at the
-    /// Launch→Flight boundary).
+    /// detect the `Launch→Flight` (arm) and `Flight→Land` (seed) edges of the
+    /// jump's airborne swing.
     pub airborne_prev: bool,
+    /// `true` when the jump was armed from a *walking* lift-off. The airborne
+    /// swing then reaches to the ground-reference forward target (a running
+    /// stride, one step ahead); on a stand-still jump it is `false` and the
+    /// swing lands on top of the lift-off footprint instead (no forward step).
+    pub jump_arm_lead_leg: bool,
 }
 
 impl ResolverState {
@@ -243,7 +270,6 @@ impl ResolverState {
             plant_pos: left_plant,
             swing_from: left_plant,
             swing_to: left_plant,
-            airborne_offset: Vec2::ZERO,
         };
         // Right leg starts half a stance out of phase with the left, so the two
         // legs alternate once the gait begins; both stay planted while standing
@@ -255,7 +281,6 @@ impl ResolverState {
             plant_pos: right_plant,
             swing_from: right_plant,
             swing_to: right_plant,
-            airborne_offset: Vec2::ZERO,
         };
 
         Self {
@@ -266,6 +291,7 @@ impl ResolverState {
             right,
             vs: VerticalState::default(),
             airborne_prev: false,
+            jump_arm_lead_leg: false,
         }
     }
 }
@@ -443,6 +469,16 @@ fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
                 state.vs.phase = VerticalPhase::Load;
                 state.vs.h_apex = 0.0;
                 state.vs.apex_latched = false;
+                // Reset the airborne-swing bookkeeping for the new hop and arm
+                // the flight reach: a lift-off with forward speed steps forward
+                // (a running stride), a stand-still jump lands back on its own
+                // footprint instead.
+                state.vs.swing_lift = 0.0;
+                state.vs.swing_period = 0.0;
+                state.vs.swing_t = 0.0;
+                state.vs.swing_from_off_left = Vec2::ZERO;
+                state.vs.swing_from_off_right = Vec2::ZERO;
+                state.jump_arm_lead_leg = state.hip_vel.x.abs() > SWING_TRIGGER_SPEED;
             }
         }
         VerticalPhase::Load => {
@@ -478,12 +514,24 @@ fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
             let v_req = apex_to_launch_speed(y_goal - state.hip_pos.y, g);
             if state.hip_vel.y >= v_req || (state.hip_pos.y - floor) >= full_ext {
                 state.vs.phase = VerticalPhase::Flight;
+                // Size the airborne swing lift once, from the hop's ballistic
+                // rise `v²/(2g)`. A shallow hop cannot clear the full tuck, so
+                // the lift is capped to `⅔` of the rise; a normal hop clears
+                // `FLIGHT_SWING_LIFT_FRACTION · step_height` outright.
+                let v0 = state.hip_vel.y.max(0.0);
+                let rise = v0 * v0 / (2.0 * g);
+                state.vs.swing_lift = (FLIGHT_SWING_LIFT_FRACTION * config.step_height)
+                    .min((2.0 / 3.0) * rise);
+                state.vs.swing_period = (2.0 * v0 / g).max(f32::EPSILON);
+                state.vs.swing_t = 0.0;
             }
         }
         VerticalPhase::Flight => {
             // Ballistic, unactuated — the anti-hover guarantee.
             state.hip_vel.y -= g * dt;
             state.hip_pos.y += state.hip_vel.y * dt;
+            // Advance the airborne-swing clock (drives the flight foot arc).
+            state.vs.swing_t += dt;
             let rise = (state.hip_pos.y - floor) - stand;
             if rise > state.vs.h_apex {
                 state.vs.h_apex = rise;
@@ -494,7 +542,13 @@ fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
                 state.vs.h_apex_prev = state.vs.h_apex;
                 state.vs.apex_latched = true;
             }
-            if state.hip_vel.y < 0.0 && h <= stand {
+            // The hop ends only when the hip is truly back down on the planted
+            // floor line (`hip_pos.y ≤ floor + stand`), so the airborne foot
+            // swing has a full landing half-cycle to reach ahead: either the
+            // feet catch the body (the normal, cyclic running landing) or a
+            // slightly slow flight hands a small residual to `Land`'s settle.
+            // Exit on the hip, never on a pose-triggered foot lift.
+            if state.hip_vel.y < 0.0 && state.hip_pos.y <= floor + stand {
                 state.vs.phase = VerticalPhase::Land;
                 state.vs.land_timer = 0.0;
             }
@@ -718,13 +772,28 @@ pub fn solve_leg_ik(
 /// input held.
 const SWING_TRIGGER_SPEED: f32 = 1.0;
 
-/// Maximum fraction of full leg extension the rendered leg is allowed to hold
-/// while airborne. With `thigh == calf`, the knee half-angle is
-/// `α = acos(reach / (thigh + calf))`; clamping the lift-off reach to this
-/// fraction keeps `α` away from 0 (the IK's `acos` singularity, where an
-/// infinitesimal reach change snaps the knee sideways). `0.96` leaves the leg
-/// visibly bent (~19°) for the whole hop at the default proportions.
+/// Maximum fraction of the full leg reach `thigh + calf` that the airborne swing
+/// may use for the hip→foot offset. Keeps the knee off the 2-bone IK's
+/// `acos(reach/(thigh+calf))` singularity: with `thigh == calf` a reach of
+/// `0.96·(L1+L2)` holds the knee half-angle at `α = acos(0.96) ≈ 16°`, so a fast
+/// hip during Flight can never straighten (and thereby snap) the knee.
 const LIFT_REACH_SAFE_FRACTION: f32 = 0.96;
+
+/// Horizontal reach the lead foot may extend ahead of the hip at the landing
+/// plant, as a fraction of the ground-reference gait reach `X_max`. The jump's
+/// airborne (swing) half drives both feet forward from behind the hip to ahead
+/// of it; this caps how far ahead so the landing pose not only sits inside the
+/// IK reach but also leaves the leg *visibly bent* — with `thigh == calf` the
+/// knee half-angle is `α = acos(reach / (thigh + calf))`, so keeping the
+/// standing-height reach at `0.5·X_max` (≈ 35 px ≪ 110 px) holds `α` far from
+/// the IK's `acos(reach/110)` singularity and no knee can ever snap straight.
+const FLIGHT_SWING_REACH_FRACTION: f32 = 0.5;
+
+/// How far the airborne swing lifts the foot off the planted floor line, as a
+/// fraction of the walking `step_height` — the vertical amplitude of the jump's
+/// full-circle foot arc. Kept below 1 so the airborne swing reads as a running
+/// stride rather than a knee-to-chest tuck.
+const FLIGHT_SWING_LIFT_FRACTION: f32 = 0.8;
 
 /// Per-tick planning context shared by both legs.
 #[derive(Debug, Clone, Copy)]
@@ -1017,17 +1086,14 @@ pub fn step_lower_body(
         capture_offset,
     };
 
-    // 5b. --- Landing re-seed (Flight→Land edge): plant the gait on the render ---
-    // While airborne the rendered feet were frozen at their lift-off pose (§6b)
-    // while the gait kept advancing underneath — `plant_pos` moved forward and the
-    // phases swapped. Snapping the render to that advanced `plant_pos` in one
-    // frame was a ~17 px foot teleport at touchdown: the exact "would break the
-    // physics system" pop. So on the first grounded frame, re-seed the gait onto
-    // the *rendered* feet (x preserved, z on the floor) as fresh `Stance`, and
-    // hand the legs a full stance window. The rendered pose is unchanged — the
-    // foot is already where we plant it — so the Flight→Land boundary is
-    // continuous. Done BEFORE `step_leg` so its `foot_pos = plant_pos` write is a
-    // no-op rather than a snap.
+    // 5b. --- Jump landing seed (Flight→Land edge): both feet plant together ---
+    // The jump's airborne half drives BOTH feet forward to one shared landing
+    // point (a two-foot grounded stance), so on the first grounded frame both
+    // legs are re-seeded onto a common footprint in `Stance` with a full stance
+    // window. The seed preserves each foot's *rendered* x and drops it onto the
+    // floor, and since the flight swing already left both feet on that point the
+    // write is a no-op on the render: the Flight→Land boundary is continuous.
+    // Done BEFORE `step_leg` so its `foot_pos = plant_pos` write is a no-op.
     if !airborne && state.airborne_prev {
         let floor = config.floor_y;
         for leg in [&mut state.left, &mut state.right] {
@@ -1088,53 +1154,88 @@ pub fn step_lower_body(
         }
     }
 
-    // 6b. --- Airborne foot freeze (rendered feet only) ---
-    // A jump is a purely VERTICAL event: with no ground to push against the legs
-    // must hold their lift-off pose and ride up with the body, not keep stepping
-    // ("air-walk"). So while airborne the rendered feet are pinned to the offset
-    // they had at lift-off (`hip_pos + airborne_offset`) instead of the gait's
-    // ground-plane target. That frozen offset keeps the leg off the IK's `acos`
-    // singularity (the reach is clamped to the safe bend zone at lift-off), so no
-    // knee can snap. Only `foot_pos` is touched here: `phase`, `plant_pos` and
-    // `swing_from/to` are left to the gait (the phase machine still runs, but its
-    // renders are overwritten), and the Flight→Land edge re-seeds the gait onto
-    // these feet (step 5b) so landing is continuous.
+    // 6b. --- Jump airborne swing: both feet drive forward to the landing point ---
+    // The jump's airborne half (Flight) is the *swing* phase of the leading leg's
+    // full cycle: with `swing_duration == stance_duration` the airborne half is
+    // exactly half the cycle (duty factor β = 0.5). Both legs are SYNCED — the
+    // trailing leg simply mirrors the leading leg — so they reach forward together
+    // and land on the SAME point.
+    //
+    // The hip is far above the floor here, so the leg is inherently near full
+    // extension and the 2-bone IK sits on its `acos(reach/(L1+L2))` singularity.
+    // The foot is therefore driven as a hip-relative OFFSET, swept from its
+    // lift-off offset (behind the hip) to the shared landing offset (ahead of the
+    // hip), with the offset length CLAMPED to `LIFT_REACH_SAFE_FRACTION·(L1+L2)`.
+    // That holds the knee at `α = acos(0.96) ≈ 16°` or more, so a fast hip can
+    // never snap the knee straight. (A world-space floor target is useless here:
+    // it is unreachable while the hip is high, so the IK ray-clamps it onto the
+    // very same singularity.)
     if airborne {
-        for leg in [&mut state.left, &mut state.right] {
-            if !state.airborne_prev {
-                // Lift-off: freeze the foot's offset from the hip.
-                let offset = leg.foot_pos - state.hip_pos;
-                // Re-clamp that offset so the leg rides the hop inside the IK's
-                // *safe* bend zone instead of on top of its `acos` singularity.
-                // With `thigh == calf`, `α = acos(reach / (thigh + calf))`, so a
-                // straight leg (reach → full extension) makes the knee
-                // infinitely sensitive to any reach change. Capping the reach at
-                // `LIFT_REACH_SAFE_FRACTION·(thigh+calf)` keeps `α ≳ 18°` and the
-                // leg visibly bent for the whole hop, so no knee can snap — and
-                // the foot re-seed at touchdown (below) is automatically inside
-                // the safe zone too. The offset's *direction* is preserved, so
-                // the fore/aft split of the stride survives.
-                let full = (config.thigh_len + config.calf_len).max(f32::EPSILON);
-                let reach_cap = full * LIFT_REACH_SAFE_FRACTION;
-                let mut offset = offset;
-                let reach = offset.length();
-                if reach > reach_cap && reach > f32::EPSILON {
-                    offset *= reach_cap / reach;
-                }
-                leg.airborne_offset = offset;
+        let full = (config.thigh_len + config.calf_len).max(f32::EPSILON);
+        let reach_cap = full * LIFT_REACH_SAFE_FRACTION;
+        // Shared landing offset target: one forward Raibert reach ahead of the hip
+        // for a running (walking) lift-off, or straight down onto the lift-off
+        // footprint for a stand-still jump. Capped at `FLIGHT_SWING_REACH_FRACTION
+        // ·x_max` so the landing pose stays well inside the safe bend zone.
+        let t_step = plan_target_x(state.hip_pos.x, v, v_desired_scalar, 0.0, config, &plan);
+        let max_reach = x_max * FLIGHT_SWING_REACH_FRACTION;
+        let land_x = (if state.jump_arm_lead_leg {
+            t_step
+        } else {
+            state.hip_pos.x
+        })
+        .clamp(state.hip_pos.x - max_reach, state.hip_pos.x + max_reach);
+        // Lift-off (first airborne frame): latch each foot's hip-relative offset
+        // (clamped into the bend zone) as the sweep start, so the first airborne
+        // frame is continuous with the planted pose. Stored in `vs` so a stance
+        // leg's `step_leg` lift-off mid-flight cannot clobber it.
+        if !state.airborne_prev {
+            let mut lo = state.left.foot_pos - state.hip_pos;
+            let lr0 = lo.length();
+            if lr0 > reach_cap {
+                lo *= reach_cap / lr0;
             }
-            // Ride the foot with the body at that constant offset. The reach
-            // stays fixed for the whole hop (leg bent ≈19°), so the IK never
-            // sits on its `acos` singularity and the knee cannot snap. The
-            // lift-off frame is continuous by construction when the launch leg
-            // was already bent (`hip + (foot − hip) == foot`); a straight-leg
-            // lift-off bends the leg in by at most `full−reach_cap ≈ 4 px`,
-            // tucked smoothly rather than snapped.
-            let mut tuck = state.hip_pos + leg.airborne_offset;
-            // Never let the foot sink below the floor. On the descent this hands
-            // the foot back onto the floor exactly where the landing plant sits.
-            tuck.y = tuck.y.max(config.floor_y);
-            leg.foot_pos = tuck;
+            state.vs.swing_from_off_left = lo;
+            let mut ro = state.right.foot_pos - state.hip_pos;
+            let rr0 = ro.length();
+            if rr0 > reach_cap {
+                ro *= reach_cap / rr0;
+            }
+            state.vs.swing_from_off_right = ro;
+        }
+        // Time base: `swing_t / swing_period → [0, 1]` across the whole airborne
+        // half-cycle (both latched / advanced by `tick_vertical`).
+        let prog = if state.vs.swing_period > f32::EPSILON {
+            (state.vs.swing_t / state.vs.swing_period).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let lift = if state.vs.swing_lift > 0.0 {
+            state.vs.swing_lift
+        } else {
+            config.step_height * FLIGHT_SWING_LIFT_FRACTION
+        };
+        let arc = prog * (1.0 - prog) * 4.0 * lift;
+        let floor = config.floor_y;
+        // Hip → shared landing point, clamped into the bend zone.
+        let mut land_off = Vec2::new(land_x - state.hip_pos.x, floor - state.hip_pos.y);
+        let lr = land_off.length();
+        if lr > reach_cap {
+            land_off *= reach_cap / lr;
+        }
+        for (leg, from_off) in [
+            (&mut state.left, state.vs.swing_from_off_left),
+            (&mut state.right, state.vs.swing_from_off_right),
+        ] {
+            let mut off = from_off.lerp(land_off, prog);
+            off.y += arc;
+            let r = off.length();
+            if r > reach_cap {
+                off *= reach_cap / r;
+            }
+            let mut p = state.hip_pos + off;
+            p.y = p.y.max(floor);
+            leg.foot_pos = p;
         }
     }
     state.airborne_prev = airborne;
@@ -1357,7 +1458,6 @@ mod tests {
             plant_pos: Vec2::ZERO,
             swing_from: Vec2::ZERO,
             swing_to: Vec2::ZERO,
-            airborne_offset: Vec2::ZERO,
         };
 
         // Lift off with the hip at x = 0.
@@ -1963,13 +2063,14 @@ mod tests {
     }
 
     #[test]
-    fn test_vertical_jump_preserves_walking_spread() {
-        // A jump is a purely VERTICAL event: it must NOT collapse the horizontal
-        // gait. The two plant points must keep their normal, alternating walking
-        // spread (≈ v·Ts) across the entire hop rather than converging to a
-        // single two-foot landing point (the old doc §5A.4 sync). The leading
-        // foot ends up AHEAD of the hip for the next step and the character walks
-        // straight on.
+    fn test_jump_syncs_both_legs_onto_one_landing_point() {
+        // The jump's airborne half is a SYNCED full-circle swing: the trailing leg
+        // mirrors the leading leg, so both feet reach forward together and land on
+        // the SAME point (a two-foot grounded stance). This is the opposite of the
+        // walk gait, where the two feet stay a stride apart (alternating
+        // anti-phase). The horizontal foot gap must therefore COLLAPSE to ~0 across
+        // Flight — unlike the old freeze, which held the lift-off split, and the
+        // old in-air stride, which kept the anti-phase spread.
         let cfg = LowerBodyConfig::default();
         let mut state = ResolverState::new(&cfg);
         let dt = 1.0 / 60.0;
@@ -1984,30 +2085,30 @@ mod tests {
 
         state.vs.jump_requested = true;
         let mut min_gap = f32::INFINITY;
+        let mut end_gap = f32::INFINITY;
         let mut saw_flight = false;
         for _ in 0..4000 {
-            let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
             if d.v_phase == VerticalPhase::Flight {
                 saw_flight = true;
+                let gap = (pose.left_foot.x - pose.right_foot.x).abs();
+                min_gap = min_gap.min(gap);
+                end_gap = gap;
             }
-            let gap = (state.left.plant_pos.x - state.right.plant_pos.x).abs();
-            min_gap = min_gap.min(gap);
             if saw_flight && d.v_phase == VerticalPhase::Stand {
                 break;
             }
         }
         assert!(saw_flight, "hop never went airborne");
-        // The spread must never collapse: the jump only lifts the body, it must
-        // not fold the legs together. With the no-air-walk fix the rendered feet
-        // are frozen at their lift-off split for the whole hop (and the gait is
-        // re-seeded onto them at touchdown), so the spread equals that lift-off
-        // split (≈4.6 px here) instead of oscillating through a full in-air
-        // stride as it used to. The guard's job is that it stays clearly non-zero
-        // — the two legs never converge onto a single point.
+        // The synced swing must bring the two feet together ...
         assert!(
-            min_gap > 2.0,
-            "jump collapsed the walking spread (min_gap={min_gap}): the two legs \
-             folded onto a single point"
+            min_gap < 2.0,
+            "the synced swing never brought the feet together (min gap = {min_gap:.1}px)"
+        );
+        // ... and leave them on a single, shared landing point for touchdown.
+        assert!(
+            end_gap < 2.0,
+            "the two legs did not land on the same point (end-of-flight gap = {end_gap:.1}px)"
         );
     }
 
@@ -4106,58 +4207,39 @@ mod tests {
     }
 
     #[test]
-    fn test_jump_does_not_air_walk() {
-        // Animation contract for the walking jump: the jump is a purely VERTICAL
-        // event. The legs must FREEZE in the split they had at lift-off and ride
-        // up with the body — they must NOT keep stepping ("air-walk") while there
-        // is no ground to push against.
+    fn test_jump_is_a_synced_full_circle() {
+        // Animation contract for the jump: it is a full gait cycle, not a freeze.
+        //   * Load + Launch are the leading leg's grounded (stance) half;
+        //   * Flight + Land are its airborne (swing) half, in which the foot
+        //     reaches FORWARD from behind the hip to the landing point;
+        //   * with β = 0.5 those two halves last the same time;
+        //   * both legs are SYNCED (the trailing leg mirrors the leading leg), so
+        //     they drive forward together and land on the SAME point.
         //
-        // Regression guard. Two failure modes are locked out here:
-        //   * the old two-foot-sync retarget left both feet clustered behind the
-        //     advancing hip (the measured "legs lag behind" pose);
-        //   * leaving the raw gait running in the air made the feet keep swinging
-        //     forward and backward relative to the hip for the whole hop.
-        // The airborne foot now rides at its lift-off offset, so the foot's offset
-        // from the hip is constant across Flight.
+        // Regression guards, both of which the old behaviours failed:
+        //   * the old freeze held each foot's offset from the hip constant for the
+        //     whole hop (a "moon-walk" — no forward swing);
+        //   * the older two-foot-sync retarget left both feet clustered BEHIND the
+        //     advancing hip, so nothing reached ahead to catch the landing.
         let cfg = LowerBodyConfig::default();
         let dt = 1.0 / 60.0;
-        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
-        // Per-frame particle-continuity bound. Larger than the stand-still guard
-        // (8 px) because the body is translating: the hip itself travels
-        // `target_speed·dt ≈ 2 px`/frame, so a smooth walking hop keeps every
-        // particle under ~9.3 px here (measured). The reported teleport was
-        // ~21-23 px, so this still catches a snap with margin.
-        let step_bound = 10.0_f32;
+        // Per-frame particle-continuity bound: a smooth swing arc (the foot's own
+        // forward reach plus the hip's `target_speed·dt ≈ 2 px` travel) stays well
+        // under this, while a pose teleport would trip it.
+        let step_bound = 12.0_f32;
 
         // Cruise to a steady walk so the hip and gait are both at speed.
         let mut s = walk_state(&cfg, dt);
         assert!(s.hip_vel.x > 100.0, "not cruising before the jump");
 
-        // Baseline: over one normal walking stride the leading foot reaches AHEAD
-        // of the hip (positive x-reach) and the trailing foot sits behind it, so
-        // there is a healthy fore/aft split while walking.
-        let mut walk_lead = f32::NEG_INFINITY;
-        let mut walk_trail = f32::INFINITY;
-        for _ in 0..(stride / dt) as usize {
-            let (pose, _d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
-            walk_lead = walk_lead
-                .max((pose.left_foot.x - pose.hip.x).max(pose.right_foot.x - pose.hip.x));
-            walk_trail = walk_trail
-                .min((pose.left_foot.x - pose.hip.x).min(pose.right_foot.x - pose.hip.x));
-        }
-
-        // Hop. Track how much each foot's *offset from the hip* changes while
-        // airborne; if the gait is air-walking this spread will be large. Also
-        // track the largest single-frame motion of any of the 5 particles, so a
-        // landing (Flight→Land/Stand) snap is caught the same way the
-        // stand-still guard catches the Launch→Flight snap. Unlike the
-        // stand-still hop the body is *translating*, so the bound is larger — it
-        // must clear the hip's own travel plus a normal swing step — but a
-        // teleport (the reported ~21-23 px knee jump) must still trip it.
-        let mut flight_lead = f32::NEG_INFINITY;
-        let mut flight_trail = f32::INFINITY;
-        let mut max_offset_delta = 0.0_f32;
-        let mut prev_airborne_offsets: Option<[f32; 2]> = None;
+        let mut flight_lead_end = f32::NEG_INFINITY; // min foot reach at last flight frame
+        let mut flight_gap_end = f32::INFINITY; // |left.x − right.x| at last flight frame
+        // Hip→foot forward offsets at the FIRST and LAST airborne frames. The
+        // total forward sweep is their difference (the per-frame delta is small
+        // because the swing is deliberately smooth — and that smoothness is the
+        // no-teleport guarantee checked by `max_step` below).
+        let mut first_flight_off: Option<(f32, f32)> = None;
+        let mut last_flight_off = (0.0_f32, 0.0_f32);
         let mut saw_flight = false;
         let mut prev: Option<LowerBodyPose> = None;
         let mut max_step = 0.0_f32;
@@ -4169,13 +4251,14 @@ mod tests {
             let r = pose.right_foot.x - pose.hip.x;
             if d.v_phase == VerticalPhase::Flight {
                 saw_flight = true;
-                flight_lead = flight_lead.max(l.max(r));
-                flight_trail = flight_trail.min(l.min(r));
-                if let Some(prev) = prev_airborne_offsets {
-                    max_offset_delta =
-                        max_offset_delta.max((l - prev[0]).abs().max((r - prev[1]).abs()));
+                if first_flight_off.is_none() {
+                    first_flight_off = Some((l, r));
                 }
-                prev_airborne_offsets = Some([l, r]);
+                last_flight_off = (l, r);
+                // Remember the last flight frame's reach and foot gap — the pose
+                // the swing is committing to just before touchdown.
+                flight_lead_end = l.min(r);
+                flight_gap_end = (pose.left_foot.x - pose.right_foot.x).abs();
             }
             if let Some(p) = prev {
                 for (name, a, b) in [
@@ -4196,62 +4279,65 @@ mod tests {
                 }
             }
             prev = Some(pose);
-            // (Offset continuity is also checked in
-            // `test_stand_still_jump_has_no_pose_teleport`.)
             if saw_flight && d.v_phase == VerticalPhase::Stand {
                 break;
             }
         }
 
         assert!(saw_flight, "walking jump never went airborne");
+        // How far the hip→foot offset swept forward over the airborne half (the
+        // smaller leg, so BOTH legs must reach forward).
+        let swing_forward = match first_flight_off {
+            Some((l0, r0)) => (last_flight_off.0 - l0).min(last_flight_off.1 - r0),
+            None => 0.0,
+        };
         println!(
-            "jump-swing reach: walk_lead={walk_lead:.1}px  walk_trail={walk_trail:.1}px  \
-             flight_lead={flight_lead:.1}px  flight_trail={flight_trail:.1}px  \
-             max_offset_delta={max_offset_delta:.2}px  max_step={max_step:.1}px"
+            "jump full circle: flight_lead_end={flight_lead_end:.1}px  \
+             flight_gap_end={flight_gap_end:.1}px  \
+             swing_forward={swing_forward:.1}px  max_step={max_step:.1}px"
         );
-        // The legs must NOT air-walk: the foot offsets barely move while airborne.
-        // Allow the tiny slack from the descent floor-clamp; anything close to a
-        // swing step (tens of px) is a gait running in the air.
+        // The swing must carry the legs FORWARD relative to the hip — the opposite
+        // of the old freeze, where the offset (and so this sweep) was exactly 0.
         assert!(
-            max_offset_delta < 3.0,
-            "the legs air-walked during the jump: a foot's offset from the hip moved \
-             {max_offset_delta:.1}px across Flight (allowed < 3.0px). \
-             (walk_lead={walk_lead:.1}px, walk_trail={walk_trail:.1}px, \
-             flight_lead={flight_lead:.1}px, flight_trail={flight_trail:.1}px)"
+            swing_forward > 4.0,
+            "the jump legs were frozen, not swinging: the hip→foot offset moved only \
+             {swing_forward:.1}px forward across Flight (expected a forward swing)"
         );
-        // And the frozen split must still be a real stride — one foot ahead of the
-        // hip, one behind — so the landing is caught, not dangled.
+        // By the last flight frame the swing has carried BOTH feet ahead of the
+        // hip, ready to catch the landing ...
         assert!(
-            flight_lead > 0.0 && flight_trail < 0.0,
-            "the airborne legs collapsed onto the hip instead of holding the walking \
-             split (flight_lead={flight_lead:.1}px, flight_trail={flight_trail:.1}px)."
+            flight_lead_end > 0.0,
+            "the airborne swing never reached ahead of the hip \
+             (last-flight reach = {flight_lead_end:.1}px)"
+        );
+        // ... and the two legs have converged onto the SAME landing point.
+        assert!(
+            flight_gap_end < 12.0,
+            "the two legs did not land on the same point (gap = {flight_gap_end:.1}px)"
         );
     }
 
     #[test]
     fn test_stand_still_jump_has_no_pose_teleport() {
-        // Regression: a stand-still jump used to pop the knee particles to a
-        // different position for a single frame and then snap them back, which
+        // Regression: a jump must never pop the knee particles to a different
+        // position for a single frame and then snap them back — that discontinuity
         // would wreck the physics system that consumes this pose.
         //
-        // Cause: the airborne safety clamp limited each rendered foot to a hard
-        // disc of radius 0.75·(thigh+calf). That is *stricter* than the IK's own
-        // reach limit, so the instant Flight began the clamp engaged and yanked
-        // the left foot from (−30, 0) to (−30, 26.2) and the left knee from
-        // (−2.2, 44.6) to (18.9, 51.4) — a ~21 px knee teleport in one frame
-        // (f055 → f056 at 90 Hz).
-        //
-        // The fix makes the rendered feet ride with the body at the offset they
-        // had at lift-off (constant leg reach, so the IK never sits on its acos
-        // singularity) clamped to never sink below the floor. Every particle is
-        // then continuous across the Launch→Flight and Flight→Land boundaries —
-        // the largest per-frame step is dominated by the hip's own ballistic
-        // motion, never by a snapping knee.
+        // The jump's airborne half is a forward swing arc, driven per-frame from
+        // the ballistic flight clock (a sine arc, not a rate limit or a hard
+        // clamp). Composed with the frictionless landing seed it delivers a pose
+        // that is continuous across the Launch→Flight and Flight→Land boundaries:
+        // the largest per-frame particle step is dominated by the hip's own
+        // ballistic motion, never by a snapping knee. The airborne reach is also
+        // capped (`FLIGHT_SWING_REACH_FRACTION·X_max`) so the landing pose stays
+        // well inside the IK's safe bend zone and no knee straightens onto the
+        // `acos` singularity.
         let cfg = LowerBodyConfig::default();
         let dt = 1.0 / 90.0;
         // Generous upper bound on per-frame particle travel. The reported pop was
-        // ~21-23 px in one frame; a smooth hop keeps every particle under ~7 px.
-        let bound = 8.0_f32;
+        // ~21-23 px in one frame; a smooth arc keeps every particle well under
+        // this.
+        let bound = 10.0_f32;
 
         let mut s = ResolverState::new(&cfg);
         for _ in 0..40 {
