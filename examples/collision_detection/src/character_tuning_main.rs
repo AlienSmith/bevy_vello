@@ -648,6 +648,11 @@ fn indicator_ui(
         ui.add(
             egui::Slider::new(&mut params.config.max_pos_speed, 0.0..=3000.0).text("max_pos_speed"),
         );
+        ui.label("Pose responsiveness: fraction of the gap closed per tick, pre-clamp.");
+        ui.add(
+            egui::Slider::new(&mut params.config.rest_chase_alpha, 0.0..=1.0)
+                .text("rest_chase_alpha (Kp)"),
+        );
 
         ui.heading("Spine heading drive");
         ui.label("Per-heading angular speed cap, and the P1_P2_P3 angular joint compliance.");
@@ -669,7 +674,7 @@ fn indicator_ui(
     });
 }
 
-/// egui window that edits the live `ArmConfig` on the player's right arm
+/// egui window that edits the live `LimbConfig` on the player's right arm
 /// directly (no resource mirror needed — the controller component holds the
 /// config and `update_character_movement` reads it each FixedUpdate).
 ///
@@ -716,6 +721,11 @@ fn arm_tuning_ui(
         ui.separator();
 
         ui.heading("Rest-angle chase");
+        ui.label("Kp: fraction of the gap closed per tick, pre-clamp (shared with spine).");
+        ui.add(
+            egui::Slider::new(&mut config.rest_chase_alpha, 0.0..=1.0)
+                .text("rest_chase_alpha (Kp)"),
+        );
         ui.add(
             egui::Slider::new(&mut config.max_angle_rate, 0.0..=40.0)
                 .text("max_angle_rate (rad/s)"),

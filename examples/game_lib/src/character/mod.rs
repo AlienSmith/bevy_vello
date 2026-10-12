@@ -75,6 +75,14 @@ pub struct SpineConfig {
     /// headings independently carry angular velocity now (no more derived
     /// `linear_to_angle` estimate), so this is a first-class, directly tuned cap.
     pub max_ang_speed: f32,
+    /// Responsiveness knob for the pose interpolation: fraction of the remaining
+    /// gap to the desired pose that is closed per fixed tick, *before* the rate
+    /// clamp (interpolate-then-clamp). This is the "Kp" of the spine's rest-angle
+    /// / rest-centre chase. Shared with the limb controller
+    /// ([`LimbConfig::rest_chase_alpha`]) so the whole driven rig responds to ONE
+    /// knob. 0.5 reproduces the historical hardcoded behaviour; lower = softer /
+    /// slower, higher = snappier. Expected in `(0, 1]`.
+    pub rest_chase_alpha: f32,
     /// X-PBD compliance for the `P1_P2_P3` angular constraint. Re-rest every
     /// frame against the two-heading commanded pose so the position and angular
     /// constraints agree by construction (no fighting). Soft enough to let the
@@ -90,13 +98,14 @@ impl Default for SpineConfig {
             damping: 0.01,
             max_pos_speed: 900.0,
             max_ang_speed: 10.0,
+            rest_chase_alpha: 0.5,
             bend_compliance: 1e-7,
         }
     }
 }
 
 #[derive(Clone)]
-pub struct ArmConfig {
+pub struct LimbConfig {
     /// Fraction of distance to blend toward true target each frame.
     /// 0.3 = move virtual target 30% toward true target from current wrist.
     pub target_blend: f32,
@@ -109,7 +118,7 @@ pub struct ArmConfig {
     /// (`∇C ~ 1/l`), so `wSum ~ w/l²` and the same compliance value behaves
     /// `l²`-softer on longer bones. The emitted compliance is therefore
     /// pre-scaled per joint by `(compliance_ref_length / bone_length)²` (see
-    /// `calculate_arm_ik`), making this knob a length-independent stiffness:
+    /// `calculate_limb_ik`), making this knob a length-independent stiffness:
     /// it means the same thing for every character scale / bone length.
     pub angular_compliance: f32,
     /// Reference bone length (px) at which [`Self::angular_compliance`] is
@@ -139,7 +148,7 @@ pub struct ArmConfig {
     /// so the XPBD spring pulls against motion instead of only against position
     /// error. The constraint angle is `θ = φ_in − φ_out` while `ω` measures the
     /// OUTGOING bone, so `θ̇ ≈ −ω` and the textbook `−kd·θ̇` offset becomes
-    /// `rest_offset = +kd·ω` (see the derivation in `calculate_arm_ik`). This
+    /// `rest_offset = +kd·ω` (see the derivation in `calculate_limb_ik`). This
     /// is the D half of a PD controller implemented in target space — the
     /// solver stays untouched. Time-independent by design: `kd·ω` is an angle
     /// ([s]·[rad/s]), recomputed statelessly each tick; kd IS the time
@@ -163,6 +172,13 @@ pub struct ArmConfig {
     /// P: ~0.12 rad (≈7°) is a sane ceiling — larger values make the rest
     /// target whipsaw at swing frequency during fast flicks.
     pub kd_max_offset: f32,
+    /// Responsiveness knob for the rest-angle chase (the "Kp" of the PD in
+    /// target space). Fraction of the remaining angle to the desired rest angle
+    /// that is closed per tick, *before* the `max_angle_rate` clamp
+    /// (interpolate-then-clamp). MUST match [`SpineConfig::rest_chase_alpha`] —
+    /// the same value is threaded to both so the spine and the limbs share ONE
+    /// responsiveness knob. 0.5 reproduces the historical hardcoded behaviour.
+    pub rest_chase_alpha: f32,
     /// Maximum angular velocity for the constraint rest angle, in radians per second.
     /// The rest angle chases the IK target at this rate, preventing sudden jumps
     /// that cause overshoot and body wobble.
@@ -176,7 +192,7 @@ pub struct ArmConfig {
     pub ik_mode: IkMode,
 }
 
-impl Default for ArmConfig {
+impl Default for LimbConfig {
     fn default() -> Self {
         Self {
             target_blend: 0.3,
@@ -187,6 +203,7 @@ impl Default for ArmConfig {
             soft_scale: 20.0,
             kd: 0.065,
             kd_max_offset: 0.12,
+            rest_chase_alpha: 0.5,
             max_angle_rate: 2.0 * std::f32::consts::PI,
             bend_sign: -1.0,
             ik_mode: IkMode::Disabled,
@@ -296,7 +313,7 @@ impl Default for SpineIndicator {
 pub struct RightArmController {
     pub particles: [Entity; 4],
     pub joints: [Entity; 2],
-    pub config: ArmConfig,
+    pub config: LimbConfig,
     /// Aim target in world space. Written by weapon system, AI, player input, etc.
     pub target: Vec2,
 }
@@ -308,7 +325,7 @@ pub struct RightArmController {
 pub struct LeftArmController {
     pub particles: [Entity; 4],
     pub joints: [Entity; 2],
-    pub config: ArmConfig,
+    pub config: LimbConfig,
     /// Aim target in world space. Written by weapon system, AI, player input, etc.
     pub target: Vec2,
 }
@@ -347,14 +364,14 @@ impl Default for ArmController {
 }
 
 #[derive(Clone, Copy)]
-pub enum WhichArm {
+pub enum WhichLimb {
     Left,
     Right,
 }
 
 #[derive(Event)]
-pub struct ResetArmControlConstraintsEvent {
-    pub arm: WhichArm,
+pub struct ResetLimbControlConstraintsEvent {
+    pub limb: WhichLimb,
     pub character: Entity,
 }
 

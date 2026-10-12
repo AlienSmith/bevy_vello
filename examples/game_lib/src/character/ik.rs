@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::character::{ArmConfig, IkMode};
+use crate::character::{IkMode, LimbConfig};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -194,7 +194,7 @@ pub(super) fn solve_aim_ik_elbow_only(
 
 /// Dispatches to Reach / Aim (full or elbow-only) based on config.ik_mode.
 pub(super) fn compute_ik_positions(
-    config: &ArmConfig,
+    config: &LimbConfig,
     local_target: Vec2,
     p12_local: Vec2,
     p13_local: Vec2,
@@ -612,7 +612,7 @@ mod tests {
         let arm = test_arm_bent();
 
         // Case A: IkMode::Aim with offset=0 → should aim forearm at local_target
-        let config_aim = ArmConfig {
+        let config_aim = LimbConfig {
             ik_mode: IkMode::Aim {
                 weapon_offset_y: 0.0,
             },
@@ -636,7 +636,7 @@ mod tests {
         );
 
         // Case B: IkMode::Reach
-        let config_reach = ArmConfig {
+        let config_reach = LimbConfig {
             ik_mode: IkMode::Reach,
             ..Default::default()
         };
@@ -658,7 +658,7 @@ mod tests {
         );
 
         // Case C: IkMode::Disabled → no change
-        let config_disabled = ArmConfig {
+        let config_disabled = LimbConfig {
             ik_mode: IkMode::Disabled,
             ..Default::default()
         };

@@ -10,7 +10,7 @@ use vello_physics::{
 };
 
 use crate::character::{
-    ArmConfig, IkMode, LeftArmController, ResetArmControlConstraintsEvent, RightArmController,
+    IkMode, LeftArmController, LimbConfig, ResetLimbControlConstraintsEvent, RightArmController,
     SpineConfig, SpineController, SpineIndicator,
 };
 
@@ -438,19 +438,24 @@ fn calculate_spine_drive(
     let rest_heading_lower = local_points[2].y.atan2(local_points[2].x);
     let max_ang_step = config.max_ang_speed * dt;
 
-    let virtual_center = interpolate_toward_vec(center, desired_center, 0.5, max_pos_step);
+    let virtual_center = interpolate_toward_vec(
+        center,
+        desired_center,
+        config.rest_chase_alpha,
+        max_pos_step,
+    );
     // Angular variant takes the *shortest* arc so each bone never spins the long
     // way round (e.g. Up → Left must swing 90°, not 270°).
     let virtual_heading_upper = interpolate_toward_angle(
         current_heading_upper,
         desired_heading_upper,
-        0.5,
+        config.rest_chase_alpha,
         max_ang_step,
     );
     let virtual_heading_lower = interpolate_toward_angle(
         current_heading_lower,
         desired_heading_lower,
-        0.5,
+        config.rest_chase_alpha,
         max_ang_step,
     );
 
@@ -535,14 +540,14 @@ fn calculate_spine_drive(
 ///
 /// In both modes, the IK runs in local space and uses `rotate_toward` damping on
 /// the angular constraint rest angles to prevent sudden jumps that cause body wobble.
-fn calculate_arm_ik(
+fn calculate_limb_ik(
     target: Vec2,
     dt: f32,
     particles_entity: &Vec<Entity>,
     particles: &Vec<VelloParticle>,
     joints_entity: &Vec<Entity>,
     _joints: &Vec<VelloJoint>,
-    config: &ArmConfig,
+    config: &LimbConfig,
     blend_core: &BalancedCoreFrame,
 ) -> Vec<CharacterAngularConstraintEvent> {
     const ARM_PARTICLE_COUNT: usize = 4; // P1, P12, P13, PRLA
@@ -719,6 +724,7 @@ fn calculate_arm_ik(
                 current_shoulder_cs.y,
                 damped_shoulder_cs.x,
                 damped_shoulder_cs.y,
+                config.rest_chase_alpha,
                 max_delta,
             );
 
@@ -747,6 +753,7 @@ fn calculate_arm_ik(
             current_elbow_cs.y,
             damped_elbow_cs.x,
             damped_elbow_cs.y,
+            config.rest_chase_alpha,
             max_delta,
         );
 
@@ -801,10 +808,17 @@ fn rotate_cs(cs: Vec2, delta: f32) -> Vec2 {
 ///   angle eases into the desired angle instead of slamming onto it in one frame.
 ///   This removes the step excitation that made the stiff P spring overshoot and
 ///   waggle, matching the spine's clean settle.
-fn rotate_toward(cos_a: f32, sin_a: f32, cos_b: f32, sin_b: f32, max_delta: f32) -> (f32, f32) {
+fn rotate_toward(
+    cos_a: f32,
+    sin_a: f32,
+    cos_b: f32,
+    sin_b: f32,
+    alpha: f32,
+    max_delta: f32,
+) -> (f32, f32) {
     let angle_a = sin_a.atan2(cos_a);
     let angle_b = sin_b.atan2(cos_b);
-    let blended = interpolate_toward_angle(angle_a, angle_b, 0.5, max_delta);
+    let blended = interpolate_toward_angle(angle_a, angle_b, alpha, max_delta);
     (blended.cos(), blended.sin())
 }
 
@@ -832,7 +846,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let arm_angular_events: Vec<CharacterAngularConstraintEvent> = calculate_arm_ik(
+        let arm_angular_events: Vec<CharacterAngularConstraintEvent> = calculate_limb_ik(
             arm.target,
             dt,
             &p_e,
@@ -861,7 +875,7 @@ pub fn update_character_movement(
         let angular_constraints: Vec<VelloJoint> =
             j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
 
-        let arm_angular_events = calculate_arm_ik(
+        let arm_angular_events = calculate_limb_ik(
             arm.target,
             dt,
             &p_e,
@@ -878,8 +892,8 @@ pub fn update_character_movement(
     }
 }
 
-pub fn reset_arm_constraint_event(
-    mut reader: EventReader<ResetArmControlConstraintsEvent>,
+pub fn reset_limb_constraint_event(
+    mut reader: EventReader<ResetLimbControlConstraintsEvent>,
     query_control: Query<(&LeftArmController, &RightArmController)>,
     query_a: Query<&VelloJoint>,
     mut angular_writer: EventWriter<CharacterAngularConstraintEvent>,
@@ -887,9 +901,9 @@ pub fn reset_arm_constraint_event(
     let mut angular_events = vec![];
     for item in reader.read() {
         let (left, right) = query_control.get(item.character).unwrap();
-        let angulars = match item.arm {
-            super::WhichArm::Left => left.joints,
-            super::WhichArm::Right => right.joints,
+        let angulars = match item.limb {
+            super::WhichLimb::Left => left.joints,
+            super::WhichLimb::Right => right.joints,
         };
         angulars.iter().for_each(|e| {
             let j = query_a.get(*e).unwrap();

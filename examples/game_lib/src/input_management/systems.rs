@@ -2,10 +2,10 @@ use bevy::prelude::*;
 use leafwing_input_manager::prelude::*;
 
 use crate::{
-    character::{Connectivity, IkMode, RightArmController, SpineController, WhichArm},
+    character::{Connectivity, IkMode, RightArmController, SpineController, WhichLimb},
     character_factory::CharacterRoot,
     weapons::{FireEvent, PistolControl},
-    CharacterController, CharacterPartEvent, ResetArmControlConstraintsEvent,
+    CharacterController, CharacterPartEvent, ResetLimbControlConstraintsEvent,
 };
 
 use super::{actions::PlayerAction, mouse::MouseWorldPosition};
@@ -44,7 +44,7 @@ pub fn read_player_input(
     character_root_q: Query<&CharacterRoot>,
     mut events: EventWriter<CharacterPartEvent>,
     mut fire: EventWriter<FireEvent>,
-    mut reset_event: EventWriter<ResetArmControlConstraintsEvent>,
+    mut reset_event: EventWriter<ResetLimbControlConstraintsEvent>,
 ) {
     for (character_entity, action_state) in action_state_q.iter() {
         // ---- Movement ----
@@ -100,8 +100,8 @@ pub fn read_player_input(
                 });
                 if let Ok(mut right) = arm_q.get_mut(character_entity) {
                     right.config.ik_mode = IkMode::Disabled;
-                    reset_event.write(ResetArmControlConstraintsEvent {
-                        arm: WhichArm::Right,
+                    reset_event.write(ResetLimbControlConstraintsEvent {
+                        limb: WhichLimb::Right,
                         character: character_entity,
                     });
                 }

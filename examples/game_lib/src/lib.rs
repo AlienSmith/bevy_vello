@@ -30,9 +30,9 @@ pub struct VelloCharacterPlugin;
 pub use crate::{
     ai::{build_enemy_ai_tree, AiPhase, AiState},
     character::{
-        ArmConfig, CharacterController, ConnectivityRoot, IkMode, LeftArmController,
-        ResetArmControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
-        SpineIndicator, StringPool, WhichArm,
+        CharacterController, ConnectivityRoot, IkMode, LeftArmController, LimbConfig,
+        ResetLimbControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
+        SpineIndicator, StringPool, WhichLimb,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},

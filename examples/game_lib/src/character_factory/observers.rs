@@ -208,7 +208,7 @@ use vello_physics::{
 
 use crate::{
     character::{
-        ArmConfig, Connectivity, ConnectivityRoot, LeftArmController, RightArmController,
+        Connectivity, ConnectivityRoot, LeftArmController, LimbConfig, RightArmController,
         SpineConfig, SpineController, StringPool,
     },
     character_asset::{
@@ -810,7 +810,7 @@ pub fn assemble_character(
             get(&right_arm_cfg.particles[3]),
         ],
         joints: [get(&right_arm_cfg.joints[0]), get(&right_arm_cfg.joints[1])],
-        config: ArmConfig {
+        config: LimbConfig {
             bend_sign: 1.0,
             ..Default::default()
         },
@@ -826,7 +826,7 @@ pub fn assemble_character(
             get(&left_arm_cfg.particles[3]),
         ],
         joints: [get(&left_arm_cfg.joints[0]), get(&left_arm_cfg.joints[1])],
-        config: ArmConfig {
+        config: LimbConfig {
             bend_sign: 1.0,
             ..Default::default()
         },
