@@ -9,7 +9,9 @@
 
 mod raibert_sandbox;
 
-use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
+use bevy::{
+    asset::AssetMetaCheck, diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, window::PresentMode,
+};
 use bevy_egui::EguiPlugin;
 use bevy_vello::VelloPlugin;
 use game_lib::LowerBodySandboxPlugin;
@@ -17,6 +19,9 @@ use game_lib::LowerBodySandboxPlugin;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
+        // The resolver is stepped in FixedUpdate; `LowerBodySandboxPlugin`
+        // installs the 90 Hz clock, and this exposes real FPS in the UI.
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {

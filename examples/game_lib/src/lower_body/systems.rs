@@ -1,6 +1,7 @@
 //! Bevy ECS glue for the lower-body resolver: input → step → cached output.
 
 use bevy::prelude::*;
+use bevy::time::Fixed;
 
 use crate::lower_body::resolver::{
     step_lower_body, DebugInfo, LowerBodyConfig, LowerBodyPose, ResolverState, VerticalPhase,
@@ -62,13 +63,15 @@ impl LowerBodyController {
     }
 }
 
-/// Read arrow keys / WASD and advance the resolver one timestep.
+/// Read arrow keys / WASD and advance the resolver one fixed timestep.
 ///
-/// The resolver is fully deterministic and framerate-independent (`dt` is
-/// passed through), so this can run in `Update` with `Time::delta_secs()`.
+/// Runs in `FixedUpdate` with `Time<Fixed>`, so the resolver always steps with
+/// the fixed physics `dt` (1/90 s), never the render-frame time. That keeps the
+/// grounded [`regulate_height()`](crate::lower_body::resolver) spring inside its
+/// stability band regardless of the achieved frame rate.
 pub fn drive_lower_body(
     keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     params: Res<LowerBodyParams>,
     mut controllers: Query<&mut LowerBodyController>,
 ) {

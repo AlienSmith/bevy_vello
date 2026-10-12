@@ -10,6 +10,7 @@
 //! - Vello scenes are y-down, so every point is converted with `to_vello` before
 //!   being written into the scene.
 
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use bevy_vello::{
@@ -26,6 +27,15 @@ pub struct RaibertSandbox;
 /// Marker on the follow camera so [`update_sandbox`] can recentre it on the hip.
 #[derive(Component)]
 pub struct SandboxCamera;
+
+/// Stability edge of the resolver's grounded height spring, in seconds.
+///
+/// [`regulate_height()`] is (semi-implicit) symplectic Euler with
+/// `VERTICAL_K_S = 400`, `VERTICAL_K_D = 40`. The amplification matrix
+/// `det = 1 − 40·dt`, `trace = 2 − 400·dt² − 40·dt` is inside the Jury band iff
+/// `100·dt² + 20·dt − 1 < 0`, i.e. **stable for `dt < 0.0414 s` (≈24 Hz)**.
+/// Below that frame rate the grounded spring diverges.
+pub const REGULATE_HEIGHT_MAX_DT: f32 = 0.0414;
 
 /// The one visual entity (scene + controller) and the follow camera.
 pub fn setup_sandbox(mut commands: Commands) {
@@ -182,11 +192,50 @@ pub fn update_sandbox(
 pub fn tuning_ui(
     mut contexts: EguiContexts,
     mut params: ResMut<LowerBodyParams>,
+    fixed: Res<Time<Fixed>>,
+    diagnostics: Res<DiagnosticsStore>,
     controller_q: Query<&LowerBodyController, With<RaibertSandbox>>,
 ) {
     let cfg = &mut params.config;
     egui::Window::new("Raibert Lower Body Tuning").show(contexts.ctx_mut(), |ui| {
         ui.label("← → or A/D walk;  Space / ↑ jump;  R resets to the resting stance.");
+        ui.separator();
+
+        // The resolver now runs in FixedUpdate, so it always steps with the fixed
+        // physics dt (never the frame time). Show that dt against the grounded-
+        // spring stability edge — a constant, deterministic guarantee.
+        let dt = fixed.delta_secs();
+        let stable = dt < REGULATE_HEIGHT_MAX_DT;
+        ui.heading("Loop stability (solver dt)");
+        ui.label(format!(
+            "fixed dt : {:6.2} ms  ({:5.0} Hz)",
+            dt * 1000.0,
+            1.0 / dt
+        ));
+        let frame_ms = diagnostics
+            .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+            .and_then(|d| d.value())
+            .unwrap_or(f64::NAN);
+        ui.label(format!(
+            "frame dt : {:6.2} ms  (render, decoupled)",
+            frame_ms
+        ));
+        ui.label(format!(
+            "edge dt  : {:6.2} ms  (~24 Hz)",
+            REGULATE_HEIGHT_MAX_DT * 1000.0
+        ));
+        ui.colored_label(
+            if stable {
+                egui::Color32::LIGHT_GREEN
+            } else {
+                egui::Color32::RED
+            },
+            if stable {
+                "STABLE  (dt inside band)"
+            } else {
+                "UNSTABLE  (dt over edge)"
+            },
+        );
         ui.separator();
 
         ui.heading("Leg lengths & height");
