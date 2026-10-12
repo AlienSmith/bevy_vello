@@ -63,6 +63,27 @@ impl LowerBodyController {
     }
 }
 
+/// Persistent jump-edge latch for [`drive_lower_body`].
+///
+/// The resolver runs in `FixedUpdate` (90 Hz), but the jump must be
+/// *edge-triggered*: arming the buffer from the held level every tick re-fires
+/// the hop the instant [`tick_vertical()`](crate::lower_body::resolver) returns
+/// to `Stand` after landing, producing an endless double-hop while the key is
+/// held.
+///
+/// `ButtonInput::just_pressed` is the wrong edge for this: it is a **render
+/// frame** event, and at high (uncapped) frame rates most render frames run
+/// zero fixed steps, so the single-frame edge is routinely missed and taps are
+/// dropped. Instead we fetch the rising edge from the **held level sampled on
+/// the fixed clock**: the key is physically down for tens of ms, so several
+/// fixed steps observe it, and the latch turns that level into exactly one edge
+/// per press.
+#[derive(Resource, Default)]
+pub struct LowerBodyInput {
+    /// Whether any jump key was held at the previous fixed step.
+    jump_was_held: bool,
+}
+
 /// Read arrow keys / WASD and advance the resolver one fixed timestep.
 ///
 /// Runs in `FixedUpdate` with `Time<Fixed>`, so the resolver always steps with
@@ -73,6 +94,7 @@ pub fn drive_lower_body(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Fixed>>,
     params: Res<LowerBodyParams>,
+    mut input: ResMut<LowerBodyInput>,
     mut controllers: Query<&mut LowerBodyController>,
 ) {
     let mut input_dir = Vec2::ZERO;
@@ -83,12 +105,17 @@ pub fn drive_lower_body(
         input_dir.x -= 1.0;
     }
     // Vertical channel: `y > 0.5` is a buffered jump request. Both Space and
-    // Up/W raise it (the resolver consumes it at the next `Stand → Load` edge,
-    // so holding the key does not spam jumps).
-    if keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW)
-    {
+    // Up/W raise it, but only on the key's *rising edge*, derived at fixed rate
+    // from the held level so a high render frame rate cannot skip it (see
+    // [`LowerBodyInput`]). The resolver consumes the request at the next
+    // grounded `Stand → Load` edge, so one press ⇒ one hop and holding the key
+    // no longer re-hops on landing.
+    let jump_held =
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW);
+    if jump_held && !input.jump_was_held {
         input_dir.y += 1.0;
     }
+    input.jump_was_held = jump_held;
     if keys.pressed(KeyCode::ArrowDown) || keys.pressed(KeyCode::KeyS) {
         input_dir.y -= 1.0;
     }

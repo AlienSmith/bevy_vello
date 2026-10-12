@@ -80,6 +80,10 @@ pub struct HipPin {
     /// Rigid-frame attitude in radians. Step 1 uses `0.0` (upright). Reserved
     /// for the later PD-attitude phase.
     pub theta: f32,
+    /// Whether a jump action was held at the previous step. Turns the held
+    /// level into an edge at the fixed `dt` (a render-frame `just_pressed` is
+    /// dropped whenever a render frame runs zero fixed steps).
+    jump_was_held: bool,
 }
 
 impl HipPin {
@@ -92,6 +96,7 @@ impl HipPin {
             ready: false,
             enabled: true,
             theta: 0.0,
+            jump_was_held: false,
         }
     }
 }
@@ -182,10 +187,17 @@ pub fn drive_hip_pin(
             if action.pressed(&PlayerAction::MoveLeft) {
                 input_dir.x -= 1.0;
             }
-            // Resolver convention: `input_dir.y > 0.5` is a buffered jump.
-            if action.pressed(&PlayerAction::MoveUp) {
+            // Resolver convention: `input_dir.y > 0.5` is a buffered jump. It
+            // must be *edge-triggered*: the resolver re-enters `Stand` while the
+            // key may still be held, so a held-level arm re-fires the hop on
+            // every landing (the double-hop). Derive the rising edge from the
+            // held level here at the fixed `dt` rather than via the action's
+            // render-frame `just_pressed`, which a high frame rate drops.
+            let jump_held = action.pressed(&PlayerAction::MoveUp);
+            if jump_held && !pin.jump_was_held {
                 input_dir.y += 1.0;
             }
+            pin.jump_was_held = jump_held;
             if action.pressed(&PlayerAction::MoveDown) {
                 input_dir.y -= 1.0;
             }

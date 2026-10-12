@@ -19,4 +19,6 @@ pub use resolver::{
     GaitLimits, GaitPhase, LegState, LowerBodyConfig, LowerBodyPose, ResolverState, VerticalPhase,
     VerticalState,
 };
-pub use systems::{drive_lower_body, reset_lower_body, LowerBodyController, LowerBodyParams};
+pub use systems::{
+    drive_lower_body, reset_lower_body, LowerBodyController, LowerBodyInput, LowerBodyParams,
+};
