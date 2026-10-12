@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 use crate::lower_body::resolver::{
-    step_lower_body, DebugInfo, LowerBodyConfig, LowerBodyPose, ResolverState,
+    step_lower_body, DebugInfo, LowerBodyConfig, LowerBodyPose, ResolverState, VerticalPhase,
 };
 
 /// Runtime-tuneable resolver config, exposed as a single UI-editable Resource.
@@ -51,6 +51,12 @@ impl LowerBodyController {
             v_abs: 0.0,
             v_support: 0.0,
             capture_x: 0.0,
+            v_phase: VerticalPhase::Stand,
+            hip_height: config.hip_height,
+            hip_vel_y: 0.0,
+            h_desired: config.jump_apex,
+            h_apex: 0.0,
+            delta_l: 0.0,
         };
         Self { state, pose, debug }
     }
@@ -73,9 +79,11 @@ pub fn drive_lower_body(
     if keys.pressed(KeyCode::ArrowLeft) || keys.pressed(KeyCode::KeyA) {
         input_dir.x -= 1.0;
     }
-    // y is ignored by the flat-floor resolver, but read it for completeness
-    // (future non-flat gait patterns may use it for speed modulation).
-    if keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW) {
+    // Vertical channel: `y > 0.5` is a buffered jump request. Both Space and
+    // Up/W raise it (the resolver consumes it at the next `Stand → Load` edge,
+    // so holding the key does not spam jumps).
+    if keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW)
+    {
         input_dir.y += 1.0;
     }
     if keys.pressed(KeyCode::ArrowDown) || keys.pressed(KeyCode::KeyS) {

@@ -66,6 +66,21 @@ pub struct LowerBodyConfig {
     pub bend_sign: f32,
     /// `true` while crouching (squash height).
     pub crouch: bool,
+
+    // --- Vertical (loop 1) knobs. See `plans/raibert_vertical_loop.md`. ---
+    /// Effective gravity, px/s². The ECS layer overwrites this from the live
+    /// world each tick; the default assumes the `100 px = 1 m` mapping (980).
+    pub gravity: f32,
+    /// Target jump apex **rise** above the standing hip height, px. This is the
+    /// `h_desired` of the per-hop displacement law (doc §4).
+    pub jump_apex: f32,
+    /// Apex-error proportional gain for the per-hop displacement law
+    /// `Δl = Δl_prev + k_p·(h_desired − h_apex)`. Dimensionless.
+    pub k_p_apex: f32,
+    /// Upward acceleration the virtual leg pin can command while grounded,
+    /// px/s². This is a **force authority**, not a stiffness: the loop still
+    /// closes on measured velocity, never on this number (doc §2.2, §4.1).
+    pub launch_accel: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -87,6 +102,10 @@ impl Default for LowerBodyConfig {
             floor_y: 0.0,
             bend_sign: 1.0,
             crouch: false,
+            gravity: 980.0,
+            jump_apex: 60.0,
+            k_p_apex: 0.5,
+            launch_accel: 2200.0,
         }
     }
 }
@@ -128,6 +147,59 @@ pub struct LegState {
     pub swing_to: Vec2,
 }
 
+/// Discrete phase of the vertical (loop 1) controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalPhase {
+    /// Regulating to the standing height.
+    Stand,
+    /// Banking displacement: crouching by the commanded `Δl`.
+    Load,
+    /// Spending displacement: thrusting up until the measured h-dot cutoff.
+    Launch,
+    /// Ballistic, unactuated.
+    Flight,
+    /// Absorbing the landing back to the standing height.
+    Land,
+}
+
+/// Loop-1 (vertical) persistent state. See `plans/raibert_vertical_loop.md`.
+///
+/// The whole algorithm is one line — the displacement law
+/// `Δl = Δl_prev + k_p·(h_desired − h_apex)` — plus the phase machine that
+/// decides *when* to bank `Δl` (Load) and when to spend it (Launch). On a
+/// one-time jump `Δl_prev` starts at zero, so the first Load depth is simply
+/// `k_p·h_desired`; thereafter the same law runs every hop.
+#[derive(Debug, Clone, Copy)]
+pub struct VerticalState {
+    pub phase: VerticalPhase,
+    /// `Δl`: extra crouch displacement commanded for the current hop.
+    pub delta_l: f32,
+    /// Running max rise above stand this hop.
+    pub h_apex: f32,
+    /// Latched apex rise of the last completed hop (the *measurement*).
+    pub h_apex_prev: f32,
+    /// True once the current hop's apex has been latched (edge, not level).
+    pub apex_latched: bool,
+    /// Buffered jump intent, consumed at a `Stand → Load` edge.
+    pub jump_requested: bool,
+    /// Time spent in `Land`, used for the settle exit.
+    pub land_timer: f32,
+}
+
+impl Default for VerticalState {
+    fn default() -> Self {
+        Self {
+            phase: VerticalPhase::Stand,
+            delta_l: 0.0,
+            h_apex: 0.0,
+            h_apex_prev: 0.0,
+            apex_latched: false,
+            jump_requested: false,
+            land_timer: 0.0,
+        }
+    }
+}
+
 /// The resolver's full persistent state.
 #[derive(Debug, Clone)]
 pub struct ResolverState {
@@ -137,6 +209,8 @@ pub struct ResolverState {
     pub hip_height: f32,
     pub left: LegState,
     pub right: LegState,
+    /// Loop-1 (vertical) controller state.
+    pub vs: VerticalState,
 }
 
 impl ResolverState {
@@ -176,6 +250,7 @@ impl ResolverState {
             hip_height: config.hip_height,
             left,
             right,
+            vs: VerticalState::default(),
         }
     }
 }
@@ -220,6 +295,20 @@ pub struct DebugInfo {
     /// Signed capture-point offset from the hip while braking to a stop
     /// (0 when not stopping).
     pub capture_x: f32,
+
+    // --- Loop 1 (vertical) telemetry. See `plans/raibert_vertical_loop.md`. ---
+    /// Current vertical-controller phase.
+    pub v_phase: VerticalPhase,
+    /// Measured hip height above the floor, px.
+    pub hip_height: f32,
+    /// Measured vertical hip velocity `ḣ`, px/s.
+    pub hip_vel_y: f32,
+    /// Target apex rise `h_desired`, px.
+    pub h_desired: f32,
+    /// Latched apex rise of the last completed hop (the measurement), px.
+    pub h_apex: f32,
+    /// Current commanded extra crouch displacement `Δl`, px.
+    pub delta_l: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +331,167 @@ pub fn approach(current: f32, target: f32, max_delta: f32) -> f32 {
 pub fn rotate(v: Vec2, angle: f32) -> Vec2 {
     let (sin, cos) = angle.sin_cos();
     Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
+}
+
+// ---------------------------------------------------------------------------
+// Loop 1: the vertical displacement controller (pure math)
+// ---------------------------------------------------------------------------
+
+/// Forward: ballistic apex **rise** for a measured launch speed.
+/// `Δh = ḣ₀² / (2·g̃)` — kinematics only; subtracts out the standing height.
+#[inline]
+pub fn predict_apex_rise(h_dot0: f32, gravity: f32) -> f32 {
+    if gravity <= 0.0 {
+        0.0
+    } else {
+        h_dot0 * h_dot0 / (2.0 * gravity)
+    }
+}
+
+/// Backward: launch speed needed to reach an apex rise `Δh*`.
+/// `ḣ₀* = sqrt(2·g̃·Δh*)` — no mass and no stiffness, by construction.
+#[inline]
+pub fn apex_to_launch_speed(apex_rise: f32, gravity: f32) -> f32 {
+    (2.0 * gravity * apex_rise.max(0.0)).sqrt()
+}
+
+/// Landing speed magnitude after falling `fall` px (energy conservation).
+/// Retained for the absorb/landing path (`Land`) and for symmetry with the
+/// launch helpers; consumed today by the loop-1 tests.
+#[inline]
+#[allow(dead_code)]
+pub fn landing_speed(fall: f32, gravity: f32) -> f32 {
+    (2.0 * gravity * fall.max(0.0)).sqrt()
+}
+
+/// The per-hop displacement (stroke) law — the whole of loop 1:
+///
+/// ```text
+/// Δl = Δl_prev + k_p · ( h_desired − h_apex )
+/// ```
+///
+/// `h_desired` and `h_apex` are **apex rises** above the standing height, so
+/// their difference is itself a displacement and `k_p` is dimensionless. The
+/// `Δl_prev` term is an integrator: it learns the baseline energy needed to
+/// fight gravity, which is why no mass or stiffness ever enters the loop.
+#[inline]
+pub fn update_delta_l(delta_l_prev: f32, h_desired: f32, h_apex: f32, k_p: f32) -> f32 {
+    delta_l_prev + k_p * (h_desired - h_apex)
+}
+
+/// Grounded height-regulator spring (1/s²) and damping (1/s). Critically
+/// damped (`k_d = 2·√k_s`) so a height step settles without ringing.
+const VERTICAL_K_S: f32 = 400.0;
+const VERTICAL_K_D: f32 = 40.0;
+
+/// Drive the grounded hip toward `y_target` under a critically-damped spring,
+/// with ground support cancelling gravity — the "held" pin of
+/// `plans/gravity_four_layer.md`. The vertical loop closes on the *measured*
+/// resulting state, never on this request.
+fn regulate_height(state: &mut ResolverState, y_target: f32, dt: f32) {
+    let dy = y_target - state.hip_pos.y;
+    let a = VERTICAL_K_S * dy - VERTICAL_K_D * state.hip_vel.y;
+    state.hip_vel.y += a * dt;
+    state.hip_pos.y += state.hip_vel.y * dt;
+}
+
+/// One tick of the loop-1 (vertical) controller.
+///
+/// State-based triggers only: crouch depth reached, measured h-dot cutoff,
+/// full extension, contact loss, settle band. No timers gate the launch.
+fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
+    let g = config.gravity.max(1.0);
+    let floor = config.floor_y;
+    let stand = if config.crouch {
+        config.crouch_height
+    } else {
+        config.hip_height
+    };
+    let h = state.hip_pos.y - floor;
+    let grounded = state.left.phase == GaitPhase::Stance || state.right.phase == GaitPhase::Stance;
+    let full_ext = config.thigh_len + config.calf_len - 2.0;
+
+    match state.vs.phase {
+        VerticalPhase::Stand => {
+            regulate_height(state, floor + stand, dt);
+            if state.vs.jump_requested && grounded {
+                state.vs.jump_requested = false;
+                // Apply the displacement law for this hop, using the last hop's
+                // measured apex (`0` on the very first jump → `Δl = k_p·h_desired`).
+                state.vs.delta_l = update_delta_l(
+                    state.vs.delta_l,
+                    config.jump_apex,
+                    state.vs.h_apex_prev,
+                    config.k_p_apex,
+                );
+                state.vs.phase = VerticalPhase::Load;
+                state.vs.h_apex = 0.0;
+                state.vs.apex_latched = false;
+            }
+        }
+        VerticalPhase::Load => {
+            // Launch window (doc §5.7): a hop is committed from a stance. If
+            // contact is lost before the crouch completes, abort to Stand and
+            // wait for the next stance window rather than crouching mid-air.
+            if !grounded {
+                state.vs.phase = VerticalPhase::Stand;
+            } else {
+                // Bank displacement: crouch by `Δl`, never below the crouch stop.
+                let target = (stand - state.vs.delta_l).max(config.crouch_height.min(stand));
+                regulate_height(state, floor + target, dt);
+                state.vs.delta_l = (stand - target).max(0.0);
+                if h <= target + 1.0 {
+                    state.vs.phase = VerticalPhase::Launch;
+                }
+            }
+        }
+        VerticalPhase::Launch => {
+            // Spend displacement: thrust up. Release on the **measured** h-dot
+            // (doc §4.1) once it is just enough to coast from the CURRENT height
+            // to the target apex `floor + stand + jump_apex` — i.e. the cutoff
+            // is **altitude-aware**, so any height already gained during Launch
+            // is credited. That makes the measured apex land on `stand +
+            // h_desired` regardless of how deep the crouch was, which is what
+            // lets the per-hop `Δl` law close its loop (a fixed cutoff would
+            // overshoot and feed the integrator the wrong sign). The fallback
+            // ends Launch on full extension with h-dot still short (a shallow
+            // crouch saturating the leg).
+            state.hip_vel.y += (config.launch_accel - g) * dt;
+            state.hip_pos.y += state.hip_vel.y * dt;
+            let y_goal = floor + stand + config.jump_apex;
+            let v_req = apex_to_launch_speed(y_goal - state.hip_pos.y, g);
+            if state.hip_vel.y >= v_req || (state.hip_pos.y - floor) >= full_ext {
+                state.vs.phase = VerticalPhase::Flight;
+            }
+        }
+        VerticalPhase::Flight => {
+            // Ballistic, unactuated — the anti-hover guarantee.
+            state.hip_vel.y -= g * dt;
+            state.hip_pos.y += state.hip_vel.y * dt;
+            let rise = (state.hip_pos.y - floor) - stand;
+            if rise > state.vs.h_apex {
+                state.vs.h_apex = rise;
+            }
+            // Latch the apex at the sign change of vertical velocity. This is
+            // the boundary measurement the per-hop law consumes.
+            if state.hip_vel.y <= 0.0 && !state.vs.apex_latched {
+                state.vs.h_apex_prev = state.vs.h_apex;
+                state.vs.apex_latched = true;
+            }
+            if state.hip_vel.y < 0.0 && h <= stand {
+                state.vs.phase = VerticalPhase::Land;
+                state.vs.land_timer = 0.0;
+            }
+        }
+        VerticalPhase::Land => {
+            regulate_height(state, floor + stand, dt);
+            state.vs.land_timer += dt;
+            let settled = (h - stand).abs() < 4.0 && state.hip_vel.y.abs() < 20.0;
+            if state.vs.land_timer > 0.1 && settled {
+                state.vs.phase = VerticalPhase::Stand;
+            }
+        }
+    }
 }
 
 /// The backward velocity clamp. Isolates the maximum horizontal speed the hip
@@ -521,6 +771,7 @@ fn step_leg(
     config: &LowerBodyConfig,
     plan: &StepPlan,
     dt: f32,
+    landing_anchor: Option<f32>,
 ) -> Option<f32> {
     match leg.phase {
         GaitPhase::Stance => {
@@ -537,8 +788,15 @@ fn step_leg(
                 || (plan.stopping && v.abs() > SWING_TRIGGER_SPEED);
             if leg.phase_timer <= 0.0 && wants_step && !other_swinging {
                 let mut swing_to = leg.plant_pos;
-                swing_to.x =
-                    plan_target_x(hip_x, v, v_desired, config.swing_duration_ts, config, plan);
+                // Follower retarget (doc §5A.4): while a jump is in progress the
+                // swinging foot aims at the *other* (leader) foot's plant, so both
+                // feet arrive together for a two-foot landing.
+                swing_to.x = match landing_anchor {
+                    Some(ax) => ax,
+                    None => {
+                        plan_target_x(hip_x, v, v_desired, config.swing_duration_ts, config, plan)
+                    }
+                };
                 swing_to.y = config.floor_y;
                 leg.phase = GaitPhase::Swing;
                 leg.phase_timer = config.swing_duration_ts;
@@ -553,8 +811,10 @@ fn step_leg(
             // position, velocity and remaining flight time. Open-loop targets
             // frozen at lift-off are what made sudden stops land both feet on
             // one side of the hip.
-            leg.swing_to.x =
-                plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
+            leg.swing_to.x = match landing_anchor {
+                Some(ax) => ax,
+                None => plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan),
+            };
             // Progress 1→0 over the swing duration (elapsed fraction).
             let total = config.swing_duration_ts.max(f32::EPSILON);
             let t = (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0);
@@ -598,14 +858,28 @@ pub fn step_lower_body(
 ) -> (LowerBodyPose, DebugInfo) {
     let dir = input_dir.normalize_or_zero();
 
-    // 1. --- Hip height ---
-    let h_target = if config.crouch {
-        config.crouch_height
-    } else {
-        config.hip_height
-    };
-    state.hip_height = approach(state.hip_height, h_target, config.hip_height * dt * 3.0);
-    let h = state.hip_height;
+    // 0. --- Vertical loop (loop 1) ---
+    // Buffer jump intent from the input's vertical channel. A jump fires at the
+    // next `Stand → Load` edge (see `tick_vertical`), which is the launch
+    // window that keeps load + launch inside one stance (doc §5.7).
+    if input_dir.y > 0.5 {
+        state.vs.jump_requested = true;
+    }
+
+    // 1. --- Vertical integration ---
+    // `tick_vertical` OWNS `hip_pos.y` / `hip_vel.y`: it regulates the grounded
+    // hip spring (Stand/Load/Land) and integrates ballistically in Flight. The
+    // loop closes on this *measured* state — never on the requested pose.
+    tick_vertical(state, config, dt);
+    // Measured height above the floor. Read back from the integrated position
+    // (not the old kinematic target) so the horizontal planner sees the true
+    // height, including mid-flight.
+    let h = (state.hip_pos.y - config.floor_y).max(1.0);
+    state.hip_height = h;
+
+    // Airborne = no ground authority. The horizontal planner must not shape
+    // velocity in the air: `v_x` carries ballistically (doc §6.2, §5A).
+    let airborne = state.vs.phase == VerticalPhase::Flight;
 
     // 2. --- Feasibility envelope at the current height ---
     let limits = GaitLimits::from_config(config, h, config.target_speed);
@@ -663,13 +937,17 @@ pub fn step_lower_body(
         }
     }
 
+    // In Flight there is no ground authority: horizontal velocity carries
+    // ballistically (no shaping, no braking). This is what makes walk → jump →
+    // walk one continuous loop at a constant `v_x` (doc §6.2, §5A).
+    if airborne {
+        v = state.hip_vel.x;
+    }
     state.hip_vel.x = v;
-    // Kinematic sandbox: no vertical hip dynamics.
-    state.hip_vel.y = 0.0;
 
-    // Integrate hip position. Height is pinned to `floor_y + h`.
+    // Integrate the horizontal hip position. The vertical position/velocity are
+    // owned by `tick_vertical` above — there is no height pin here.
     state.hip_pos.x += v * dt;
-    state.hip_pos.y = config.floor_y + h;
 
     // 4c. --- Stance constraint: the hip may never outrun its pinned feet ---
     // A stance foot is pinned in world space. If the hip travels beyond the
@@ -679,7 +957,9 @@ pub fn step_lower_body(
     // that foot off the floor. Clamp the hip into the intersection of the
     // stance feet's windows `[plant ± X_max]`; the position stays continuous
     // and the constraint releases as soon as the trailing foot re-plants.
-    {
+    // Gated OFF in Flight: a ballistic body has no ground to push against, so
+    // there are no pinned feet to respect. Body axes freeze until touchdown.
+    if !airborne {
         let mut lo = f32::NEG_INFINITY;
         let mut hi = f32::INFINITY;
         for leg in [&state.left, &state.right] {
@@ -707,6 +987,14 @@ pub fn step_lower_body(
         stopping,
         capture_offset,
     };
+    // While a jump is in progress, retarget each swinging foot to the opposite
+    // (leader) foot's plant for a two-foot landing (doc §5A.4).
+    let jump_active = matches!(
+        state.vs.phase,
+        VerticalPhase::Load | VerticalPhase::Launch | VerticalPhase::Flight
+    );
+    let left_anchor = jump_active.then_some(state.right.plant_pos.x);
+    let right_anchor = jump_active.then_some(state.left.plant_pos.x);
     let left_td = step_leg(
         &mut state.left,
         state.hip_pos.x,
@@ -716,6 +1004,7 @@ pub fn step_lower_body(
         config,
         &plan,
         dt,
+        left_anchor,
     );
     let right_td = step_leg(
         &mut state.right,
@@ -726,6 +1015,7 @@ pub fn step_lower_body(
         config,
         &plan,
         dt,
+        right_anchor,
     );
 
     // 6. --- Backward solve at touchdown (foot → hip) ---
@@ -734,7 +1024,8 @@ pub fn step_lower_body(
     // deadbeat). Skipped while stopping: capture plants encode "brake to rest
     // here", which the cruise inversion would misread as a velocity command.
     let mut v_support = 0.0;
-    if v_desired_scalar != 0.0 {
+    // Skipped in Flight: no touchdown can fire, and `v_x` must carry unchanged.
+    if !airborne && v_desired_scalar != 0.0 {
         if let Some(delta) = left_td.or(right_td) {
             v_support = compute_support_velocity(
                 delta,
@@ -789,6 +1080,12 @@ pub fn step_lower_body(
         v_abs: limits.v_abs,
         v_support,
         capture_x: capture_offset,
+        v_phase: state.vs.phase,
+        hip_height: h,
+        hip_vel_y: state.hip_vel.y,
+        h_desired: config.jump_apex,
+        h_apex: state.vs.h_apex_prev,
+        delta_l: state.vs.delta_l,
     };
 
     (pose, debug)
@@ -964,7 +1261,7 @@ mod tests {
 
         // Lift off with the hip at x = 0.
         let plan = cruise_plan(&cfg);
-        let _ = step_leg(&mut leg, 0.0, v, v, false, &cfg, &plan, 0.001);
+        let _ = step_leg(&mut leg, 0.0, v, v, false, &cfg, &plan, 0.001, None);
         assert_eq!(leg.phase, GaitPhase::Swing);
 
         // Fly through the swing while the hip keeps moving.
@@ -973,7 +1270,7 @@ mod tests {
         let mut touchdown = None;
         for _ in 0..((cfg.swing_duration_ts / dt).ceil() as usize + 2) {
             hip_x += v * dt;
-            touchdown = step_leg(&mut leg, hip_x, v, v, false, &cfg, &plan, dt);
+            touchdown = step_leg(&mut leg, hip_x, v, v, false, &cfg, &plan, dt, None);
             if leg.phase == GaitPhase::Stance {
                 break;
             }
@@ -1018,6 +1315,7 @@ mod tests {
             &cfg,
             &plan,
             dt,
+            None,
         );
         let _ = step_leg(
             &mut state.right,
@@ -1028,6 +1326,7 @@ mod tests {
             &cfg,
             &plan,
             dt,
+            None,
         );
         assert_eq!(state.left.phase, GaitPhase::Stance);
         assert_eq!(state.right.phase, GaitPhase::Swing);
@@ -1049,6 +1348,7 @@ mod tests {
             &cfg,
             &plan,
             dt,
+            None,
         );
         let _ = step_leg(
             &mut state.right,
@@ -1059,6 +1359,7 @@ mod tests {
             &cfg,
             &plan,
             dt,
+            None,
         );
         assert_eq!(state.left.phase, GaitPhase::Stance);
         assert_eq!(state.right.phase, GaitPhase::Stance);
@@ -1086,6 +1387,7 @@ mod tests {
                 &cfg,
                 &plan,
                 dt,
+                None,
             );
             assert!(
                 (state.left.foot_pos - planted).length() < 1e-3,
@@ -1420,5 +1722,2271 @@ mod tests {
             }
             v_prev = debug.v_clamped;
         }
+    }
+
+    // --- Loop 1 (vertical) ---
+
+    #[test]
+    fn test_vertical_pure_math() {
+        let g = 980.0;
+        // `apex_to_launch_speed` and `predict_apex_rise` are exact inverses.
+        let v = apex_to_launch_speed(50.0, g);
+        assert!((v - (2.0f32 * g * 50.0).sqrt()).abs() < 1e-3);
+        assert!((predict_apex_rise(v, g) - 50.0).abs() < 1e-2);
+        // Energy conservation: falling the same height recovers launch speed.
+        assert!((landing_speed(50.0, g) - v).abs() < 1e-3);
+        // The Δl law: a one-time jump starts from Δl_prev = 0.
+        assert_eq!(update_delta_l(0.0, 60.0, 0.0, 0.5), 30.0);
+        // With the error at zero the integrator holds its memory.
+        assert!((update_delta_l(30.0, 60.0, 60.0, 0.5) - 30.0).abs() < 1e-6);
+        // A shortfall banks more displacement; an overshoot gives some back.
+        assert!((update_delta_l(30.0, 60.0, 40.0, 0.5) - 40.0).abs() < 1e-6);
+        assert!((update_delta_l(30.0, 60.0, 80.0, 0.5) - 20.0).abs() < 1e-6);
+    }
+
+    /// Drive the resolver until one jump request completes a full hop; return
+    /// the latched apex of that hop.
+    fn run_one_jump(cfg: &LowerBodyConfig, state: &mut ResolverState, dt: f32) -> f32 {
+        state.vs.jump_requested = true;
+        for _ in 0..4000 {
+            let _ = step_lower_body(Vec2::ZERO, cfg, state, dt);
+            if state.vs.phase == VerticalPhase::Stand && state.vs.h_apex_prev > 0.0 {
+                return state.vs.h_apex_prev;
+            }
+        }
+        state.vs.h_apex_prev
+    }
+
+    #[test]
+    fn test_vertical_jump_and_integrator() {
+        // A one-time jump must leave the ground, bank displacement, latch its
+        // apex, and — repeated — keep the apex in a bounded band around the
+        // target via the Δl integrator (never diverging).
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let target = cfg.jump_apex;
+
+        let apex1 = run_one_jump(&cfg, &mut state, dt);
+        assert!(apex1 > 0.4 * target, "first hop too low: {apex1}");
+        assert!(state.vs.delta_l > 0.0, "no displacement was banked");
+        assert!(state.vs.h_apex_prev > 0.0, "apex was not latched");
+
+        let mut apexes = vec![apex1];
+        for _ in 0..7 {
+            apexes.push(run_one_jump(&cfg, &mut state, dt));
+            assert!(
+                state.vs.delta_l.is_finite() && state.vs.delta_l < 4.0 * target,
+                "Δl diverged: {}",
+                state.vs.delta_l
+            );
+        }
+        let late = &apexes[apexes.len() - 4..];
+        let mean = late.iter().sum::<f32>() / late.len() as f32;
+        assert!(
+            (mean - target).abs() < 0.45 * target,
+            "integrator did not converge near target {target}: mean={mean} apexes={apexes:?}"
+        );
+    }
+
+    #[test]
+    fn test_vertical_flight_is_ballistic() {
+        // Anti-hover: Flight is unactuated, so the vertical velocity must fall
+        // by exactly g·dt every frame — never rising, never held.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        state.vs.jump_requested = true;
+
+        let mut prev_hdot = 0.0f32;
+        let mut in_flight = false;
+        let mut saw_flight = false;
+        for _ in 0..2000 {
+            let (_p, d) = step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+            if d.v_phase == VerticalPhase::Flight {
+                if in_flight {
+                    let dv = d.hip_vel_y - prev_hdot;
+                    assert!(
+                        (dv + cfg.gravity * dt).abs() < 1e-2,
+                        "Flight not ballistic: dḣ={dv}, expected {}",
+                        -cfg.gravity * dt
+                    );
+                }
+                saw_flight = true;
+                in_flight = true;
+                prev_hdot = d.hip_vel_y;
+            } else if saw_flight {
+                break;
+            }
+        }
+        assert!(saw_flight, "never entered Flight");
+    }
+
+    #[test]
+    fn test_vertical_preserves_horizontal_velocity() {
+        // walk → jump → walk is one continuous loop: v_x is conserved through
+        // the air (no ground shaping in Flight) and the gait resumes at it.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for _ in 0..((stride * 3.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        assert!(
+            state.hip_vel.x > 100.0,
+            "did not reach cruise before the jump: {}",
+            state.hip_vel.x
+        );
+
+        state.vs.jump_requested = true;
+        let mut v_in_flight: Option<f32> = None;
+        let mut saw_flight = false;
+        for _ in 0..2000 {
+            let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            if d.v_phase == VerticalPhase::Flight {
+                saw_flight = true;
+                match v_in_flight {
+                    None => v_in_flight = Some(d.v_clamped),
+                    Some(v0) => assert!(
+                        (d.v_clamped - v0).abs() < 1e-3,
+                        "v_x changed in Flight: {v0} → {}",
+                        d.v_clamped
+                    ),
+                }
+            } else if saw_flight && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw_flight, "never entered Flight");
+        assert!(
+            state.hip_vel.x > 100.0,
+            "lost speed across the jump: {}",
+            state.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_vertical_two_foot_landing() {
+        // While walking, a jump's swinging foot must retarget to the leader
+        // (opposite) foot's plant, so the feet converge to a single landing
+        // point instead of the normal alternating spread (doc §5A.4).
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for _ in 0..((stride * 3.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        state.vs.jump_requested = true;
+        let mut min_gap = f32::INFINITY;
+        for _ in 0..4000 {
+            let _ = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            let gap = (state.left.plant_pos.x - state.right.plant_pos.x).abs();
+            min_gap = min_gap.min(gap);
+            if state.vs.phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        // The two plants must have converged to well inside the standing spread.
+        let stand_spread = 30.0;
+        assert!(
+            min_gap < 0.5 * stand_spread,
+            "feet never converged for a two-foot landing: min_gap={min_gap}"
+        );
+    }
+
+    // --- Loop 1 numeric: the whole walking → jumping → walking episode ---
+    //
+    // The resolver is pure math over 5 points (1 hip + 2 knees + 2 feet), so the
+    // entire episode is a headless numeric trace. These tests check that the
+    // NUMBERS fit the kinematics rather than just that the phases advance.
+
+    /// Run a hop to completion; return the latched apex rise and the number of
+    /// ballistic ticks spent with no ground support. `run_one_jump` discards the
+    /// timing, which the numeric loop tests need.
+    fn run_hop_measured(cfg: &LowerBodyConfig, state: &mut ResolverState, dt: f32) -> (f32, u32) {
+        state.vs.jump_requested = true;
+        let mut flight_ticks = 0u32;
+        for _ in 0..6000 {
+            let (_p, d) = step_lower_body(Vec2::ZERO, cfg, state, dt);
+            if d.v_phase == VerticalPhase::Flight {
+                flight_ticks += 1;
+            }
+            if state.vs.phase == VerticalPhase::Stand && state.vs.h_apex_prev > 0.0 {
+                return (state.vs.h_apex_prev, flight_ticks);
+            }
+        }
+        (state.vs.h_apex_prev, flight_ticks)
+    }
+
+    #[test]
+    fn test_vertical_apex_matches_target_and_ballistic_timing() {
+        // The NUMBERS must fit. The altitude-aware launch cutoff releases the hip
+        // at a measured h-dot that balances to `stand + h_desired`, so the latched
+        // apex equals the target, and the observed Flight duration closes the
+        // ballistic relation `t_flight ≈ 2·ḣ₀/g̃` for `ḣ₀ = sqrt(2·g̃·h_apex)`.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let g = cfg.gravity;
+        let target = cfg.jump_apex;
+
+        // The release is a per-tick threshold, so Launch can overshoot the ideal
+        // cutoff by up to one tick of exit speed, `launch_accel·dt`. That is an
+        // apex jitter of `ḣ₀*·(launch_accel·dt)/g̃` that no integrator can remove
+        // (it is the quantization of the cutoff, not a modeling error). The
+        // per-hop band must admit exactly one such quantum; the MEAN, which the
+        // Δl law centres, must fit far tighter.
+        let v_ideal = apex_to_launch_speed(target, g);
+        let quantum = v_ideal * (cfg.launch_accel * dt) / g;
+
+        let mut apexes = Vec::new();
+        for hop in 0..8 {
+            let (apex, flight_ticks) = run_hop_measured(&cfg, &mut state, dt);
+            apexes.push(apex);
+            assert!(apex.is_finite(), "hop {hop}: apex not finite");
+            assert!(
+                (apex - target).abs() <= quantum + 2.0,
+                "hop {hop}: apex {apex} outside one launch-quantum of target {target} \
+                 (quantum={quantum}, Δl={})",
+                state.vs.delta_l
+            );
+
+            // Ballistic timing closes on the *measured* apex: t_flight ≈ 2·ḣ₀/g̃.
+            let h_dot0 = apex_to_launch_speed(apex, g);
+            let t_pred = 2.0 * h_dot0 / g;
+            let t_meas = flight_ticks as f32 * dt;
+            assert!(
+                (t_meas - t_pred).abs() <= 0.15 * t_pred + dt,
+                "hop {hop}: flight time {t_meas}s vs ballistic {t_pred}s"
+            );
+        }
+        let mean = apexes.iter().sum::<f32>() / apexes.len() as f32;
+        assert!(
+            (mean - target).abs() <= 0.08 * target,
+            "mean apex {mean} does not fit target {target}: {apexes:?}"
+        );
+
+        // Δl is a bounded integrator, and the hip resets to stand between hops.
+        assert!(
+            state.vs.delta_l >= 0.0 && state.vs.delta_l < 4.0 * target,
+            "Δl out of band: {}",
+            state.vs.delta_l
+        );
+        assert!(
+            (state.hip_pos.y - (cfg.floor_y + cfg.hip_height)).abs() < 8.0,
+            "hip did not reset to stand: {}",
+            state.hip_pos.y
+        );
+    }
+
+    #[test]
+    fn test_walk_jump_walk_full_episode_is_consistent() {
+        // The whole episode — walking → jump → walking — as one headless trace,
+        // asserting the 5 tracked points never violate their invariants and the
+        // vertical numbers stay physical on every single tick.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+
+        let mut saw_flight = false;
+        let mut max_h = 0.0f32;
+        let mut landed_h = state.hip_pos.y;
+        let mut flight_vx: Option<f32> = None;
+
+        for frame in 0..4000 {
+            // Jump once, at cruise, while still holding the walk input.
+            let jump_now =
+                state.vs.phase == VerticalPhase::Stand && !saw_flight && state.hip_vel.x > 100.0;
+            let input = if jump_now {
+                state.vs.jump_requested = true;
+                Vec2::new(1.0, 1.0)
+            } else {
+                Vec2::X
+            };
+
+            let (pose, d) = step_lower_body(input, &cfg, &mut state, dt);
+
+            // --- The 5 points: finite, on-bone, on-floor ---
+            for p in [
+                pose.hip,
+                pose.left_knee,
+                pose.left_foot,
+                pose.right_knee,
+                pose.right_foot,
+            ] {
+                assert!(
+                    p.x.is_finite() && p.y.is_finite(),
+                    "frame {frame}: NaN in pose: {p:?}"
+                );
+            }
+            let lt = (pose.left_knee - pose.hip).length();
+            let lc = (pose.left_foot - pose.left_knee).length();
+            let rt = (pose.right_knee - pose.hip).length();
+            let rc = (pose.right_foot - pose.right_knee).length();
+            assert!(
+                (lt - cfg.thigh_len).abs() < 0.05
+                    && (lc - cfg.calf_len).abs() < 0.05
+                    && (rt - cfg.thigh_len).abs() < 0.05
+                    && (rc - cfg.calf_len).abs() < 0.05,
+                "frame {frame}: bone length violated: L={lt}/{lc} R={rt}/{rc}"
+            );
+            assert!(
+                pose.left_foot.y >= cfg.floor_y - 0.5 && pose.right_foot.y >= cfg.floor_y - 0.5,
+                "frame {frame}: foot sank below the floor"
+            );
+
+            // --- Vertical numbers ---
+            max_h = max_h.max(d.hip_height);
+            if d.v_phase == VerticalPhase::Flight {
+                saw_flight = true;
+                match flight_vx {
+                    None => flight_vx = Some(d.v_clamped),
+                    Some(v0) => assert!(
+                        (d.v_clamped - v0).abs() < 1e-3,
+                        "frame {frame}: v_x changed in Flight: {v0} → {}",
+                        d.v_clamped
+                    ),
+                }
+            }
+            if saw_flight && d.v_phase == VerticalPhase::Stand {
+                landed_h = state.hip_pos.y;
+                break;
+            }
+        }
+
+        assert!(saw_flight, "episode never went airborne");
+        // The apex must clear the target band even while walking.
+        assert!(
+            max_h - cfg.hip_height >= 0.7 * cfg.jump_apex,
+            "jump apex too low: peak h={max_h}, stand={}",
+            cfg.hip_height
+        );
+        // And the hip must settle back onto the stand.
+        assert!(
+            (landed_h - (cfg.floor_y + cfg.hip_height)).abs() < 8.0,
+            "did not settle back to stand: h={landed_h}"
+        );
+        // The gait resumes and keeps advancing after the landing.
+        for _ in 0..(stride / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        assert!(
+            state.hip_vel.x > 100.0,
+            "did not resume the gait after the jump: v_x={}",
+            state.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_walk_jump_walk_gait_resumes_and_progresses() {
+        // After landing, the two legs must return to a valid, alternating gait
+        // (never both Swing) and holding the input must keep the hip advancing.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for _ in 0..((stride * 3.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        let x_before = state.hip_pos.x;
+
+        state.vs.jump_requested = true;
+        // Ride through the whole hop, checking the gait gate while grounded.
+        for _ in 0..2000 {
+            let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            if d.v_phase != VerticalPhase::Flight {
+                assert!(
+                    !(d.left_phase == GaitPhase::Swing && d.right_phase == GaitPhase::Swing),
+                    "both feet swinging while grounded"
+                );
+            }
+            if d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        // Resume walking and confirm forward progress with a valid alternation.
+        for _ in 0..((stride * 2.0) / dt) as usize {
+            let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            assert!(
+                !(d.left_phase == GaitPhase::Swing && d.right_phase == GaitPhase::Swing),
+                "both feet swinging during post-jump walking"
+            );
+        }
+        assert!(
+            state.hip_pos.x > x_before + 20.0,
+            "gait did not advance after the jump: {x_before} → {}",
+            state.hip_pos.x
+        );
+    }
+
+    #[test]
+    fn test_walk_jump_walk_deterministic_replay() {
+        // Pure math over the 5 points means identical inputs replay to identical
+        // numbers — the property that makes these headless tests meaningful.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let approach = ((stride * 3.0) / dt) as usize;
+
+        let run = || {
+            let mut s = ResolverState::new(&cfg);
+            let mut trace: Vec<[f32; 7]> = Vec::new();
+            for i in 0..(approach + 600) {
+                if i == approach {
+                    s.vs.jump_requested = true;
+                }
+                let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+                trace.push([
+                    s.hip_pos.x,
+                    s.hip_pos.y,
+                    d.v_clamped,
+                    d.hip_vel_y,
+                    d.delta_l,
+                    d.h_apex,
+                    d.hip_height,
+                ]);
+            }
+            trace
+        };
+
+        let first = run();
+        let second = run();
+        assert_eq!(first.len(), second.len());
+        for (frame, (a, b)) in first.iter().zip(second.iter()).enumerate() {
+            assert_eq!(a, b, "frame {frame} diverged between identical runs");
+        }
+    }
+
+    // --- State-machine transitions: the whole mode graph ---
+    //
+    // The two behaviours the character is built from are IDLE and WALK, plus the
+    // JUMP action available from both. These tests walk every directed edge of
+    // that graph — idle→walk, walk→idle, idle→jump, jump→idle, walk→jump,
+    // jump→walk and their round trips — asserting the pose invariants on every
+    // tick and the meaningful numeric outcome at each edge. A seeded fuzzer then
+    // hammers the edges with random switch timing (reproducibly).
+
+    /// Assert the 5-point pose and loop-1 state stay physical on one tick. This
+    /// is the shared contract every transition must uphold:
+    /// * all 5 points finite;
+    /// * both legs exactly on-bone (IK ray-clamp guarantees this);
+    /// * no foot ever sinks below the floor (the clamp only ever lifts);
+    /// * never both feet airborne at once (the anti-phase gait gate);
+    /// * vertical state finite and bounded.
+    fn assert_pose_invariants(
+        cfg: &LowerBodyConfig,
+        pose: &LowerBodyPose,
+        d: &DebugInfo,
+        ctx: &str,
+        frame: usize,
+    ) {
+        for p in [
+            pose.hip,
+            pose.left_knee,
+            pose.left_foot,
+            pose.right_knee,
+            pose.right_foot,
+        ] {
+            assert!(
+                p.x.is_finite() && p.y.is_finite(),
+                "{ctx} frame {frame}: NaN in pose: {p:?}"
+            );
+        }
+        let lt = (pose.left_knee - pose.hip).length();
+        let lc = (pose.left_foot - pose.left_knee).length();
+        let rt = (pose.right_knee - pose.hip).length();
+        let rc = (pose.right_foot - pose.right_knee).length();
+        assert!(
+            (lt - cfg.thigh_len).abs() < 0.05
+                && (lc - cfg.calf_len).abs() < 0.05
+                && (rt - cfg.thigh_len).abs() < 0.05
+                && (rc - cfg.calf_len).abs() < 0.05,
+            "{ctx} frame {frame}: bone length violated: L={lt}/{lc} R={rt}/{rc}"
+        );
+        assert!(
+            pose.left_foot.y >= cfg.floor_y - 0.5 && pose.right_foot.y >= cfg.floor_y - 0.5,
+            "{ctx} frame {frame}: foot sank below the floor"
+        );
+        assert!(
+            !(d.left_phase == GaitPhase::Swing && d.right_phase == GaitPhase::Swing),
+            "{ctx} frame {frame}: both feet airborne at once"
+        );
+        assert!(
+            d.delta_l.is_finite()
+                && d.hip_height.is_finite()
+                && d.hip_vel_y.is_finite()
+                && d.delta_l < 100.0 * cfg.jump_apex,
+            "{ctx} frame {frame}: loop-1 state out of band: Δl={}, h={}, ḣ={}",
+            d.delta_l,
+            d.hip_height,
+            d.hip_vel_y
+        );
+    }
+
+    /// Hold `walk`/`idle` input for `frames`, checking invariants every tick.
+    fn drive(
+        cfg: &LowerBodyConfig,
+        state: &mut ResolverState,
+        dt: f32,
+        frames: usize,
+        walk: bool,
+        ctx: &str,
+    ) {
+        for frame in 0..frames {
+            let input = if walk { Vec2::X } else { Vec2::ZERO };
+            let (pose, d) = step_lower_body(input, cfg, state, dt);
+            assert_pose_invariants(cfg, &pose, &d, ctx, frame);
+        }
+    }
+
+    /// Request a jump, then step (holding `input`) until the vertical FSM settles
+    /// back to `Stand` after going airborne. Returns `(saw_flight, max_rise,
+    /// flight_ticks)` where `max_rise` is the peak measured height above stand.
+    fn run_hop(
+        cfg: &LowerBodyConfig,
+        state: &mut ResolverState,
+        dt: f32,
+        input: Vec2,
+        ctx: &str,
+    ) -> (bool, f32, u32) {
+        state.vs.jump_requested = true;
+        let mut saw_flight = false;
+        let mut max_rise = 0.0f32;
+        let mut flight_ticks = 0u32;
+        for frame in 0..4000 {
+            let (pose, d) = step_lower_body(input, cfg, state, dt);
+            assert_pose_invariants(cfg, &pose, &d, ctx, frame);
+            max_rise = max_rise.max(d.hip_height - cfg.hip_height);
+            if d.v_phase == VerticalPhase::Flight {
+                saw_flight = true;
+                flight_ticks += 1;
+            }
+            if saw_flight && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        (saw_flight, max_rise, flight_ticks)
+    }
+
+    #[test]
+    fn test_transition_idle_to_walk() {
+        // idle → walk: from rest the gait must break into a step and reach cruise.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+
+        // Start at rest, gait frozen, both feet planted.
+        drive(&cfg, &mut s, dt, (stride / dt) as usize, false, "idle-pre");
+        assert!(
+            s.left.phase == GaitPhase::Stance && s.right.phase == GaitPhase::Stance,
+            "idle gait is not frozen"
+        );
+        let x0 = s.hip_pos.x;
+
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 3.0) / dt) as usize,
+            true,
+            "walk",
+        );
+        assert!(
+            s.hip_vel.x > 100.0,
+            "did not reach cruise: v={}",
+            s.hip_vel.x
+        );
+        assert!(
+            s.hip_pos.x > x0 + 50.0,
+            "did not advance: {x0} → {}",
+            s.hip_pos.x
+        );
+    }
+
+    #[test]
+    fn test_transition_walk_to_idle() {
+        // walk → idle: release the input and the hip must brake, settle between the
+        // feet, and then stay put (no phantom steps).
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 3.0) / dt) as usize,
+            true,
+            "walk",
+        );
+        assert!(s.hip_vel.x > 100.0, "not cruising before the stop");
+
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 4.0) / dt) as usize,
+            false,
+            "brake",
+        );
+        assert!(s.hip_vel.x.abs() < 8.0, "did not stop: v={}", s.hip_vel.x);
+        let mid = (s.left.plant_pos.x + s.right.plant_pos.x) * 0.5;
+        assert!(
+            (s.hip_pos.x - mid).abs() < 8.0,
+            "hip did not settle over the feet: hx={} mid={mid}",
+            s.hip_pos.x
+        );
+
+        // Idle hold: no drift, both feet planted.
+        let x1 = s.hip_pos.x;
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 2.0) / dt) as usize,
+            false,
+            "idle-hold",
+        );
+        assert!(
+            (s.hip_pos.x - x1).abs() < 3.0,
+            "phantom drift while idle: {x1} → {}",
+            s.hip_pos.x
+        );
+        assert!(
+            s.left.phase == GaitPhase::Stance && s.right.phase == GaitPhase::Stance,
+            "gait not frozen after stopping"
+        );
+    }
+
+    #[test]
+    fn test_transition_idle_to_jump() {
+        // idle → jump: a standing jump must clear the target band and land back on
+        // the stand with zero horizontal drift.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        drive(&cfg, &mut s, dt, (stride / dt) as usize, false, "idle-pre");
+        let x0 = s.hip_pos.x;
+
+        let (saw_flight, max_rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::ZERO, "idle-jump");
+        assert!(saw_flight, "standing jump never left the ground");
+        assert!(
+            max_rise >= 0.7 * cfg.jump_apex,
+            "standing jump too low: rise={max_rise}"
+        );
+        assert!(
+            (s.hip_pos.y - (cfg.floor_y + cfg.hip_height)).abs() < 8.0,
+            "did not return to the stand: {}",
+            s.hip_pos.y
+        );
+        assert!(
+            (s.hip_pos.x - x0).abs() < 2.0,
+            "vertical jump drifted horizontally: {x0} → {}",
+            s.hip_pos.x
+        );
+        assert!(s.vs.delta_l >= 0.0, "Δl went negative: {}", s.vs.delta_l);
+    }
+
+    #[test]
+    fn test_transition_jump_to_idle() {
+        // jump → idle: after an idle jump lands, the system must be a clean idle
+        // again — both feet planted, gait frozen, no residual velocity.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let (_saw, _rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::ZERO, "jump-idle");
+        // Let it fully settle, still idle.
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 2.0) / dt) as usize,
+            false,
+            "idle-settle",
+        );
+        assert!(s.hip_vel.x.abs() < 5.0, "residual v after landing");
+        assert!(
+            s.left.phase == GaitPhase::Stance && s.right.phase == GaitPhase::Stance,
+            "not an idle stance after the jump"
+        );
+    }
+
+    #[test]
+    fn test_transition_walk_to_jump() {
+        // walk → jump: at cruise the jump must not perturb v_x (ballistic carry),
+        // and the apex numbers must still fit while moving.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 3.0) / dt) as usize,
+            true,
+            "walk",
+        );
+        let v_before = s.hip_vel.x;
+        assert!(v_before > 100.0, "not cruising before the jump");
+
+        let (saw_flight, max_rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::X, "walk-jump");
+        assert!(saw_flight, "walking jump never left the ground");
+        assert!(
+            max_rise >= 0.7 * cfg.jump_apex,
+            "walking jump too low: rise={max_rise}"
+        );
+        assert!(
+            (s.hip_vel.x - v_before).abs() < 0.15 * v_before,
+            "v_x was perturbed by the jump: {v_before} → {}",
+            s.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_transition_jump_to_walk() {
+        // jump → walk: an idle jump that lands and then receives walk input must
+        // break straight into a cruise gait.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let (saw, _rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::ZERO, "jump");
+        assert!(saw, "never went airborne");
+
+        let x0 = s.hip_pos.x;
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 3.0) / dt) as usize,
+            true,
+            "walk",
+        );
+        assert!(
+            s.hip_vel.x > 100.0,
+            "did not resume walking after the jump: v={}",
+            s.hip_vel.x
+        );
+        assert!(
+            s.hip_pos.x > x0 + 50.0,
+            "did not advance after the jump: {x0} → {}",
+            s.hip_pos.x
+        );
+    }
+
+    #[test]
+    fn test_transition_round_trips() {
+        // The compound edges: idle→walk→idle, idle→jump→idle, and
+        // walk→jump→walk, each asserted end-to-end on one state.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let n = |mults: f32| ((stride * mults) / dt) as usize;
+
+        // idle → walk → idle
+        let x_idle0 = s.hip_pos.x;
+        drive(&cfg, &mut s, dt, n(3.0), true, "rt walk");
+        assert!(s.hip_vel.x > 100.0, "rt: no cruise");
+        drive(&cfg, &mut s, dt, n(4.0), false, "rt idle");
+        assert!(s.hip_vel.x.abs() < 8.0, "rt: did not stop");
+        assert!(s.hip_pos.x > x_idle0 + 50.0, "rt: no net travel");
+
+        // idle → jump → idle
+        let x_before_jump = s.hip_pos.x;
+        let (saw, rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::ZERO, "rt jump");
+        assert!(saw && rise >= 0.7 * cfg.jump_apex, "rt: bad idle jump");
+        drive(&cfg, &mut s, dt, n(2.0), false, "rt idle2");
+        assert!(
+            (s.hip_pos.x - x_before_jump).abs() < 3.0,
+            "rt: idle jump drifted"
+        );
+
+        // walk → jump → walk
+        drive(&cfg, &mut s, dt, n(3.0), true, "rt walk2");
+        let v_before = s.hip_vel.x;
+        let (saw2, rise2, _ft2) = run_hop(&cfg, &mut s, dt, Vec2::X, "rt walkjump");
+        assert!(saw2 && rise2 >= 0.7 * cfg.jump_apex, "rt: bad walking jump");
+        drive(&cfg, &mut s, dt, n(2.0), true, "rt walk3");
+        assert!(
+            s.hip_vel.x > 100.0 && (s.hip_vel.x - v_before).abs() < 0.2 * v_before,
+            "rt: walking gait not maintained across the jump: {v_before} → {}",
+            s.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_transition_chained_jumps_while_walking() {
+        // walk → jump → walk → jump → walk … : repeated hops at cruise must each
+        // fit the target and keep the horizontal speed steady (the walk→jump→walk
+        // loop is stable, not just a one-shot).
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let g = cfg.gravity;
+        let quantum = apex_to_launch_speed(cfg.jump_apex, g) * (cfg.launch_accel * dt) / g;
+
+        drive(
+            &cfg,
+            &mut s,
+            dt,
+            ((stride * 3.0) / dt) as usize,
+            true,
+            "walk",
+        );
+        let v_cruise = s.hip_vel.x;
+        assert!(v_cruise > 100.0, "not cruising");
+
+        for cycle in 0..5 {
+            let (saw, rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::X, &format!("chain {cycle}"));
+            assert!(saw, "cycle {cycle}: never airborne");
+            assert!(
+                (rise - cfg.jump_apex).abs() <= quantum + 2.0,
+                "cycle {cycle}: apex {rise} outside one launch-quantum of {}",
+                cfg.jump_apex
+            );
+            // Keep walking between hops.
+            drive(
+                &cfg,
+                &mut s,
+                dt,
+                ((stride * 2.0) / dt) as usize,
+                true,
+                "walk-between",
+            );
+            assert!(
+                (s.hip_vel.x - v_cruise).abs() < 0.2 * v_cruise,
+                "cycle {cycle}: cruise speed drifted: {v_cruise} → {}",
+                s.hip_vel.x
+            );
+        }
+        assert!(
+            s.vs.delta_l >= 0.0 && s.vs.delta_l < 4.0 * cfg.jump_apex,
+            "Δl out of band after chaining: {}",
+            s.vs.delta_l
+        );
+    }
+
+    /// A tiny deterministic LCG so randomized switch-timing tests are fully
+    /// reproducible (same seed → same schedule → same numbers). This is what lets
+    /// randomization live in a pure-math unit test without flakiness.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        /// True with probability `1/n`.
+        fn chance(&mut self, n: u32) -> bool {
+            self.next_u32() % n.max(1) == 0
+        }
+        /// A frame count in `[lo, hi]`.
+        fn span(&mut self, lo: u32, hi: u32) -> u32 {
+            lo + self.next_u32() % (hi.saturating_sub(lo).max(1))
+        }
+    }
+
+    /// Drive a random schedule of idle/walk toggles and jump requests, returning a
+    /// compact trace of the numbers for the determinism check. Invariants are
+    /// asserted on every tick.
+    fn fuzz_schedule(seed: u64) -> Vec<[f32; 6]> {
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let mut rng = Lcg::new(seed);
+        let mut s = ResolverState::new(&cfg);
+        let mut walk = false;
+        let mut trace = Vec::with_capacity(9000);
+        // Random hold lengths keep switches landing at arbitrary gait phases.
+        let mut walk_hold = rng.span(1, 120);
+        let mut jump_hold = rng.span(1, 240);
+
+        for frame in 0..9000 {
+            if walk_hold == 0 {
+                walk = !walk;
+                walk_hold = rng.span(1, 120);
+            }
+            walk_hold -= 1;
+            if jump_hold == 0 {
+                s.vs.jump_requested = true;
+                jump_hold = rng.span(30, 240);
+            }
+            jump_hold -= 1;
+
+            let input = if walk { Vec2::X } else { Vec2::ZERO };
+            let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, &format!("fuzz seed {seed}"), frame);
+            // Global boundedness: nothing may run away under arbitrary switching.
+            assert!(
+                s.hip_vel.x.abs() < 1.0e4 && d.hip_vel_y.abs() < 1.0e4,
+                "seed {seed} frame {frame}: velocity ran away: vx={} vy={}",
+                s.hip_vel.x,
+                d.hip_vel_y
+            );
+            trace.push([
+                s.hip_pos.x,
+                s.hip_pos.y,
+                d.v_clamped,
+                d.hip_vel_y,
+                d.delta_l,
+                d.hip_height,
+            ]);
+        }
+        trace
+    }
+
+    #[test]
+    fn test_transition_random_switch_timing() {
+        // Randomize the timing of every state switch (idle↔walk toggles and jump
+        // requests) across many seeds. The point is not one trajectory but that NO
+        // schedule — including switches that land mid-stride, mid-crouch or
+        // mid-air — can violate the pose invariants or drive the loop unbounded.
+        for seed in 1..=12 {
+            let trace = fuzz_schedule(seed);
+            assert_eq!(trace.len(), 9000, "seed {seed}: short trace");
+        }
+    }
+
+    #[test]
+    fn test_transition_random_switch_timing_is_deterministic() {
+        // Reproducibility of the fuzzer: the same seed must yield byte-identical
+        // numbers, so a failure can always be replayed exactly.
+        for seed in [7u64, 1234, 999_999] {
+            let a = fuzz_schedule(seed);
+            let b = fuzz_schedule(seed);
+            assert_eq!(a.len(), b.len(), "seed {seed}: length mismatch");
+            for (frame, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(x, y, "seed {seed} frame {frame}: nondeterministic");
+            }
+        }
+        // And different seeds must actually explore different schedules.
+        assert_ne!(
+            fuzz_schedule(1),
+            fuzz_schedule(2),
+            "the fuzzer is not varying its schedule"
+        );
+    }
+
+    // --- Design-contract probes ---
+    //
+    // These encode what `plans/raibert_vertical_loop.md` claims the loop DOES, so a
+    // refactor that silently changes the behaviour is caught here rather than only
+    // once it is ported onto the physics body.
+
+    #[test]
+    fn test_design_apex_fits_target_across_amplitude_sweep() {
+        // §4: the commanded apex must actually be reached (within one launch
+        // quantum) for every target the leg has the stroke to buy. This is the
+        // core numeric contract — "the number fits".
+        let dt = 1.0 / 60.0;
+        for &target in &[20.0f32, 30.0, 40.0, 50.0, 60.0] {
+            let mut cfg = LowerBodyConfig::default();
+            cfg.jump_apex = target;
+            let g = cfg.gravity;
+            let quantum = apex_to_launch_speed(target, g) * (cfg.launch_accel * dt) / g;
+            let mut s = ResolverState::new(&cfg);
+            let mut apexes = Vec::new();
+            for _ in 0..8 {
+                let (apex, _ft) = run_hop_measured(&cfg, &mut s, dt);
+                apexes.push(apex);
+            }
+            let mean = apexes.iter().sum::<f32>() / apexes.len() as f32;
+            assert!(
+                (mean - target).abs() <= 0.12 * target + quantum,
+                "target {target}: mean apex {mean} off ({apexes:?})"
+            );
+            assert!(
+                s.vs.delta_l.is_finite() && s.vs.delta_l.abs() < 4.0 * target,
+                "target {target}: Δl out of band: {}",
+                s.vs.delta_l
+            );
+        }
+    }
+
+    #[test]
+    fn test_design_no_model_fitting_gravity_sweep() {
+        // §4A: the loop holds "no mass estimate, no stiffness estimate, no leg
+        // model" — only measured state and g. Changing g must not break
+        // convergence: the same one-line law still reaches the target.
+        let dt = 1.0 / 60.0;
+        for &g in &[490.0f32, 980.0, 1960.0] {
+            let mut cfg = LowerBodyConfig::default();
+            cfg.gravity = g;
+            cfg.jump_apex = 30.0;
+            let mut s = ResolverState::new(&cfg);
+            let mut apexes = Vec::new();
+            for _ in 0..10 {
+                let (apex, _ft) = run_hop_measured(&cfg, &mut s, dt);
+                apexes.push(apex);
+            }
+            let last = &apexes[apexes.len() - 4..];
+            let mean = last.iter().sum::<f32>() / last.len() as f32;
+            assert!(
+                (mean - cfg.jump_apex).abs() <= 0.25 * cfg.jump_apex,
+                "g={g}: apex not reached: mean={mean} ({apexes:?})"
+            );
+            assert!(
+                s.vs.delta_l.is_finite() && s.vs.delta_l.abs() < 200.0,
+                "g={g}: Δl diverged: {}",
+                s.vs.delta_l
+            );
+        }
+    }
+
+    #[test]
+    fn test_design_unreachable_target_saturates_without_diverging() {
+        // A target beyond what the stroke can buy must SATURATE: the crouch clamps
+        // at the mechanical stop, the apex plateaus, and the PI integrator must not
+        // wind up past the stop (that would be the divergence bug in disguise).
+        let cfg = {
+            let mut c = LowerBodyConfig::default();
+            c.jump_apex = 200.0;
+            c
+        };
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stop = cfg.hip_height - cfg.crouch_height; // 35 px mechanical stop
+        let mut apexes = Vec::new();
+        for hop in 0..15 {
+            let (apex, _ft) = run_hop_measured(&cfg, &mut s, dt);
+            apexes.push(apex);
+            assert!(apex.is_finite(), "hop {hop}: non-finite apex");
+        }
+        let last = &apexes[apexes.len() - 5..];
+        let mx = last.iter().cloned().fold(f32::MIN, f32::max);
+        let mn = last.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(mx < cfg.jump_apex, "unreachable target reached: {apexes:?}");
+        assert!(mx - mn < 5.0, "apex did not plateau: {last:?}");
+        assert!(
+            s.vs.delta_l <= stop + 1.0,
+            "Δl wound past the crouch stop: {} > {stop}",
+            s.vs.delta_l
+        );
+    }
+
+    #[test]
+    fn test_design_controller_has_no_airborne_authority() {
+        // §3.1 / anti-hover: the controller must never ADD upward velocity while
+        // airborne. On every Flight tick ḣ must strictly decrease (gravity only).
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        s.vs.jump_requested = true;
+        let mut prev: Option<f32> = None;
+        let mut saw = false;
+        for _ in 0..3000 {
+            let (_p, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            if d.v_phase == VerticalPhase::Flight {
+                saw = true;
+                if let Some(p) = prev {
+                    assert!(
+                        d.hip_vel_y < p,
+                        "controller added height in the air: {p} → {}",
+                        d.hip_vel_y
+                    );
+                }
+                prev = Some(d.hip_vel_y);
+            } else {
+                prev = None;
+            }
+            if saw && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw, "never flew");
+    }
+
+    #[test]
+    fn test_design_vertical_phase_order_is_respected() {
+        // §5: the FSM must traverse Stand→Load→Launch→Flight→Land→Stand in order —
+        // never skipping a phase and never reversing (the one legal backward edge
+        // is the launch-window abort Load→Stand).
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        s.vs.jump_requested = true;
+        let mut seen: Vec<VerticalPhase> = vec![VerticalPhase::Stand];
+        let mut last = VerticalPhase::Stand;
+        for _ in 0..3000 {
+            let (_p, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            if d.v_phase != last {
+                let ok = matches!(
+                    (last, d.v_phase),
+                    (VerticalPhase::Stand, VerticalPhase::Load)
+                        | (VerticalPhase::Load, VerticalPhase::Launch)
+                        | (VerticalPhase::Load, VerticalPhase::Stand)
+                        | (VerticalPhase::Launch, VerticalPhase::Flight)
+                        | (VerticalPhase::Flight, VerticalPhase::Land)
+                        | (VerticalPhase::Land, VerticalPhase::Stand)
+                );
+                assert!(ok, "illegal vertical transition {last:?} → {:?}", d.v_phase);
+                seen.push(d.v_phase);
+                last = d.v_phase;
+            }
+            if last == VerticalPhase::Stand && seen.len() > 1 {
+                break;
+            }
+        }
+        for need in [
+            VerticalPhase::Load,
+            VerticalPhase::Launch,
+            VerticalPhase::Flight,
+            VerticalPhase::Land,
+        ] {
+            assert!(seen.contains(&need), "never entered {need:?}: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn test_design_tolerates_variable_dt() {
+        // Porting reality: the frame dt is not fixed. A PAL-style ±40 % jitter
+        // around 1/60 must not destabilize the loop — the apex still fits, the
+        // invariants still hold, and the hop still lands.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let mut rng = Lcg::new(0xDEAD_BEEF);
+        s.vs.jump_requested = true;
+        let mut saw = false;
+        let mut max_h = 0.0f32;
+        for frame in 0..6000 {
+            // dt ∈ [0.0100, 0.0200] (~1/60 ± 20 % in time → the physics rate jitters).
+            let dt = 0.0100 + (rng.next_u32() % 100) as f32 * 0.0001;
+            let (pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "vdt", frame);
+            max_h = max_h.max(d.hip_height);
+            if d.v_phase == VerticalPhase::Flight {
+                saw = true;
+            }
+            if saw && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw, "variable-dt loop never flew");
+        assert!(
+            max_h - cfg.hip_height >= 0.6 * cfg.jump_apex,
+            "variable-dt jump too low: rise={}",
+            max_h - cfg.hip_height
+        );
+        assert!(
+            (s.hip_pos.y - (cfg.floor_y + cfg.hip_height)).abs() < 10.0,
+            "variable-dt hop did not settle: {}",
+            s.hip_pos.y
+        );
+    }
+
+    #[test]
+    fn test_design_crouch_mode_still_jumps() {
+        // With `crouch = true` the stand height is `crouch_height`, so the loop
+        // must settle low and still buy the full transition to
+        // `crouch_height + jump_apex`. Exercises the `stand` selector and the
+        // `crouch_height.min(stand)` Load clamp.
+        let mut cfg = LowerBodyConfig::default();
+        cfg.crouch = true;
+        let stand = cfg.crouch_height; // 55
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        s.vs.jump_requested = true;
+
+        let mut saw = false;
+        let mut max_h = 0.0f32;
+        for frame in 0..6000 {
+            let (pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "crouch", frame);
+            max_h = max_h.max(d.hip_height);
+            if d.v_phase == VerticalPhase::Flight {
+                saw = true;
+            }
+            if saw && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw, "crouch-mode jump never flew");
+        assert!(
+            max_h >= stand + 0.5 * cfg.jump_apex,
+            "crouch-mode apex too low: peak={max_h}, stand={stand}"
+        );
+        assert!(
+            (s.hip_pos.y - (cfg.floor_y + stand)).abs() < 8.0,
+            "crouch-mode did not settle to stand: {} (want {})",
+            s.hip_pos.y,
+            cfg.floor_y + stand
+        );
+    }
+
+    #[test]
+    fn test_design_nonzero_floor_offset() {
+        // The whole loop must be translation-invariant: a floor at y = 100 has to
+        // behave exactly like y = 0 (all heights are measured above `floor_y`).
+        let mut cfg = LowerBodyConfig::default();
+        cfg.floor_y = 100.0;
+        let base = cfg.floor_y + cfg.hip_height; // 190
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        s.vs.jump_requested = true;
+
+        let mut saw = false;
+        let mut max_h = 0.0f32;
+        for frame in 0..6000 {
+            let (pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "floor", frame);
+            max_h = max_h.max(d.hip_height);
+            if d.v_phase == VerticalPhase::Flight {
+                saw = true;
+            }
+            if saw && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw, "floor-offset jump never flew");
+        assert!(
+            max_h - cfg.hip_height >= 0.6 * cfg.jump_apex,
+            "floor-offset jump too low: rise={}",
+            max_h - cfg.hip_height
+        );
+        assert!(
+            (s.hip_pos.y - base).abs() < 8.0,
+            "did not settle at the offset stand: {} (want {base})",
+            s.hip_pos.y
+        );
+    }
+
+    /// Fuzz with random jump requests AND per-tick dt jitter; returns a trace for
+    /// the determinism check. Invariants asserted every tick.
+    fn fuzz_jitter(seed: u64) -> Vec<[f32; 6]> {
+        let cfg = LowerBodyConfig::default();
+        let mut rng = Lcg::new(seed);
+        let mut s = ResolverState::new(&cfg);
+        let mut walk = false;
+        let mut trace = Vec::with_capacity(8000);
+        let mut walk_hold = rng.span(1, 90);
+        let mut jump_hold = rng.span(1, 150);
+
+        for frame in 0..8000 {
+            if walk_hold == 0 {
+                walk = !walk;
+                walk_hold = rng.span(1, 90);
+            }
+            walk_hold -= 1;
+            if jump_hold == 0 {
+                s.vs.jump_requested = true;
+                jump_hold = rng.span(20, 180);
+            }
+            jump_hold -= 1;
+            let dt = 0.0100 + (rng.next_u32() % 100) as f32 * 0.0001; // 0.01..0.02
+
+            let input = if walk { Vec2::X } else { Vec2::ZERO };
+            let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, &format!("fuzz-jitter {seed}"), frame);
+            assert!(
+                s.hip_vel.x.abs() < 1.0e4 && d.hip_vel_y.abs() < 1.0e4,
+                "seed {seed} frame {frame}: runaway vx={} vy={}",
+                s.hip_vel.x,
+                d.hip_vel_y
+            );
+            trace.push([
+                s.hip_pos.x,
+                s.hip_pos.y,
+                d.v_clamped,
+                d.hip_vel_y,
+                d.delta_l,
+                d.hip_height,
+            ]);
+        }
+        trace
+    }
+
+    #[test]
+    fn test_fuzz_jitter_is_stable_and_deterministic() {
+        // Random dt + random switching, across seeds: never panics, never
+        // diverges, and replays identically for a given seed.
+        for seed in 1..=6 {
+            let a = fuzz_jitter(seed);
+            let b = fuzz_jitter(seed);
+            assert_eq!(a.len(), b.len(), "seed {seed}: length");
+            for (frame, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x, y,
+                    "seed {seed} frame {frame}: nondeterministic under jitter"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_design_launch_full_extension_branch() {
+        // §4.1 fallback: if the hip reaches full extension with ḣ still short of
+        // the cutoff, Launch must still release to Flight (a shallow-crouch
+        // saturation). `jump_apex = 200` guarantees the cutoff is unreachable, so
+        // the ONLY way out of Launch is the full-extension branch.
+        let cfg = {
+            let mut c = LowerBodyConfig::default();
+            c.jump_apex = 200.0;
+            c
+        };
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        s.vs.jump_requested = true;
+        let full_ext = cfg.thigh_len + cfg.calf_len - 2.0;
+        let mut max_h = 0.0f32;
+        let mut released = false;
+        for _ in 0..4000 {
+            let (_p, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            max_h = max_h.max(d.hip_height);
+            if d.v_phase == VerticalPhase::Flight {
+                released = true;
+                break;
+            }
+            assert!(
+                d.v_phase != VerticalPhase::Land,
+                "locked in Load/Launch without ever flying"
+            );
+        }
+        assert!(released, "never left Launch for an unreachable target");
+        assert!(
+            max_h >= full_ext - 4.0,
+            "released short of full extension: {max_h} vs {full_ext}"
+        );
+    }
+
+    #[test]
+    fn test_design_launch_commit_latency_is_measured() {
+        // §5.7 says a jump intent is *buffered* and committed at the next launch
+        // window. Measure the real latency: request a jump at the worst moment
+        // (mid-swing) and record how many ticks elapse before Load is entered.
+        // This pins the current behaviour; a change to the window policy trips it.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        // Walk until exactly one leg is mid-swing.
+        let mut ticks = 0usize;
+        while !(s.left.phase == GaitPhase::Swing || s.right.phase == GaitPhase::Swing) {
+            step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            ticks += 1;
+            assert!(
+                ticks < (stride * 4.0 / dt) as usize,
+                "never got a swing leg"
+            );
+        }
+        s.vs.jump_requested = true;
+        let mut latency = 0usize;
+        for _ in 0..2000 {
+            let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            if d.v_phase == VerticalPhase::Load {
+                break;
+            }
+            latency += 1;
+        }
+        // The intent never drops: it must commit within a couple of strides.
+        assert!(
+            latency < (stride * 3.0 / dt) as usize,
+            "jump intent was dropped (latency {latency} ticks)"
+        );
+    }
+
+    // --- Sudden stop from an arbitrary phase ---
+    //
+    // The user's hypothesis: a sudden stop (release the move input) must "finish
+    // the last walking/jumping circle and then stand still" and it must not
+    // matter WHERE in the cycle the stop is triggered. These sweeps slide the
+    // release frame across a whole stride (walk) and a whole hop (jump) and
+    // assert the SAME settled end-state every time: the in-progress step/jump
+    // completes (never frozen mid-swing / never cancelled mid-air), speed reaches
+    // zero, both feet are planted, and nothing drifts or re-steps afterward.
+
+    #[test]
+    fn test_stop_finishes_walk_cycle_from_any_phase() {
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let stride_frames = (stride / dt).round() as usize;
+        let cruise_frames = (stride * 3.0 / dt) as usize;
+        let settle_budget = (stride * 8.0 / dt) as usize;
+
+        let mut worst_settle = 0usize;
+        let mut stopped_mid_swing = 0usize;
+        for k in (0..stride_frames).step_by(2) {
+            let ctx = format!("walk-stop k={k}");
+            let mut s = ResolverState::new(&cfg);
+            // Cruise to a steady gait …
+            drive(&cfg, &mut s, dt, cruise_frames, true, &ctx);
+            assert!(
+                s.hip_vel.x > 50.0,
+                "{ctx}: not at cruise before the stop (v={})",
+                s.hip_vel.x
+            );
+            if s.left.phase == GaitPhase::Swing || s.right.phase == GaitPhase::Swing {
+                stopped_mid_swing += 1;
+            }
+
+            // … walk `k` more frames (sliding the stop across the stride) …
+            let mut settle = None;
+            for frame in 0..(k + settle_budget) {
+                let input = if frame < k { Vec2::X } else { Vec2::ZERO };
+                let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+                assert_pose_invariants(&cfg, &pose, &d, &ctx, frame);
+                if frame >= k
+                    && s.hip_vel.x.abs() < 5.0
+                    && s.left.phase == GaitPhase::Stance
+                    && s.right.phase == GaitPhase::Stance
+                {
+                    settle = Some(frame - k);
+                    break;
+                }
+            }
+            let settle = settle.unwrap_or_else(|| panic!("{ctx}: never reached a standstill"));
+            worst_settle = worst_settle.max(settle);
+
+            // … and once settled it must stay put: no phantom steps, no drift.
+            let x_settled = s.hip_pos.x;
+            let (l_plant, r_plant) = (s.left.plant_pos, s.right.plant_pos);
+            drive(&cfg, &mut s, dt, (2.0 / dt) as usize, false, &ctx);
+            assert!(
+                s.left.phase == GaitPhase::Stance && s.right.phase == GaitPhase::Stance,
+                "{ctx}: stepping resumed after the standstill"
+            );
+            assert!(
+                (s.hip_pos.x - x_settled).abs() < 4.0,
+                "{ctx}: drifted after the standstill: {x_settled} -> {}",
+                s.hip_pos.x
+            );
+            assert!(
+                (s.left.plant_pos - l_plant).length() < 1e-3
+                    && (s.right.plant_pos - r_plant).length() < 1e-3,
+                "{ctx}: a foot re-planted with no input"
+            );
+        }
+        // Every stop must settle promptly, and the sweep must have actually hit
+        // the mid-swing case (otherwise the test is not probing the hard phase).
+        assert!(
+            worst_settle < settle_budget,
+            "slowest stop settle was {worst_settle} frames (budget {settle_budget})"
+        );
+        assert!(
+            stopped_mid_swing > 0,
+            "the sweep never triggered a stop during swing"
+        );
+    }
+
+    #[test]
+    fn test_stop_finishes_jump_cycle_from_any_phase() {
+        // Releasing the move input at any point of a hop — including mid-Load,
+        // mid-Launch and mid-Flight — must NOT cancel a committed jump: it still
+        // goes airborne and settles to a standstill on landing.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let cruise_frames = (stride * 3.0 / dt) as usize;
+        let settle_budget = (stride * 16.0 / dt) as usize;
+        // The sweep spans the whole hop (Load → Launch → Flight → Land).
+        let hop_frames = 120usize;
+
+        let mut released_mid_air = 0usize;
+        for k in (0..hop_frames).step_by(3) {
+            let ctx = format!("jump-stop k={k}");
+            let mut s = ResolverState::new(&cfg);
+            drive(&cfg, &mut s, dt, cruise_frames, true, &ctx);
+
+            s.vs.jump_requested = true;
+            let mut saw_flight = false;
+            let mut settled = false;
+            for frame in 0..(k + settle_budget) {
+                let input = if frame < k { Vec2::X } else { Vec2::ZERO };
+                let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+                assert_pose_invariants(&cfg, &pose, &d, &ctx, frame);
+                if d.v_phase == VerticalPhase::Flight {
+                    saw_flight = true;
+                    if frame >= k {
+                        released_mid_air += 1;
+                    }
+                }
+                if frame >= k
+                    && saw_flight
+                    && d.v_phase == VerticalPhase::Stand
+                    && s.hip_vel.x.abs() < 5.0
+                    && s.left.phase == GaitPhase::Stance
+                    && s.right.phase == GaitPhase::Stance
+                {
+                    settled = true;
+                    break;
+                }
+            }
+            assert!(
+                saw_flight,
+                "{ctx}: releasing the move input cancelled the jump (never flew)"
+            );
+            assert!(settled, "{ctx}: never reached a standstill after the jump");
+        }
+        // The sweep must have exercised a release while already airborne.
+        assert!(
+            released_mid_air > 0,
+            "the sweep never released the input during Flight"
+        );
+    }
+
+    #[test]
+    fn test_stop_from_random_phase_always_settles() {
+        // Reproducible fuzz of the stop phase: cruise, then release after a random
+        // number of extra frames, optionally requesting a jump at the same moment.
+        // Whatever the phase, the character must finish the cycle and stand still.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let cruise_frames = (stride * 3.0 / dt) as usize;
+        let settle_budget = (stride * 20.0 / dt) as usize;
+        let mut rng = Lcg::new(0x00C0_FFEE);
+
+        for trial in 0..24u32 {
+            let ctx = format!("stop-fuzz trial {trial}");
+            let mut s = ResolverState::new(&cfg);
+            drive(&cfg, &mut s, dt, cruise_frames, true, &ctx);
+
+            let k = rng.span(0, (stride / dt) as u32);
+            let jump = rng.chance(3);
+            if jump {
+                s.vs.jump_requested = true;
+            }
+
+            let mut saw_flight = false;
+            let mut settled = false;
+            for frame in 0..(k as usize + settle_budget) {
+                let input = if (frame as u32) < k {
+                    Vec2::X
+                } else {
+                    Vec2::ZERO
+                };
+                let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+                assert_pose_invariants(&cfg, &pose, &d, &ctx, frame);
+                if d.v_phase == VerticalPhase::Flight {
+                    saw_flight = true;
+                }
+                if (frame as u32) >= k
+                    && s.hip_vel.x.abs() < 5.0
+                    && s.left.phase == GaitPhase::Stance
+                    && s.right.phase == GaitPhase::Stance
+                    && (!jump || (saw_flight && d.v_phase == VerticalPhase::Stand))
+                {
+                    settled = true;
+                    break;
+                }
+            }
+            assert!(
+                settled,
+                "{ctx}: never settled (jump={jump}, k={k}, v={})",
+                s.hip_vel.x
+            );
+        }
+    }
+
+    // --- The "middle" of a walk↔jump edge: an idle, or not? ---
+    //
+    // Design §5.7/§5.8 answer this precisely, and it is worth pinning as a test
+    // because the intuitive answer (a middle idle) is the WRONG one:
+    //
+    // * walk → jump does NOT insert an idle/stop. "The horizontal loop keeps
+    //   running … the launch is `Stance-start → Launch` with `v_x` continuous;
+    //   only the height reference changes." Freezing `v_x` through the window was
+    //   explicitly withdrawn (§5.7). The only "middle" is the *vertical* FSM
+    //   passing through `Stand → Load → Launch → Flight → Land → Stand` while the
+    //   gait never stops.
+    // * idle → jump is a different edge: from a true standstill the physical
+    //   "middle" is the `Load` crouch — it banks displacement in height only, so
+    //   the body must NOT translate during it.
+    //
+    // These three tests treat that as the contract.
+
+    /// Append `p` only if it differs from the previous entry, so the vector holds
+    /// the *ordered distinct* phase sequence (consecutive repeats collapsed).
+    fn push_phase(seq: &mut Vec<VerticalPhase>, p: VerticalPhase) {
+        if seq.last() != Some(&p) {
+            seq.push(p);
+        }
+    }
+
+    /// Build a state cruised to steady speed with move input held.
+    fn walk_state(cfg: &LowerBodyConfig, dt: f32) -> ResolverState {
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let mut s = ResolverState::new(cfg);
+        drive(
+            cfg,
+            &mut s,
+            dt,
+            ((stride * 3.0) / dt) as usize,
+            true,
+            "cruise",
+        );
+        s
+    }
+
+    #[test]
+    fn test_walk_to_jump_phase_order() {
+        // The vertical phase sequence of a walking jump is fixed, and — per
+        // §5.7 — there is NO idle interposed: it is `Stance-start → Launch`
+        // (here expressed as Stand → Load → Launch → Flight → Land → Stand)
+        // while the horizontal gait keeps running.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let mut s = walk_state(&cfg, dt);
+        assert!(s.hip_vel.x > 100.0, "not cruising before the jump");
+
+        s.vs.jump_requested = true;
+        let mut seq = vec![s.vs.phase];
+        let mut saw_flight = false;
+        for frame in 0..4000 {
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "walk-jump", frame);
+            push_phase(&mut seq, d.v_phase);
+            if d.v_phase == VerticalPhase::Flight {
+                saw_flight = true;
+            }
+            if saw_flight && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw_flight, "never went airborne");
+        assert_eq!(
+            seq,
+            vec![
+                VerticalPhase::Stand,
+                VerticalPhase::Load,
+                VerticalPhase::Launch,
+                VerticalPhase::Flight,
+                VerticalPhase::Land,
+                VerticalPhase::Stand,
+            ],
+            "walk→jump vertical phase order changed: {seq:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "KNOWN DEVIATION (2026-10-12): a walking jump committed mid-swing transiently \
+                collapses/reverses v_x via touchdown backward-solves; plan §5.7 wants v_x \
+                continuous. Enable once the §5.7 launch-window gate lands."]
+    fn test_walk_to_jump_preserves_vx_design() {
+        // §5.7/§5.8 claim: "the horizontal loop keeps running … the launch is
+        // `Stance-start → Launch` with `v_x` continuous; only the height
+        // reference changes." Freezing `v_x` was explicitly withdrawn (§5.7).
+        // So |v_x| must stay a large fraction of cruise for the WHOLE transition.
+        //
+        // It does NOT today. Measured at dt = 1/60 (jump requested mid-swing):
+        // `v_x` rings 120 → 4.6 → 120 → 90 → −50 → 3.3 → 16.6 (Flight holds
+        // 16.6) → 120 after landing. Two touchdown backward-solves fire DURING
+        // the jump (`v_support = 4.6` mid-Load, `−90` during Launch): because the
+        // jump commits mid-swing instead of at the §5.7 launch window, the
+        // two-foot-landing follower plants *behind* the hip and each touchdown
+        // damps `v_x`. Existing walk↔jump tests pass because they only check
+        // `v_x` after the hop has re-accelerated to cruise, not during it.
+        //
+        // This test encodes the DESIGN property (it will pass once the launch is
+        // buffered to the stance-start window per §5.7).
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let mut s = walk_state(&cfg, dt);
+        let v_cruise = s.hip_vel.x;
+
+        s.vs.jump_requested = true;
+        let mut v_min = f32::INFINITY;
+        let mut v_min_phase = VerticalPhase::Stand;
+        let mut v_min_support = 0.0f32;
+        let mut saw_flight = false;
+        for frame in 0..4000 {
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "walk-jump", frame);
+            if d.v_phase == VerticalPhase::Flight {
+                saw_flight = true;
+            }
+            let vx = s.hip_vel.x.abs();
+            if vx < v_min {
+                v_min = vx;
+                v_min_phase = d.v_phase;
+                v_min_support = d.v_support;
+            }
+            if saw_flight && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw_flight, "never went airborne");
+        assert!(
+            v_min > 0.5 * v_cruise,
+            "walking jump did not preserve v_x (§5.7): min |v_x|={v_min} at {v_min_phase:?} \
+             (touchdown v_support={v_min_support}), cruise={v_cruise}"
+        );
+    }
+
+    #[test]
+    fn test_jump_to_walk_has_no_middle_idle() {
+        // The reverse edge: an idle hop lands (Land → Stand) and then walk input
+        // must break straight into the gait. The vertical phase must be `Stand` at
+        // the hand-off and stay `Stand` — no accidental re-jump — while the
+        // character accelerates from the standstill.
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+
+        let (saw, _rise, _ft) = run_hop(&cfg, &mut s, dt, Vec2::ZERO, "idle-hop");
+        assert!(saw, "never went airborne");
+        assert!(
+            s.vs.phase == VerticalPhase::Stand,
+            "did not settle to Stand after the hop: {:?}",
+            s.vs.phase
+        );
+        let x0 = s.hip_pos.x;
+
+        for frame in 0..((stride * 3.0) / dt) as usize {
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "jump-walk", frame);
+            assert_eq!(
+                d.v_phase,
+                VerticalPhase::Stand,
+                "re-entered the jump while transitioning to walk"
+            );
+        }
+        assert!(s.hip_vel.x > 100.0, "did not resume walking");
+        assert!(s.hip_pos.x > x0 + 50.0, "did not advance after the hop");
+    }
+
+    #[test]
+    fn test_idle_to_jump_crouch_does_not_translate() {
+        // The true idle→jump edge. From a standstill the ordered sequence is
+        // Stand → Load → Launch → Flight → Land → Stand, and the `Load` crouch —
+        // the physical "middle" this edge *does* have — must bank displacement in
+        // height only, never translating the body (no phantom step).
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        drive(&cfg, &mut s, dt, (1.0 / dt) as usize, false, "rest");
+        assert!(s.hip_vel.x.abs() < 1.0, "not at rest");
+        let x0 = s.hip_pos.x;
+
+        let mut seq = vec![s.vs.phase];
+        let mut crouch_x_min = f32::INFINITY;
+        let mut crouch_x_max = f32::NEG_INFINITY;
+        let mut saw_flight = false;
+        s.vs.jump_requested = true;
+        for frame in 0..4000 {
+            let (pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "idle-jump", frame);
+            push_phase(&mut seq, d.v_phase);
+            if d.v_phase == VerticalPhase::Load {
+                crouch_x_min = crouch_x_min.min(s.hip_pos.x);
+                crouch_x_max = crouch_x_max.max(s.hip_pos.x);
+            }
+            if d.v_phase == VerticalPhase::Flight {
+                saw_flight = true;
+            }
+            if saw_flight && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw_flight, "idle jump never flew");
+        assert_eq!(
+            seq,
+            vec![
+                VerticalPhase::Stand,
+                VerticalPhase::Load,
+                VerticalPhase::Launch,
+                VerticalPhase::Flight,
+                VerticalPhase::Land,
+                VerticalPhase::Stand,
+            ],
+            "idle→jump vertical phase order changed: {seq:?}"
+        );
+        assert!(
+            crouch_x_max - crouch_x_min < 1.0,
+            "the crouch translated the body: {crouch_x_min} … {crouch_x_max}"
+        );
+        assert!(
+            (s.hip_pos.x - x0).abs() < 3.0,
+            "idle jump drifted: {x0} → {}",
+            s.hip_pos.x
+        );
+        assert!(
+            s.hip_vel.x.abs() < 5.0,
+            "not at a standstill after the idle jump: v={}",
+            s.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_jump_to_walk_symmetric_no_vx_hidden_stop() {
+        // Symmetry probe for the reverse edge. The walk→jump finding was an
+        // in-jump touchdown solve that damped `v_x`. Here we check the mirror:
+        // does landing (and the resume into walk) inject an analogous *hidden*
+        // horizontal stop, or reverse `v_x`? Holding walk input through the hop,
+        // we require (a) landing does not silently floor the carried speed,
+        // (b) `v_x` never goes backward during Land/resume, and (c) walk speed
+        // recovers. (Measured: `v_x` rises monotonically 30 → 120 through Land,
+        // `v_support = 0` — the landing is clean, unlike the jump-in edge.)
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let mut s = walk_state(&cfg, dt);
+        let v_cruise = s.hip_vel.x;
+
+        s.vs.jump_requested = true;
+        let mut saw_flight = false;
+        let mut land_seen = false;
+        let mut v_carry = 0.0f32; // last |v_x| while airborne (momentum carried)
+        let mut v_min_land = f32::INFINITY;
+        let mut v_min_signed = f32::INFINITY;
+        let mut land_frames = 0usize;
+        for _ in 0..4000 {
+            let (_p, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            match d.v_phase {
+                VerticalPhase::Flight => {
+                    saw_flight = true;
+                    v_carry = s.hip_vel.x.abs();
+                }
+                VerticalPhase::Land => {
+                    land_seen = true;
+                    land_frames += 1;
+                    v_min_land = v_min_land.min(s.hip_vel.x.abs());
+                }
+                _ => {}
+            }
+            if land_seen {
+                v_min_signed = v_min_signed.min(s.hip_vel.x);
+            }
+            if saw_flight && land_seen && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw_flight && land_seen, "never flew and/or never landed");
+        // (a) Landing must not silently floor the carried speed to a standstill.
+        assert!(
+            v_min_land > 0.4 * v_carry.max(1.0),
+            "landing killed the carried v_x: carry={v_carry:.2}, min |v_x| during Land=\
+             {v_min_land:.2} over {land_frames} land frames"
+        );
+        // (b) No backward stutter on touchdown.
+        assert!(
+            v_min_signed > -1.0,
+            "v_x reversed during landing/resume: min signed v_x={v_min_signed:.2}"
+        );
+
+        // (c) Continue holding walk input: speed must come back to cruise.
+        let mut v_recover = 0.0f32;
+        for _ in 0..((stride * 4.0) / dt) as usize {
+            let (_p, _d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            v_recover = v_recover.max(s.hip_vel.x);
+            if s.hip_vel.x > 0.9 * v_cruise {
+                break;
+            }
+        }
+        assert!(
+            v_recover > 0.8 * v_cruise,
+            "did not resume walking after the hop: peak v={v_recover:.2}, cruise={v_cruise:.2}"
+        );
+    }
+
+    // --- Weird-but-legal condition probes ---
+    //
+    // These deliberately push degenerate or unusual inputs through the pure
+    // resolver: magnitudes, directions, frame rates, zero dt, nonsense tuning.
+    // They are not new features — they pin the *existing* contract at the edges,
+    // which is exactly where a physics port diverges first.
+
+    #[test]
+    fn test_input_normalization_is_magnitude_invariant() {
+        // `step_lower_body` normalizes the input direction (`normalize_or_zero`).
+        // Only the unit direction may matter, so a tiny or a huge stick
+        // magnitude must produce the very same cruise as a unit push. This
+        // guards a refactor that starts scaling speed by raw magnitude.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let cruise_with = |input: Vec2| -> f32 {
+            let mut s = ResolverState::new(&cfg);
+            for frame in 0..((stride * 4.0) / dt) as usize {
+                let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+                assert_pose_invariants(&cfg, &pose, &d, "normalize", frame);
+            }
+            s.hip_vel.x
+        };
+        let unit = cruise_with(Vec2::X);
+        let huge = cruise_with(Vec2::new(700.0, 0.0));
+        let tiny = cruise_with(Vec2::new(1.0e-3, 0.0));
+        assert!(
+            unit > 0.5 * cfg.target_speed,
+            "unit push did not cruise: {unit}"
+        );
+        assert!(
+            (unit - huge).abs() < 1.0e-3,
+            "magnitude leaked into speed: unit={unit:.4} huge={huge:.4}"
+        );
+        assert!(
+            (unit - tiny).abs() < 1.0e-3,
+            "tiny magnitude did not normalize to +X: unit={unit:.4} tiny={tiny:.4}"
+        );
+    }
+
+    #[test]
+    fn test_reverse_direction_mirror_and_turnaround_are_bounded() {
+        // Every other test walks in +X. Walk in -X (the mirror) and then reverse
+        // mid-stride *without* idling. The mirror must reach exactly -cruise; the
+        // reversal must stay finite, hold the invariants, and settle into -X.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        let v_forward = walk_state(&cfg, dt).hip_vel.x;
+
+        // (a) -X must be the exact mirror of +X.
+        let mut s = ResolverState::new(&cfg);
+        for frame in 0..((stride * 4.0) / dt) as usize {
+            let (pose, d) = step_lower_body(Vec2::NEG_X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "reverse", frame);
+        }
+        let v_reverse = s.hip_vel.x;
+        assert!(
+            (v_reverse + v_forward).abs() < 0.05 * v_forward.abs().max(1.0),
+            "reverse is not the mirror of forward: forward={v_forward:.3}, reverse={v_reverse:.3}"
+        );
+
+        // (b) Reversing mid-stride must stay bounded and settle into -X.
+        let mut s = walk_state(&cfg, dt);
+        let mut saw_negative = false;
+        for frame in 0..((stride * 6.0) / dt) as usize {
+            let (pose, d) = step_lower_body(Vec2::NEG_X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "turnaround", frame);
+            if s.hip_vel.x < -0.5 * v_forward.abs() {
+                saw_negative = true;
+            }
+        }
+        assert!(
+            saw_negative,
+            "never reversed into -X: end v={:.3}",
+            s.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn test_held_jump_input_rehops_and_never_relaunches_midair() {
+        // `input.y > 0.5` re-arms `jump_requested` every tick. Holding a walk+jump
+        // stick (raw y = 1.0) must (a) never commit a hop except from a grounded
+        // stand, and (b) re-hop after each landing — a bunny hop. The phase
+        // predecessor is the contract: `Load` may only be entered from `Stand`,
+        // and `Launch` only from `Load`.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let mut s = ResolverState::new(&cfg);
+        let input = Vec2::new(1.0, 1.0);
+        let mut prev = VerticalPhase::Stand;
+        let mut flights = 0usize;
+        let mut was_flight = false;
+        for frame in 0..8000 {
+            let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "held-jump", frame);
+            match d.v_phase {
+                VerticalPhase::Load => assert!(
+                    matches!(prev, VerticalPhase::Stand | VerticalPhase::Load),
+                    "jump committed mid-air: Load entered from {prev:?} at frame {frame}"
+                ),
+                VerticalPhase::Launch => assert!(
+                    matches!(prev, VerticalPhase::Load | VerticalPhase::Launch),
+                    "launch without a grounded crouch: Launch entered from {prev:?} at frame {frame}"
+                ),
+                _ => {}
+            }
+            let flight = d.v_phase == VerticalPhase::Flight;
+            if flight && !was_flight {
+                flights += 1;
+            }
+            was_flight = flight;
+            prev = d.v_phase;
+            if flights >= 3 {
+                break;
+            }
+        }
+        assert!(
+            flights >= 3,
+            "held jump did not re-hop after each landing: flights={flights}"
+        );
+    }
+
+    #[test]
+    fn test_production_frame_rates_stay_stable_and_bounded() {
+        // The grounded height spring is integrated with explicit Euler
+        // (`regulate_height`), so stability is dt-limited. Every real frame rate
+        // we ship must stay inside the stable band across a full walk+hop episode.
+        let cfg = LowerBodyConfig::default();
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        for &rate in &[30.0f32, 60.0, 120.0, 144.0, 240.0] {
+            let dt = 1.0 / rate;
+            let mut s = ResolverState::new(&cfg);
+            let frames = ((stride * 8.0) / dt) as usize;
+            for frame in 0..frames {
+                let input = if (frame / 200) % 2 == 0 {
+                    Vec2::X
+                } else {
+                    Vec2::ZERO
+                };
+                if frame % 400 == 100 {
+                    s.vs.jump_requested = true;
+                }
+                let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+                assert_pose_invariants(&cfg, &pose, &d, &format!("rate {rate}"), frame);
+                assert!(
+                    s.hip_vel.x.abs() < 1.0e4 && d.hip_vel_y.abs() < 1.0e4,
+                    "rate {rate} frame {frame}: runaway vx={} vy={}",
+                    s.hip_vel.x,
+                    d.hip_vel_y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_paused_dt_zero_is_a_noop() {
+        // A paused frame (`dt = 0`) must not move the body, divide by zero, or
+        // emit NaN. (Callers must not build loop bounds as `x / dt`, but the
+        // resolver itself must be safe under a zero step.)
+        let cfg = LowerBodyConfig::default();
+        let mut s = ResolverState::new(&cfg);
+        let (_p0, _d0) = step_lower_body(Vec2::X, &cfg, &mut s, 0.0);
+        let x0 = s.hip_pos.x;
+        let y0 = s.hip_pos.y;
+        let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, 0.0);
+        assert_pose_invariants(&cfg, &pose, &d, "dt0", 0);
+        assert!(
+            (s.hip_pos.x - x0).abs() < 1.0e-4 && (s.hip_pos.y - y0).abs() < 1.0e-4,
+            "dt=0 moved the body: ({x0},{y0}) -> ({},{})",
+            s.hip_pos.x,
+            s.hip_pos.y
+        );
+    }
+
+    #[test]
+    fn test_degenerate_jump_apex_zero_and_negative_are_bounded() {
+        // `jump_apex = 0` (no rise requested) and a negative `jump_apex`
+        // (nonsense input) must not run away, NaN, or trap the FSM. The negative
+        // rise is clamped to 0 by `apex_to_launch_speed`, so both collapse to a
+        // tiny/no hop that still returns to `Stand`.
+        let dt = 1.0 / 60.0;
+        for apex in [0.0f32, -30.0] {
+            let mut cfg = LowerBodyConfig::default();
+            cfg.jump_apex = apex;
+            let mut s = ResolverState::new(&cfg);
+            // Drive idle, then request a hop with no move input, using inline
+            // checks that do NOT band `Δl` by `jump_apex` — the shared helper's
+            // `Δl < 100·jump_apex` band degenerates to `≤ 0` when `jump_apex ≤ 0`.
+            let check = |pose: &LowerBodyPose, d: &DebugInfo, frame: usize| {
+                for p in [
+                    pose.hip,
+                    pose.left_knee,
+                    pose.left_foot,
+                    pose.right_knee,
+                    pose.right_foot,
+                ] {
+                    assert!(
+                        p.x.is_finite() && p.y.is_finite(),
+                        "apex={apex} frame {frame}: NaN pose {p:?}"
+                    );
+                }
+                assert!(
+                    !(d.left_phase == GaitPhase::Swing && d.right_phase == GaitPhase::Swing),
+                    "apex={apex} frame {frame}: both feet airborne"
+                );
+                assert!(
+                    d.delta_l.is_finite()
+                        && d.hip_height.is_finite()
+                        && d.hip_vel_y.is_finite()
+                        && d.delta_l.abs() < 1.0e4,
+                    "apex={apex} frame {frame}: loop-1 out of band: Δl={} h={} ḣ={}",
+                    d.delta_l,
+                    d.hip_height,
+                    d.hip_vel_y
+                );
+            };
+            for frame in 0..60 {
+                let (pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+                check(&pose, &d, frame);
+            }
+            s.vs.jump_requested = true;
+            let mut saw_flight = false;
+            for frame in 0..3000 {
+                let (pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+                check(&pose, &d, frame);
+                if d.v_phase == VerticalPhase::Flight {
+                    saw_flight = true;
+                }
+                if saw_flight && d.v_phase == VerticalPhase::Stand {
+                    break;
+                }
+            }
+            let h = s.hip_pos.y - cfg.floor_y;
+            assert!(
+                h.is_finite() && (h - cfg.hip_height).abs() < 5.0,
+                "apex={apex}: did not settle to stand: h={h} (flight={saw_flight})"
+            );
+            assert!(
+                s.hip_vel.y.abs() < 50.0,
+                "apex={apex}: vertical runaway v={}",
+                s.hip_vel.y
+            );
+        }
+    }
+
+    #[test]
+    fn test_extreme_speed_and_reach_clamps_hold() {
+        // An absurd `target_speed` must be clamped by the envelope (the shaped
+        // velocity never exceeds `v_abs`), and a tiny `safety_margin`
+        // (aggressive reach) must not break the invariants. Both are weird but
+        // legal tuning values.
+        let dt = 1.0 / 60.0;
+        let stride = LowerBodyConfig::default().stance_duration_ts
+            + LowerBodyConfig::default().swing_duration_ts;
+
+        let mut cfg = LowerBodyConfig::default();
+        cfg.target_speed = 100_000.0;
+        let mut s = ResolverState::new(&cfg);
+        for frame in 0..((stride * 6.0) / dt) as usize {
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "hi-speed", frame);
+            assert!(
+                d.v_clamped.abs() <= d.v_abs + 1.0e-3,
+                "speed exceeded the envelope: v={} v_abs={}",
+                d.v_clamped,
+                d.v_abs
+            );
+        }
+
+        let mut cfg = LowerBodyConfig::default();
+        cfg.safety_margin = 0.05;
+        let mut s = ResolverState::new(&cfg);
+        for frame in 0..((stride * 6.0) / dt) as usize {
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "tiny-margin", frame);
+        }
+    }
+
+    #[test]
+    fn test_degenerate_step_timers_stay_finite() {
+        // Sub-tick stance/swing timers and a zero stance timer are legal (if
+        // nonsensical) configs. `compute_support_velocity` divides by
+        // `Ts/2 + kv`; with `Ts = 0` that is just `kv`. The gait must still
+        // produce finite, bounded poses (the legs flip every tick).
+        let dt = 1.0 / 60.0;
+        for (stance, swing) in [(0.0f32, 0.22f32), (0.001, 0.001), (0.001, 0.22)] {
+            let mut cfg = LowerBodyConfig::default();
+            cfg.stance_duration_ts = stance;
+            cfg.swing_duration_ts = swing;
+            let mut s = ResolverState::new(&cfg);
+            for frame in 0..3000 {
+                let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+                assert_pose_invariants(
+                    &cfg,
+                    &pose,
+                    &d,
+                    &format!("degenerate Ts={stance} Tsw={swing}"),
+                    frame,
+                );
+                assert!(
+                    s.hip_vel.x.abs() < 1.0e5 && d.hip_vel_y.abs() < 1.0e5,
+                    "Ts={stance} Tsw={swing} frame {frame}: runaway vx={} vy={}",
+                    s.hip_vel.x,
+                    d.hip_vel_y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_fuzz_weird_parameters_stay_bounded_and_deterministic() {
+        // Randomize the *config* (not just the schedule), sampling deeply weird
+        // but legal tuning values, then drive a random walk/jump schedule. The
+        // structural contracts must survive every draw: finite poses, no
+        // double-swing, bounded velocity, and byte-exact replay per seed.
+        fn draw(rng: &mut Lcg) -> LowerBodyConfig {
+            let f = |rng: &mut Lcg, lo: f32, hi: f32| {
+                lo + (rng.next_u32() % 10_000) as f32 / 10_000.0 * (hi - lo)
+            };
+            let mut c = LowerBodyConfig::default();
+            c.target_speed = f(rng, 40.0, 220.0);
+            c.accel = f(rng, 150.0, 2500.0);
+            c.kv = f(rng, 0.05, 0.5);
+            c.beta = f(rng, 0.2, 1.0);
+            c.safety_margin = f(rng, 0.55, 0.95);
+            c.prediction_margin = f(rng, 0.25, 0.75);
+            c.step_height = f(rng, 8.0, 70.0);
+            c.stance_duration_ts = f(rng, 0.12, 0.38);
+            c.swing_duration_ts = f(rng, 0.10, 0.38);
+            c.gravity = f(rng, 500.0, 1800.0);
+            c.jump_apex = f(rng, 10.0, 120.0);
+            c.k_p_apex = f(rng, 0.1, 1.0);
+            c.launch_accel = f(rng, 800.0, 4000.0);
+            c
+        }
+        fn run(seed: u64) -> Vec<[f32; 3]> {
+            let dt = 1.0 / 60.0;
+            let mut rng = Lcg::new(seed);
+            let cfg = draw(&mut rng);
+            let mut s = ResolverState::new(&cfg);
+            let mut walk = false;
+            let mut walk_hold = rng.span(1, 120);
+            let mut jump_hold = rng.span(20, 200);
+            let mut trace = Vec::with_capacity(4000);
+            for frame in 0..4000 {
+                if walk_hold == 0 {
+                    walk = !walk;
+                    walk_hold = rng.span(1, 120);
+                }
+                walk_hold -= 1;
+                if jump_hold == 0 {
+                    s.vs.jump_requested = true;
+                    jump_hold = rng.span(20, 200);
+                }
+                jump_hold -= 1;
+                let input = if walk { Vec2::X } else { Vec2::ZERO };
+                let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+                for p in [
+                    pose.hip,
+                    pose.left_knee,
+                    pose.left_foot,
+                    pose.right_knee,
+                    pose.right_foot,
+                ] {
+                    assert!(
+                        p.x.is_finite() && p.y.is_finite(),
+                        "cfg-fuzz {seed} frame {frame}: NaN pose {p:?}"
+                    );
+                }
+                assert!(
+                    !(d.left_phase == GaitPhase::Swing && d.right_phase == GaitPhase::Swing),
+                    "cfg-fuzz {seed} frame {frame}: both feet airborne"
+                );
+                assert!(
+                    s.hip_vel.x.abs() < 1.0e5 && d.hip_vel_y.abs() < 1.0e5,
+                    "cfg-fuzz {seed} frame {frame}: runaway vx={} vy={}",
+                    s.hip_vel.x,
+                    d.hip_vel_y
+                );
+                trace.push([s.hip_pos.x, s.hip_pos.y, d.v_clamped]);
+            }
+            trace
+        }
+        for seed in 1..=20u64 {
+            let a = run(seed);
+            let b = run(seed);
+            assert_eq!(a.len(), b.len(), "cfg-fuzz {seed}: length");
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(x, y, "cfg-fuzz {seed} frame {i}: nondeterministic");
+            }
+        }
+        assert_ne!(run(1), run(2), "cfg-fuzz: configs are not varying");
     }
 }

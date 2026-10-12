@@ -186,7 +186,7 @@ pub fn tuning_ui(
 ) {
     let cfg = &mut params.config;
     egui::Window::new("Raibert Lower Body Tuning").show(contexts.ctx_mut(), |ui| {
-        ui.label("← → or A/D walk; R resets to the resting stance.");
+        ui.label("← → or A/D walk;  Space / ↑ jump;  R resets to the resting stance.");
         ui.separator();
 
         ui.heading("Leg lengths & height");
@@ -220,6 +220,17 @@ pub fn tuning_ui(
         {
             cfg.bend_sign = if bend_positive { 1.0 } else { -1.0 };
         }
+        ui.separator();
+
+        ui.heading("Vertical (loop 1)");
+        ui.add(egui::Slider::new(&mut cfg.gravity, 100.0..=2000.0).text("gravity (px/s²)"));
+        ui.add(
+            egui::Slider::new(&mut cfg.jump_apex, 5.0..=160.0).text("jump_apex / h_desired (px)"),
+        );
+        ui.add(egui::Slider::new(&mut cfg.k_p_apex, 0.0..=1.5).text("k_p_apex (gain)"));
+        ui.add(
+            egui::Slider::new(&mut cfg.launch_accel, 500.0..=20000.0).text("launch_accel (px/s²)"),
+        );
 
         if let Ok(controller) = controller_q.single() {
             let d = &controller.debug;
@@ -239,6 +250,15 @@ pub fn tuning_ui(
                 "phases    : L={:?} R={:?}",
                 d.left_phase, d.right_phase
             ));
+            ui.separator();
+            ui.heading("Vertical telemetry");
+            ui.label(format!("v_phase   : {:?}", d.v_phase));
+            ui.label(format!("height h  : {:.1} px", d.hip_height));
+            ui.label(format!("h-dot     : {:.1} px/s", d.hip_vel_y));
+            ui.label(format!("h_desired : {:.1} px", d.h_desired));
+            ui.label(format!("h_apex    : {:.1} px", d.h_apex));
+            ui.label(format!("delta_l   : {:.1} px", d.delta_l));
+            ui.label(format!("v_x       : {:.1} px/s", d.v_clamped));
         }
     });
 }
