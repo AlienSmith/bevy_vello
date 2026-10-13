@@ -2,9 +2,11 @@
 //!
 //! Runs the REAL game logic for the **V10** character (13 particles) with the
 //! **hip pin** owning `P1/P2/P3` and the spine drive silenced, on a
-//! **floors-removed** world (zero gravity, no static colliders) — so the only
-//! actuator acting on the spine frame is the stiff external position
-//! constraint the pin queues. No window, no GPU.
+//! **floors-removed** world (no static colliders, gravity off by default) — so
+//! the only actuator acting on the spine frame is the stiff external position
+//! constraint the pin queues. Set `GRAVITY=on` to load that same frame with
+//! the world's `g` and prove the (now light, `inv_mass 1.0`) `P1/P2/P3` still
+//! hold. No window, no GPU.
 //!
 //! What is real here:
 //! - character assembly from `v10.character.svg` + `v10.character.json` (game_lib)
@@ -54,7 +56,8 @@
 //! - `keys` — same mask as `held`
 //!
 //! Env: `PROBE_FPS` (default 60), `OUT_CSV` (default
-//! `/home/ubuntu/bender/tmp/headless/pin_log.csv`).
+//! `/home/ubuntu/bender/tmp/headless/pin_log.csv`), `GRAVITY` (default off;
+//! `on`/`off`, or a raw `x,y` vello-frame vector).
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -148,6 +151,58 @@ fn events_path(main: &str) -> String {
     }
 }
 
+/// Same magnitude the tuning app uses (`GRAVITY_ON`): 100 px = 1 m, so 980
+/// px/s². Vello frame is x right, y **down**, so "down" is `+y`.
+const GRAVITY_ON: Vec2 = Vec2::new(0.0, 980.0);
+
+/// Gravity for the harness, from the `GRAVITY` env var. The harness exists to
+/// prove the pin holds the frame; gravity is exactly what makes the now-light
+/// `P1/P2/P3` (inv_mass 1.0) fight for their position, so it is a first-class
+/// knob here.
+/// - unset / `off` / `0` → `Vec2::ZERO` (the original floors-removed world)
+/// - `on` / `1`          → [`GRAVITY_ON`] (matches the tuning app)
+/// - `x,y`               → a raw vello-frame vector (x right, y down)
+fn gravity_from_env() -> Vec2 {
+    match std::env::var("GRAVITY").ok().as_deref().map(str::trim) {
+        None | Some("") | Some("off") | Some("0") => Vec2::ZERO,
+        Some("on") | Some("1") => GRAVITY_ON,
+        Some(spec) => {
+            let mut it = spec.split(',');
+            let x = it.next().and_then(|v| v.trim().parse::<f32>().ok());
+            let y = it.next().and_then(|v| v.trim().parse::<f32>().ok());
+            match (x, y) {
+                (Some(x), Some(y)) => Vec2::new(x, y),
+                _ => {
+                    warn!("GRAVITY=`{spec}` not understood; falling back to zero");
+                    Vec2::ZERO
+                }
+            }
+        }
+    }
+}
+
+fn env_f32(key: &str, default: f32) -> f32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+/// Pin params from env so the stiffness can be swept without a rebuild.
+/// `COMPLIANCE` overrides the base constraint compliance; `DAMPING` overrides
+/// the raw velocity damper. Softening (`kp`/`kd`/`soft_scale`) defaults to the
+/// neutral [`HipPinParams`] values — the pin is a pure position constraint
+/// unless a PD term is set, so the steady-state sag under gravity is the clean
+/// `sag ≈ g·dt² + compliance·g` and scales linearly with `compliance`.
+fn params_from_env() -> HipPinParams {
+    let d = HipPinParams::default();
+    HipPinParams {
+        compliance: env_f32("COMPLIANCE", d.compliance),
+        damping: env_f32("DAMPING", d.damping),
+        ..d
+    }
+}
+
 /// Engine Vello (y-down) → world (y-up) so acceleration signs read correctly.
 #[inline]
 fn vello_to_world(p: Vec2) -> Vec2 {
@@ -230,8 +285,9 @@ fn main() {
     )))
     .add_plugins(VelloCharacterPlugin)
     // Physics resources (mirrors VelloCollisionResponsePlugin, minus GPU parts).
-    // Zero gravity + no colliders = the floors-removed case.
-    .insert_resource(VelloConstraintWorld::new(Vec2::ZERO))
+    // No colliders + gravity per `GRAVITY` (default zero) = the floors-removed
+    // case; `GRAVITY=on` loads the pin with the same `g` the tuning app uses.
+    .insert_resource(VelloConstraintWorld::new(gravity_from_env()))
     .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
     .insert_resource(VelloCollisionWorld::default())
     .insert_resource(RemovedColliders::default())
@@ -239,7 +295,7 @@ fn main() {
     // Pin mode: the pin owns P1/P2/P3, so the spine drive must stay silent
     // (absent resource = ON, so this must be inserted explicitly).
     .insert_resource(SpineDriveEnabled(false))
-    .insert_resource(HipPinParams::default())
+    .insert_resource(params_from_env())
     .add_event::<ColliderExternalImpulseEvent>()
     .add_event::<CharacterPivotForceEvent>()
     .add_event::<CharacterPivotVelocityEvent>()

@@ -148,13 +148,20 @@ struct PistolState {
 #[derive(Resource)]
 struct GravityToggle {
     enabled: bool,
+    /// Downward acceleration magnitude (px/s², vello `+y`). Matches `GRAVITY_ON.y`.
+    magnitude: f32,
 }
 
 impl Default for GravityToggle {
     fn default() -> Self {
-        // Off by default: the physics plugin boots the world with zero gravity,
-        // so the character starts weightless until the box is checked.
-        Self { enabled: true }
+        // On by default: the physics plugin boots the world at zero gravity, so
+        // `apply_default_gravity` (Startup) must push this into the world — the
+        // checkbox only writes on a *change*, so without it the box would read
+        // "checked" while the character still floats.
+        Self {
+            enabled: true,
+            magnitude: GRAVITY_ON.y,
+        }
     }
 }
 //cargo run --package collision_detection --bin character_tuning_main --release
@@ -207,6 +214,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
+        // The world boots at zero gravity; open it now to match the default.
+        .add_systems(Startup, apply_default_gravity)
         .add_systems(Startup, cannon::spawn_cannon_indicator)
         .add_systems(
             Update,
@@ -753,8 +762,23 @@ fn arm_tuning_ui(
     });
 }
 
-/// Simple gravity toggle: an open/close checkbox that sets the world gravity
-/// to the vello-frame default (98.0 px/s² down) or zero.
+/// Push the default toggle state into the world at startup. `VelloCollisionResponsePlugin`
+/// boots at zero gravity and the checkbox only writes on a *change*, so without
+/// this the "on"-by-default toggle would silently never open gravity.
+fn apply_default_gravity(
+    toggle: Res<GravityToggle>,
+    mut constraint_world: ResMut<VelloConstraintWorld>,
+) {
+    constraint_world.set_gravity(if toggle.enabled {
+        Vec2::new(0.0, toggle.magnitude)
+    } else {
+        Vec2::ZERO
+    });
+}
+
+/// Gravity toggle: an open/close checkbox plus a magnitude slider (so the app
+/// can be driven at the same `g` the `headless_pin` gate uses). Writes the world
+/// gravity only when something actually changes.
 fn gravity_toggle_ui(
     mut contexts: EguiContexts,
     mut toggle: ResMut<GravityToggle>,
@@ -762,9 +786,19 @@ fn gravity_toggle_ui(
 ) {
     egui::Window::new("Gravity").show(contexts.ctx_mut(), |ui| {
         let mut enabled = toggle.enabled;
-        if ui.checkbox(&mut enabled, "gravity on / off").changed() {
+        let mut magnitude = toggle.magnitude;
+        let mut changed = ui.checkbox(&mut enabled, "gravity on / off").changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut magnitude, 0.0..=4000.0).text("g (px/s², +y down)"))
+            .changed();
+        if changed {
             toggle.enabled = enabled;
-            constraint_world.set_gravity(if enabled { GRAVITY_ON } else { Vec2::ZERO });
+            toggle.magnitude = magnitude;
+            constraint_world.set_gravity(if enabled {
+                Vec2::new(0.0, magnitude)
+            } else {
+                Vec2::ZERO
+            });
         }
     });
 }
@@ -801,6 +835,14 @@ fn hip_pin_ui(
         ui.add(egui::Slider::new(&mut params.config.thigh_len, 20.0..=120.0).text("thigh_len"));
         ui.add(egui::Slider::new(&mut params.config.calf_len, 20.0..=120.0).text("calf_len"));
         ui.add(egui::Slider::new(&mut params.config.gravity, 0.0..=2000.0).text("gravity"));
+        ui.separator();
+        ui.label("PD command  a = kp·(pose−x) + kd·(v_hip−v)");
+        ui.add(egui::Slider::new(&mut params.kp, 0.0..=4000.0).text("pin kp (P term)"));
+        ui.add(egui::Slider::new(&mut params.kd, 0.0..=200.0).text("pin kd (v match)"));
+        ui.separator();
+        ui.label("Speed-softened compliance (softer when moving fast)");
+        ui.add(egui::Slider::new(&mut params.v_ref, 1.0..=2000.0).text("v_ref (px/s)"));
+        ui.add(egui::Slider::new(&mut params.soft_scale, 1.0..=50.0).text("soft_scale"));
         ui.separator();
         ui.add(
             egui::Slider::new(&mut params.compliance, 1e-9..=1e-5)

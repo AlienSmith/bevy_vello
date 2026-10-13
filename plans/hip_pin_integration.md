@@ -56,13 +56,19 @@ Notes:
   there is no `v_target` there. The hip has one, so the D-term is the textbook `Kd(v_target − v_actual)`.
 
   Note the stock [`ExternalPositionConstraintConfig`](bevy_vello/src/integrations/physics/mod.rs:179)
-  is position-only (no velocity slot). So:
-  - **Step 1 (stiff):** the pin ignores `v_target`; the rigid projection tracks the position target,
-    which is correct because the projection *derives* the velocity for free. `v_target` is unused.
-  - **Soft phase:** we need `v_target` to enter the solve. This requires either an impulse-event
-    bridge (the additive-XPBD-impulse route in
-    [`lower_body_pd_bridge.md`](bevy_vello/plans/lower_body_pd_bridge.md:8)) or an added velocity
-    field on the constraint config — a follow-up, but the target signal is already in hand.
+  is position-only (no velocity slot). The PD is therefore realized in **position-target form**
+  (implemented 2026-10-13, [`pd_target()`](bevy_vello/examples/game_lib/src/lower_body/hip_pin.rs:121)):
+  integrate the command acceleration over one step and add it to the pose target —
+  `target = pose + (Kp·(pose − x) + Kd·(v_hip − v))·dt²`, so the constraint's force is the PD law.
+  This is the same target-space D convention as the arm/spine (see
+  [`spine_pd_three_linear.md`](bevy_vello/plans/spine_pd_three_linear.md:94) §3.2) and needs **no**
+  impulse bridge or new config field. `softened_compliance()` softens `compliance` with particle
+  speed (the limb's ω-schedule ported to velocity space).
+  - **Step 1 (stiff):** `kp = kd = 0`, `soft_scale = 1` — the shape-only pin above; the rigid
+    projection derives velocity for free.
+  - **Soft phase (now reachable):** raise `kp`/`kd` and `soft_scale`; the PD rides on top of the
+    (now speed-softened) pin. With `P1/P2/P3` lightened to `inv_mass = 1.0`, the particles respond
+    to the PD (previously `1e-5` made them near-immovable anchors).
 - **Frame shape is preserved by construction.** Because we pin *three* particles toward *one
   consistent rigid pose*, the `[P1,P2,P3]` distances hold without any distance/angular work — as
   long as the three targets are generated from one rigid transform (§4). No `bend_compliance`
@@ -199,7 +205,12 @@ once the pin is proven. This keeps the diff small and the tuning app compiling.
    colliders in the JSON, (ii) a post-claim pair filter, or (iii) defer and accept jitter.
    (Rec: (i).)
 3. **Spine drive removal** — gate now, delete later? (Rec: yes.)
-4. **Gravity ownership** on the three pinned particles (§7.1).
+4. **Gravity ownership** on the three pinned particles (§7.1). **Settled (2026-10-13, todo 68):**
+   the sandbox owns vertical dynamics — [`drive_hip_pin`](bevy_vello/examples/game_lib/src/lower_body/hip_pin.rs:284)
+   feeds the world `g·dt²` forward into the pin target so the constraint cancels the XPBD gravity
+   term exactly (inert at `g = 0`). Verified in the `GRAVITY=on` gate: the light `P1/P2/P3`
+   (`inv_mass = 1.0`) track within `0.34 px` of the gravity-free case with zero `-g` sag
+   (see [`hip_pin_implementation_record.md`](bevy_vello/plans/hip_pin_implementation_record.md:123)).
 
 ## 11. Relation to other docs
 

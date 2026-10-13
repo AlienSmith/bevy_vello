@@ -10,7 +10,10 @@ mod plugin;
 mod resolver;
 mod systems;
 
-pub use hip_pin::{drive_hip_pin, reset_hip_pin, rigid_frame_targets, HipPin, HipPinParams};
+pub use hip_pin::{
+    drive_hip_pin, pd_target, reset_hip_pin, rigid_frame_targets, softened_compliance, HipPin,
+    HipPinParams,
+};
 
 pub use plugin::LowerBodySandboxPlugin;
 pub use resolver::{

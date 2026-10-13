@@ -1,23 +1,33 @@
 //! Hip-pin bridge: drive the character's rigid `P1/P2/P3` frame from the
-//! Raibert lower-body resolver using **external position constraints only**.
+//! Raibert lower-body resolver.
 //!
-//! See `bevy_vello/plans/hip_pin_integration.md`. Step 1 (this file) is the
-//! stiff variant:
+//! The resolver's hip output — **position and velocity** — is the model; the
+//! pin realizes it on the three pinned particles with a **PD command + a stiff
+//! external position constraint**:
 //!
 //! * the resolver is stepped with the live fixed `dt` and the game input map
 //!   ([`PlayerAction`]),
-//! * its hip output is mapped into the character's **Vello (y-down) world
-//!   frame**, anchored to the live `P3` captured once when the pin first arms,
-//! * the `P1`/`P2` targets are derived from the captured rest offsets by a
-//!   **pure rigid transform** (translation + the `theta` attitude, `0` in step
-//!   1) — no per-tick re-anchoring, so this is a genuine *pin*, not damping,
+//! * its hip is mapped into the character's **Vello (y-down) world frame**,
+//!   anchored to the live `P3` captured once when the pin first arms,
+//! * the `P1`/`P2`/`P3` *pose* targets are derived from the captured rest
+//!   offsets by a **pure rigid transform** (translation + the `theta` attitude),
+//! * each particle's *command* target is that pose advanced by a PD
+//!   acceleration: `a = Kp·(pose − x) + Kd·(v_hip − v)`, integrated to a
+//!   position offset `target = pose + a·dt²`. The velocity term uses the
+//!   resolver's hip velocity as feed-forward, so the pin tracks a moving hip
+//!   without lag ([`pd_target`]),
+//! * the constraint's stiffness `1/compliance` is **softened in speed space**
+//!   — `compliance_eff = compliance·(1 + s·(soft_scale−1))`,
+//!   `s = min(|v|/v_ref, 1)` — so a fast frame yields instead of fighting the
+//!   motion, mirroring the limb PD's ω-scheduled compliance
+//!   ([`softened_compliance`]),
 //! * exactly **three** [`CharacterExternalPositionConstraintEvent`]s are
 //!   emitted (`P1`, `P2`, `P3`); **nothing angular** is emitted, so the
 //!   `P1_P2_P3` angular joint is left at rest and cannot fight the pin.
 //!
 //! The spine drive ([`crate::character::systems::tick_spine_drive`]) must be
-//! switched off while this runs; the tuning app does that via
-//! [`SpineDriveEnabled`](crate::character::SpineDriveEnabled).
+//! switched off while this runs — the code is **retained but disabled**, not
+//! removed, via [`SpineDriveEnabled`](crate::character::SpineDriveEnabled).
 
 use bevy::prelude::*;
 use bevy_vello::integrations::physics::{
@@ -37,11 +47,30 @@ use crate::lower_body::resolver::{step_lower_body, LowerBodyConfig, ResolverStat
 pub struct HipPinParams {
     /// The Raibert resolver config (thigh/calf/hip-height/speeds/gravity...).
     pub config: LowerBodyConfig,
-    /// External position constraint compliance (lower = stiffer). The stock
-    /// `ExternalPositionConstraint` is position-only, so this is the *whole*
-    /// stiffness of the pin.
+    /// PD **position** gain of the command, in `1/s²` (`a += kp·(pose − x)`).
+    /// `0` disables the P term; the pin then tracks `pose` through `compliance`
+    /// alone (the original position-only behaviour). Start small and raise
+    /// until the frame snaps without ringing (ω ≈ √kp).
+    pub kp: f32,
+    /// PD **velocity-matching** gain of the command, in `1/s`
+    /// (`a += kd·(v_hip − v)`). Uses the resolver's hip velocity as the
+    /// feed-forward target, so the pin tracks a moving hip without lag. `0`
+    /// disables the velocity term. A good start is `kd ≈ 2√kp`.
+    pub kd: f32,
+    /// Speed (px/s) at which the compliance softening saturates: `s` reaches `1`
+    /// at `|v| = v_ref`.
+    pub v_ref: f32,
+    /// Softening factor: at `s = 1` the emitted compliance is multiplied by this
+    /// (larger ⇒ softer-on-fast). `1.0` disables softening (constant
+    /// compliance).
+    pub soft_scale: f32,
+    /// External position constraint compliance **at rest** (lower = stiffer).
+    /// The stock `ExternalPositionConstraint` is position-only, so this is the
+    /// base stiffness of the pin; it is scaled up (softer) with speed by
+    /// [`Self::soft_scale`].
     pub compliance: f32,
-    /// External position constraint damping (0..1).
+    /// External position constraint damping (0..1). Legacy raw velocity damper;
+    /// prefer [`Self::kd`] once tuning.
     pub damping: f32,
 }
 
@@ -49,8 +78,13 @@ impl Default for HipPinParams {
     fn default() -> Self {
         Self {
             config: LowerBodyConfig::default(),
-            // Matches the retired spine drive's stiff default — snaps the
-            // particles to the commanded pose.
+            // Neutral defaults: `kp = kd = 0` reproduces the position-only pin,
+            // so the PD is opt-in at tuning time.
+            kp: 0.0,
+            kd: 0.0,
+            v_ref: 300.0,
+            soft_scale: 1.0, // 1 ⇒ constant compliance (softening off)
+            // Snaps the (now-light) particles to the commanded pose.
             compliance: 1e-7,
             damping: 0.01,
         }
@@ -116,6 +150,36 @@ pub fn rigid_frame_targets(
         let rotated = Vec2::new(o.x * cos - o.y * sin, o.x * sin + o.y * cos);
         anchor_p3 + world_delta + rotated
     })
+}
+
+/// PD command target for one pinned particle: the pose target advanced by the
+/// commanded acceleration `a = Kp·(pose − x) + Kd·(v_hip − v)`, integrated to a
+/// position offset (`target = pose + a·dt²`). `v_hip` is the resolver's hip
+/// velocity (the rigid frame translates as one, so all three particles carry
+/// it). Pure; exposed for unit testing.
+pub fn pd_target(
+    pose_t: Vec2,
+    pos: Vec2,
+    vel: Vec2,
+    v_hip: Vec2,
+    dt: f32,
+    kp: f32,
+    kd: f32,
+) -> Vec2 {
+    let a = kp * (pose_t - pos) + kd * (v_hip - vel);
+    pose_t + a * (dt * dt)
+}
+
+/// Speed-softened compliance: `base·(1 + s·(soft_scale−1))` with
+/// `s = min(speed/v_ref, 1)`. `soft_scale = 1` (or `v_ref ≤ 0`) returns `base`
+/// unchanged. Pure; exposed for unit testing.
+pub fn softened_compliance(base: f32, soft_scale: f32, v_ref: f32, speed: f32) -> f32 {
+    let s = if v_ref > 0.0 {
+        (speed / v_ref).min(1.0)
+    } else {
+        0.0
+    };
+    base * (1.0 + s * (soft_scale - 1.0))
 }
 
 /// Seed the pin from the assembled character: capture the `P3` world anchor and
@@ -208,21 +272,48 @@ pub fn drive_hip_pin(
 
         // --- Map resolver hip (y-up) → Vello world (y-down) translation. ---
         // Only the delta from the seed hip is used, so the resolver's absolute
-        // frame never leaks into the world.
+        // frame never leaks into the world. The resolver's hip velocity is the
+        // PD feed-forward target (all three frame particles translate as one).
         let world_delta = Vec2::new(pose.hip.x - pin.seed_hip.x, -(pose.hip.y - pin.seed_hip.y));
+        let v_hip = Vec2::new(pin.state.hip_vel.x, -pin.state.hip_vel.y);
 
-        // --- Rigid frame (attitude theta; 0 = upright in step 1). ---
-        let targets = rigid_frame_targets(pin.anchor_p3, pin.rest_offsets, world_delta, pin.theta);
+        // --- Rigid pose (attitude theta; 0 = upright). ---
+        let pose_targets =
+            rigid_frame_targets(pin.anchor_p3, pin.rest_offsets, world_delta, pin.theta);
 
-        // --- Emit exactly 3 position constraints, nothing angular. ---
-        for (i, target) in [2usize, 3, 4].into_iter().zip(targets.iter()) {
+        // --- Gravity ownership on the pinned frame. ---
+        // The XPBD step applies world gravity to P1/P2/P3 *before* this
+        // constraint solves (and `inv_mass` is now 1.0, so that term is no
+        // longer negligible). The resolver already integrates the same gravity
+        // into `pose`, so the pinned particle would receive `g` twice. Feed the
+        // same `g·dt²` forward into the target to hand gravity ownership to the
+        // sandbox; the constraint then cancels the physics gravity exactly and
+        // no `-g` bias is left on the frame. This is inert at zero gravity.
+        let g_vello = world.gravity();
+        let g_dt2 = g_vello * (dt * dt);
+
+        // --- Per-particle PD command + speed-softened compliance. ---
+        // Exactly 3 position constraints, nothing angular.
+        for (i, pose_t) in [2usize, 3, 4].into_iter().zip(pose_targets.iter()) {
+            let (pos, vel) = match p_q.get(spine.particles[i]) {
+                Ok(p) => (p.particle.pos, p.particle.velocity),
+                Err(_) => continue,
+            };
+            let target = pd_target(*pose_t, pos, vel, v_hip, dt, params.kp, params.kd) + g_dt2;
+            let compliance = softened_compliance(
+                params.compliance,
+                params.soft_scale,
+                params.v_ref,
+                vel.length(),
+            );
+
             world.queue_character_one_time_external_position_constraint(
                 &CharacterExternalPositionConstraintEvent {
                     character_entity: entity,
                     joint_entity: spine.particles[i],
                     config: ExternalPositionConstraintConfig {
-                        target: *target,
-                        compliance: params.compliance,
+                        target,
+                        compliance,
                         damping: params.damping,
                     },
                 },
@@ -325,5 +416,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pd_target_is_pose_when_gains_are_zero() {
+        let pose = Vec2::new(10.0, -5.0);
+        let t = pd_target(
+            pose,
+            Vec2::new(0.0, 0.0),
+            Vec2::ZERO,
+            Vec2::ZERO,
+            1.0 / 90.0,
+            0.0,
+            0.0,
+        );
+        assert!((t - pose).length() < 1e-6);
+    }
+
+    #[test]
+    fn pd_target_leads_toward_pose_and_commanded_velocity() {
+        let dt = 1.0 / 90.0;
+        let pose = Vec2::new(100.0, 0.0);
+        let pos = Vec2::new(90.0, 0.0); // pose ahead of pos in +x
+                                        // P term alone pushes the target past `pose` (in +x).
+        let tp = pd_target(pose, pos, Vec2::ZERO, Vec2::ZERO, dt, 100.0, 0.0);
+        assert!(tp.x > pose.x, "P term should lead ahead of pose: {tp:?}");
+        // D term: particle at rest, hip moving +x ⇒ target pushed +x.
+        let td = pd_target(pose, pos, Vec2::ZERO, Vec2::new(200.0, 0.0), dt, 0.0, 10.0);
+        assert!(
+            td.x > pose.x,
+            "D term should lead in the hip direction: {td:?}"
+        );
+        // D term with the particle already matching the hip ⇒ no shift.
+        let tm = pd_target(
+            pose,
+            pos,
+            Vec2::new(200.0, 0.0),
+            Vec2::new(200.0, 0.0),
+            dt,
+            0.0,
+            10.0,
+        );
+        assert!(
+            (tm - pose).length() < 1e-6,
+            "matched velocity ⇒ no shift: {tm:?}"
+        );
+    }
+
+    #[test]
+    fn compliance_softens_monotonically_with_speed_and_clamps() {
+        let base = 1e-7;
+        let slow = softened_compliance(base, 10.0, 300.0, 0.0);
+        let mid = softened_compliance(base, 10.0, 300.0, 150.0);
+        let fast = softened_compliance(base, 10.0, 300.0, 300.0);
+        let satur = softened_compliance(base, 10.0, 300.0, 9999.0);
+        assert!((slow - base).abs() < 1e-12, "at rest ⇒ base");
+        assert!(
+            mid > slow && fast > mid,
+            "softer as speed grows: {slow} {mid} {fast}"
+        );
+        assert!(
+            (fast - base * 10.0).abs() < 1e-12,
+            "saturated ⇒ base·soft_scale"
+        );
+        assert!((satur - fast).abs() < 1e-12, "clamped at v_ref");
+        // soft_scale = 1 and v_ref = 0 are both no-ops.
+        assert!((softened_compliance(base, 1.0, 300.0, 9999.0) - base).abs() < 1e-12);
+        assert!((softened_compliance(base, 10.0, 0.0, 9999.0) - base).abs() < 1e-12);
     }
 }
