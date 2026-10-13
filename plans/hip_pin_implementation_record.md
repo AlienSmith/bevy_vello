@@ -68,3 +68,54 @@ Topology reused: `P3 = hip`, `P2 = CoM` (see
    work; moot at the fixed 90 Hz physics tick (≈3.7× inside the stable band). Add substepping or a
    clamped `dt` in [`step_lower_body()`](bevy_vello/examples/game_lib/src/lower_body/resolver.rs:853)
    only if a deliberately coarse debug/slow-motion path is ever added.
+
+## Headless judge layer (2026-10-13)
+
+The two headless harnesses now share a **judge** — pure, log-only post-processing over captured
+telemetry in [`headless/judge.rs`](bevy_vello/examples/game_lib/src/headless/judge.rs:1) (re-exported
+from [`headless/mod.rs`](bevy_vello/examples/game_lib/src/headless/mod.rs:1) and
+[`lib.rs`](bevy_vello/examples/game_lib/src/lib.rs:1)). It answers "did the physics behave?" rather
+than only logging it:
+
+- [`tail_verdict()`](bevy_vello/examples/game_lib/src/headless/judge.rs:89) — settled-tail RMS about
+  the mean + deadbanded angular-rate **sign reversals** (a monotonic catch-up is not a wobble);
+  slices the last `tail_s`.
+- [`cell_verdict()`](bevy_vello/examples/game_lib/src/headless/judge.rs:168) — `WAGGLE` if the tail
+  fails, else `SLOW`/`PASS`.
+- [`check_invariants()`](bevy_vello/examples/game_lib/src/headless/judge.rs:193) — finite + rectangular
+  + magnitude ceilings, **scoped to numeric channels only** (a column is numeric when its name ends in
+  `x|y|vx|vy|ax|ay|fx|fy`). The string `phase` column is deliberately skipped — full-column finite
+  scanning false-flagged it as `non_finite`.
+- [`check_bone_rigidity()`](bevy_vello/examples/game_lib/src/headless/judge.rs:294) — per-bone length
+  hold (rest learned from row 0), with `worst_row` naming the offending tick.
+- [`rows_hash()`](bevy_vello/examples/game_lib/src/headless/judge.rs:369) / `diff_rows` — FNV-1a
+  fingerprint for determinism replay. 8 unit tests pass.
+
+Wired into `headless_arm_pd.rs` (verdict + invariants + hash) and `headless_pin.rs` (invariants +
+`P1–P2`/`P2–P3`/`P1–P3` bone rigidity + hash).
+
+### Finding 1 — the pin's `rig=FAIL` is the jump impulse, not the tracking
+
+With `PIN_RIGID_TOL = 0.02`, the pin gate reports `rig=FAIL max_rel_dev≈0.035`, but per-bone
+timestamps land at `t≈5.4–5.9 s`, i.e. **inside the scripted 5.0 s jump**, not during the walk.
+Pre-jump (t<5.0) the frame holds to ≈0.05–0.12 % on the edges and ≤1.14 % on the `P1–P3` diagonal;
+the diagonal is the sensitive shear indicator and only stretches under the jump impulse. This is an
+honest, actionable result: the pin holds the frame rigidly while walking; the jump is where to look
+next.
+
+### Finding 2 — the harness drove the physics non-deterministically (flaky hash)
+
+Two `headless_pin` runs produced **different** `rows_hash` values (`9ebb0ee3…`, `24ba5958…`,
+`23de2238…`, `a66905a5…`, `d9439af2…` …), while the semantics/metrics stayed stable. Rows 1–226 were
+byte-identical and the event ledgers matched, with divergence appearing at the first scripted
+release. Root cause: the run loop used wall-clock **`run_loop(1/60)`** against a **90 Hz** fixed sim,
+so the number of fixed steps batched per frame varied run-to-run; the pin injects keys in `PreUpdate`
+(render rate), so the batch boundary perturbed the physics from the first event onward. The arm was
+never affected (its drive is fixed-time and its CSV is byte-identical) — which is exactly the
+control that isolated the cause. **Fix:** `TimeUpdateStrategy::ManualDuration(1/FIXED_HZ)` in both
+harnesses — one fixed step per frame, no wall-clock batching. After the fix the pin hash is stable
+across 5 runs (`efdc55efddd35fb7`); the arm stays `c213e1989f0ab16b` and `PASS`.
+
+**Conclusion:** the XPBD physics *solver* is deterministic; the earlier flakiness was the
+harness's wall-clock frame clock, not the engine. Deterministic replay is now a first-class,
+assertable property (`rows_hash`).

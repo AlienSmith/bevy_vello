@@ -6,6 +6,7 @@ mod collider_factory;
 mod damage;
 mod death_channel;
 mod decorations;
+mod headless;
 mod health;
 mod input_management;
 mod lower_body;
@@ -30,13 +31,19 @@ pub struct VelloCharacterPlugin;
 pub use crate::{
     ai::{build_enemy_ai_tree, AiPhase, AiState},
     character::{
-        CharacterController, ConnectivityRoot, IkMode, LeftArmController, LimbConfig,
+        CharacterController, Connectivity, ConnectivityRoot, IkMode, LeftArmController, LimbConfig,
         ResetLimbControlConstraintsEvent, RightArmController, SpineConfig, SpineController,
         SpineDriveEnabled, SpineIndicator, StringPool, WhichLimb,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},
     decorations::{Decoration, DecorationAnchor},
+    headless::{
+        capture_telemetry, cell_verdict, check_bone_rigidity, check_invariants, diff_rows,
+        flush_csv, flush_rows, rows_hash, tail_verdict, Bone, HeadlessTelemetryPlugin,
+        InvariantConfig, InvariantReport, ParticleTelemetryConfig, ResolvedParticles,
+        RigidityReport, TelemetryBuffer, TelemetryRow, Verdict, V10_PARTICLES,
+    },
     health::{Die, Health},
     input_management::{
         actions::{default_input_map, PlayerAction},
@@ -46,10 +53,9 @@ pub use crate::{
     },
     lower_body::{
         compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max,
-        drive_hip_pin, reset_hip_pin, solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin,
-        HipPinParams, LegState, LowerBodyConfig, LowerBodyController, LowerBodyInput,
-        LowerBodyParams,
-        LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
+        drive_hip_pin, reset_hip_pin, rigid_frame_targets, solve_leg_ik, DebugInfo, GaitLimits,
+        GaitPhase, HipPin, HipPinParams, LegState, LowerBodyConfig, LowerBodyController,
+        LowerBodyInput, LowerBodyParams, LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
     },
 };
 
