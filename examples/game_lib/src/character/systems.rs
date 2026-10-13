@@ -10,8 +10,9 @@ use vello_physics::{
 };
 
 use crate::character::{
-    IkMode, LeftArmController, LimbConfig, ResetLimbControlConstraintsEvent, RightArmController,
-    SpineConfig, SpineController, SpineDriveEnabled, SpineIndicator,
+    IkMode, LeftArmController, LeftLegController, LimbConfig, ResetLimbControlConstraintsEvent,
+    RightArmController, RightLegController, SpineConfig, SpineController, SpineDriveEnabled,
+    SpineIndicator,
 };
 
 pub fn tick_spine_drive(
@@ -835,6 +836,8 @@ pub fn update_character_movement(
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     mut right_arm_q: Query<(&mut RightArmController, &VelloCharacterPhysicsRoot)>,
     mut left_arm_q: Query<(&mut LeftArmController, &VelloCharacterPhysicsRoot)>,
+    mut right_leg_q: Query<(&mut RightLegController, &VelloCharacterPhysicsRoot)>,
+    mut left_leg_q: Query<(&mut LeftLegController, &VelloCharacterPhysicsRoot)>,
     p_q: Query<&VelloParticle>,
     j_q: Query<&VelloJoint>,
     mut world: ResMut<VelloConstraintWorld>,
@@ -843,75 +846,130 @@ pub fn update_character_movement(
 
     // ---- Right arm ----
     for (arm, p_root) in &mut right_arm_q {
-        if p_root.initial_frame_coordinates.is_none() {
-            continue;
-        }
-
-        let p_e: Vec<Entity> = arm.particles.to_vec();
-        let j_e: Vec<Entity> = arm.joints.to_vec();
-        let particles: Vec<VelloParticle> =
-            p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
-        let angular_constraints: Vec<VelloJoint> =
-            j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
-
-        let arm_angular_events: Vec<CharacterAngularConstraintEvent> = calculate_limb_ik(
+        drive_limb(
             arm.target,
-            dt,
-            &p_e,
-            &particles,
-            &j_e,
-            &angular_constraints,
+            &arm.particles,
+            &arm.joints,
             &arm.config,
-            &p_root.frame_coordinates,
+            dt,
+            p_root,
+            &p_q,
+            &j_q,
+            &mut world,
         );
-
-        arm_angular_events
-            .iter()
-            .for_each(|e| world.queue_character_angular_constraints(e));
     }
 
     // ---- Left arm ----
     for (arm, p_root) in &mut left_arm_q {
-        if p_root.initial_frame_coordinates.is_none() {
-            continue;
-        }
-
-        let p_e: Vec<Entity> = arm.particles.to_vec();
-        let j_e: Vec<Entity> = arm.joints.to_vec();
-        let particles: Vec<VelloParticle> =
-            p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
-        let angular_constraints: Vec<VelloJoint> =
-            j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
-
-        let arm_angular_events = calculate_limb_ik(
+        drive_limb(
             arm.target,
-            dt,
-            &p_e,
-            &particles,
-            &j_e,
-            &angular_constraints,
+            &arm.particles,
+            &arm.joints,
             &arm.config,
-            &p_root.frame_coordinates,
+            dt,
+            p_root,
+            &p_q,
+            &j_q,
+            &mut world,
         );
-
-        arm_angular_events
-            .iter()
-            .for_each(|e| world.queue_character_angular_constraints(e));
     }
+
+    // ---- Right leg ----
+    for (leg, p_root) in &mut right_leg_q {
+        drive_limb(
+            leg.target,
+            &leg.particles,
+            &leg.joints,
+            &leg.config,
+            dt,
+            p_root,
+            &p_q,
+            &j_q,
+            &mut world,
+        );
+    }
+
+    // ---- Left leg ----
+    for (leg, p_root) in &mut left_leg_q {
+        drive_limb(
+            leg.target,
+            &leg.particles,
+            &leg.joints,
+            &leg.config,
+            dt,
+            p_root,
+            &p_q,
+            &j_q,
+            &mut world,
+        );
+    }
+}
+
+/// Shared per-limb driver: gathers a limb's 4 particles + 2 angular joints, runs
+/// the topology-agnostic IK in [`calculate_limb_ik`], and queues the resulting
+/// angular constraints. Arms and legs are structurally identical
+/// (`[ref, pivot, mid, end]` / `[joint0, joint1]`) so they share this driver and
+/// differ only in the entities/joints bound in their controller component.
+#[allow(clippy::too_many_arguments)]
+fn drive_limb(
+    target: Vec2,
+    particles_e: &[Entity; 4],
+    joints_e: &[Entity; 2],
+    config: &LimbConfig,
+    dt: f32,
+    p_root: &VelloCharacterPhysicsRoot,
+    p_q: &Query<&VelloParticle>,
+    j_q: &Query<&VelloJoint>,
+    world: &mut VelloConstraintWorld,
+) {
+    if p_root.initial_frame_coordinates.is_none() {
+        return;
+    }
+
+    let p_e: Vec<Entity> = particles_e.to_vec();
+    let j_e: Vec<Entity> = joints_e.to_vec();
+    let particles: Vec<VelloParticle> = p_e.iter().map(|e| p_q.get(*e).unwrap().clone()).collect();
+    let angular_constraints: Vec<VelloJoint> =
+        j_e.iter().map(|e| j_q.get(*e).unwrap().clone()).collect();
+
+    let events: Vec<CharacterAngularConstraintEvent> = calculate_limb_ik(
+        target,
+        dt,
+        &p_e,
+        &particles,
+        &j_e,
+        &angular_constraints,
+        config,
+        &p_root.frame_coordinates,
+    );
+
+    events
+        .iter()
+        .for_each(|e| world.queue_character_angular_constraints(e));
 }
 
 pub fn reset_limb_constraint_event(
     mut reader: EventReader<ResetLimbControlConstraintsEvent>,
     query_control: Query<(&LeftArmController, &RightArmController)>,
+    leg_control: Query<(&LeftLegController, &RightLegController)>,
     query_a: Query<&VelloJoint>,
     mut angular_writer: EventWriter<CharacterAngularConstraintEvent>,
 ) {
     let mut angular_events = vec![];
     for item in reader.read() {
-        let (left, right) = query_control.get(item.character).unwrap();
         let angulars = match item.limb {
-            super::WhichLimb::Left => left.joints,
-            super::WhichLimb::Right => right.joints,
+            super::WhichLimb::Left => query_control.get(item.character).unwrap().0.joints,
+            super::WhichLimb::Right => query_control.get(item.character).unwrap().1.joints,
+            // Legs are optional (blueprints without legs spawn no controller), so
+            // a reset request for a leg on a legless character is a no-op.
+            super::WhichLimb::LeftLeg => match leg_control.get(item.character) {
+                Ok((left, _)) => left.joints,
+                Err(_) => continue,
+            },
+            super::WhichLimb::RightLeg => match leg_control.get(item.character) {
+                Ok((_, right)) => right.joints,
+                Err(_) => continue,
+            },
         };
         angulars.iter().for_each(|e| {
             let j = query_a.get(*e).unwrap();

@@ -208,8 +208,8 @@ use vello_physics::{
 
 use crate::{
     character::{
-        Connectivity, ConnectivityRoot, LeftArmController, LimbConfig, RightArmController,
-        SpineConfig, SpineController, StringPool,
+        Connectivity, ConnectivityRoot, IkMode, LeftArmController, LeftLegController, LimbConfig,
+        RightArmController, RightLegController, SpineConfig, SpineController, StringPool,
     },
     character_asset::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, ColliderData, SvgCharacterAsset,
@@ -833,6 +833,75 @@ pub fn assemble_character(
         target: Vec2::ZERO,
     };
 
+    // ---- Legs (optional; Reach mode only in Stage 1) ----
+    // Legs reuse the arm limb machinery verbatim: the same `[ref, pivot, mid,
+    // end]` particle / `[j0, j1]` joint shape and the same `LimbConfig` defaults
+    // (V10 legs and arms are near-equal bone length). `right_leg`/`left_leg` are
+    // `Option` so blueprints without legs spawn no controller. `ik_mode: Reach`
+    // selects the straight-line reach solver; both bend upward (`bend_sign:
+    // 1.0`) to match the arms. V10 leg topology:
+    //   right `[P2, P3, P41, PRLL]` / `[P2_P3_P41, P3_P41_PRLL]`
+    //   left  `[P2, P3, P40, PLLL]` / `[P2_P3_P40, P3_P40_PLLL]`
+    // Resolve a particle's rest foot position into the Bevy world frame
+    // (y-up), matching `calculate_limb_ik`'s `bevy_to_vello` convention, so the
+    // leg target can be seeded at its rest pose. With the target at rest the
+    // reach solver's convergence threshold `|foot - target| <= threshold`
+    // holds, so the legs hold their pose until a gait/AI driver writes a
+    // target — no spurious re-pose at spawn, and no drag toward the origin
+    // (which an unseeded `Vec2::ZERO` target would cause).
+    let rest_bevy = |name: &str| -> Option<Vec2> {
+        let p = blueprint
+            .data
+            .particles
+            .iter()
+            .find(|it| it.path_id.as_str() == name)?;
+        let point = kurbo::Point::new(p.particle.pos.x as f64, p.particle.pos.y as f64);
+        let r = affine * point;
+        Some(Vec2::new(r.x as f32, -(r.y as f32)))
+    };
+
+    let leg_controllers = match (
+        &blueprint.data.controllers.right_leg,
+        &blueprint.data.controllers.left_leg,
+    ) {
+        (Some(right_cfg), Some(left_cfg)) => {
+            let right_target = rest_bevy(&right_cfg.particles[3]).unwrap_or(Vec2::ZERO);
+            let left_target = rest_bevy(&left_cfg.particles[3]).unwrap_or(Vec2::ZERO);
+            let right_leg = RightLegController {
+                particles: [
+                    get(&right_cfg.particles[0]),
+                    get(&right_cfg.particles[1]),
+                    get(&right_cfg.particles[2]),
+                    get(&right_cfg.particles[3]),
+                ],
+                joints: [get(&right_cfg.joints[0]), get(&right_cfg.joints[1])],
+                config: LimbConfig {
+                    bend_sign: 1.0,
+                    ik_mode: IkMode::Reach,
+                    ..Default::default()
+                },
+                target: right_target,
+            };
+            let left_leg = LeftLegController {
+                particles: [
+                    get(&left_cfg.particles[0]),
+                    get(&left_cfg.particles[1]),
+                    get(&left_cfg.particles[2]),
+                    get(&left_cfg.particles[3]),
+                ],
+                joints: [get(&left_cfg.joints[0]), get(&left_cfg.joints[1])],
+                config: LimbConfig {
+                    bend_sign: 1.0,
+                    ik_mode: IkMode::Reach,
+                    ..Default::default()
+                },
+                target: left_target,
+            };
+            Some((right_leg, left_leg))
+        }
+        _ => None,
+    };
+
     commands.entity(root_entity).insert(character_connectivity);
     commands.entity(root_entity).insert(TotalHealth::new(100.0));
     // Whole-character death observer: when TotalHealth hits zero the body parts
@@ -874,6 +943,11 @@ pub fn assemble_character(
         right_arm,
         left_arm,
     ));
+
+    // Legs are optional; only inserted when the blueprint declares both.
+    if let Some((right_leg, left_leg)) = leg_controllers {
+        commands.entity(root_entity).insert((right_leg, left_leg));
+    }
 
     for (_, (e, c)) in colliders_particle_entity.drain() {
         commands.entity(e).insert(c);

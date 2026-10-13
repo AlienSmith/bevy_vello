@@ -1,26 +1,59 @@
-//! Headless limb-PD waggle-tuning gate.
+//! Headless **limb**-PD waggle-tuning gate (arm **or** leg), script-driven.
 //!
-//! Drives the **V10** character's **right arm** through a ~180° target swing and
-//! reports whether the limb PD controller **settles** or **waggles**, so good
-//! `Kp`/`Kd` values can be found. All of it runs the REAL game logic — the only
-//! things removed are the GPU-bound tail of the physics chain (there are no
-//! colliders, so collision detection would produce no contacts regardless).
+//! One harness drives any single limb of the **V10** character — right/left arm
+//! or right/left leg — through a **command script** and reports whether the limb
+//! PD controller **settles** or **waggles**, so good `Kp`/`Kd` values can be
+//! found. Arms and legs are structurally identical (`[ref, pivot, mid, end]` /
+//! `[joint0, joint1]`) and share [`drive_limb`](game_lib) + `calculate_limb_ik`,
+//! so they share this one tool; the only thing that differs is the input.
 //!
-//! What is real here:
+//! ## Input: a command script, not code edits
+//!
+//! The playhead is a flat, ordered list of **self-contained commands** — each
+//! groups everything it needs (which limb, where to, its gains, how long to
+//! hold). No phase machine, no cross-entry coupling. Commands are deserialized
+//! from JSON (env `SCRIPT=path.json`); when absent a built-in script is used.
+//!
+//! ```json
+//! { "script": [
+//!   { "reach": { "limb": "right_leg", "dir": [1.0, -0.1], "dur": 1.2 } },
+//!   { "wait":  { "dur": 0.6 } },
+//!   { "reach": { "limb": "right_leg", "dir": [-1.0, -0.1], "kp": 0.5, "kd": 0.065, "dur": 1.2 } },
+//!   { "aim":   { "limb": "right_arm", "dir": [1.0, 0.0], "dur": 1.2 } },
+//!   { "set":   { "limb": "right_arm", "kp": 0.4, "kd": 0.05 } },
+//!   { "reset": { "limb": "right_leg" } },
+//!   { "wait":  { "dur": 0.9 } }
+//! ] }
+//! ```
+//!
+//! | Command | Effect |
+//! |---|---|
+//! | `reach` | Position IK (`IkMode::Reach`): drive `limb` end to `to` (world Bevy y-up) or `anchor + dir*dist`. |
+//! | `aim`   | Direction IK (`IkMode::Aim`): aim `limb` end along `dir` at `dist` from the pivot. |
+//! | `set`   | Persistently set `limb` gains (`kp`/`kd`) without moving. |
+//! | `reset` | Emit a limb constraint reset (restores authored rest angles). |
+//! | `wait`  | Hold the current command (let it settle) for `dur` seconds. |
+//! | `move`  | **Reserved** — no actuator in this harness yet (logs once, acts as `wait`). |
+//! | `jump`  | **Reserved** — no actuator in this harness yet (logs once, acts as `wait`). |
+//!
+//! `to`/`dir` are `[x, y]`; when `to`/`dist` are omitted the target is placed
+//! `dist` (default = the limb's characteristic length) from the limb pivot along
+//! `dir`, so a script needs no knowledge of the assembled rest pose.
+//!
+//! ## What is real here
+//!
 //! - character assembly from `v10.character.svg` + `v10.character.json` (game_lib)
-//! - the real limb controller ([`update_character_movement`], `FixedUpdate`) which
-//!   reads `RightArmController.target` + `config.ik_mode` and runs
-//!   `calculate_limb_ik` — the PD under test
+//! - the real limb controller (`update_character_movement`, `FixedUpdate`) which
+//!   reads `*Controller.target` + `config.ik_mode` and runs `calculate_limb_ik` —
+//!   the PD under test
 //! - the real XPBD connection/angular physics (`FixedUpdate` @ 90 Hz)
 //!
-//! What is configured for a clean, isolated measurement:
-//! - **`IkMode::Aim { weapon_offset_y: 0.0 }`** (the user's choice — the mode that
-//!   tends to waggle, and the one that makes a clean ~180° wrist rotate easy).
+//! ## What is configured for a clean, isolated measurement
+//!
 //! - The spine drive is silenced (`SpineDriveEnabled(false)`) and there is **no**
-//!   `HipPin`, so the `P1/P2/P3` frame is passive and never fights the arm.
-//! - Zero gravity, no colliders. `P1` is authored `inv_mass = 1e-5` (near-static
-//!   anchor), so the shoulder (`P1`) stays put and only `P13` (elbow) / `PRLA`
-//!   (wrist) move under the PD.
+//!   `HipPin`, so the `P1/P2/P3` frame is passive and never fights the limb.
+//! - Zero gravity, no colliders. The frame particles are authored near-static, so
+//!   only the driven limb moves under the PD.
 //!
 //! ## The PD knobs (verified, in `calculate_limb_ik`)
 //!
@@ -29,34 +62,29 @@
 //! | **Kp** | `LimbConfig::rest_chase_alpha` | 0.5 |
 //! | **Kd** | `LimbConfig::kd` | 0.065 s |
 //!
-//! The harness sweeps `Kp`/`Kd` live (env or a grid) and writes one CSV row per
-//! fixed tick — every row carries all **13** v10 particle channels (position +
-//! velocity, in JSON order, so `P2` is always index 2). It then classifies each
-//! `(Kp,Kd)` cell.
-//!
-//! ## The swing plan
-//!
-//! `base` (rest) → `swing1` (ease to the opposite ~180° point) → `hold1` (settle)
-//! → `flip` (slow ease back, sweeping through DC) → `release` (hold, measure the
-//! residual ring). The target sits at a fixed large distance along a direction
-//! that rotates 0→180°, so the Aim solver drives the **whole** forearm through a
-//! ~180° arc.
+//! `SWEEP=1` replays the **same script** once per `(Kp,Kd)` cell, overriding the
+//! gains on every gain-bearing command; a single CSV row is written per fixed tick
+//! carrying all **13** v10 particle channels. Each cell is then classified.
 //!
 //! ## Verdict (per cell)
 //!
+//! Measured on the **focus** limb (env `LIMB`) end-bone angle over the script's
+//! final hold window:
+//!
 //! - `DIVERGED` — `|theta|` range > 360° / non-finite
-//! - `NO_SWING` — the measured arc is < 60° (the arm never moved — a rig problem)
+//! - `NO_SWING` — the measured arc is < 60° (the limb never moved — a rig problem)
 //! - `WAGGLE`   — settled-tail RMS > ~1° or ≥ 4 angular-rate sign-reversals
-//!   (measured only over the last 0.6 s, so the monotonic flip-tail catch-up is
-//!   not mistaken for oscillation)
-//! - `SLOW`     — settles too late (or not within the release window)
+//!   (measured only over the last 0.6 s, so a monotonic catch-up is not mistaken
+//!   for oscillation)
+//! - `SLOW`     — settles too late (or not within the final window)
 //! - `PASS`     — settles quickly and quietly
 //!
 //! ## Env
 //!
-//! `KP`, `KD`, `TARGET_DIST` (px; ≤0 = auto 3×forearm), `SWING_HZ` (half-swing
-//! rate), `HOLD`, `DUR` (per cell), `OUT_CSV` (main CSV), `SWEEP=1`,
-//! `GRID="kp:kd,kp:kd,..."`. Output defaults under
+//! `LIMB` = `right_arm`|`left_arm`|`right_leg`|`left_leg` (focus limb + default
+//! script; default `right_arm`), `SCRIPT` (path to a JSON script), `KP`, `KD`
+//! (≤0 = auto/unset), `TARGET_DIST` (px; ≤0 = auto, aim only), `OUT_CSV`
+//! (main CSV), `SWEEP=1`, `GRID="kp:kd,kp:kd,..."`. Output defaults under
 //! `/home/ubuntu/bender/tmp/headless/`.
 
 use std::time::Duration;
@@ -68,6 +96,8 @@ use bevy::{
     time::TimeUpdateStrategy,
     MinimalPlugins,
 };
+
+use serde::Deserialize;
 
 use bevy_vello::{
     collision::{CollisionEventBatch, RemovedColliders, VelloCollisionWorld, VelloRayTraceCommand},
@@ -92,8 +122,10 @@ use game_lib::{
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
     check_invariants, flush_csv, flush_rows, rows_hash, tail_verdict, CharacterController,
-    CharacterRoot, HeadlessTelemetryPlugin, IkMode, InvariantConfig, ParticleTelemetryConfig,
-    RightArmController, SpineDriveEnabled, TelemetryBuffer, TelemetryRow, VelloCharacterPlugin,
+    CharacterRoot, HeadlessTelemetryPlugin, IkMode, InvariantConfig, LeftArmController,
+    LeftLegController, LimbConfig, ParticleTelemetryConfig, ResetLimbControlConstraintsEvent,
+    RightArmController, RightLegController, SpineDriveEnabled, TelemetryBuffer, TelemetryRow,
+    VelloCharacterPlugin, WhichLimb,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,42 +144,283 @@ const FIXED_HZ: f64 = 90.0;
 const MAX_CELLS: usize = 64;
 /// Angle band (deg) that counts as "settled".
 const SETTLE_BAND_DEG: f32 = 1.5;
-/// Minimum arc (deg) for the swing to count as a real motion.
+/// Minimum arc (deg) for the motion to count as a real swing.
 const MIN_SWING_DEG: f32 = 60.0;
-/// Width (s) of the settled tail measured at the end of the release window.
-/// The release window opens while the flip is still coasting to rest, so the
-/// oscillation metrics are taken only from this final slice — a monotonic
-/// catch-up then cannot masquerade as a wobble.
+/// Width (s) of the settled tail measured at the end of the final hold window.
 const TAIL_S: f32 = 0.6;
 /// Residual RMS (deg, about the tail mean) above which the tail is judged noisy.
 const TAIL_RMS_DEG: f32 = 1.0;
 /// Angular-rate sign-reversals (with a deadband) within the tail above which the
-/// arm is judged to oscillate — a direct, transient-immune wobble detector.
+/// limb is judged to oscillate — a direct, transient-immune wobble detector.
 const WAGGLE_REVERSALS: u32 = 4;
 /// `|omega|` (rad/s) below which a sample is ignored when counting reversals.
 const REVERSAL_DEADBAND: f32 = 0.05;
-/// Settle time (s after release start) above which the response is "SLOW".
+/// Settle time (s after the final hold starts) above which the response is "SLOW".
 const SLOW_SETTLE_S: f32 = 1.5;
 
 const PI: f32 = std::f32::consts::PI;
 
-/// Phase ids (also the CSV `phase` column via [`phase_label`]).
-const PH_BASE: u8 = 0;
-const PH_SWING: u8 = 1;
-const PH_HOLD: u8 = 2;
-const PH_FLIP: u8 = 3;
-const PH_RELEASE: u8 = 4;
+// ---------------------------------------------------------------------------
+// Command script (serde JSON)
+// ---------------------------------------------------------------------------
+
+/// The four drivable limbs (also the JSON `limb` tag).
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+enum LimbId {
+    RightArm,
+    LeftArm,
+    RightLeg,
+    LeftLeg,
+}
+
+impl LimbId {
+    fn idx(self) -> usize {
+        match self {
+            LimbId::RightArm => 0,
+            LimbId::LeftArm => 1,
+            LimbId::RightLeg => 2,
+            LimbId::LeftLeg => 3,
+        }
+    }
+
+    fn which(self) -> WhichLimb {
+        match self {
+            LimbId::RightArm => WhichLimb::Right,
+            LimbId::LeftArm => WhichLimb::Left,
+            LimbId::RightLeg => WhichLimb::RightLeg,
+            LimbId::LeftLeg => WhichLimb::LeftLeg,
+        }
+    }
+
+    fn from_env() -> Self {
+        match std::env::var("LIMB").ok().as_deref() {
+            Some("left_arm") => LimbId::LeftArm,
+            Some("right_leg") => LimbId::RightLeg,
+            Some("left_leg") => LimbId::LeftLeg,
+            _ => LimbId::RightArm,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            LimbId::RightArm => "right_arm",
+            LimbId::LeftArm => "left_arm",
+            LimbId::RightLeg => "right_leg",
+            LimbId::LeftLeg => "left_leg",
+        }
+    }
+}
+
+/// Position-IK reach: drive `limb` end to `to` (world Bevy y-up) or, when `to`
+/// is omitted, to `anchor + normalize(dir) * dist`.
+#[derive(Deserialize, Clone)]
+struct ReachArgs {
+    limb: LimbId,
+    #[serde(default)]
+    to: Option<[f32; 2]>,
+    #[serde(default)]
+    dir: Option<[f32; 2]>,
+    #[serde(default)]
+    dist: Option<f32>,
+    #[serde(default)]
+    kp: Option<f32>,
+    #[serde(default)]
+    kd: Option<f32>,
+    dur: f32,
+}
+
+/// Direction-IK aim: aim `limb` end along `dir` at `dist` from the pivot.
+#[derive(Deserialize, Clone)]
+struct AimArgs {
+    limb: LimbId,
+    dir: [f32; 2],
+    #[serde(default)]
+    dist: Option<f32>,
+    #[serde(default)]
+    kp: Option<f32>,
+    #[serde(default)]
+    kd: Option<f32>,
+    #[serde(default)]
+    weapon_offset_y: Option<f32>,
+    dur: f32,
+}
+
+/// Persistently set a limb's gains without moving it.
+#[derive(Deserialize, Clone)]
+struct SetArgs {
+    limb: LimbId,
+    #[serde(default)]
+    kp: Option<f32>,
+    #[serde(default)]
+    kd: Option<f32>,
+}
+
+/// Emit a limb constraint reset.
+#[derive(Deserialize, Clone)]
+struct ResetArgs {
+    limb: LimbId,
+}
+
+/// Hold the current command for `dur` seconds.
+#[derive(Deserialize, Clone)]
+struct WaitArgs {
+    dur: f32,
+}
+
+/// Reserved whole-body verbs (no actuator in this harness yet).
+#[derive(Deserialize, Clone)]
+struct MoveArgs {
+    /// Reserved: no whole-body actuator in this harness yet.
+    #[allow(dead_code)]
+    dir: [f32; 2],
+    dur: f32,
+}
+
+#[derive(Deserialize, Clone)]
+struct JumpArgs {
+    #[serde(default = "default_jump_dur")]
+    dur: f32,
+}
+
+fn default_jump_dur() -> f32 {
+    0.8
+}
+
+/// One script command. Externally tagged: `{ "reach": { .. } }`.
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+enum Command {
+    Reach(ReachArgs),
+    Aim(AimArgs),
+    Set(SetArgs),
+    Reset(ResetArgs),
+    Wait(WaitArgs),
+    Move(MoveArgs),
+    Jump(JumpArgs),
+}
+
+impl Command {
+    /// Kind label for the CSV `kind` column.
+    fn kind(&self) -> &'static str {
+        match self {
+            Command::Reach(_) => "reach",
+            Command::Aim(_) => "aim",
+            Command::Set(_) => "set",
+            Command::Reset(_) => "reset",
+            Command::Wait(_) => "wait",
+            Command::Move(_) => "move",
+            Command::Jump(_) => "jump",
+        }
+    }
+
+    /// How long the playhead dwells on this command.
+    fn dur(&self) -> f32 {
+        match self {
+            Command::Reach(a) => a.dur,
+            Command::Aim(a) => a.dur,
+            Command::Wait(a) => a.dur,
+            Command::Move(a) => a.dur,
+            Command::Jump(a) => a.dur,
+            // Instant: applied for exactly one tick.
+            Command::Set(_) | Command::Reset(_) => 0.0,
+        }
+    }
+}
+
+#[derive(Deserialize, Clone)]
+struct ScriptFile {
+    script: Vec<Command>,
+}
+
+/// Built-in scripts used when `SCRIPT` is not given: a big step to one extreme,
+/// a settle, a big step back through DC, then a settle — the minimum that exposes
+/// waggle for either an arm (aim) or a leg (reach).
+fn default_script(focus: LimbId) -> Vec<Command> {
+    match focus {
+        LimbId::RightArm | LimbId::LeftArm => vec![
+            Command::Aim(AimArgs {
+                limb: focus,
+                dir: [1.0, 0.0],
+                dist: None,
+                kp: None,
+                kd: None,
+                weapon_offset_y: Some(0.0),
+                dur: 1.2,
+            }),
+            Command::Wait(WaitArgs { dur: 0.6 }),
+            Command::Aim(AimArgs {
+                limb: focus,
+                dir: [-1.0, 0.0],
+                dist: None,
+                kp: None,
+                kd: None,
+                weapon_offset_y: Some(0.0),
+                dur: 1.2,
+            }),
+            Command::Wait(WaitArgs { dur: 0.9 }),
+        ],
+        LimbId::RightLeg | LimbId::LeftLeg => vec![
+            Command::Reach(ReachArgs {
+                limb: focus,
+                to: None,
+                dir: Some([1.0, -0.1]),
+                dist: None,
+                kp: None,
+                kd: None,
+                dur: 1.2,
+            }),
+            Command::Wait(WaitArgs { dur: 0.6 }),
+            Command::Reach(ReachArgs {
+                limb: focus,
+                to: None,
+                dir: Some([-1.0, -0.1]),
+                dist: None,
+                kp: None,
+                kd: None,
+                dur: 1.2,
+            }),
+            Command::Wait(WaitArgs { dur: 0.9 }),
+        ],
+    }
+}
+
+/// Load the script: `SCRIPT=path.json` if set, else the built-in default.
+fn load_script(focus: LimbId) -> (Vec<Command>, String) {
+    match std::env::var("SCRIPT") {
+        Ok(path) if !path.trim().is_empty() => match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<ScriptFile>(&text) {
+                Ok(sf) if !sf.script.is_empty() => (sf.script, format!("file:{path}")),
+                Ok(_) => {
+                    error!("SCRIPT '{path}' parsed but is empty; using built-in default");
+                    (default_script(focus), "default(empty-file)".into())
+                }
+                Err(e) => {
+                    error!("SCRIPT '{path}' failed to parse ({e}); using built-in default");
+                    (default_script(focus), "default(parse-error)".into())
+                }
+            },
+            Err(e) => {
+                error!("SCRIPT '{path}' unreadable ({e}); using built-in default");
+                (default_script(focus), "default(unreadable)".into())
+            }
+        },
+        _ => (default_script(focus), "default".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sample / report
+// ---------------------------------------------------------------------------
 
 /// One telemetry sample (Bevy y-up frame) — the minimum the classifier reads.
-/// Per-particle positions/velocities now arrive via the CSV channels (see
-/// [`game_lib::capture_telemetry`]), so only the derived forearm angle/rate are
-/// kept here.
 #[derive(Clone, Copy)]
 struct Sample {
     tau: f32,
-    phase: u8,
-    theta: f32, // forearm angle (rad), Bevy frame
-    omega: f32, // forearm angular velocity (rad/s)
+    /// Script action index this sample belongs to.
+    act: usize,
+    theta: f32, // end-bone angle (rad), Bevy frame
+    omega: f32, // end-bone angular velocity (rad/s)
 }
 
 /// The classified result of one `(Kp,Kd)` cell — the deliverable readout.
@@ -162,11 +435,8 @@ struct CellReport {
     reversals: u32,
     settle_s: Option<f32>,
     max_omega: f32,
-    /// `judge::check_invariants` verdict over the whole cell's rows.
     inv_ok: bool,
-    /// First invariant failure detail (empty when `inv_ok`).
     inv_detail: String,
-    /// Determinism fingerprint of the cell's rows (`judge::rows_hash`).
     hash: u64,
 }
 
@@ -175,24 +445,28 @@ struct Probe {
     character: Option<Entity>,
     /// Monotonic fixed-tick counter (the harness clock).
     tick: u64,
-    /// Tick at which the character was spawned (for the initial up-time guard).
     spawn_tick: Option<u64>,
-    /// True once the rig came up at least once; after that, later cells only
-    /// need a short re-capture, so the initial up-time guard no longer applies.
     ever_ready: bool,
 
-    // --- rig (captured once, when the arm is first ready) ---
+    // --- rig (captured once, when the focus limb is first ready) ---
+    focus: LimbId,
     ready: bool,
     ticks_ready: u64,
-    shoulder: Vec2, // P1 (P12), Bevy
-    dir_a: Vec2,    // unit, Bevy — rest-pointing swing extreme
+    /// Per-limb pivot anchor (world Bevy y-up) = the limb's `particles[1]`.
+    anchors: [Vec2; 4],
+    /// Per-limb characteristic length = upper + lower bone, in px.
+    limb_len: [f32; 4],
+    anchored: bool,
+    /// Resolved `TARGET_DIST` override for `aim` (px; ≤0 = auto).
     target_dist: f32,
 
-    // --- schedule ---
-    base: f32,
-    t_half: f32,
-    hold: f32,
-    dur: f32,
+    // --- script ---
+    script: Vec<Command>,
+    script_src: String,
+    action: usize,
+    action_start_tick: u64,
+    applied_action: Option<usize>,
+    script_done: bool,
 
     // --- sweep ---
     grid: Vec<(f32, f32)>,
@@ -202,53 +476,15 @@ struct Probe {
     kp: f32,
     kd: f32,
     samples: Vec<Sample>,
-
-    /// One classified report per completed cell.
     reports: Vec<CellReport>,
     done: bool,
     csv_path: String,
     sweep: bool,
 }
 
-fn phase_label(p: u8) -> &'static str {
-    match p {
-        PH_BASE => "base",
-        PH_SWING => "swing1",
-        PH_HOLD => "hold1",
-        PH_FLIP => "flip",
-        _ => "release",
-    }
-}
-
-/// `(phase, s)` for the swing schedule at time `tau` seconds after ready.
-/// `s` ∈ [0,1] drives the target direction `rotate(dir_a, s·π)`: 0 = rest side,
-/// 1 = the opposite (~180°) side.
-fn phase_and_s(tau: f32, base: f32, t_half: f32, hold: f32) -> (u8, f32) {
-    if tau < base {
-        return (PH_BASE, 0.0);
-    }
-    let e1 = base + t_half;
-    if tau < e1 {
-        let u = ((tau - base) / t_half).clamp(0.0, 1.0);
-        return (PH_SWING, 0.5 - 0.5 * (PI * u).cos());
-    }
-    let e2 = e1 + hold;
-    if tau < e2 {
-        return (PH_HOLD, 1.0);
-    }
-    let e3 = e2 + t_half;
-    if tau < e3 {
-        let u = ((tau - e2) / t_half).clamp(0.0, 1.0);
-        return (PH_FLIP, 0.5 + 0.5 * (PI * u).cos());
-    }
-    (PH_RELEASE, 0.0)
-}
-
-#[inline]
-fn rotate(v: Vec2, a: f32) -> Vec2 {
-    let (s, c) = a.sin_cos();
-    Vec2::new(v.x * c - v.y * s, v.x * s + v.y * c)
-}
+// ---------------------------------------------------------------------------
+// Small math / env helpers
+// ---------------------------------------------------------------------------
 
 /// Engine Vello (y-down) → Bevy (y-up).
 #[inline]
@@ -312,10 +548,17 @@ fn default_grid() -> Vec<(f32, f32)> {
     g
 }
 
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
 fn main() {
     let sweep = env_flag("SWEEP");
+    let focus = LimbId::from_env();
+    let (script, script_src) = load_script(focus);
+
     let csv_path = std::env::var("OUT_CSV")
-        .unwrap_or_else(|_| "/home/ubuntu/bender/tmp/headless/arm_pd_log.csv".to_string());
+        .unwrap_or_else(|_| "/home/ubuntu/bender/tmp/headless/limb_pd_log.csv".to_string());
 
     let grid: Vec<(f32, f32)> = match std::env::var("GRID") {
         Ok(g) if !g.trim().is_empty() => parse_grid(&g),
@@ -323,23 +566,38 @@ fn main() {
         _ => vec![(env_f32("KP", 0.5), env_f32("KD", 0.065))],
     };
 
-    let swing_hz = env_f32("SWING_HZ", 1.5);
+    // Seed the first cell's gains from the grid (also the single-cell default).
+    let (kp0, kd0) = grid.first().copied().unwrap_or((0.5, 0.065));
+
+    info!(
+        "limb-PD harness: focus={} script={} ({} command(s)), {} cell(s), sweep={}",
+        focus.label(),
+        script_src,
+        script.len(),
+        grid.len(),
+        sweep
+    );
+
     let probe = Probe {
         character: None,
         tick: 0,
         spawn_tick: None,
         ever_ready: false,
+        focus,
         ready: false,
         ticks_ready: 0,
-        shoulder: Vec2::ZERO,
-        dir_a: Vec2::X,
+        anchors: [Vec2::ZERO; 4],
+        limb_len: [0.0; 4],
+        anchored: false,
         target_dist: env_f32("TARGET_DIST", 0.0),
-        base: 0.5,
-        t_half: 0.5 / swing_hz.max(0.1),
-        hold: env_f32("HOLD", 1.0),
-        dur: env_f32("DUR", 6.0),
-        kp: grid.first().map(|c| c.0).unwrap_or(0.5),
-        kd: grid.first().map(|c| c.1).unwrap_or(0.065),
+        script,
+        script_src,
+        action: 0,
+        action_start_tick: 0,
+        applied_action: None,
+        script_done: false,
+        kp: kp0,
+        kd: kd0,
         grid,
         cell: 0,
         samples: Vec::new(),
@@ -370,7 +628,7 @@ fn main() {
     .add_plugins(VelloCharacterPlugin)
     .add_plugins(HeadlessTelemetryPlugin)
     // Physics resources (mirrors VelloCollisionResponsePlugin, minus GPU parts).
-    // Zero gravity + no colliders = the isolated-arm case.
+    // Zero gravity + no colliders = the isolated-limb case.
     .insert_resource(VelloConstraintWorld::new(Vec2::ZERO))
     .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
     .insert_resource(VelloCollisionWorld::default())
@@ -386,6 +644,7 @@ fn main() {
     .add_event::<CharacterAngularConstraintEvent>()
     .add_event::<CharacterFrameForceEvent>()
     .add_event::<VelloRayTraceCommand>()
+    .add_event::<ResetLimbControlConstraintsEvent>()
     .insert_resource(probe);
 
     // Real physics stepping, same order as VelloCollisionResponsePlugin minus the
@@ -409,16 +668,16 @@ fn main() {
 
     app.add_systems(Startup, register_character_assets);
     app.add_systems(Update, mark_assets_loaded);
-    // Write `RightArmController.target` + the PD gains in `FixedPreUpdate`, i.e.
-    // before the controller reads them this same fixed step (FixedPreUpdate runs
+    // Apply the current script command in `FixedPreUpdate`, i.e. before the
+    // controller reads the target this same fixed step (FixedPreUpdate runs
     // before FixedUpdate in the FixedMain schedule).
-    app.add_systems(FixedPreUpdate, arm_drive);
+    app.add_systems(FixedPreUpdate, drive_script);
     // Sample after the whole fixed step (physics + controller), append the row via
     // the shared telemetry plugin, then finalize the cell. Gated so no stray row
     // lands in the gap between cells (the rig is briefly not "ready").
     app.add_systems(
         FixedPostUpdate,
-        (arm_sample, capture_telemetry, arm_finalize)
+        (limb_sample, capture_telemetry, limb_finalize)
             .chain()
             .run_if(telemetry_active),
     );
@@ -460,15 +719,118 @@ fn mark_assets_loaded(
     }
 }
 
+/// The resolved intent of the current command — everything the dispatcher needs
+/// to write, independent of which of the four controller components it lands on.
+enum Intent {
+    /// Drive `limb` to `target` in `mode` with `(kp, kd)`.
+    Move {
+        limb: LimbId,
+        target: Vec2,
+        mode: IkMode,
+        kp: f32,
+        kd: f32,
+    },
+    /// Persistently set gains only.
+    Set {
+        limb: LimbId,
+        kp: Option<f32>,
+        kd: Option<f32>,
+    },
+    /// Emit a constraint reset for `limb`.
+    Reset { limb: LimbId },
+    /// Do nothing this tick.
+    Idle,
+}
+
+/// Fold the current command + the probe's rig state into an [`Intent`].
+fn resolve_intent(cmd: &Command, probe: &Probe) -> Intent {
+    // Per-command gains override the cell/env default only in single-cell mode;
+    // in sweep mode the cell's gains always win (that IS the experiment axis).
+    let gains = |kp: Option<f32>, kd: Option<f32>| -> (f32, f32) {
+        if probe.sweep {
+            (probe.kp, probe.kd)
+        } else {
+            (kp.unwrap_or(probe.kp), kd.unwrap_or(probe.kd))
+        }
+    };
+
+    match cmd {
+        Command::Reach(a) => {
+            let idx = a.limb.idx();
+            let anchor = probe.anchors[idx];
+            let len = probe.limb_len[idx].max(1.0);
+            let target = match a.to {
+                Some([x, y]) => Vec2::new(x, y),
+                None => {
+                    let dir = a
+                        .dir
+                        .map(|[x, y]| Vec2::new(x, y))
+                        .unwrap_or(Vec2::NEG_Y)
+                        .normalize_or(Vec2::NEG_Y);
+                    anchor + dir * a.dist.unwrap_or(len)
+                }
+            };
+            let (kp, kd) = gains(a.kp, a.kd);
+            Intent::Move {
+                limb: a.limb,
+                target,
+                mode: IkMode::Reach,
+                kp,
+                kd,
+            }
+        }
+        Command::Aim(a) => {
+            let idx = a.limb.idx();
+            let anchor = probe.anchors[idx];
+            let len = probe.limb_len[idx].max(1.0);
+            // Auto distance: 3× the end bone (matches the arm harness heuristic),
+            // unless `TARGET_DIST` or the command's `dist` says otherwise.
+            let auto = 3.0 * len * 0.5;
+            let dist = if probe.target_dist > 0.0 {
+                probe.target_dist
+            } else {
+                a.dist.unwrap_or(auto.max(40.0))
+            };
+            let dir = Vec2::new(a.dir[0], a.dir[1]).normalize_or(Vec2::X);
+            let target = anchor + dir * dist;
+            let (kp, kd) = gains(a.kp, a.kd);
+            Intent::Move {
+                limb: a.limb,
+                target,
+                mode: IkMode::Aim {
+                    weapon_offset_y: a.weapon_offset_y.unwrap_or(0.0),
+                },
+                kp,
+                kd,
+            }
+        }
+        Command::Set(a) => {
+            let kp = if probe.sweep { Some(probe.kp) } else { a.kp };
+            let kd = if probe.sweep { Some(probe.kd) } else { a.kd };
+            Intent::Set {
+                limb: a.limb,
+                kp,
+                kd,
+            }
+        }
+        Command::Reset(a) => Intent::Reset { limb: a.limb },
+        Command::Wait(_) | Command::Move(_) | Command::Jump(_) => Intent::Idle,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn arm_drive(
+fn drive_script(
     mut commands: Commands,
     mut probe: ResMut<Probe>,
     character_svg: Res<SvgCharacterAssetManager>,
     character_blueprint: Res<BlueprintCharacterAssetManager>,
-    mut arm_q: Query<&mut RightArmController>,
+    mut right_arm_q: Query<&mut RightArmController>,
+    mut left_arm_q: Query<&mut LeftArmController>,
+    mut right_leg_q: Query<&mut RightLegController>,
+    mut left_leg_q: Query<&mut LeftLegController>,
     root_q: Query<&VelloCharacterPhysicsRoot>,
     particle_q: Query<&VelloParticle>,
+    mut reset_ev: EventWriter<ResetLimbControlConstraintsEvent>,
     mut exit: EventWriter<AppExit>,
 ) {
     probe.tick += 1;
@@ -497,7 +859,7 @@ fn arm_drive(
                 .id();
             probe.character = Some(entity);
             probe.spawn_tick = Some(tick);
-            info!("V10 spawned, arm-PD clock starts");
+            info!("V10 spawned, limb-PD clock starts");
         }
         return;
     }
@@ -505,11 +867,10 @@ fn arm_drive(
     let character = probe.character.unwrap();
 
     // ---- Bail out if the rig never comes up (never silently hang). ----
-    // Only guards the *initial* bring-up; between cells the rig is already up.
     if !probe.ready && !probe.ever_ready {
         if let Some(st) = probe.spawn_tick {
             if tick.saturating_sub(st) > (FIXED_HZ as u64) * 10 {
-                error!("arm never became ready after 10 sim-seconds; aborting");
+                error!("rig never became ready after 10 sim-seconds; aborting");
                 probe.done = true;
                 exit.write(AppExit::error());
             }
@@ -526,78 +887,289 @@ fn arm_drive(
     if root.initial_frame_coordinates.is_none() {
         return;
     }
-    let Ok(mut arm) = arm_q.get_mut(character) else {
-        return;
-    };
 
-    // ---- Capture the rig once: shoulder anchor + the rest forearm direction. ----
+    // ---- Capture the rig once: every limb's pivot anchor + characteristic length. ----
     if !probe.ready {
-        let Ok(p_p1) = particle_q.get(arm.particles[1]) else {
-            return;
+        // The focus limb must exist; otherwise there is nothing to measure.
+        let focus_ok = match probe.focus {
+            LimbId::RightArm => right_arm_q.get(character).is_ok(),
+            LimbId::LeftArm => left_arm_q.get(character).is_ok(),
+            LimbId::RightLeg => right_leg_q.get(character).is_ok(),
+            LimbId::LeftLeg => left_leg_q.get(character).is_ok(),
         };
-        let Ok(p_p13) = particle_q.get(arm.particles[2]) else {
-            return;
-        };
-        let Ok(p_prla) = particle_q.get(arm.particles[3]) else {
-            return;
-        };
-        let shoulder = to_bevy(p_p1.particle.pos);
-        let elbow = to_bevy(p_p13.particle.pos);
-        let wrist = to_bevy(p_prla.particle.pos);
-        let forearm = (wrist - elbow).normalize_or_zero();
-        if forearm == Vec2::ZERO {
-            error!("degenerate forearm; aborting");
-            probe.done = true;
-            exit.write(AppExit::error());
+        if !focus_ok {
             return;
         }
-        // The swing extreme is the rest forearm rotated 90°; `dir_a` and its
-        // 180° opposite bracket the full sweep.
-        probe.shoulder = shoulder;
-        probe.dir_a = rotate(forearm, PI / 2.0);
-        let f_len = (wrist - elbow).length();
-        if probe.target_dist <= 0.0 {
-            probe.target_dist = (3.0 * f_len).max(40.0);
+
+        probe.anchored = seed_anchors(
+            &mut probe,
+            character,
+            &right_arm_q,
+            &left_arm_q,
+            &right_leg_q,
+            &left_leg_q,
+            &particle_q,
+        );
+        if !probe.anchored {
+            return;
         }
+
         let first_ready = !probe.ever_ready;
         probe.ticks_ready = tick;
         probe.ready = true;
         probe.ever_ready = true;
+        probe.action = 0;
+        probe.action_start_tick = tick;
+        probe.applied_action = None;
+        probe.script_done = false;
         probe.samples.clear();
         if first_ready {
-            // The rig exists now (particles spawned + connectivity named), so the
-            // telemetry system can resolve every v10 particle by name. The resolve
-            // latch means this must NOT happen before the particles exist.
             commands.insert_resource(ParticleTelemetryConfig::v10(character));
         }
         info!(
-            "cell {} (kp={:.3}, kd={:.3}): rig ready, swing dist {:.1}px",
-            probe.cell, probe.kp, probe.kd, probe.target_dist
+            "cell {} (kp={:.3}, kd={:.3}): rig ready, focus={} anchor={:?}",
+            probe.cell,
+            probe.kp,
+            probe.kd,
+            probe.focus.label(),
+            probe.anchors[probe.focus.idx()],
         );
     }
 
-    let tau = (tick.saturating_sub(probe.ticks_ready)) as f32 / FIXED_HZ as f32;
-    let (phase, s) = phase_and_s(tau, probe.base, probe.t_half, probe.hold);
-    if phase == PH_RELEASE && tau >= probe.dur {
-        // The telemetry system owns finalization (so it can grab the last
-        // sample); the drive simply holds the rest target and waits.
-        arm.target = probe.shoulder + probe.dir_a * probe.target_dist;
+    if probe.script.is_empty() {
+        error!("empty script; aborting");
+        probe.done = true;
+        exit.write(AppExit::error());
         return;
     }
 
-    // ---- Command: Aim mode, target on the rotating swing direction. ----
-    // `RightArmController.target` is Bevy world (y-up) coords; `calculate_limb_ik`
-    // converts it to Vello internally via `bevy_to_vello`, so we feed it Bevy.
-    let dir = rotate(probe.dir_a, s * PI);
-    let target_bevy = probe.shoulder + dir * probe.target_dist;
-    arm.config.ik_mode = IkMode::Aim {
-        weapon_offset_y: 0.0,
-    };
-    arm.config.rest_chase_alpha = probe.kp;
-    arm.config.kd = probe.kd;
-    arm.target = target_bevy;
+    // ---- Playhead: one entry per command, advanced when its `dur` elapses. ----
+    let cur = probe.action.min(probe.script.len() - 1);
+    let cur_dur = probe.script[cur].dur();
+    let elapsed = (tick.saturating_sub(probe.action_start_tick)) as f32 / FIXED_HZ as f32;
 
-    let _ = (phase, s); // logged by telemetry
+    // Apply the current command (idempotent for continuous verbs; once for
+    // one-shot verbs via `applied_action`).
+    let cmd = probe.script[cur].clone();
+    let first_touch = probe.applied_action != Some(cur);
+    let intent = resolve_intent(&cmd, &probe);
+    match intent {
+        Intent::Move {
+            limb,
+            target,
+            mode,
+            kp,
+            kd,
+        } => match limb {
+            LimbId::RightArm => apply_to_arm(&mut right_arm_q, character, target, mode, kp, kd),
+            LimbId::LeftArm => apply_to_larm(&mut left_arm_q, character, target, mode, kp, kd),
+            LimbId::RightLeg => apply_to_rleg(&mut right_leg_q, character, target, mode, kp, kd),
+            LimbId::LeftLeg => apply_to_lleg(&mut left_leg_q, character, target, mode, kp, kd),
+        },
+        Intent::Set { limb, kp, kd } => {
+            if first_touch {
+                apply_set(
+                    &mut right_arm_q,
+                    &mut left_arm_q,
+                    &mut right_leg_q,
+                    &mut left_leg_q,
+                    character,
+                    limb,
+                    kp,
+                    kd,
+                );
+            }
+        }
+        Intent::Reset { limb } => {
+            if first_touch {
+                reset_ev.write(ResetLimbControlConstraintsEvent {
+                    limb: limb.which(),
+                    character,
+                });
+            }
+        }
+        Intent::Idle => {
+            if first_touch {
+                if let Command::Move(_) | Command::Jump(_) = probe.script[cur] {
+                    warn!(
+                        "'{}' command has no actuator in this harness yet; acting as wait",
+                        probe.script[cur].kind()
+                    );
+                }
+            }
+        }
+    }
+    if first_touch {
+        probe.applied_action = Some(cur);
+    }
+
+    // Advance the playhead (after applying, so a `dur == 0` verb still lands once).
+    if elapsed >= cur_dur {
+        if cur + 1 < probe.script.len() {
+            probe.action = cur + 1;
+            probe.action_start_tick = tick;
+            probe.applied_action = None;
+        } else {
+            probe.script_done = true;
+            // The telemetry system owns finalization (so it can grab the last
+            // sample); the drive simply holds the last target and waits.
+        }
+    }
+}
+
+/// Seed each limb's pivot anchor (world Bevy y-up) + characteristic length,
+/// resolved from the controller components. Returns false if a limb's particles
+/// are not yet resolvable (retry next tick). Missing limbs keep zeroed defaults.
+#[allow(clippy::too_many_arguments)]
+fn seed_anchors(
+    probe: &mut Probe,
+    character: Entity,
+    right_arm_q: &Query<&mut RightArmController>,
+    left_arm_q: &Query<&mut LeftArmController>,
+    right_leg_q: &Query<&mut RightLegController>,
+    left_leg_q: &Query<&mut LeftLegController>,
+    particle_q: &Query<&VelloParticle>,
+) -> bool {
+    let mut ok = true;
+    let mut seed = |idx: usize, parts: &[Entity; 4]| {
+        let (Ok(p1), Ok(p2), Ok(p3)) = (
+            particle_q.get(parts[1]),
+            particle_q.get(parts[2]),
+            particle_q.get(parts[3]),
+        ) else {
+            ok = false;
+            return;
+        };
+        let pivot = to_bevy(p1.particle.pos);
+        let mid = to_bevy(p2.particle.pos);
+        let end = to_bevy(p3.particle.pos);
+        probe.anchors[idx] = pivot;
+        probe.limb_len[idx] = (mid - pivot).length() + (end - mid).length();
+    };
+    if let Ok(c) = right_arm_q.get(character) {
+        seed(0, &c.particles);
+    }
+    if let Ok(c) = left_arm_q.get(character) {
+        seed(1, &c.particles);
+    }
+    if let Ok(c) = right_leg_q.get(character) {
+        seed(2, &c.particles);
+    }
+    if let Ok(c) = left_leg_q.get(character) {
+        seed(3, &c.particles);
+    }
+    ok
+}
+
+#[inline]
+fn apply_to_arm(
+    q: &mut Query<&mut RightArmController>,
+    character: Entity,
+    target: Vec2,
+    mode: IkMode,
+    kp: f32,
+    kd: f32,
+) {
+    if let Ok(mut c) = q.get_mut(character) {
+        c.target = target;
+        c.config.ik_mode = mode;
+        c.config.rest_chase_alpha = kp;
+        c.config.kd = kd;
+    }
+}
+
+#[inline]
+fn apply_to_larm(
+    q: &mut Query<&mut LeftArmController>,
+    character: Entity,
+    target: Vec2,
+    mode: IkMode,
+    kp: f32,
+    kd: f32,
+) {
+    if let Ok(mut c) = q.get_mut(character) {
+        c.target = target;
+        c.config.ik_mode = mode;
+        c.config.rest_chase_alpha = kp;
+        c.config.kd = kd;
+    }
+}
+
+#[inline]
+fn apply_to_rleg(
+    q: &mut Query<&mut RightLegController>,
+    character: Entity,
+    target: Vec2,
+    mode: IkMode,
+    kp: f32,
+    kd: f32,
+) {
+    if let Ok(mut c) = q.get_mut(character) {
+        c.target = target;
+        c.config.ik_mode = mode;
+        c.config.rest_chase_alpha = kp;
+        c.config.kd = kd;
+    }
+}
+
+#[inline]
+fn apply_to_lleg(
+    q: &mut Query<&mut LeftLegController>,
+    character: Entity,
+    target: Vec2,
+    mode: IkMode,
+    kp: f32,
+    kd: f32,
+) {
+    if let Ok(mut c) = q.get_mut(character) {
+        c.target = target;
+        c.config.ik_mode = mode;
+        c.config.rest_chase_alpha = kp;
+        c.config.kd = kd;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_set(
+    right_arm_q: &mut Query<&mut RightArmController>,
+    left_arm_q: &mut Query<&mut LeftArmController>,
+    right_leg_q: &mut Query<&mut RightLegController>,
+    left_leg_q: &mut Query<&mut LeftLegController>,
+    character: Entity,
+    limb: LimbId,
+    kp: Option<f32>,
+    kd: Option<f32>,
+) {
+    let tweak = |config: &mut LimbConfig| {
+        if let Some(kp) = kp {
+            config.rest_chase_alpha = kp;
+        }
+        if let Some(kd) = kd {
+            config.kd = kd;
+        }
+    };
+    match limb {
+        LimbId::RightArm => {
+            if let Ok(mut c) = right_arm_q.get_mut(character) {
+                tweak(&mut c.config);
+            }
+        }
+        LimbId::LeftArm => {
+            if let Ok(mut c) = left_arm_q.get_mut(character) {
+                tweak(&mut c.config);
+            }
+        }
+        LimbId::RightLeg => {
+            if let Ok(mut c) = right_leg_q.get_mut(character) {
+                tweak(&mut c.config);
+            }
+        }
+        LimbId::LeftLeg => {
+            if let Ok(mut c) = left_leg_q.get_mut(character) {
+                tweak(&mut c.config);
+            }
+        }
+    }
 }
 
 /// Whether telemetry should collect this tick: only while the rig is up and a
@@ -606,16 +1178,41 @@ fn telemetry_active(probe: Res<Probe>) -> bool {
     probe.character.is_some() && probe.ready && !probe.done
 }
 
+/// The focus limb's end-bone (particles[2] → particles[3]) angle + rate, in the
+/// Bevy frame. Returns `None` if the focus limb's controller is absent.
+fn focus_bone(
+    probe: &Probe,
+    character: Entity,
+    right_arm_q: &Query<&RightArmController>,
+    left_arm_q: &Query<&LeftArmController>,
+    right_leg_q: &Query<&RightLegController>,
+    left_leg_q: &Query<&LeftLegController>,
+    particle_q: &Query<&VelloParticle>,
+) -> Option<(f32, f32)> {
+    let parts: [Entity; 4] = match probe.focus {
+        LimbId::RightArm => right_arm_q.get(character).ok()?.particles,
+        LimbId::LeftArm => left_arm_q.get(character).ok()?.particles,
+        LimbId::RightLeg => right_leg_q.get(character).ok()?.particles,
+        LimbId::LeftLeg => left_leg_q.get(character).ok()?.particles,
+    };
+    let mid = particle_q.get(parts[2]).ok()?;
+    let end = particle_q.get(parts[3]).ok()?;
+    let arm = to_bevy(end.particle.pos) - to_bevy(mid.particle.pos);
+    let dvel = to_bevy(end.particle.velocity) - to_bevy(mid.particle.velocity);
+    let theta = arm.y.atan2(arm.x);
+    let omega = bone_ang_vel(arm, dvel);
+    Some((theta, omega))
+}
+
 /// Collect one sample: the harness scalars (into [`TelemetryRow`], in a fixed
 /// key order) and the theta/omega the classifier needs (into `Probe::samples`).
-///
-/// Runs before [`capture_telemetry`], which appends this tick's scalars plus all
-/// 13 v10 particle channels. Elbow (`P13`) and wrist (`PRLA`) positions arrive via
-/// those channels, so they are no longer duplicated as scalars.
-fn arm_sample(
+fn limb_sample(
     mut probe: ResMut<Probe>,
     mut row: ResMut<TelemetryRow>,
-    arm_q: Query<&RightArmController>,
+    right_arm_q: Query<&RightArmController>,
+    left_arm_q: Query<&LeftArmController>,
+    right_leg_q: Query<&RightLegController>,
+    left_leg_q: Query<&LeftLegController>,
     particle_q: Query<&VelloParticle>,
 ) {
     let Some(character) = probe.character else {
@@ -624,73 +1221,57 @@ fn arm_sample(
     if probe.done || !probe.ready {
         return;
     }
-    let Ok(arm) = arm_q.get(character) else {
-        return;
-    };
-    let (Ok(p_p13), Ok(p_prla)) = (
-        particle_q.get(arm.particles[2]),
-        particle_q.get(arm.particles[3]),
+    let Some((theta, omega)) = focus_bone(
+        &probe,
+        character,
+        &right_arm_q,
+        &left_arm_q,
+        &right_leg_q,
+        &left_leg_q,
+        &particle_q,
     ) else {
         return;
     };
 
     let tick = probe.tick;
     let tau = (tick.saturating_sub(probe.ticks_ready)) as f32 / FIXED_HZ as f32;
-    let (phase, s) = phase_and_s(tau, probe.base, probe.t_half, probe.hold);
+    let act = probe.action.min(probe.script.len().saturating_sub(1));
+    let kind = probe.script.get(act).map(|c| c.kind()).unwrap_or("none");
 
-    let elbow = to_bevy(p_p13.particle.pos);
-    let wrist = to_bevy(p_prla.particle.pos);
-    let v_elbow = to_bevy(p_p13.particle.velocity);
-    let v_wrist = to_bevy(p_prla.particle.velocity);
-    let forearm = wrist - elbow;
-    let theta = forearm.y.atan2(forearm.x);
-    let omega = bone_ang_vel(forearm, v_wrist - v_elbow);
-
-    // Copy the scalars out before the `push`, so the mutable borrow of
-    // `probe.samples` cannot overlap a read of `probe.kp/kd`.
     let (kp, kd) = (probe.kp, probe.kd);
     probe.samples.push(Sample {
         tau,
-        phase,
+        act,
         theta,
         omega,
     });
 
-    // Same keys, same order, every tick (the header is frozen from these on the
-    // first capture).
     row.clear();
     row.set("tau", format!("{:.4}", tau));
     row.set("t", format!("{:.4}", tick as f32 / FIXED_HZ as f32));
-    row.set("phase", phase_label(phase));
+    row.set("act", act.to_string());
+    row.set("kind", kind.to_string());
     row.set("kp", format!("{:.3}", kp));
     row.set("kd", format!("{:.4}", kd));
-    row.set("s", format!("{:.4}", s));
     row.set("theta_deg", format!("{:.3}", theta.to_degrees()));
     row.set("omega", format!("{:.3}", omega));
 }
 
-/// Close out a cell once the swing window has elapsed: classify, flush the
+/// Close out a cell once the script has run to completion: classify, flush the
 /// per-cell CSV from the shared buffer, then advance to the next cell or write
 /// the summary and exit.
-fn arm_finalize(
+fn limb_finalize(
     mut probe: ResMut<Probe>,
     mut buf: ResMut<TelemetryBuffer>,
+    mut reset_ev: EventWriter<ResetLimbControlConstraintsEvent>,
     mut exit: EventWriter<AppExit>,
 ) {
-    if probe.done || !probe.ready {
-        return;
-    }
-    let tau = (probe.tick.saturating_sub(probe.ticks_ready)) as f32 / FIXED_HZ as f32;
-    let (phase, _) = phase_and_s(tau, probe.base, probe.t_half, probe.hold);
-    if !(phase == PH_RELEASE && tau >= probe.dur) {
+    if probe.done || !probe.ready || !probe.script_done {
         return;
     }
 
     let mut report = finalize_cell(&probe);
 
-    // Judge the cell's raw telemetry before it is flushed: a NaN row, a ragged
-    // row or an out-of-ceiling magnitude is a physics bug, not a tuning result.
-    // The hash fingerprints the whole cell for determinism replay.
     let inv = check_invariants(&buf.header, &buf.rows, &InvariantConfig::default());
     report.inv_ok = inv.ok;
     report.inv_detail = inv.detail.clone();
@@ -717,12 +1298,11 @@ fn arm_finalize(
         report.hash,
     );
 
-    // Per-cell path: one file per cell in sweep mode, else the single out path.
     let cell_path = if probe.sweep {
         let p = std::path::Path::new(&probe.csv_path);
         let dir = p.parent().map(|d| d.to_path_buf());
         let name = format!(
-            "arm_pd_cell{:02}_kp{:.3}_kd{:.4}.csv",
+            "limb_pd_cell{:02}_kp{:.3}_kd{:.4}.csv",
             report.cell, report.kp, report.kd
         );
         match dir {
@@ -735,7 +1315,6 @@ fn arm_finalize(
     flush_csv(&cell_path, &buf);
     probe.reports.push(report);
 
-    // Advance to the next cell, or finish.
     probe.cell += 1;
     if probe.cell >= probe.grid.len() {
         finish(&probe);
@@ -745,15 +1324,25 @@ fn arm_finalize(
         let (kp, kd) = probe.grid[probe.cell];
         probe.kp = kp;
         probe.kd = kd;
-        probe.ready = false;
+        // Reset the playhead for the next cell and restore rest angles so the
+        // next cell starts from the same pose.
+        if let Some(character) = probe.character {
+            reset_ev.write(ResetLimbControlConstraintsEvent {
+                limb: probe.focus.which(),
+                character,
+            });
+        }
+        probe.action = 0;
+        probe.action_start_tick = probe.tick + 1;
+        probe.applied_action = None;
+        probe.script_done = false;
         probe.samples.clear();
-        // Keep the frozen header (particle resolution is stable across cells) but
-        // drop this cell's rows so the next cell starts clean.
         buf.clear_rows();
     }
 }
 
-/// Classify one cell from its samples.
+/// Classify one cell from its samples: the transported arc over the whole script
+/// plus the settled-tail quality over the **final** action's hold window.
 fn finalize_cell(probe: &Probe) -> CellReport {
     let samples = &probe.samples;
     let mut rep = CellReport {
@@ -813,25 +1402,29 @@ fn finalize_cell(probe: &Probe) -> CellReport {
         return rep;
     }
 
-    // Release window samples, carrying omega so the tail detector can read the
-    // sign of the angular rate directly.
-    let rel: Vec<(f32, f32, f32)> = samples
+    // The settled window = the final action's samples (the script should end on a
+    // hold). Fall back to the whole run if the last action has too few samples.
+    let last_act = samples.last().map(|s| s.act).unwrap_or(0);
+    let mut win: Vec<(f32, f32, f32)> = samples
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.phase == PH_RELEASE)
+        .filter(|(_, s)| s.act == last_act)
         .map(|(i, s)| (s.tau, un[i].to_degrees(), s.omega))
         .collect();
-    if rel.len() < 5 {
+    if win.len() < 5 {
+        win = samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.tau, un[i].to_degrees(), s.omega))
+            .collect();
+    }
+    if win.len() < 5 {
         return rep; // stays SHORT
     }
 
-    // The settled tail (last `TAIL_S` of the release window) is judged by the
-    // shared detector in `judge`: residual RMS about the tail mean + deadbanded
-    // angular-rate sign-reversals. Slicing the tail — not the whole window — is
-    // what keeps a monotonic flip-tail catch-up from reading as a wobble.
-    let taus: Vec<f32> = rel.iter().map(|r| r.0).collect();
-    let thetas: Vec<f32> = rel.iter().map(|r| r.1).collect();
-    let omegas: Vec<f32> = rel.iter().map(|r| r.2).collect();
+    let taus: Vec<f32> = win.iter().map(|r| r.0).collect();
+    let thetas: Vec<f32> = win.iter().map(|r| r.1).collect();
+    let omegas: Vec<f32> = win.iter().map(|r| r.2).collect();
     let v = tail_verdict(
         &taus,
         &thetas,
@@ -845,35 +1438,33 @@ fn finalize_cell(probe: &Probe) -> CellReport {
     rep.rms_deg = v.rms_deg;
     rep.reversals = v.reversals;
 
-    // Catch-up excursion (informational): how far the settled pose lay from the
-    // furthest flip-tail sample. Large is fine — it only means a long flip.
     let mut catchup = 0.0f32;
-    for (_, th, _) in &rel {
+    for (_, th, _) in &win {
         catchup = catchup.max((th - tail_mean).abs());
     }
     rep.catchup_deg = catchup;
 
-    // Settle time: first release instant after which every sample stays in band
-    // about the settled tail mean.
-    let rel_t0 = rel[0].0;
-    let mut settle: Option<f32> = None;
-    let nrels = rel.len();
+    // Settle time: first instant after the final window opens at which every
+    // remaining sample stays in band about the settled tail mean.
+    let rel_t0 = win[0].0;
+    let nrels = win.len();
     let mut last_out = None;
-    for (i, (_, th, _)) in rel.iter().enumerate() {
+    for (i, (_, th, _)) in win.iter().enumerate() {
         if (th - tail_mean).abs() > SETTLE_BAND_DEG {
             last_out = Some(i);
         }
     }
-    if let Some(li) = last_out {
+    rep.settle_s = if let Some(li) = last_out {
         if li + 1 < nrels {
-            settle = Some(rel[li + 1].0 - rel_t0);
+            Some(win[li + 1].0 - rel_t0)
+        } else {
+            None
         }
     } else {
-        settle = Some(0.0);
-    }
-    rep.settle_s = settle;
+        Some(0.0)
+    };
 
-    rep.verdict = cell_verdict(v.pass, settle, SLOW_SETTLE_S).to_string();
+    rep.verdict = cell_verdict(v.pass, rep.settle_s, SLOW_SETTLE_S).to_string();
     rep
 }
 
@@ -882,7 +1473,7 @@ fn finish(probe: &Probe) {
     let stem = p
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("arm_pd_log");
+        .unwrap_or("limb_pd_log");
     let dir = p.parent().map(|d| d.to_path_buf());
     let name = format!("{stem}.summary.csv");
     let path = match dir {
@@ -912,5 +1503,11 @@ fn finish(probe: &Probe) {
         ));
     }
     flush_rows(&path, header, &rows);
-    info!("done: {} cell(s); summary: {}", probe.grid.len(), path);
+    info!(
+        "done: {} cell(s) on {} ({}); summary: {}",
+        probe.grid.len(),
+        probe.focus.label(),
+        probe.script_src,
+        path
+    );
 }

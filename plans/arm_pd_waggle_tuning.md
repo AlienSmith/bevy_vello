@@ -1,11 +1,109 @@
-# Plan: Headless Arm-PD Waggle-Tuning Harness
+# Plan: Headless Limb-PD Waggle-Tuning Harness
 
 ## Goal
 
-A headless tool that drives the V10 **right arm** through a ~180° swing and
-reports whether the limb PD controller **settles** or **waggles**, so we can
-find good `Kp`/`Kd` values. A wrong pair is obvious — either it takes forever
-to settle (under-damped) or it rings forever / diverges (over-driven).
+A headless tool that drives **any one limb** of the V10 character (right/left
+arm or right/left leg) through a commanded motion and reports whether the limb
+PD controller **settles** or **waggles**, so we can find good `Kp`/`Kd` values.
+A wrong pair is obvious — either it takes forever to settle (under-damped) or it
+rings forever / diverges (over-driven).
+
+Arms and legs are structurally identical (`[ref, pivot, mid, end]` particles,
+`[joint0, joint1]`) and share the same controller (`drive_limb` +
+`calculate_limb_ik`), so **one** harness drives all four; only the input
+differs. The tool is **script-driven** — the playhead is a flat ordered list of
+self-contained commands deserialized from JSON (`SCRIPT=path.json`), selected by
+`LIMB`. No code edits are needed to change a sweep or a motion.
+
+## Unified harness update (2026-10-13)
+
+`headless_arm_pd.rs` was generalized from right-arm-only to limb-generic:
+
+- `LIMB` = `right_arm|left_arm|right_leg|left_leg` selects the focus limb and
+  the built-in default script. Default `right_arm`.
+- **Commands** (serde JSON, externally tagged by `kind`), each self-contained
+  (limb + target/direction + gains + duration) — no phase machine, no
+  cross-entry coupling:
+
+  | Command | Effect |
+  |---|---|
+  | `reach` | Length-complete position IK (`IkMode::Reach`) to `to` or `anchor + dir*dist`. |
+  | `aim`   | Direction IK (`IkMode::Aim`) along `dir` at `dist` from the pivot (arm sibling of `reach`). |
+  | `set`   | Persistently set `limb` gains (`kp`/`kd`) without moving. |
+  | `reset` | Emit `ResetLimbControlConstraintsEvent` (restore authored rest angles). |
+  | `wait`  | Hold the current command (let it settle) for `dur`. |
+  | `move`/`jump` | **Reserved** — no whole-body actuator yet; parse, log once, act as `wait` (Stage 1 parts 2/3). |
+
+- `SWEEP=1` replays the **same script** once per `(Kp,Kd)` cell, overriding the
+  gains on every gain-bearing command.
+- `to`/`dir` are `[x,y]` (world Bevy y-up); when `to`/`dist` are omitted the
+  target is placed `dist` (default = the limb's characteristic length) from the
+  limb pivot along `dir`, so a script needs no knowledge of the rest pose.
+
+### Stage-1 leg gate (2026-10-13) — PASS
+
+Built-in `right_leg` default script (`reach` ±X with `[1,-0.1]`/`[-1,-0.1]`):
+
+```
+LIMB=right_leg : PASS swing=172.4deg rms=0.28deg rev=2 settle=0.00s inv=ok hash=7f80671b48af75df
+LIMB=right_arm : PASS swing=201.2deg rms=0.04deg rev=0 settle=0.00s inv=ok hash=cee8aed7012742c7
+```
+
+The same command file supplied via `SCRIPT=` reproduces the built-in leg run
+**bit-for-bit** (identical `hash`), confirming the JSON parse path is
+deterministic and equivalent to the built-in default. This exercises the
+Stage-1 leg controllers end-to-end (assembly → `drive_limb` → `calculate_limb_ik`
+→ XPBD) at the isolated (zero-g, no-collider, no-pin) operating point.
+
+**Does the leg reach waggle?** A harder probe — a marching `reach` (down →
+forward → down → back) plus the 25-cell sweep:
+
+```
+script: reach [0,-1] -> reach [1,-0.2] -> reach [0,-1] -> reach [-1,-0.2]
+LIMB=right_leg (danger run, default 0.5/0.065) : PASS rms=0.03deg rev=0
+```
+
+At the chosen gains the leg is **rock-solid** (rms ≤ 0.28°, 0–2 reversals). The
+leg sweep reproduces the arm boundary **cell-for-cell** — the instability is
+driven by **excess Kd**, not Kp, and the same `(Kp,Kd)` cells fail:
+
+| Kp | stable Kd (leg, PASS) | first WAGGLE |
+|---|---|---|
+| 0.20 / 0.35 | 0.00–0.14 (all) | — |
+| **0.50** | **≤ 0.065** | Kd = 0.10 (rev 32) |
+| 0.65 | ≤ 0.03 | Kd = 0.065 (rev 28, settles=none) |
+| 0.80 | ≤ 0.03 | Kd = 0.065 (rev 30) |
+
+Other consistent signals:
+- **Kd = 0 waggles** at higher Kp: `rev=1` at Kp 0.8, `settle=0.20–0.21 s` at
+  Kp 0.5–0.8 — under-damped without D.
+- **kd = 0.03 is the sweet spot** (rms ≤ 0.04°, `settle = 0.00 s` at every Kp).
+- **`swing_deg` shrinks as Kd grows** (182° at Kd 0 → ~161° at Kd 0.065–0.14):
+  the `kd·ω` trailing offset costs overshoot/extension — a useful secondary
+  indicator.
+- Commands confirm the chosen `Kp=0.5, Kd=0.065` transfers from arm → leg.
+
+### Determinism scope — the hash is an in-harness regression, not a physics invariant
+
+`hash` is `rows_hash` over one cell's captured CSV — it guarantees **byte-identical
+replay of this exact harness at a fixed config**, not that the physics is
+immutable. It **must** change (and only change) when the scene, the gains, or the
+input change; each cell above has a distinct hash, which is the sanity check.
+
+The current harness is deliberately the **easiest** operating point: zero gravity,
+no colliders, and the spine root held by **`inv_mass = 1e-5`** (near-static
+anchor). Standing on a near-infinite-mass particle is a headless-only trick — it
+would be hazardous in a gravity-bearing world (an effectively infinite-mass body
+cannot be pushed by contacts). The plan is to hold the spine with the **stiff
+external position constraint** (the hip pin) instead, once gravity is on (todo
+67/68). That change **will** move the hash, and that is expected and fine:
+- The hash's job is *replay equivalence within a config*, not *cross-config
+  equality*; re-running a config twice must match, a config change must not.
+- The **Kp/Kd boundary** (compared by `rms`/`reversals`/`verdict`, never the
+  hash) is the transferable result — and it is already independently corroborated
+  arm-vs-leg, which is the real cross-check.
+- So nothing here couples us to the heavy-particle trick; the mass is a **rig
+  choice**, separate from the PD being measured.
 
 ## The rig (verified)
 

@@ -345,6 +345,37 @@ pub struct LeftArmController {
     pub target: Vec2,
 }
 
+/// Right leg controller with pre-cached entity handles + per-frame input.
+///
+/// A leg is structurally identical to an arm — four particles in IK order
+/// `[ref, pivot, mid, end]` and two angular joints — so it reuses
+/// [`LimbConfig`] and the shared [`calculate_limb_ik`](super::systems::calculate_limb_ik)
+/// driver. The mapping for V10 is:
+///   `ref` = P2 (waist), `pivot` = P3 (hip), `mid` = P41 (knee), `end` = PRLL (foot)
+/// with joints `[P2_P3_P41, P3_P41_PRLL]`.
+///
+/// Stage 1 drives legs in [`IkMode::Reach`] only, reusing the arm `LimbConfig`
+/// defaults (legs and arms are near-equal bone length on V10).
+#[derive(Component, Clone)]
+pub struct RightLegController {
+    pub particles: [Entity; 4],
+    pub joints: [Entity; 2],
+    pub config: LimbConfig,
+    /// Foot target in world space. Written by the gait/AI layer.
+    pub target: Vec2,
+}
+
+/// Left leg controller with pre-cached entity handles + per-frame input.
+/// Particles: [P2, P3, P40, PLLL]; Joints: [P2_P3_P40, P3_P40_PLLL].
+#[derive(Component, Clone)]
+pub struct LeftLegController {
+    pub particles: [Entity; 4],
+    pub joints: [Entity; 2],
+    pub config: LimbConfig,
+    /// Foot target in world space. Written by the gait/AI layer.
+    pub target: Vec2,
+}
+
 // ---------------------------------------------------------------------------
 // Legacy — kept for migration, will be removed later
 // ---------------------------------------------------------------------------
@@ -382,6 +413,8 @@ impl Default for ArmController {
 pub enum WhichLimb {
     Left,
     Right,
+    LeftLeg,
+    RightLeg,
 }
 
 #[derive(Event)]

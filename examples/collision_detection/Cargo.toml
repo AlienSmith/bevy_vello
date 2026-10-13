@@ -21,6 +21,8 @@ path = "src/raibert_sandbox_main.rs"
 
 [dependencies]
 ron = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
 #particle won't work with multi-threaded
 bevy = { workspace = true}
 vello_physics = { workspace = true }
