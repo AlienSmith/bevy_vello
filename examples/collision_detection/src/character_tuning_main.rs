@@ -11,11 +11,9 @@
 
 mod cannon;
 mod edge_pan_camera;
-mod spine_indicator;
 
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
-use spine_indicator::{IndicatorVisibility, SpineTuneParams};
 
 use bevy_vello::integrations::physics::systems::update_constraint_world;
 use bevy_vello::{
@@ -46,8 +44,7 @@ use game_lib::{
     default_input_map, drive_hip_pin, reset_hip_pin, update_character_movement,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems, HipPin,
-    HipPinParams, PlayerAction, PlayerMarker, SpineController, SpineDriveEnabled,
-    VelloCharacterPlugin,
+    HipPinParams, PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -188,22 +185,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init_state::<GameState>()
         .add_plugins(VelloCharacterPlugin::default())
         .insert_resource(PistolState::default())
-        .insert_resource(SpineTuneParams::default())
-        .insert_resource(IndicatorVisibility::default())
         .insert_resource(cannon::CannonParams::default())
         .insert_resource(GravityToggle::default())
         .insert_resource(HipPinParams::default())
-        // Pin mode is ON by default: the hip pin owns P1/P2/P3, so the spine
-        // drive is silenced (they must never both queue constraints on the same
-        // particles). Toggle both in the "Hip Pin" window.
-        .insert_resource(SpineDriveEnabled(false))
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
         .add_plugins(particles::VelloPartclePlugin)
-        .add_observer(spine_indicator::spawn_spine_indicator)
         .add_systems(
             FixedUpdate,
             tick_drag.before(CollisionSystems::CollisionResponsePhysics),
@@ -241,10 +231,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             (
                 edge_pan_camera::update_edge_pan_camera,
-                spine_indicator::spine_control_input,
-                spine_indicator::draw_spine_indicator,
-                spine_indicator::apply_spine_config,
-                indicator_ui,
                 arm_tuning_ui,
                 gravity_toggle_ui,
                 cannon::cannon_ui,
@@ -656,60 +642,6 @@ fn setup_resources(
     c_blueprint("character/v10.character.json");
 }
 
-/// egui window that prints the current indicator rotation speed in degrees/sec,
-/// the active control mode, and lets the user edit the speed directly via a
-/// slider (mirrors the `K`/`L` keys).
-fn indicator_ui(
-    mut contexts: EguiContexts,
-    mut params: ResMut<SpineTuneParams>,
-    visibility: Res<IndicatorVisibility>,
-) {
-    egui::Window::new("Indicator Tuning").show(contexts.ctx_mut(), |ui| {
-        ui.label("Arrows move the desired centre (control input, not UI).");
-        ui.label("P toggles the visualization.");
-        ui.separator();
-
-        ui.heading("Desired-target reach");
-        ui.label("How far the desired target sits from the current P2 (px).");
-        ui.add(egui::Slider::new(&mut params.command_reach, 0.0..=2000.0).text("px"));
-        ui.separator();
-
-        ui.heading("Spine drive config (applied to the indicator)");
-        ui.add(
-            egui::Slider::new(&mut params.config.compliance, 1e-9..=1e-5)
-                .logarithmic(true)
-                .text("compliance"),
-        );
-        ui.add(egui::Slider::new(&mut params.config.damping, 0.0..=1.0).text("damping"));
-        ui.add(
-            egui::Slider::new(&mut params.config.max_pos_speed, 0.0..=3000.0).text("max_pos_speed"),
-        );
-        ui.label("Pose responsiveness: fraction of the gap closed per tick, pre-clamp.");
-        ui.add(
-            egui::Slider::new(&mut params.config.rest_chase_alpha, 0.0..=1.0)
-                .text("rest_chase_alpha (Kp)"),
-        );
-
-        ui.heading("Spine heading drive");
-        ui.label("Per-heading angular speed cap, and the P1_P2_P3 angular joint compliance.");
-        ui.add(
-            egui::Slider::new(&mut params.config.max_ang_speed, 0.0..=60.0)
-                .text("max_ang_speed (rad/s)"),
-        );
-        ui.add(
-            egui::Slider::new(&mut params.config.bend_compliance, 1e-9..=1e-4)
-                .logarithmic(true)
-                .text("bend_compliance"),
-        );
-        ui.separator();
-
-        ui.label(format!(
-            "Visualization: {}  (P to toggle)",
-            if visibility.0 { "On" } else { "Off" }
-        ));
-    });
-}
-
 /// egui window that edits the live `LimbConfig` on the player's right arm
 /// directly (no resource mirror needed — the controller component holds the
 /// config and `update_character_movement` reads it each FixedUpdate).
@@ -810,30 +742,73 @@ fn gravity_toggle_ui(
     });
 }
 
-/// Hip-pin tuning window: master enable (which also gates the spine drive) plus
-/// the live Raibert resolver + pin-stiffness knobs.
+/// Hip-pin tuning window: master enable plus the live Raibert resolver +
+/// pin-stiffness knobs, and an input readout that shows the W/A/S/D vector the
+/// pin is actually reading from `ActionState<PlayerAction>` (proving the hip
+/// controller is hooked to input).
 fn hip_pin_ui(
     mut contexts: EguiContexts,
     mut params: ResMut<HipPinParams>,
-    mut drive_enabled: ResMut<SpineDriveEnabled>,
-    mut pin_q: Query<&mut HipPin>,
+    mut pin_q: Query<(Entity, &mut HipPin)>,
+    action_q: Query<&ActionState<PlayerAction>>,
 ) {
+    // Snapshot the single character's pin (all Copy) so no borrow is held across
+    // the UI closure, which needs `&mut` access to edit the pin below.
+    let snapshot = pin_q
+        .iter_mut()
+        .next()
+        .map(|(e, p)| (e, p.enabled, p.ready, p.state.hip_pos));
+
     egui::Window::new("Hip Pin").show(contexts.ctx_mut(), |ui| {
-        let mut enabled = pin_q.iter_mut().next().map(|p| p.enabled).unwrap_or(false);
+        let Some((entity, mut enabled, ready, hip_pos)) = snapshot else {
+            ui.label("no character / hip pin yet");
+            return;
+        };
+
+        // Input readout: the exact `input_dir` the pin feeds the resolver.
+        // `drive_hip_pin` reads `MoveLeft/Right` (x) and `MoveUp/Down` (y); if
+        // this vector reacts to your keys, input is reaching the pin.
+        let (mut ix, mut iy) = (0.0_f32, 0.0_f32);
+        if let Ok(action) = action_q.get(entity) {
+            if action.pressed(&PlayerAction::MoveRight) {
+                ix += 1.0;
+            }
+            if action.pressed(&PlayerAction::MoveLeft) {
+                ix -= 1.0;
+            }
+            if action.pressed(&PlayerAction::MoveUp) {
+                iy += 1.0;
+            }
+            if action.pressed(&PlayerAction::MoveDown) {
+                iy -= 1.0;
+            }
+        }
+        ui.colored_label(
+            if ix != 0.0 || iy != 0.0 {
+                egui::Color32::LIGHT_GREEN
+            } else {
+                egui::Color32::GRAY
+            },
+            format!(
+                "input WASD: ({ix:+.0}, {iy:+.0})   ready: {ready}   hip: ({:.1}, {:.1})",
+                hip_pos.x, hip_pos.y
+            ),
+        );
+        ui.label("Drive with W/A/S/D (leafwing PlayerAction). Arrow keys are unused.");
+        ui.separator();
+
         if ui
             .checkbox(&mut enabled, "hip pin enabled (drives P1/P2/P3)")
             .changed()
         {
-            for mut pin in pin_q.iter_mut() {
+            for (_, mut pin) in pin_q.iter_mut() {
                 pin.enabled = enabled;
             }
-            // The drive and the pin must never both own P1/P2/P3.
-            drive_enabled.0 = !enabled;
         }
-        if let Some(mut pin) = pin_q.iter_mut().next() {
+        if let Some((_, mut pin)) = pin_q.iter_mut().next() {
             ui.add(egui::Slider::new(&mut pin.theta, -1.5..=1.5).text("theta (attitude)"));
         }
-        if let Some(mut pin) = pin_q.iter_mut().next() {
+        if let Some((_, mut pin)) = pin_q.iter_mut().next() {
             let mut drives = params.hip_drives_legs;
             if ui
                 .checkbox(&mut drives, "hip pin drives legs (feet follow sandbox)")
