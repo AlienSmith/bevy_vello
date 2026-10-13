@@ -239,3 +239,136 @@ tradeoff, now quantifiable.
 
 Reproduce: `GRAVITY=on COMPLIANCE=1e-1 cargo run --release -p collision_detection --example headless_pin`
 (vs. `GRAVITY=off COMPLIANCE=1e-1 ...` for the control).
+
+## Integrate the sandbox: the pin now drives the legs too (2026-10-13)
+
+The pin already owned `P1/P2/P3` (the hip frame). The remaining integration was
+to make the sandbox drive the **whole** lower body — the two legs (knees `P40`/
+`P41`, feet `PLLL`/`PRLL`) — so the resolver's planned window is realized on the
+character, not just the hip. The legs are structurally an arm: four particles in
+IK order `[ref, pivot, mid, end]` (`P2, P3, P40/41, PLLL/PRLL`) driven by
+[`update_character_movement`](bevy_vello/examples/game_lib/src/character/systems.rs:834)
+from `LeftLegController.target`/`RightLegController.target` (a bevy **y-up** foot
+position) via the shared limb IK.
+
+**Design (chosen — extend the pin, not a parallel system).** The pin is already
+the single place that steps the resolver and owns the hip; it now *also* writes
+the resolver's foot poses into the leg targets, so there is exactly one resolver
+step per character per tick and no ordering ambiguity between a hip system and a
+leg system. Concretely, in [`drive_hip_pin`](bevy_vello/examples/game_lib/src/lower_body/hip_pin.rs:222):
+
+- On the first leg-driving tick it captures a [`LegBridgeSeed`] — both the
+  resolver foot positions (y-up) **and** the live leg-controller targets (bevy
+  y-up). This is the key to frame-agnostic mapping: the resolver's floor is at
+  `y = 0`, but the character spawns wherever, so only the per-tick foot **delta**
+  from the seed is applied (via [`leg_target`](bevy_vello/examples/game_lib/src/lower_body/hip_pin.rs:228)).
+- Each subsequent tick: `leg.target = seed_target + (pose.foot − seed_resolver_foot)`.
+  Left/right are mapped independently (`PLLL`←`left_foot`, `PRLL`←`right_foot`).
+- Gated by [`HipPinParams::hip_drives_legs`](bevy_vello/examples/game_lib/src/lower_body/hip_pin.rs:76)
+  (default **true** = integrated; `false` leaves the legs to external control,
+  pin-only). [`HipPin::reseat_leg_bridge`] re-captures the seed when the toggle
+  flips so the feet snap to their live position instead of jumping by the
+  accumulated delta. [`reset_hip_pin`] clears the seed too.
+
+**Ordering.** The pin must run **before**
+[`update_character_movement`](bevy_vello/examples/game_lib/src/character/systems.rs:834)
+(the leg IK reads the targets) and before `update_constraint_world`. The tuning
+app now schedules `drive_hip_pin.before(update_character_movement).before(update_constraint_world)`.
+That required re-exporting `update_character_movement`
+([`character::mod`](bevy_vello/examples/game_lib/src/character/mod.rs:13) → [`lib`](bevy_vello/examples/game_lib/src/lib.rs:33)).
+
+**Why the result should track the sandbox closely (the user's expectation).** The
+legs' only job is to place the feet/knees at the sandbox poses; the resolver's
+`solve_leg_ik` already guarantees bone lengths, and there are **no leg colliders**
+to fight the IK, so per-tick foot-target tracking is the whole game. The one
+interaction is indirect: the leg angular joints touch `P3` (the hip), which the
+pin holds — but the pin is stiff (`1e-7`) so it wins that local tug.
+
+**Harness.** [`headless_pin.rs`](bevy_vello/examples/collision_detection/examples/headless_pin.rs:197)
+stays **pin-only** by default (its tracking invariant is about `P1/P2/P3`); the
+full lower body is opt-in with `LEGS=on`. The measured end-to-end foot-tracking
+gate stays a user-run check in the tuning app (plan §8).
+
+Verify: `cargo test -p game_lib` (96 pass, +1 `leg_target` seed/delta unit test;
+`hip_pin` now 7 tests) and `cargo build -p collision_detection --bins --examples`
+(both green). Visual: run `character_tuning_main`, watch the feet follow the
+resolver as the character walks/jumps; toggle "hip pin drives legs" to compare.
+
+## Headless verification of the pin + legs under gravity (2026-10-13, todo 84)
+
+Before trusting the integration visually, we ran it through the same headless
+pipeline used for the pin-only gate — the point being to catch the three
+pathologies early: **wobble**, **explosion** (non-finite / unbounded state), and
+**feet lagging far from their targets**.
+
+### What we added to the harness
+
+[`headless_pin.rs`](bevy_vello/examples/collision_detection/examples/headless_pin.rs:1)
+gained an opt-in, integrated mode (`GRAVITY=on LEGS=on`) that measures the leg
+half of the bridge on top of the existing hip-frame check:
+
+- **Ordering.** The schedule now runs
+  `drive_hip_pin.before(update_character_movement)` (split out of the plain
+  `.chain()`), so the legs read the targets the pin just wrote in the same tick —
+  the same ordering the tuning app uses. `update_character_movement` was imported
+  from the `game_lib` re-exports.
+- **Foot-lag tracking.** Per tick it compares each foot's *realized* position
+  (`vello_to_world(pos)`, the inverse of the `bevy_to_vello` the IK applies) to
+  the live `Left/RightLegController.target`, tracks the combined and per-side
+  peak error (with the time it occurred), and writes a `<main>.leg.csv` sidecar
+  (`t,left_err_px,right_err_px`) for localization.
+- **Leg-bone rigidity.** The four leg bones (`P3–P40`, `P40–PLLL`, `P3–P41`,
+  `P41–PRLL`) are added to `check_bone_rigidity` when legs are active.
+- **Leg wobble tail.** A `tail_verdict` over the last `LEG_TAIL_S = 0.7 s` of
+  foot error (`LEG_RMS_MAX = 6.0 px`, `LEG_REV_MAX = 6` reversals past a
+  `LEG_RATE_DEADBAND = 20.0 px/s`), reported as `leg_tail=PASS/WAGGLE`.
+
+Constants: `LEG_TAIL_S=0.7`, `LEG_RMS_MAX=6.0`, `LEG_REV_MAX=6`,
+`LEG_RATE_DEADBAND=20.0`.
+
+### Verdicts — `GRAVITY=on LEGS=on`
+
+```
+summary: rows=538 events=3 nan_rows=0 max_track_err=0.365px max_leg_err=37.491px@t0.80 \
+         inv=ok rig=ok max_rel_dev=0.0027 leg_tail=PASS(rms=2.786px rev=4) hash=c78d4c86daa6fcbc
+leg peak: left=37.5px@t0.80 right=27.6px@t4.09 (combined 37.5px@t0.80)
+rigidity: P1-P2=0.0008 P2-P3=0.0009 P1-P3=0.0008 P3-P40=0.0016 P40-PLLL=0.0027 P3-P41=0.0014 P41-PRLL=0.0025
+```
+
+- **No explosion.** `nan_rows=0` and `inv=ok` — every row finite, all channels
+  inside their ceilings. Bone rigidity is `rig=ok` with `max_rel_dev=0.0027`
+  (worst bone stretches 0.27%, the foot `P40-PLLL`), so the frame and both legs
+  are held to their rest lengths.
+- **Hip tracks essentially exactly.** `max_track_err = 0.365 px` over `P1/P2/P3`
+  — the frame does not fight the pin.
+- **No wobble.** `leg_tail = PASS (rms = 2.786 px, rev = 4)` — at the end of the
+  episode the feet sit ~2-3 px from target with no ringing.
+- **Deterministic.** `hash = c78d4c86daa6fcbc` was byte-identical across repeated
+  runs (this is the in-harness regression hash, not a physics invariant — see the
+  determinism-scope note in [`arm_pd_waggle_tuning.md`](bevy_vello/plans/arm_pd_waggle_tuning.md:86)).
+
+### Where the lag is (answering "can you tell where the huge lag happens?")
+
+The one number that stands out is the **37.5 px peak foot lag**. At the project
+scale of **100 px = 1 m** that is ~0.37 m — worth localizing, and the
+`<main>.leg.csv` trace pins it down exactly:
+
+- **Walk onset (left swing).** Error ramps `4.9 → 37.5 px` over `t = 0.53–0.80`,
+  peaks at **`t = 0.80 s`**, then decays to **`< 1 px` by `t = 0.99 s`**. This is
+  a **swing-phase transient**: the IK is rate-limited chasing a target that is
+  itself being flung forward fast by the gait plan, so it trails during the fast
+  part of the swing and snaps back onto the plant.
+- **Turn-around (right swing).** The right foot peaks **27.6 px @ `t = 4.09 s`**
+  during the `3.5–4.5 s` turn, both feet showing `20–26 px` transients — again a
+  swing transient, not a steady offset.
+- **Stance / rest / tail.** Feet hold **~2-3 px** — the error collapses whenever
+  the foot is planted.
+
+**Conclusion:** the peak is NOT a steady-state error, a ring, or a blow-up — it
+is a bounded, self-correcting **swing-phase tracking lag** (the leg IK trailing
+the fast-moving swing target), which converges within ~0.2 s of the plant. The
+stance foot is essentially on target, the hip frame is exact, and nothing
+diverges. If we later want to shave the swing transient, the lever is the leg
+IK's per-tick approach rate / gains (Stage 1c, todo 64), not the pin.
+
+Command: `GRAVITY=on LEGS=on cargo run -p collision_detection --example headless_pin`.

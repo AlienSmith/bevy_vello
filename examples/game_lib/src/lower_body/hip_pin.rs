@@ -37,7 +37,7 @@ use bevy_vello::integrations::physics::{
 use leafwing_input_manager::prelude::ActionState;
 use vello_physics::ExternalPositionConstraintConfig;
 
-use crate::character::SpineController;
+use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
 use crate::lower_body::resolver::{step_lower_body, LowerBodyConfig, ResolverState};
 
@@ -72,6 +72,14 @@ pub struct HipPinParams {
     /// External position constraint damping (0..1). Legacy raw velocity damper;
     /// prefer [`Self::kd`] once tuning.
     pub damping: f32,
+    /// When true (default) the pin also writes the resolver's **foot** poses into
+    /// the character's [`RightLegController`]/[`LeftLegController`] targets, so
+    /// the **whole** lower body (hip frame + knees + feet) is sandbox-driven. The
+    /// legs are then realized each tick by
+    /// [`update_character_movement`](crate::character::systems::update_character_movement),
+    /// which must be ordered **after** this system. Set false to leave the legs
+    /// under external control (the pin then only owns `P1/P2/P3`).
+    pub hip_drives_legs: bool,
 }
 
 impl Default for HipPinParams {
@@ -87,8 +95,24 @@ impl Default for HipPinParams {
             // Snaps the (now-light) particles to the commanded pose.
             compliance: 1e-7,
             damping: 0.01,
+            // Drive the legs from the sandbox by default (the integration).
+            hip_drives_legs: true,
         }
     }
+}
+
+/// Foot-target seeds for the sandbox↔leg bridge: the resolver foot positions
+/// (y-up) and the character's leg-controller foot targets (bevy y-up) captured
+/// on the pin's first leg-driving tick. Per tick only the sandbox foot *delta*
+/// from `resolver_feet` is added to `target_feet`, so the resolver's absolute
+/// frame (floor at `y = 0`) never has to line up with the character's spawn
+/// `y`. See `HipPin::leg_seed`.
+#[derive(Debug, Clone, Copy)]
+struct LegBridgeSeed {
+    /// Resolver foot positions at seed time (y-up), `[left, right]`.
+    resolver_feet: [Vec2; 2],
+    /// Leg-controller foot targets at seed time (bevy y-up), `[left, right]`.
+    target_feet: [Vec2; 2],
 }
 
 /// Per-character hip pin. Attach to the character root entity. All fields are
@@ -118,6 +142,10 @@ pub struct HipPin {
     /// level into an edge at the fixed `dt` (a render-frame `just_pressed` is
     /// dropped whenever a render frame runs zero fixed steps).
     jump_was_held: bool,
+    /// Seeds for the sandbox↔leg bridge, captured once on the first tick the
+    /// pin drives the legs. `None` until then (and after a reset). See
+    /// `LegBridgeSeed`.
+    leg_seed: Option<LegBridgeSeed>,
 }
 
 impl HipPin {
@@ -131,7 +159,17 @@ impl HipPin {
             enabled: true,
             theta: 0.0,
             jump_was_held: false,
+            leg_seed: None,
         }
+    }
+
+    /// Drop the sandbox↔leg seed so the foot targets are re-captured from the
+    /// live pose on the next leg-driving tick. Call when toggling
+    /// [`HipPinParams::hip_drives_legs`] (so the feet snap to their current
+    /// position rather than jump by the accumulated sandbox delta) or after
+    /// teleporting the character.
+    pub fn reseat_leg_bridge(&mut self) {
+        self.leg_seed = None;
     }
 }
 
@@ -182,6 +220,15 @@ pub fn softened_compliance(base: f32, soft_scale: f32, v_ref: f32, speed: f32) -
     base * (1.0 + s * (soft_scale - 1.0))
 }
 
+/// Foot-target mapping for the sandbox↔leg bridge: apply the resolver's foot
+/// **delta** from the seed to the leg controller's seeded foot target. Only the
+/// delta is used, so the resolver's absolute frame (floor at `y = 0`) never has
+/// to line up with the character's spawn `y`. Both vectors are bevy y-up. Pure;
+/// exposed for unit testing.
+pub fn leg_target(seed_target: Vec2, resolver_foot: Vec2, seed_resolver_foot: Vec2) -> Vec2 {
+    seed_target + (resolver_foot - seed_resolver_foot)
+}
+
 /// Seed the pin from the assembled character: capture the `P3` world anchor and
 /// the `P1/P2` rest offsets. No-op once `ready` or if the character is not yet
 /// assembled.
@@ -224,6 +271,8 @@ pub fn drive_hip_pin(
     params: Res<HipPinParams>,
     mut pin_q: Query<(Entity, &mut HipPin)>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
+    mut right_leg_q: Query<&mut RightLegController>,
+    mut left_leg_q: Query<&mut LeftLegController>,
     p_q: Query<&VelloParticle>,
     action_q: Query<&ActionState<PlayerAction>>,
     mut world: ResMut<VelloConstraintWorld>,
@@ -319,6 +368,30 @@ pub fn drive_hip_pin(
                 },
             );
         }
+
+        // --- Sandbox → legs: write the resolver foot poses into the leg
+        // controllers' IK targets, so the whole lower body (hip frame + knees +
+        // feet) follows the sandbox. `update_character_movement` (ordered after
+        // this system) reads these targets and runs the leg IK. The seed is
+        // captured once — both the resolver feet and the bevy-yup targets — and
+        // only the per-tick *delta* is applied, so the resolver's absolute frame
+        // never has to match the character's spawn y. A character without legs
+        // has no controller and is simply skipped.
+        if params.hip_drives_legs {
+            let (Ok(mut right_leg), Ok(mut left_leg)) =
+                (right_leg_q.get_mut(entity), left_leg_q.get_mut(entity))
+            else {
+                continue;
+            };
+            let seed = *pin.leg_seed.get_or_insert(LegBridgeSeed {
+                resolver_feet: [pose.left_foot, pose.right_foot],
+                target_feet: [left_leg.target, right_leg.target],
+            });
+            left_leg.target =
+                leg_target(seed.target_feet[0], pose.left_foot, seed.resolver_feet[0]);
+            right_leg.target =
+                leg_target(seed.target_feet[1], pose.right_foot, seed.resolver_feet[1]);
+        }
     }
 }
 
@@ -334,6 +407,7 @@ pub fn reset_hip_pin(
     for mut pin in pin_q.iter_mut() {
         pin.state = ResolverState::new(&params.config);
         pin.ready = false;
+        pin.leg_seed = None;
     }
 }
 
@@ -461,6 +535,19 @@ mod tests {
             (tm - pose).length() < 1e-6,
             "matched velocity ⇒ no shift: {tm:?}"
         );
+    }
+
+    #[test]
+    fn leg_target_applies_only_the_resolver_delta() {
+        // Seed: resolver foot and character foot target are in different absolute
+        // frames; only the delta must transfer.
+        let seed_target = Vec2::new(340.0, 210.0); // bevy y-up foot target
+        let seed_foot = Vec2::new(0.0, 0.0); // resolver floor contact
+                                             // Unchanged resolver pose ⇒ target unchanged (no frame leak).
+        assert!((leg_target(seed_target, seed_foot, seed_foot) - seed_target).length() < 1e-6);
+        // Resolver foot steps forward +30, up +20 ⇒ target moves by exactly that.
+        let moved = leg_target(seed_target, Vec2::new(30.0, 20.0), seed_foot);
+        assert!((moved - (seed_target + Vec2::new(30.0, 20.0))).length() < 1e-6);
     }
 
     #[test]

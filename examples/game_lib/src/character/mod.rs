@@ -11,6 +11,10 @@ mod observers;
 pub mod plugin;
 mod systems;
 
+// Re-exported so hosts can order the hip pin (or any leg-target writer) *before*
+// the limb driver: `drive_hip_pin.before(update_character_movement)`.
+pub use systems::update_character_movement;
+
 #[derive(Component, Clone)]
 pub struct Connectivity {
     pub name: Interned<str>,

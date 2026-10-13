@@ -93,8 +93,9 @@ use game_lib::{
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
     check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, rigid_frame_targets,
-    rows_hash, Bone, CharacterController, CharacterRoot, Connectivity, HipPin, HipPinParams,
-    InvariantConfig, PlayerAction, PlayerMarker, SpineDriveEnabled, VelloCharacterPlugin,
+    rows_hash, tail_verdict, update_character_movement, Bone, CharacterController, CharacterRoot,
+    Connectivity, HipPin, HipPinParams, InvariantConfig, LeftLegController, PlayerAction,
+    PlayerMarker, RightLegController, SpineDriveEnabled, VelloCharacterPlugin,
 };
 use leafwing_input_manager::prelude::ActionState;
 
@@ -121,6 +122,16 @@ const FILT_TAU: f32 = 0.06;
 /// pin should hold these near-exactly; anything larger is a physics bug.
 const PIN_RIGID_TOL: f32 = 0.02;
 
+/// Foot-tracking tail window (s) and thresholds for the leg wobble verdict. The
+/// commanded foot target is static once the script ends, so the realized foot
+/// should converge and *hold*; ringing shows as RMS (px) about the tail mean plus
+/// reversals of the error rate (px/s). The window starts at `EXIT_AT - LEG_TAIL_S`
+/// (`5.3s`), clear of the `5.0–5.12` jump edge.
+const LEG_TAIL_S: f32 = 0.7;
+const LEG_RMS_MAX: f32 = 6.0;
+const LEG_REV_MAX: u32 = 6;
+const LEG_RATE_DEADBAND: f32 = 20.0;
+
 /// The input timeline: `(label, begin, end, keys, kind)`.
 /// `kind`: 0 = hold begin, 1 = hold end, 2 = edge tap.
 /// Windows exercise the resolver: forward walk, stop, turn-around, then a hop.
@@ -140,14 +151,19 @@ fn out_path() -> String {
 /// The sidecar events CSV path derived from the main one (`pin_log.csv` →
 /// `pin_log.events.csv`).
 fn events_path(main: &str) -> String {
+    path_with_suffix(main, ".events.csv")
+}
+
+/// `pin_log.csv` + `.leg.csv` → `pin_log.leg.csv` (same dir, suffix before ext).
+fn path_with_suffix(main: &str, suffix: &str) -> String {
     let p = std::path::Path::new(main);
     let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("pin_log");
     match p.parent() {
         Some(dir) => dir
-            .join(format!("{stem}.events.csv"))
+            .join(format!("{stem}{suffix}"))
             .to_string_lossy()
             .to_string(),
-        None => format!("{stem}.events.csv"),
+        None => format!("{stem}{suffix}"),
     }
 }
 
@@ -194,11 +210,21 @@ fn env_f32(key: &str, default: f32) -> f32 {
 /// neutral [`HipPinParams`] values — the pin is a pure position constraint
 /// unless a PD term is set, so the steady-state sag under gravity is the clean
 /// `sag ≈ g·dt² + compliance·g` and scales linearly with `compliance`.
+///
+/// This harness is the **pin-only** gate, so the sandbox↔leg bridge is OFF by
+/// default (the legs are not part of the tracking invariant here, and their
+/// angular constraints touch `P2`/`P3`). Opt in with `LEGS=on` to exercise the
+/// full lower body.
 fn params_from_env() -> HipPinParams {
     let d = HipPinParams::default();
+    let drives_legs = matches!(
+        std::env::var("LEGS").ok().as_deref().map(str::trim),
+        Some("on") | Some("1") | Some("true")
+    );
     HipPinParams {
         compliance: env_f32("COMPLIANCE", d.compliance),
         damping: env_f32("DAMPING", d.damping),
+        hip_drives_legs: drives_legs,
         ..d
     }
 }
@@ -254,6 +280,27 @@ struct Probe {
     last_event: Option<u32>,
     max_err: f32,
     nan_rows: u32,
+    /// Indices into `particles` for the leg ends `[left, right]`, each
+    /// `(knee, foot)`. Zeroed / unused when the character has no legs.
+    leg_idx: [[usize; 2]; 2],
+    /// True when both legs' knee/foot particles were discovered (V10 has them).
+    leg_active: bool,
+    /// Max lag (world px) of a foot vs its commanded IK `target` (the pin's
+    /// sandbox foot pose). Only sampled when the pin drives the legs.
+    max_leg_err: f32,
+    /// Per-tick `t` and combined (worst-leg) foot-tracking error (world px), fed
+    /// to `tail_verdict` for the post-settle wobble verdict.
+    leg_t: Vec<f32>,
+    leg_err: Vec<f32>,
+    /// Per-leg peak foot lag (world px) and the `t` it peaked: index 0 = left
+    /// (`PLLL`), 1 = right (`PRLL`). Localizes the worst lag to an event.
+    max_leg_err_lr: [f32; 2],
+    max_leg_err_lr_t: [f32; 2],
+    /// `t` of the combined (worst-leg) peak foot lag.
+    leg_peak_t: f32,
+    /// Per-tick per-leg foot lag (world px) `[left, right]`, written to the
+    /// `<main>.leg.csv` sidecar so the lag can be localized to a gait phase.
+    leg_err_lr: Vec<[f32; 2]>,
 }
 
 fn main() {
@@ -322,6 +369,15 @@ fn main() {
         last_event: None,
         max_err: 0.0,
         nan_rows: 0,
+        leg_idx: [[0, 0], [0, 0]],
+        leg_active: false,
+        max_leg_err: 0.0,
+        leg_t: vec![],
+        leg_err: vec![],
+        max_leg_err_lr: [0.0, 0.0],
+        max_leg_err_lr_t: [0.0, 0.0],
+        leg_peak_t: 0.0,
+        leg_err_lr: vec![],
     });
 
     // Real physics stepping, same order as VelloCollisionResponsePlugin minus
@@ -331,7 +387,10 @@ fn main() {
         FixedUpdate,
         (
             make_collision_constraints,
-            drive_hip_pin,
+            // Pin the frame first, then let the limb IK read the leg targets the
+            // pin just wrote, then step the constraint world — all in one tick,
+            // so the legs never read a stale target.
+            drive_hip_pin.before(update_character_movement),
             update_constraint_world,
             update_connection_particles,
             remove_soft_body,
@@ -479,7 +538,9 @@ fn probe_driver(
     character_blueprint: Res<BlueprintCharacterAssetManager>,
     conn_q: Query<&Connectivity>,
     pin_q: Query<&HipPin>,
+    params: Res<HipPinParams>,
     particle_q: Query<(Entity, &VelloParticle)>,
+    leg_q: Query<(&LeftLegController, &RightLegController)>,
     root_q: Query<Entity, With<CharacterRoot>>,
     mut exit: EventWriter<AppExit>,
 ) {
@@ -564,6 +625,16 @@ fn probe_driver(
             found.iter().position(|(n, _)| n == "P2").unwrap_or(3),
             found.iter().position(|(n, _)| n == "P3").unwrap_or(4),
         ];
+        // Leg ends (V10): left = knee `P40`, foot `PLLL`; right = knee `P41`,
+        // foot `PRLL`. Absent for legless blueprints ⇒ leg tracking is skipped.
+        let find = |n: &str| found.iter().position(|(name, _)| name.as_str() == n);
+        match (find("P40"), find("PLLL"), find("P41"), find("PRLL")) {
+            (Some(lk), Some(lf), Some(rk), Some(rf)) => {
+                probe.leg_idx = [[lk, lf], [rk, rf]];
+                probe.leg_active = true;
+            }
+            _ => probe.leg_active = false,
+        }
         probe.particles = found;
         let n = probe.particles.len();
         probe.prev_vel = vec![Vec2::ZERO; n];
@@ -628,6 +699,37 @@ fn probe_driver(
     }
     probe.primed = true;
 
+    // --- Leg tracking (only when the pin drives the legs): the realized foot vs
+    // the commanded IK `target` the pin wrote into each leg controller. `target`
+    // is bevy y-up, the particle pos is vello y-down, so convert before comparing.
+    // A large value = a foot lagging far from (or fighting) its commanded pose.
+    if params.hip_drives_legs && probe.leg_active {
+        if let Ok((left_leg, right_leg)) = leg_q.get(character) {
+            let mut emax_leg = 0.0f32;
+            let mut lr = [0.0f32, 0.0f32];
+            for (li, target) in [left_leg.target, right_leg.target].into_iter().enumerate() {
+                let foot_ent = probe.particles[probe.leg_idx[li][1]].1;
+                if let Ok((_, p)) = particle_q.get(foot_ent) {
+                    let realized = vello_to_world(p.particle.pos);
+                    let err = (realized - target).length();
+                    lr[li] = err;
+                    if err > probe.max_leg_err_lr[li] {
+                        probe.max_leg_err_lr[li] = err;
+                        probe.max_leg_err_lr_t[li] = t;
+                    }
+                    emax_leg = emax_leg.max(err);
+                }
+            }
+            if emax_leg > probe.max_leg_err {
+                probe.max_leg_err = emax_leg;
+                probe.leg_peak_t = t;
+            }
+            probe.leg_t.push(t);
+            probe.leg_err.push(emax_leg);
+            probe.leg_err_lr.push(lr);
+        }
+    }
+
     // --- Tracking error (realized vs commanded rigid frame, Vello y-down). ---
     let world_delta = Vec2::new(
         pin.state.hip_pos.x - pin.seed_hip.x,
@@ -655,7 +757,10 @@ fn probe_driver(
         // `P1/P2/P3` frame must hold its bone lengths (that is the pin's job).
         // The hash fingerprints the run for determinism replay.
         let inv = check_invariants(&head, &probe.log, &InvariantConfig::default());
-        let bones = [
+        // Rigid bones that must keep their length: the pinned `P1/P2/P3` frame
+        // (the pin's job) and, when the pin drives the legs, both legs' thigh +
+        // calf (the IK / distance-constraint job). A stretch is a constraint fight.
+        let mut bones = vec![
             Bone {
                 a: ("P1x".into(), "P1y".into()),
                 b: ("P2x".into(), "P2y".into()),
@@ -672,21 +777,64 @@ fn probe_driver(
                 rest_len: 0.0,
             },
         ];
+        let mut bone_labels: Vec<String> = vec!["P1-P2".into(), "P2-P3".into(), "P1-P3".into()];
+        let legs_on = params.hip_drives_legs && probe.leg_active;
+        if legs_on {
+            // V10 legs: left = P3-P40-PLLL, right = P3-P41-PRLL.
+            for (a, b) in [
+                ("P3", "P40"),
+                ("P40", "PLLL"),
+                ("P3", "P41"),
+                ("P41", "PRLL"),
+            ] {
+                bones.push(Bone {
+                    a: (format!("{a}x"), format!("{a}y")),
+                    b: (format!("{b}x"), format!("{b}y")),
+                    rest_len: 0.0,
+                });
+                bone_labels.push(format!("{a}-{b}"));
+            }
+        }
         let rig = check_bone_rigidity(&head, &probe.log, &bones, PIN_RIGID_TOL);
         let hash = rows_hash(&head, &probe.log);
         let worst_rel = rig.max_rel_dev.iter().copied().fold(0.0f32, f32::max);
         // Per-bone detail with the tick where each peaked — so a failure points
         // at the offending event rather than just a magnitude.
-        let bone_names = ["P1-P2", "P2-P3", "P1-P3"];
         let mut rig_detail = String::new();
-        for (i, nm) in bone_names.iter().enumerate() {
-            let t = probe
+        for (i, nm) in bone_labels.iter().enumerate() {
+            let tt = probe
                 .log
                 .get(rig.worst_row[i])
                 .and_then(|r| r.split(',').next())
                 .unwrap_or("?");
-            rig_detail += &format!(" {nm}={:.4}@t{t}", rig.max_rel_dev[i]);
+            rig_detail += &format!(" {nm}={:.4}@t{tt}", rig.max_rel_dev[i]);
         }
+
+        // Foot-tracking wobble verdict over the settle tail: the commanded foot
+        // target is static once the script ends, so the realized foot should
+        // converge and *hold*. Ringing shows up as RMS about the tail mean plus
+        // reversals of the error rate (a monotonic catch-up is not a wobble).
+        let mut leg_rate = vec![0.0f32; probe.leg_err.len()];
+        for i in 1..probe.leg_err.len() {
+            let d = (probe.leg_t[i] - probe.leg_t[i - 1]).max(1e-6);
+            leg_rate[i] = (probe.leg_err[i] - probe.leg_err[i - 1]) / d;
+        }
+        let leg_v = tail_verdict(
+            &probe.leg_t,
+            &probe.leg_err,
+            &leg_rate,
+            LEG_TAIL_S,
+            LEG_RMS_MAX,
+            LEG_REV_MAX,
+            LEG_RATE_DEADBAND,
+        );
+        let leg_verdict = if !legs_on || probe.leg_err.len() < 2 {
+            "n/a"
+        } else if leg_v.pass {
+            "PASS"
+        } else {
+            "WAGGLE"
+        };
 
         let mut out = String::from(head + "\n");
         out += &(probe.log.join("\n") + "\n");
@@ -708,16 +856,41 @@ fn probe_driver(
         write(&main_path, out);
         write(&ev_path, ev_out);
 
+        // Per-leg foot-lag trace so the worst lag can be tied to a gait phase.
+        if legs_on && !probe.leg_t.is_empty() {
+            let leg_path = path_with_suffix(&main_path, ".leg.csv");
+            let mut leg_out = String::from("t,left_err_px,right_err_px\n");
+            for (i, tt) in probe.leg_t.iter().enumerate() {
+                let lr = probe.leg_err_lr.get(i).copied().unwrap_or([0.0, 0.0]);
+                leg_out += &format!("{tt:.4},{:.3},{:.3}\n", lr[0], lr[1]);
+            }
+            write(&leg_path, leg_out);
+        }
+
         info!(
-            "summary: rows={} events={} nan_rows={} max_track_err={:.3}px inv={} rig={} max_rel_dev={:.4} hash={:016x}",
+            "summary: rows={} events={} nan_rows={} max_track_err={:.3}px max_leg_err={:.3}px@t{:.2} inv={} rig={} max_rel_dev={:.4} leg_tail={}(rms={:.3}px rev={}) hash={:016x}",
             probe.log.len(),
             probe.next_event_id,
             probe.nan_rows,
             probe.max_err,
+            probe.max_leg_err,
+            probe.leg_peak_t,
             if inv.ok { "ok".to_string() } else { inv.detail.clone() },
             if rig.ok { "ok".to_string() } else { "FAIL".to_string() },
             worst_rel,
+            leg_verdict,
+            leg_v.rms_deg,
+            leg_v.reversals,
             hash,
+        );
+        info!(
+            "leg peak: left={:.1}px@t{:.2} right={:.1}px@t{:.2} (combined {:.1}px@t{:.2})",
+            probe.max_leg_err_lr[0],
+            probe.max_leg_err_lr_t[0],
+            probe.max_leg_err_lr[1],
+            probe.max_leg_err_lr_t[1],
+            probe.max_leg_err,
+            probe.leg_peak_t,
         );
         info!("rigidity:{}", rig_detail);
         let _ = root_q.iter().count(); // keep the query live for parity with the demo

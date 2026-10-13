@@ -43,7 +43,7 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    default_input_map, drive_hip_pin, reset_hip_pin,
+    default_input_map, drive_hip_pin, reset_hip_pin, update_character_movement,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems, HipPin,
     HipPinParams, PlayerAction, PlayerMarker, SpineController, SpineDriveEnabled,
@@ -208,9 +208,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             FixedUpdate,
             tick_drag.before(CollisionSystems::CollisionResponsePhysics),
         )
-        // Hip pin: step the Raibert resolver + queue the three P1/P2/P3 external
-        // position constraints before the constraint world is stepped.
-        .add_systems(FixedUpdate, drive_hip_pin.before(update_constraint_world))
+        // Hip pin: step the Raibert resolver, queue the three P1/P2/P3 external
+        // position constraints, and (when `hip_drives_legs`) write the foot
+        // targets for the legs — all *before* `update_character_movement` runs
+        // the leg IK, and before the constraint world is stepped.
+        .add_systems(
+            FixedUpdate,
+            drive_hip_pin
+                .before(update_character_movement)
+                .before(update_constraint_world),
+        )
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
@@ -825,6 +832,16 @@ fn hip_pin_ui(
         }
         if let Some(mut pin) = pin_q.iter_mut().next() {
             ui.add(egui::Slider::new(&mut pin.theta, -1.5..=1.5).text("theta (attitude)"));
+        }
+        if let Some(mut pin) = pin_q.iter_mut().next() {
+            let mut drives = params.hip_drives_legs;
+            if ui
+                .checkbox(&mut drives, "hip pin drives legs (feet follow sandbox)")
+                .changed()
+            {
+                params.hip_drives_legs = drives;
+                pin.reseat_leg_bridge(); // re-capture the foot seed from the live pose
+            }
         }
         ui.separator();
         ui.label("Raibert lower-body resolver → rigid P1/P2/P3 frame.");

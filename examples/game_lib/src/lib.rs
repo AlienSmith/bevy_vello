@@ -31,10 +31,10 @@ pub struct VelloCharacterPlugin;
 pub use crate::{
     ai::{build_enemy_ai_tree, AiPhase, AiState},
     character::{
-        CharacterController, Connectivity, ConnectivityRoot, IkMode, LeftArmController,
-        LeftLegController, LimbConfig, ResetLimbControlConstraintsEvent, RightArmController,
-        RightLegController, SpineConfig, SpineController, SpineDriveEnabled, SpineIndicator,
-        StringPool, WhichLimb,
+        update_character_movement, CharacterController, Connectivity, ConnectivityRoot, IkMode,
+        LeftArmController, LeftLegController, LimbConfig, ResetLimbControlConstraintsEvent,
+        RightArmController, RightLegController, SpineConfig, SpineController, SpineDriveEnabled,
+        SpineIndicator, StringPool, WhichLimb,
     },
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},
@@ -54,10 +54,10 @@ pub use crate::{
     },
     lower_body::{
         compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max,
-        drive_hip_pin, pd_target, reset_hip_pin, rigid_frame_targets, softened_compliance,
-        solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin, HipPinParams, LegState,
-        LowerBodyConfig, LowerBodyController, LowerBodyInput, LowerBodyParams, LowerBodyPose,
-        LowerBodySandboxPlugin, ResolverState,
+        drive_hip_pin, leg_target, pd_target, reset_hip_pin, rigid_frame_targets,
+        softened_compliance, solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin, HipPinParams,
+        LegState, LowerBodyConfig, LowerBodyController, LowerBodyInput, LowerBodyParams,
+        LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
     },
 };
 
