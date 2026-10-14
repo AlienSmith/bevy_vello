@@ -1,4 +1,4 @@
-use bevy::{ecs::error::info, math::VectorSpace, prelude::*};
+use bevy::{ecs::error::info, math::VectorSpace, prelude::*, time::Fixed};
 use bevy_vello::integrations::physics::{
     CharacterAngularConstraintEvent, CharacterExternalPositionConstraintEvent,
     CharacterPivotImpulseEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
@@ -832,7 +832,7 @@ fn rotate_toward(
 }
 
 pub fn update_character_movement(
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     mut right_arm_q: Query<(&mut RightArmController, &VelloCharacterPhysicsRoot)>,
     mut left_arm_q: Query<(&mut LeftArmController, &VelloCharacterPhysicsRoot)>,

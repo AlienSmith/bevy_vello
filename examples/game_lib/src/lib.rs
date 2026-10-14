@@ -57,7 +57,7 @@ pub use crate::{
         drive_hip_pin, leg_target, pd_target, reset_hip_pin, rigid_frame_targets,
         softened_compliance, solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin, HipPinParams,
         LegState, LowerBodyConfig, LowerBodyController, LowerBodyInput, LowerBodyParams,
-        LowerBodyPose, LowerBodySandboxPlugin, ResolverState,
+        LowerBodyPose, LowerBodySandboxPlugin, ResolverState, VerticalPhase,
     },
 };
 

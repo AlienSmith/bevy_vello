@@ -1,7 +1,7 @@
 //! Reusable headless CSV telemetry.
 //!
-//! Every headless harness (`headless_ctrl`, `headless_pin`, `headless_arm_pd`)
-//! used to re-implement the same plumbing: build a header, accumulate rows in a
+//! Every headless harness (`headless_ctrl`, `headless_arm_pd`) used to
+//! re-implement the same plumbing: build a header, accumulate rows in a
 //! `Vec<String>`, `mkdir -p`, `std::fs::write`, log. This module is the single
 //! implementation of that.
 //!

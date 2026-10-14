@@ -367,7 +367,6 @@ pub fn approach(current: f32, target: f32, max_delta: f32) -> f32 {
     }
 }
 
-
 /// Rotate a vector by `angle` radians (CCW in a y-up frame).
 #[inline]
 pub fn rotate(v: Vec2, angle: f32) -> Vec2 {
@@ -520,8 +519,8 @@ fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
                 // `FLIGHT_SWING_LIFT_FRACTION · step_height` outright.
                 let v0 = state.hip_vel.y.max(0.0);
                 let rise = v0 * v0 / (2.0 * g);
-                state.vs.swing_lift = (FLIGHT_SWING_LIFT_FRACTION * config.step_height)
-                    .min((2.0 / 3.0) * rise);
+                state.vs.swing_lift =
+                    (FLIGHT_SWING_LIFT_FRACTION * config.step_height).min((2.0 / 3.0) * rise);
                 state.vs.swing_period = (2.0 * v0 / g).max(f32::EPSILON);
                 state.vs.swing_t = 0.0;
             }
@@ -899,7 +898,8 @@ fn step_leg(
             // position, velocity and remaining flight time. Open-loop targets
             // frozen at lift-off are what made sudden stops land both feet on
             // one side of the hip.
-            leg.swing_to.x = plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
+            leg.swing_to.x =
+                plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
             // Progress 1→0 over the swing duration (elapsed fraction).
             let total = config.swing_duration_ts.max(f32::EPSILON);
             let t = (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0);
@@ -2081,7 +2081,10 @@ mod tests {
         // Measured walking spread just before the hop (plants on either side of
         // the hip at the anti-phase extremes).
         let walk_spread = (state.left.plant_pos.x - state.right.plant_pos.x).abs();
-        assert!(walk_spread > 10.0, "not walking before the hop: {walk_spread}");
+        assert!(
+            walk_spread > 10.0,
+            "not walking before the hop: {walk_spread}"
+        );
 
         state.vs.jump_requested = true;
         let mut min_gap = f32::INFINITY;
@@ -3589,26 +3592,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "KNOWN DEVIATION (2026-10-12): a walking jump committed mid-swing transiently \
-                collapses/reverses v_x via touchdown backward-solves; plan §5.7 wants v_x \
-                continuous. Enable once the §5.7 launch-window gate lands."]
     fn test_walk_to_jump_preserves_vx_design() {
         // §5.7/§5.8 claim: "the horizontal loop keeps running … the launch is
         // `Stance-start → Launch` with `v_x` continuous; only the height
         // reference changes." Freezing `v_x` was explicitly withdrawn (§5.7).
         // So |v_x| must stay a large fraction of cruise for the WHOLE transition.
         //
-        // It does NOT today. Measured at dt = 1/60 (jump requested mid-swing):
-        // `v_x` rings 120 → 4.6 → 120 → 90 → −50 → 3.3 → 16.6 (Flight holds
-        // 16.6) → 120 after landing. Two touchdown backward-solves fire DURING
-        // the jump (`v_support = 4.6` mid-Load, `−90` during Launch): because the
-        // jump commits mid-swing instead of at the §5.7 launch window, the
-        // two-foot-landing follower plants *behind* the hip and each touchdown
-        // damps `v_x`. Existing walk↔jump tests pass because they only check
-        // `v_x` after the hop has re-accelerated to cruise, not during it.
-        //
-        // This test encodes the DESIGN property (it will pass once the launch is
-        // buffered to the stance-start window per §5.7).
+        // RESOLVED (2026-10-14). This was an `#[ignore]`d known deviation: a
+        // walk→jump committed mid-swing used to ring `v_x` (120 → 4.6 → 120 → …)
+        // as touchdown backward-solves fired DURING the jump and the
+        // two-foot-landing follower planted *behind* the hip. The "legs lag
+        // behind" fix (envelope evaluated at the GROUND reference height
+        // `h_plan`, `step_lower_body` §2) removed that: the horizontal gait now
+        // keeps its normal swing through the hop, no in-jump touchdown fires, and
+        // `v_x` stays at cruise. Un-ignored and green (8/8 runs at dt = 1/60).
+        // Per-frame continuity — no sudden dv_x without a touchdown source — is
+        // asserted by `test_jump_to_walk_vx_continuity`.
         let cfg = LowerBodyConfig::default();
         let dt = 1.0 / 60.0;
         let mut s = walk_state(&cfg, dt);
@@ -3807,6 +3806,159 @@ mod tests {
         assert!(
             v_recover > 0.8 * v_cruise,
             "did not resume walking after the hop: peak v={v_recover:.2}, cruise={v_cruise:.2}"
+        );
+    }
+
+    #[test]
+    fn test_jump_to_walk_vx_continuity() {
+        // Hypothesis under test: at the jump→walk handoff the Raibert resolver
+        // injects a *sudden* change in hip horizontal velocity — a jolt on the
+        // hip particle — instead of carrying `v_x` continuously through the hop.
+        //
+        // We hold walk input across the whole walk→jump→walk episode and, per
+        // frame, record the single-frame change |Δv_x|. Outside a touchdown
+        // backward-solve the horizontal loop may only move `v_x` by its accel
+        // budget `a_eff·dt`; a larger "free" |Δv_x| is a jolt with no physical
+        // source. On touchdown frames the backward solve legitimately steps
+        // `v_x` — telemetry exposes it as `v_support != 0` — so those are
+        // reported separately rather than lumped into the free-jolt bound.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let v_cruise = walk_state(&cfg, dt).hip_vel.x;
+        let mut s = walk_state(&cfg, dt);
+
+        s.vs.jump_requested = true;
+        let mut saw_flight = false;
+        let mut land_seen = false;
+        let mut prev_v = s.hip_vel.x;
+
+        let mut worst_free = 0.0f32; // largest jolt on a no-touchdown frame
+        let mut worst_free_phase = VerticalPhase::Stand;
+        let mut worst_free_frame = 0usize;
+        let mut worst_td = 0.0f32; // largest jolt on a touchdown frame
+        let mut worst_td_phase = VerticalPhase::Stand;
+        let mut worst_td_support = 0.0f32;
+        let mut worst_td_frame = 0usize;
+        let mut worst = 0.0f32; // largest jolt anywhere
+        let mut worst_desc = String::new();
+
+        // Accel budget per frame with a fat margin: under power `step_lower_body`
+        // approaches `v_desired` by at most `accel·dt` per tick.
+        let free_budget = cfg.accel * dt * 1.5;
+
+        for frame in 0..4000 {
+            let (pose, d) = step_lower_body(Vec2::X, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "jump-walk", frame);
+            match d.v_phase {
+                VerticalPhase::Flight => saw_flight = true,
+                VerticalPhase::Land => land_seen = true,
+                _ => {}
+            }
+            let v = s.hip_vel.x;
+            let jolt = (v - prev_v).abs();
+            if jolt > worst {
+                worst = jolt;
+                worst_desc = format!(
+                    "phase {:?} v_support={:.3} {:.3}->{:.3} (dv={:.3})",
+                    d.v_phase, d.v_support, prev_v, v, jolt
+                );
+            }
+            if d.v_support == 0.0 {
+                if jolt > worst_free {
+                    worst_free = jolt;
+                    worst_free_phase = d.v_phase;
+                    worst_free_frame = frame;
+                }
+            } else if jolt > worst_td {
+                worst_td = jolt;
+                worst_td_phase = d.v_phase;
+                worst_td_support = d.v_support;
+                worst_td_frame = frame;
+            }
+            prev_v = v;
+            if saw_flight && land_seen && d.v_phase == VerticalPhase::Stand {
+                break;
+            }
+        }
+        assert!(saw_flight && land_seen, "never flew and/or never landed");
+
+        println!(
+            "[jump->walk vx] cruise={v_cruise:.2} | worst dv={worst:.3} @ {worst_desc} | \
+             free worst dv={worst_free:.3} @ {worst_free_phase:?} frame {worst_free_frame} | \
+             touchdown worst dv={worst_td:.3} @ {worst_td_phase:?} frame {worst_td_frame} \
+             (v_support={worst_td_support:.3})"
+        );
+
+        // DESIGN: outside an explicit touchdown solve the horizontal loop may
+        // only move `v_x` by its accel budget. A violation is the hypothesized
+        // sudden hip-velocity change with no physical source.
+        assert!(
+            worst_free <= free_budget,
+            "sudden dv_x with NO touchdown source: {worst_free:.3} at {worst_free_phase:?} \
+             frame {worst_free_frame} (budget {free_budget:.3}/frame); cruise={v_cruise:.2}"
+        );
+    }
+
+    #[test]
+    fn test_exit_jump_into_walk_vx_no_sudden_change() {
+        // The literal "exit jumping into walking": jump from an idle stand and
+        // only press forward AFTER touchdown. The hand-off is a step input on the
+        // velocity *target*, but the horizontal loop may still only move `v_x` by
+        // its accel budget per frame — except on a touchdown frame (`v_support`
+        // != 0), which is the one legitimate source of a velocity step.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 60.0;
+        let mut s = ResolverState::new(&cfg);
+        drive(&cfg, &mut s, dt, (1.0 / dt) as usize, false, "rest");
+
+        s.vs.jump_requested = true;
+        let mut saw_flight = false;
+        let mut land_seen = false;
+        let mut walking = false; // flips on once we press forward after landing
+        let mut worst_free = 0.0f32;
+        let mut free_phase = VerticalPhase::Stand;
+        let mut free_frame = 0usize;
+        let mut worst_td = 0.0f32;
+        let mut prev_v = s.hip_vel.x;
+        let free_budget = cfg.accel * dt * 1.5;
+
+        for frame in 0..4000 {
+            if land_seen && s.vs.phase == VerticalPhase::Stand {
+                walking = true;
+            }
+            let input = if walking { Vec2::X } else { Vec2::ZERO };
+            let (pose, d) = step_lower_body(input, &cfg, &mut s, dt);
+            assert_pose_invariants(&cfg, &pose, &d, "exit-jump-walk", frame);
+            match d.v_phase {
+                VerticalPhase::Flight => saw_flight = true,
+                VerticalPhase::Land => land_seen = true,
+                _ => {}
+            }
+            let jolt = (s.hip_vel.x - prev_v).abs();
+            if d.v_support == 0.0 {
+                if jolt > worst_free {
+                    worst_free = jolt;
+                    free_phase = d.v_phase;
+                    free_frame = frame;
+                }
+            } else if jolt > worst_td {
+                worst_td = jolt;
+            }
+            prev_v = s.hip_vel.x;
+            if walking && s.hip_vel.x > 0.8 * cfg.target_speed {
+                break;
+            }
+        }
+        assert!(saw_flight && land_seen, "never flew and/or never landed");
+
+        println!(
+            "[exit-jump->walk vx] worst free dv={worst_free:.3} @ {free_phase:?} frame \
+             {free_frame} | touchdown dv={worst_td:.3} (budget {free_budget:.3}/frame)"
+        );
+        assert!(
+            worst_free <= free_budget,
+            "sudden dv_x when exiting a jump into walking (NO touchdown source): \
+             {worst_free:.3} at {free_phase:?} frame {free_frame} (budget {free_budget:.3})"
         );
     }
 
@@ -4234,10 +4386,10 @@ mod tests {
 
         let mut flight_lead_end = f32::NEG_INFINITY; // min foot reach at last flight frame
         let mut flight_gap_end = f32::INFINITY; // |left.x − right.x| at last flight frame
-        // Hip→foot forward offsets at the FIRST and LAST airborne frames. The
-        // total forward sweep is their difference (the per-frame delta is small
-        // because the swing is deliberately smooth — and that smoothness is the
-        // no-teleport guarantee checked by `max_step` below).
+                                                // Hip→foot forward offsets at the FIRST and LAST airborne frames. The
+                                                // total forward sweep is their difference (the per-frame delta is small
+                                                // because the swing is deliberately smooth — and that smoothness is the
+                                                // no-teleport guarantee checked by `max_step` below).
         let mut first_flight_off: Option<(f32, f32)> = None;
         let mut last_flight_off = (0.0_f32, 0.0_f32);
         let mut saw_flight = false;
@@ -4274,7 +4426,8 @@ mod tests {
                         step <= step_bound,
                         "particle `{name}` teleported {step:.1}px in one frame at f{frame} \
                          ({:?}→{:?}); bound={step_bound:.1}px",
-                        p, pose
+                        p,
+                        pose
                     );
                 }
             }
@@ -4377,7 +4530,8 @@ mod tests {
                         step <= bound,
                         "particle `{name}` teleported {step:.1}px in one frame at f{frame} \
                          ({:?}→{:?}); bound={bound:.1}px",
-                        p, pose
+                        p,
+                        pose
                     );
                 }
             }
@@ -4396,5 +4550,4 @@ mod tests {
             "pose moved too fast: {max_step:.1}px > {bound:.1}px"
         );
     }
-
 }

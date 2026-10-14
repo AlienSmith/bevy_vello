@@ -29,7 +29,7 @@
 //! switched off while this runs — the code is **retained but disabled**, not
 //! removed, via [`SpineDriveEnabled`](crate::character::SpineDriveEnabled).
 
-use bevy::prelude::*;
+use bevy::{prelude::*, time::Fixed};
 use bevy_vello::integrations::physics::{
     CharacterExternalPositionConstraintEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld,
     VelloParticle,
@@ -267,7 +267,7 @@ fn try_seed(
 /// app schedules it `.before(update_constraint_world)`), mirroring how the
 /// spine drive used to queue its events.
 pub fn drive_hip_pin(
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     params: Res<HipPinParams>,
     mut pin_q: Query<(Entity, &mut HipPin)>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,

@@ -1,4 +1,5 @@
-//! Headless **limb**-PD waggle-tuning gate (arm **or** leg), script-driven.
+//! Headless **command-driven** character harness: the limb-PD waggle gate **and**
+//! the whole-body hip-pin / Raibert traversal, in **one** binary.
 //!
 //! One harness drives any single limb of the **V10** character — right/left arm
 //! or right/left leg — through a **command script** and reports whether the limb
@@ -33,8 +34,8 @@
 //! | `set`   | Persistently set `limb` gains (`kp`/`kd`) without moving. |
 //! | `reset` | Emit a limb constraint reset (restores authored rest angles). |
 //! | `wait`  | Hold the current command (let it settle) for `dur` seconds. |
-//! | `move`  | **Reserved** — no actuator in this harness yet (logs once, acts as `wait`). |
-//! | `jump`  | **Reserved** — no actuator in this harness yet (logs once, acts as `wait`). |
+//! | `move`  | Hold a horizontal body input for `dur` s (`dir[0]` sign → left/right) — drives the hip pin. |
+//! | `jump`  | Hold the jump input for `dur` s (a rising edge → one hop) — drives the hip pin. |
 //!
 //! `to`/`dir` are `[x, y]`; when `to`/`dist` are omitted the target is placed
 //! `dist` (default = the limb's characteristic length) from the limb pivot along
@@ -48,12 +49,18 @@
 //!   the PD under test
 //! - the real XPBD connection/angular physics (`FixedUpdate` @ 90 Hz)
 //!
-//! ## What is configured for a clean, isolated measurement
+//! ## Two modes (chosen by the script)
 //!
-//! - The spine drive is silenced (`SpineDriveEnabled(false)`) and there is **no**
-//!   `HipPin`, so the `P1/P2/P3` frame is passive and never fights the limb.
-//! - Zero gravity, no colliders. The frame particles are authored near-static, so
-//!   only the driven limb moves under the PD.
+//! - **Limb mode** (no `move`/`jump`): the spine drive is silenced and there is
+//!   **no** `HipPin`, so the `P1/P2/P3` frame is passive; zero gravity, no
+//!   colliders — the isolated-limb PD measurement. `SWEEP` applies here.
+//! - **Whole-body mode** (a `move`/`jump` script, or `HIPPIN=1`): a `HipPin` is
+//!   attached, [`drive_hip_pin`](game_lib) runs in the fixed chain before the leg
+//!   IK, and the row carries the pin's `cmd_vx`/`vphase`. The run then reports the
+//!   pinned-frame **rigidity**, the **jump→walk** commanded-vs-realized hip
+//!   velocity verdict, the per-leg **foot-lag/wobble** verdict, and writes an
+//!   `<csv>.events.csv` input timeline. This is the retired `headless_pin` gate,
+//!   now command-driven.
 //!
 //! ## The PD knobs (verified, in `calculate_limb_ik`)
 //!
@@ -84,18 +91,23 @@
 //! `LIMB` = `right_arm`|`left_arm`|`right_leg`|`left_leg` (focus limb + default
 //! script; default `right_arm`), `SCRIPT` (path to a JSON script), `KP`, `KD`
 //! (≤0 = auto/unset), `TARGET_DIST` (px; ≤0 = auto, aim only), `OUT_CSV`
-//! (main CSV), `SWEEP=1`, `GRID="kp:kd,kp:kd,..."`. Output defaults under
-//! `/home/ubuntu/bender/tmp/headless/`.
+//! (main CSV), `SWEEP=1`, `GRID="kp:kd,kp:kd,..."`.
+//! Whole-body: `HIPPIN=1` (force even without a `move`/`jump`), `GRAVITY`
+//! (`on`|`off`|`x,y` vello frame), `LEGS` (`off` = pin only `P1/P2/P3`),
+//! `COMPLIANCE`, `DAMPING`. Output defaults under `/home/ubuntu/bender/tmp/headless/`.
 
 use std::time::Duration;
 
 use bevy::{
     app::ScheduleRunnerPlugin,
     asset::{AssetMetaCheck, AssetPlugin},
+    input::{ButtonInput, InputSystem},
     prelude::*,
     time::TimeUpdateStrategy,
     MinimalPlugins,
 };
+
+use leafwing_input_manager::{plugin::InputManagerSystem, prelude::ActionState};
 
 use serde::Deserialize;
 
@@ -121,11 +133,12 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    check_invariants, flush_csv, flush_rows, rows_hash, tail_verdict, CharacterController,
-    CharacterRoot, HeadlessTelemetryPlugin, IkMode, InvariantConfig, LeftArmController,
-    LeftLegController, LimbConfig, ParticleTelemetryConfig, ResetLimbControlConstraintsEvent,
-    RightArmController, RightLegController, SpineDriveEnabled, TelemetryBuffer, TelemetryRow,
-    VelloCharacterPlugin, WhichLimb,
+    check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, flush_csv, flush_rows,
+    rows_hash, tail_verdict, update_character_movement, Bone, CharacterController, CharacterRoot,
+    HeadlessTelemetryPlugin, HipPin, HipPinParams, IkMode, InvariantConfig, LeftArmController,
+    LeftLegController, LimbConfig, ParticleTelemetryConfig, PlayerAction, PlayerMarker,
+    ResetLimbControlConstraintsEvent, RightArmController, RightLegController, SpineDriveEnabled,
+    TelemetryBuffer, TelemetryRow, VelloCharacterPlugin, VerticalPhase, WhichLimb,
 };
 
 // ---------------------------------------------------------------------------
@@ -159,6 +172,30 @@ const REVERSAL_DEADBAND: f32 = 0.05;
 const SLOW_SETTLE_S: f32 = 1.5;
 
 const PI: f32 = std::f32::consts::PI;
+
+// ---------------------------------------------------------------------------
+// Whole-body (hip-pin) mode constants
+// ---------------------------------------------------------------------------
+
+/// Gravity magnitude the tuning app uses (100 px = 1 m ⇒ 980 px/s²), Vello frame
+/// (x right, y down ⇒ down is +y).
+const GRAVITY_ON: Vec2 = Vec2::new(0.0, 980.0);
+/// Bone-length tolerance for the pinned `P1/P2/P3` frame (and, when the legs are
+/// driven, both legs' thigh + calf).
+const PIN_RIGID_TOL: f32 = 0.02;
+/// Foot-tracking tail window (s) + wobble thresholds (matches the retired
+/// `headless_pin` leg verdict).
+const LEG_TAIL_S: f32 = 1.0;
+const LEG_RMS_MAX: f32 = 6.0;
+const LEG_REV_MAX: u32 = 6;
+const LEG_RATE_DEADBAND: f32 = 20.0;
+/// Held-key mask bits written into the events sidecar (`keys` column).
+const KEY_RIGHT: u8 = 1;
+const KEY_LEFT: u8 = 2;
+const KEY_UP: u8 = 4;
+/// The physical keys `default_input_map()` binds for (Right, Left, Up). The probe
+/// entity uses `default_input_map()` (L/J/I), **not** WASD.
+const KEYS: [KeyCode; 3] = [KeyCode::KeyL, KeyCode::KeyJ, KeyCode::KeyI];
 
 // ---------------------------------------------------------------------------
 // Command script (serde JSON)
@@ -268,11 +305,11 @@ struct WaitArgs {
     dur: f32,
 }
 
-/// Reserved whole-body verbs (no actuator in this harness yet).
+/// Whole-body walk: hold a horizontal body input for `dur` seconds. Only `dir[0]`
+/// (the x sign) is used — `+x` walks right, `-x` walks left — matching the
+/// resolver's `input_dir.x`.
 #[derive(Deserialize, Clone)]
 struct MoveArgs {
-    /// Reserved: no whole-body actuator in this harness yet.
-    #[allow(dead_code)]
     dir: [f32; 2],
     dur: f32,
 }
@@ -281,6 +318,11 @@ struct MoveArgs {
 struct JumpArgs {
     #[serde(default = "default_jump_dur")]
     dur: f32,
+    /// Optional held movement during the jump, matching how the app is actually
+    /// driven (move key held while jump is tapped). `None` (or `[0,0]`) releases
+    /// the move key for the jump duration — the legacy behaviour.
+    #[serde(default)]
+    dir: Option<[f32; 2]>,
 }
 
 fn default_jump_dur() -> f32 {
@@ -480,6 +522,42 @@ struct Probe {
     done: bool,
     csv_path: String,
     sweep: bool,
+
+    // --- whole-body (hip-pin + legs) mode ---
+    /// True when the script drives the whole body (`move`/`jump` present, or
+    /// `HIPPIN` set): the pin is attached, `drive_hip_pin` runs, and the
+    /// track/rigidity/jump→walk telemetry is folded into the row.
+    body: bool,
+    /// Previous held key mask, for edge-detecting the scripted body input.
+    held_prev: u8,
+    /// Events sidecar rows (`t,event_id,label,keys,kind`).
+    events: Vec<String>,
+    next_event_id: u32,
+    /// Cached `P3` particle entity (the realized hip) for the jump→walk trace.
+    p3_entity: Option<Entity>,
+    /// The jump→walk window `(begin, end)` in seconds, derived from the script
+    /// (the `move` immediately after a `jump`); `None` disables the verdict.
+    jw_window: Option<(f32, f32)>,
+    jw_prev_cmd_vx: f32,
+    jw_prev_real_vx: f32,
+    jw_primed: bool,
+    jw_cmd_step: f32,
+    jw_cmd_step_t: f32,
+    jw_real_step: f32,
+    jw_real_step_t: f32,
+    jw_lag: f32,
+    jw_lag_t: f32,
+    jw_phase: u8,
+    nan_rows: u32,
+    /// Per-leg realized foot lag vs the commanded IK target.
+    leg_active: bool,
+    max_leg_err: f32,
+    leg_peak_t: f32,
+    max_leg_err_lr: [f32; 2],
+    max_leg_err_lr_t: [f32; 2],
+    leg_t: Vec<f32>,
+    leg_err: Vec<f32>,
+    leg_err_lr: Vec<[f32; 2]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -553,9 +631,20 @@ fn default_grid() -> Vec<(f32, f32)> {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let sweep = env_flag("SWEEP");
     let focus = LimbId::from_env();
     let (script, script_src) = load_script(focus);
+
+    // Whole-body mode: the script drives `move`/`jump` (or `HIPPIN` forces it).
+    // Then the hip pin owns P1/P2/P3 + the legs and the body telemetry runs; a
+    // pure-limb script keeps the limb gate byte-identical (no pin, no pin rows).
+    let body = env_flag("HIPPIN")
+        || script
+            .iter()
+            .any(|c| matches!(c, Command::Move(_) | Command::Jump(_)));
+    let jw_window = if body { jumpwalk_window(&script) } else { None };
+
+    // Sweep is a limb-PD axis; the whole-body mode runs a single pass.
+    let sweep = env_flag("SWEEP") && !body;
 
     let csv_path = std::env::var("OUT_CSV")
         .unwrap_or_else(|_| "/home/ubuntu/bender/tmp/headless/limb_pd_log.csv".to_string());
@@ -570,12 +659,13 @@ fn main() {
     let (kp0, kd0) = grid.first().copied().unwrap_or((0.5, 0.065));
 
     info!(
-        "limb-PD harness: focus={} script={} ({} command(s)), {} cell(s), sweep={}",
+        "character harness: focus={} script={} ({} command(s)), {} cell(s), sweep={}, body={}",
         focus.label(),
         script_src,
         script.len(),
         grid.len(),
-        sweep
+        sweep,
+        body
     );
 
     let probe = Probe {
@@ -605,7 +695,34 @@ fn main() {
         done: false,
         csv_path,
         sweep,
+        body,
+        held_prev: 0,
+        events: Vec::new(),
+        next_event_id: 0,
+        p3_entity: None,
+        jw_window,
+        jw_prev_cmd_vx: 0.0,
+        jw_prev_real_vx: 0.0,
+        jw_primed: false,
+        jw_cmd_step: 0.0,
+        jw_cmd_step_t: 0.0,
+        jw_real_step: 0.0,
+        jw_real_step_t: 0.0,
+        jw_lag: 0.0,
+        jw_lag_t: 0.0,
+        jw_phase: 0,
+        nan_rows: 0,
+        leg_active: false,
+        max_leg_err: 0.0,
+        leg_peak_t: 0.0,
+        max_leg_err_lr: [0.0, 0.0],
+        max_leg_err_lr_t: [0.0, 0.0],
+        leg_t: Vec::new(),
+        leg_err: Vec::new(),
+        leg_err_lr: Vec::new(),
     };
+
+    let gravity = if body { gravity_from_env() } else { Vec2::ZERO };
 
     let mut app = App::default();
     app.add_plugins(
@@ -628,14 +745,14 @@ fn main() {
     .add_plugins(VelloCharacterPlugin)
     .add_plugins(HeadlessTelemetryPlugin)
     // Physics resources (mirrors VelloCollisionResponsePlugin, minus GPU parts).
-    // Zero gravity + no colliders = the isolated-limb case.
-    .insert_resource(VelloConstraintWorld::new(Vec2::ZERO))
+    // No colliders; gravity per `GRAVITY` in body mode, else zero (the limb case).
+    .insert_resource(VelloConstraintWorld::new(gravity))
     .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
     .insert_resource(VelloCollisionWorld::default())
     .insert_resource(RemovedColliders::default())
     .insert_resource(CollisionEventBatch::default())
-    // No hip pin, and the spine drive must stay silent so the P1/P2/P3 frame is
-    // passive (absent resource = ON, so this must be inserted explicitly).
+    // The spine drive must stay silent: in body mode the pin owns P1/P2/P3, in
+    // limb mode the frame must be passive (absent resource = ON ⇒ insert false).
     .insert_resource(SpineDriveEnabled(false))
     .add_event::<ColliderExternalImpulseEvent>()
     .add_event::<CharacterPivotForceEvent>()
@@ -647,24 +764,48 @@ fn main() {
     .add_event::<ResetLimbControlConstraintsEvent>()
     .insert_resource(probe);
 
+    if body {
+        app.insert_resource(hip_pin_params_from_env());
+    }
+
     // Real physics stepping, same order as VelloCollisionResponsePlugin minus the
     // GPU tail. `update_character_movement` is injected by `GameCharacterPlugin`
-    // in `FixedUpdate` before `update_constraint_world`.
-    app.add_systems(
-        FixedUpdate,
-        (
-            make_collision_constraints,
-            update_constraint_world,
-            update_connection_particles,
-            remove_soft_body,
-            generate_soft_body_for_collider,
-            generate_connection,
-            apply_explicit_impulse_on_softbody,
-            apply_explicit_impulse_on_connection_particle,
-            update_collider_from_soft_body,
-        )
-            .chain(),
-    );
+    // in `FixedUpdate` before `update_constraint_world`. In body mode the pin is
+    // inserted before it so the leg IK reads the foot targets the pin just wrote.
+    if body {
+        app.add_systems(
+            FixedUpdate,
+            (
+                make_collision_constraints,
+                drive_hip_pin.before(update_character_movement),
+                update_constraint_world,
+                update_connection_particles,
+                remove_soft_body,
+                generate_soft_body_for_collider,
+                generate_connection,
+                apply_explicit_impulse_on_softbody,
+                apply_explicit_impulse_on_connection_particle,
+                update_collider_from_soft_body,
+            )
+                .chain(),
+        );
+    } else {
+        app.add_systems(
+            FixedUpdate,
+            (
+                make_collision_constraints,
+                update_constraint_world,
+                update_connection_particles,
+                remove_soft_body,
+                generate_soft_body_for_collider,
+                generate_connection,
+                apply_explicit_impulse_on_softbody,
+                apply_explicit_impulse_on_connection_particle,
+                update_collider_from_soft_body,
+            )
+                .chain(),
+        );
+    }
 
     app.add_systems(Startup, register_character_assets);
     app.add_systems(Update, mark_assets_loaded);
@@ -672,6 +813,17 @@ fn main() {
     // controller reads the target this same fixed step (FixedPreUpdate runs
     // before FixedUpdate in the FixedMain schedule).
     app.add_systems(FixedPreUpdate, drive_script);
+    // In body mode, translate the active `move`/`jump` command into the real
+    // `ButtonInput` — after raw input (which clears per-frame edges) and before
+    // leafwing turns it into `ActionState`, so the pin reads it this same frame.
+    if body {
+        app.add_systems(
+            PreUpdate,
+            drive_body_keys
+                .after(InputSystem)
+                .before(InputManagerSystem::Update),
+        );
+    }
     // Sample after the whole fixed step (physics + controller), append the row via
     // the shared telemetry plugin, then finalize the cell. Gated so no stray row
     // lands in the gap between cells (the rig is briefly not "ready").
@@ -740,6 +892,9 @@ enum Intent {
     Reset { limb: LimbId },
     /// Do nothing this tick.
     Idle,
+    /// Whole-body verb (`move`/`jump`): the hip pin is driven by
+    /// [`drive_body_keys`] from the playhead, not by a limb controller here.
+    Body,
 }
 
 /// Fold the current command + the probe's rig state into an [`Intent`].
@@ -814,7 +969,8 @@ fn resolve_intent(cmd: &Command, probe: &Probe) -> Intent {
             }
         }
         Command::Reset(a) => Intent::Reset { limb: a.limb },
-        Command::Wait(_) | Command::Move(_) | Command::Jump(_) => Intent::Idle,
+        Command::Wait(_) => Intent::Idle,
+        Command::Move(_) | Command::Jump(_) => Intent::Body,
     }
 }
 
@@ -832,6 +988,7 @@ fn drive_script(
     particle_q: Query<&VelloParticle>,
     mut reset_ev: EventWriter<ResetLimbControlConstraintsEvent>,
     mut exit: EventWriter<AppExit>,
+    pin_params: Option<Res<HipPinParams>>,
 ) {
     probe.tick += 1;
     let tick = probe.tick;
@@ -839,27 +996,44 @@ fn drive_script(
     // ---- Spawn V10 once both assets are parsed. ----
     if probe.character.is_none() {
         if character_svg.all_loaded() && character_blueprint.all_loaded() {
-            let entity = commands
-                .spawn((
-                    VelloSceneBundle {
-                        transform: Transform {
-                            translation: Vec3::new(0.0, 0.0, 100.0),
-                            scale: Vec3::new(0.5, 0.5, 1.0),
-                            ..Default::default()
-                        },
+            let mut ent = commands.spawn((
+                VelloSceneBundle {
+                    transform: Transform {
+                        translation: Vec3::new(0.0, 0.0, 100.0),
+                        scale: Vec3::new(0.5, 0.5, 1.0),
                         ..Default::default()
                     },
-                    CharacterRoot {
-                        svg_asset_id: SVG_ASSET.to_owned(),
-                        blueprint_asset_id: BP_ASSET.to_owned(),
-                        collision_group: 1,
-                    },
-                    CharacterController::default(),
-                ))
-                .id();
+                    ..Default::default()
+                },
+                CharacterRoot {
+                    svg_asset_id: SVG_ASSET.to_owned(),
+                    blueprint_asset_id: BP_ASSET.to_owned(),
+                    collision_group: 1,
+                },
+                CharacterController::default(),
+            ));
+            if probe.body {
+                // The pin needs the real input path: `PlayerMarker` + the default
+                // action map + the live `ActionState` the pin reads, plus the
+                // `HipPin` itself (seeded lazily on the first ready tick). The
+                // resolver config comes from the env-built `HipPinParams`
+                // resource (TARGET_SPEED/LEGS/...), so the spawn and the
+                // resource can't drift apart.
+                let hip_cfg = match &pin_params {
+                    Some(p) => p.config.clone(),
+                    None => HipPinParams::default().config,
+                };
+                ent.insert((
+                    PlayerMarker,
+                    default_input_map(),
+                    ActionState::<PlayerAction>::default(),
+                    HipPin::new(&hip_cfg),
+                ));
+            }
+            let entity = ent.id();
             probe.character = Some(entity);
             probe.spawn_tick = Some(tick);
-            info!("V10 spawned, limb-PD clock starts");
+            info!("V10 spawned, harness clock starts (body={})", probe.body);
         }
         return;
     }
@@ -988,16 +1162,9 @@ fn drive_script(
                 });
             }
         }
-        Intent::Idle => {
-            if first_touch {
-                if let Command::Move(_) | Command::Jump(_) = probe.script[cur] {
-                    warn!(
-                        "'{}' command has no actuator in this harness yet; acting as wait",
-                        probe.script[cur].kind()
-                    );
-                }
-            }
-        }
+        // `wait` (Idle) does nothing; `move`/`jump` (Body) are driven by the
+        // playhead in `drive_body_keys`, so no limb write lands here.
+        Intent::Idle | Intent::Body => {}
     }
     if first_touch {
         probe.applied_action = Some(cur);
@@ -1209,6 +1376,8 @@ fn focus_bone(
 fn limb_sample(
     mut probe: ResMut<Probe>,
     mut row: ResMut<TelemetryRow>,
+    params: Option<Res<HipPinParams>>,
+    pin_q: Query<&HipPin>,
     right_arm_q: Query<&RightArmController>,
     left_arm_q: Query<&LeftArmController>,
     right_leg_q: Query<&RightLegController>,
@@ -1255,6 +1424,106 @@ fn limb_sample(
     row.set("kd", format!("{:.4}", kd));
     row.set("theta_deg", format!("{:.3}", theta.to_degrees()));
     row.set("omega", format!("{:.3}", omega));
+
+    // --- Whole-body (hip-pin) telemetry, folded into the row as extra scalars.
+    // The verbatim commanded hip vx (`cmd_vx`) + vertical phase (`vphase`), the
+    // jump→walk handoff accumulators, and the per-leg foot lag vs the commanded
+    // IK target. All body timing uses the **script-relative** `tau` (the playhead
+    // resets when the rig is ready), so it lines up with `jumpwalk_window`'s
+    // cumulative `dur` — not the spawn-relative `t` column the limb gate uses.
+    if probe.body {
+        let tb = tau;
+        // The pin seeds lazily; degrade to zeros rather than dropping the row, so
+        // the frozen header (scalars set in this exact order on the first capture)
+        // always matches the values.
+        let (cmd_vx, vphase) = match pin_q.get(character) {
+            Ok(pin) => (pin.state.hip_vel.x, vphase_code(pin.state.vs.phase)),
+            Err(_) => (0.0, 0),
+        };
+        row.set("cmd_vx", format!("{cmd_vx:.2}"));
+        row.set("vphase", vphase.to_string());
+
+        // Realized hip vx = the pinned `P3` (each leg controller's `pivot`,
+        // `particles[1]`). Cached on the first tick it resolves.
+        if probe.p3_entity.is_none() {
+            probe.p3_entity = left_leg_q.get(character).ok().map(|l| l.particles[1]);
+        }
+        let p3_vx = match probe.p3_entity.and_then(|e| particle_q.get(e).ok()) {
+            Some(p) => to_bevy(p.particle.velocity).x,
+            None => cmd_vx,
+        };
+
+        // Jump→walk handoff: the *commanded* hip vx (Raibert resolver) vs the
+        // *realized* hip vx (the pinned `P3`). A jagged `real_step` over a smooth
+        // `cmd_step` ⇒ the physics/pin layer injects a jolt the controller never
+        // asked for; a persistent `lag` ⇒ the frame is not tracking the command.
+        if let Some((b, e)) = probe.jw_window {
+            if (b..e).contains(&tb) {
+                if !probe.jw_primed {
+                    probe.jw_phase = vphase;
+                    probe.jw_primed = true;
+                } else {
+                    let s = (cmd_vx - probe.jw_prev_cmd_vx).abs();
+                    if s > probe.jw_cmd_step {
+                        probe.jw_cmd_step = s;
+                        probe.jw_cmd_step_t = tb;
+                    }
+                    let r = (p3_vx - probe.jw_prev_real_vx).abs();
+                    if r > probe.jw_real_step {
+                        probe.jw_real_step = r;
+                        probe.jw_real_step_t = tb;
+                    }
+                }
+                let lag = (p3_vx - cmd_vx).abs();
+                if lag > probe.jw_lag {
+                    probe.jw_lag = lag;
+                    probe.jw_lag_t = tb;
+                }
+                probe.jw_prev_cmd_vx = cmd_vx;
+                probe.jw_prev_real_vx = p3_vx;
+            }
+        }
+
+        // Per-leg foot lag: the realized foot (`PRLL`/`PLLL`) vs the commanded IK
+        // `target` the pin wrote into each leg controller. A large value = a foot
+        // lagging far from (or fighting) its commanded pose.
+        let legs_on = params
+            .as_deref()
+            .map(|p| p.hip_drives_legs)
+            .unwrap_or(false);
+        if legs_on {
+            if let (Ok(left_leg), Ok(right_leg)) =
+                (left_leg_q.get(character), right_leg_q.get(character))
+            {
+                probe.leg_active = true;
+                let mut emax_leg = 0.0f32;
+                let mut lr = [0.0f32, 0.0f32];
+                for (li, target) in [left_leg.target, right_leg.target].into_iter().enumerate() {
+                    let foot_ent = if li == 0 {
+                        left_leg.particles[3]
+                    } else {
+                        right_leg.particles[3]
+                    };
+                    if let Ok(p) = particle_q.get(foot_ent) {
+                        let err = (to_bevy(p.particle.pos) - target).length();
+                        lr[li] = err;
+                        if err > probe.max_leg_err_lr[li] {
+                            probe.max_leg_err_lr[li] = err;
+                            probe.max_leg_err_lr_t[li] = tb;
+                        }
+                        emax_leg = emax_leg.max(err);
+                    }
+                }
+                if emax_leg > probe.max_leg_err {
+                    probe.max_leg_err = emax_leg;
+                    probe.leg_peak_t = tb;
+                }
+                probe.leg_t.push(tb);
+                probe.leg_err.push(emax_leg);
+                probe.leg_err_lr.push(lr);
+            }
+        }
+    }
 }
 
 /// Close out a cell once the script has run to completion: classify, flush the
@@ -1263,6 +1532,7 @@ fn limb_sample(
 fn limb_finalize(
     mut probe: ResMut<Probe>,
     mut buf: ResMut<TelemetryBuffer>,
+    params: Option<Res<HipPinParams>>,
     mut reset_ev: EventWriter<ResetLimbControlConstraintsEvent>,
     mut exit: EventWriter<AppExit>,
 ) {
@@ -1276,6 +1546,11 @@ fn limb_finalize(
     report.inv_ok = inv.ok;
     report.inv_detail = inv.detail.clone();
     report.hash = rows_hash(&buf.header, &buf.rows);
+
+    // Whole-body verdicts + the events sidecar (no-op in limb mode).
+    if probe.body {
+        report_body(&probe, &buf, params.as_deref());
+    }
 
     info!(
         "cell {} (kp={:.3}, kd={:.4}): {} swing={:.1}deg rms={:.2}deg rev={} settle={} inv={} hash={:016x}",
@@ -1510,4 +1785,284 @@ fn finish(probe: &Probe) {
         probe.script_src,
         path
     );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-body (hip-pin) helpers
+// ---------------------------------------------------------------------------
+
+/// Compact code for the vertical phase, for the `vphase` CSV column (matches the
+/// `VerticalPhase` declaration order).
+fn vphase_code(p: VerticalPhase) -> u8 {
+    match p {
+        VerticalPhase::Stand => 0,
+        VerticalPhase::Load => 1,
+        VerticalPhase::Launch => 2,
+        VerticalPhase::Flight => 3,
+        VerticalPhase::Land => 4,
+    }
+}
+
+/// The held-key mask the active command produces: `move` → left/right by the sign
+/// of `dir[0]`, `jump` → the jump key, everything else → none.
+fn active_mask(cmd: &Command) -> u8 {
+    match cmd {
+        Command::Move(a) => {
+            if a.dir[0] > 0.0 {
+                KEY_RIGHT
+            } else if a.dir[0] < 0.0 {
+                KEY_LEFT
+            } else {
+                0
+            }
+        }
+        Command::Jump(a) => {
+            // `dir` holds the move key through the jump (app-faithful: keep
+            // running while you leap). Without it the move key is released for
+            // the jump duration.
+            let move_bit = match a.dir {
+                Some(d) if d[0] > 0.0 => KEY_RIGHT,
+                Some(d) if d[0] < 0.0 => KEY_LEFT,
+                _ => 0,
+            };
+            move_bit | KEY_UP
+        }
+        _ => 0,
+    }
+}
+
+/// The jump→walk window: the `move` immediately following a `jump` (its start/end
+/// seconds, computed by cumulative `dur`). `None` when the script has no such
+/// pattern, which disables the jump→walk verdict.
+fn jumpwalk_window(script: &[Command]) -> Option<(f32, f32)> {
+    let mut t = 0.0f32;
+    let mut saw_jump = false;
+    for c in script {
+        let d = c.dur();
+        if saw_jump && matches!(c, Command::Move(_)) {
+            return Some((t, t + d));
+        }
+        if matches!(c, Command::Jump(_)) {
+            saw_jump = true;
+        }
+        t += d;
+    }
+    None
+}
+
+/// Gravity for the harness, from `GRAVITY`: `on`/`1` → [`GRAVITY_ON`]; `off`/`0`
+/// → zero; `x,y` → a raw vello-frame vector (x right, y down).
+fn gravity_from_env() -> Vec2 {
+    match std::env::var("GRAVITY").ok().as_deref().map(str::trim) {
+        None | Some("") | Some("off") | Some("0") => Vec2::ZERO,
+        Some("on") | Some("1") => GRAVITY_ON,
+        Some(spec) => {
+            let mut it = spec.split(',');
+            let x = it.next().and_then(|v| v.trim().parse::<f32>().ok());
+            let y = it.next().and_then(|v| v.trim().parse::<f32>().ok());
+            match (x, y) {
+                (Some(x), Some(y)) => Vec2::new(x, y),
+                _ => {
+                    warn!("GRAVITY=`{spec}` not understood; falling back to zero");
+                    Vec2::ZERO
+                }
+            }
+        }
+    }
+}
+
+/// Pin params from env (body mode). `LEGS=off` keeps the pin on `P1/P2/P3` only;
+/// otherwise the pin also drives the legs (the whole-body default).
+fn hip_pin_params_from_env() -> HipPinParams {
+    let mut d = HipPinParams::default();
+    d.config.target_speed = env_f32("TARGET_SPEED", d.config.target_speed);
+    let drives_legs = !matches!(
+        std::env::var("LEGS").ok().as_deref().map(str::trim),
+        Some("off") | Some("0") | Some("false")
+    );
+    HipPinParams {
+        compliance: env_f32("COMPLIANCE", d.compliance),
+        damping: env_f32("DAMPING", d.damping),
+        hip_drives_legs: drives_legs,
+        ..d
+    }
+}
+
+/// `pin_log.csv` + `.events.csv` → `pin_log.events.csv` (same dir, suffix before
+/// extension).
+fn path_with_suffix(main: &str, suffix: &str) -> String {
+    let p = std::path::Path::new(main);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("log");
+    match p.parent() {
+        Some(dir) => dir
+            .join(format!("{stem}{suffix}"))
+            .to_string_lossy()
+            .to_string(),
+        None => format!("{stem}{suffix}"),
+    }
+}
+
+/// Translate the active `move`/`jump` command into the real `ButtonInput<KeyCode>`
+/// (edge transitions only, so held keys stay held) — the whole
+/// `keyboard → leafwing ActionState → hip pin` path, same as the retired
+/// `headless_pin` harness, but driven by the command playhead. Also records the
+/// input timeline for the events sidecar.
+fn drive_body_keys(mut keys: ResMut<ButtonInput<KeyCode>>, mut probe: ResMut<Probe>) {
+    if !probe.body || probe.character.is_none() {
+        return;
+    }
+    let cur = probe.action.min(probe.script.len().saturating_sub(1));
+    let mask = if probe.script_done {
+        0
+    } else {
+        probe.script.get(cur).map(active_mask).unwrap_or(0)
+    };
+    let kind: &'static str = if probe.script_done {
+        "done"
+    } else {
+        probe.script.get(cur).map(|c| c.kind()).unwrap_or("none")
+    };
+    let t = probe.tick as f32 / FIXED_HZ as f32;
+    for i in 0..3 {
+        let bit = 1u8 << i;
+        let now = mask & bit != 0;
+        let was = probe.held_prev & bit != 0;
+        if now && !was {
+            keys.press(KEYS[i]);
+            let id = probe.next_event_id;
+            probe.next_event_id += 1;
+            probe.events.push(format!("{t:.4},{id},{kind},{mask},0"));
+        } else if !now && was {
+            keys.release(KEYS[i]);
+            let id = probe.next_event_id;
+            probe.next_event_id += 1;
+            probe.events.push(format!("{t:.4},{id},{kind},{mask},1"));
+        }
+    }
+    probe.held_prev = mask;
+}
+
+/// Whole-body verdicts, computed from the captured buffer + the accumulators:
+/// the pinned-frame (and leg) **bone rigidity**, the **jump→walk** commanded-vs-
+/// realized hip-velocity comparison, the **leg foot-lag/wobble** verdict, and the
+/// `<csv>.events.csv` input timeline. Pure post-processing (no ECS writes).
+fn report_body(probe: &Probe, buf: &TelemetryBuffer, params: Option<&HipPinParams>) {
+    // Rigid bones that must keep their length: the pinned `P1/P2/P3` frame (the
+    // pin's job) and, when the pin drives the legs, both legs' thigh + calf.
+    let mut bones = vec![
+        Bone {
+            a: ("P1x".into(), "P1y".into()),
+            b: ("P2x".into(), "P2y".into()),
+            rest_len: 0.0,
+        },
+        Bone {
+            a: ("P2x".into(), "P2y".into()),
+            b: ("P3x".into(), "P3y".into()),
+            rest_len: 0.0,
+        },
+        Bone {
+            a: ("P1x".into(), "P1y".into()),
+            b: ("P3x".into(), "P3y".into()),
+            rest_len: 0.0,
+        },
+    ];
+    let mut labels: Vec<String> = vec!["P1-P2".into(), "P2-P3".into(), "P1-P3".into()];
+    let legs_on = params.map(|p| p.hip_drives_legs).unwrap_or(false) && probe.leg_active;
+    if legs_on {
+        for (a, b) in [
+            ("P3", "P40"),
+            ("P40", "PLLL"),
+            ("P3", "P41"),
+            ("P41", "PRLL"),
+        ] {
+            bones.push(Bone {
+                a: (format!("{a}x"), format!("{a}y")),
+                b: (format!("{b}x"), format!("{b}y")),
+                rest_len: 0.0,
+            });
+            labels.push(format!("{a}-{b}"));
+        }
+    }
+    let rig = check_bone_rigidity(&buf.header, &buf.rows, &bones, PIN_RIGID_TOL);
+    let worst_rel = rig.max_rel_dev.iter().copied().fold(0.0f32, f32::max);
+    let mut rig_detail = String::new();
+    for (i, nm) in labels.iter().enumerate() {
+        let tt = buf
+            .rows
+            .get(rig.worst_row[i])
+            .and_then(|r| r.split(',').next())
+            .unwrap_or("?");
+        rig_detail += &format!(" {nm}={:.4}@t{tt}", rig.max_rel_dev[i]);
+    }
+    info!(
+        "body: rows={} nan_rows={} rig={} max_rel_dev={:.4}",
+        buf.rows.len(),
+        probe.nan_rows,
+        if rig.ok { "ok" } else { "FAIL" },
+        worst_rel,
+    );
+    info!("rigidity:{}", rig_detail);
+
+    if let Some((b, e)) = probe.jw_window {
+        info!(
+            "jumpwalk(t{:.1}-{:.1}s): handoff_phase={} cmd_step={:.2}px/s@t{:.2} real_step={:.2}px/s@t{:.2} cmd_vs_real_gap={:.2}px/s@t{:.2}",
+            b, e, probe.jw_phase, probe.jw_cmd_step, probe.jw_cmd_step_t,
+            probe.jw_real_step, probe.jw_real_step_t, probe.jw_lag, probe.jw_lag_t,
+        );
+    }
+
+    if legs_on {
+        let mut rate = vec![0.0f32; probe.leg_err.len()];
+        for i in 1..probe.leg_err.len() {
+            let d = (probe.leg_t[i] - probe.leg_t[i - 1]).max(1e-6);
+            rate[i] = (probe.leg_err[i] - probe.leg_err[i - 1]) / d;
+        }
+        let v = tail_verdict(
+            &probe.leg_t,
+            &probe.leg_err,
+            &rate,
+            LEG_TAIL_S,
+            LEG_RMS_MAX,
+            LEG_REV_MAX,
+            LEG_RATE_DEADBAND,
+        );
+        info!(
+            "leg: peak left={:.1}px@t{:.2} right={:.1}px@t{:.2} combined={:.1}px@t{:.2} tail={}(rms={:.3}px rev={})",
+            probe.max_leg_err_lr[0], probe.max_leg_err_lr_t[0],
+            probe.max_leg_err_lr[1], probe.max_leg_err_lr_t[1],
+            probe.max_leg_err, probe.leg_peak_t,
+            if v.pass { "PASS" } else { "WAGGLE" }, v.rms_deg, v.reversals,
+        );
+    }
+
+    // The input timeline sidecar, so any CSV slice can be tied to a key event.
+    let ev_path = path_with_suffix(&probe.csv_path, ".events.csv");
+    let mut ev_out = String::from("t,event_id,label,keys,kind\n");
+    if !probe.events.is_empty() {
+        ev_out += &(probe.events.join("\n") + "\n");
+    }
+    if let Some(dir) = std::path::Path::new(&ev_path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::write(&ev_path, ev_out) {
+        Ok(_) => info!("wrote {ev_path}"),
+        Err(e) => error!("write failed ({ev_path}): {e}"),
+    }
+
+    // Per-leg foot-lag trace so the worst lag can be tied to a gait phase.
+    if legs_on && !probe.leg_t.is_empty() {
+        let leg_path = path_with_suffix(&probe.csv_path, ".leg.csv");
+        let mut leg_out = String::from("t,left_err_px,right_err_px\n");
+        for (i, tt) in probe.leg_t.iter().enumerate() {
+            let lr = probe.leg_err_lr.get(i).copied().unwrap_or([0.0, 0.0]);
+            leg_out += &format!("{tt:.4},{:.3},{:.3}\n", lr[0], lr[1]);
+        }
+        if let Some(dir) = std::path::Path::new(&leg_path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match std::fs::write(&leg_path, leg_out) {
+            Ok(_) => info!("wrote {leg_path}"),
+            Err(e) => error!("write failed ({leg_path}): {e}"),
+        }
+    }
 }

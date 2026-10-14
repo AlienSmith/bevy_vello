@@ -716,8 +716,8 @@ fn apply_default_gravity(
 }
 
 /// Gravity toggle: an open/close checkbox plus a magnitude slider (so the app
-/// can be driven at the same `g` the `headless_pin` gate uses). Writes the world
-/// gravity only when something actually changes.
+/// can be driven at the same `g` the `headless_arm_pd` body gate uses). Writes
+/// the world gravity only when something actually changes.
 fn gravity_toggle_ui(
     mut contexts: EguiContexts,
     mut toggle: ResMut<GravityToggle>,
