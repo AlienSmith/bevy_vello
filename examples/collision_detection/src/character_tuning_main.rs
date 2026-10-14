@@ -680,12 +680,11 @@ fn arm_tuning_ui(
         ui.add(egui::Slider::new(&mut config.soft_scale, 1.0..=50.0).text("soft_scale (×)"));
         ui.separator();
 
-        ui.heading("kd velocity feedback (D term)");
+        ui.heading("Solver ζ damping (implicit spring-damper)");
         ui.label(
-            "Rest target trails behind motion by kd·ω — brakes overshoot, subtracts at-rest noise.",
+            "Damping ratio baked into the XPBD angular solver. 1.0 = critical (snap, no wobble); <1 springy; >1 heavy.",
         );
-        ui.add(egui::Slider::new(&mut config.kd, 0.0..=0.5).text("kd (s)"));
-        ui.add(egui::Slider::new(&mut config.kd_max_offset, 0.0..=1.5).text("kd_max_offset (rad)"));
+        ui.add(egui::Slider::new(&mut config.zeta, 0.0..=2.0).text("zeta (ζ)"));
         ui.separator();
 
         ui.heading("Rest-angle chase");

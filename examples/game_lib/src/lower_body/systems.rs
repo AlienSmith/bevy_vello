@@ -38,6 +38,11 @@ impl LowerBodyController {
             left_foot: state.left.foot_pos,
             right_knee: state.hip_pos,
             right_foot: state.right.foot_pos,
+            hip_vel: Vec2::ZERO,
+            left_knee_vel: Vec2::ZERO,
+            left_foot_vel: Vec2::ZERO,
+            right_knee_vel: Vec2::ZERO,
+            right_foot_vel: Vec2::ZERO,
         };
         let debug = DebugInfo {
             x_max: 0.0,
@@ -110,8 +115,9 @@ pub fn drive_lower_body(
     // [`LowerBodyInput`]). The resolver consumes the request at the next
     // grounded `Stand → Load` edge, so one press ⇒ one hop and holding the key
     // no longer re-hops on landing.
-    let jump_held =
-        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW);
+    let jump_held = keys.pressed(KeyCode::Space)
+        || keys.pressed(KeyCode::ArrowUp)
+        || keys.pressed(KeyCode::KeyW);
     if jump_held && !input.jump_was_held {
         input_dir.y += 1.0;
     }

@@ -10,6 +10,7 @@ use vello_physics::{
 };
 
 use crate::character::{
+    leg_pd::{drive_leg_pd, LegPdTargets},
     IkMode, LeftArmController, LeftLegController, LimbConfig, ResetLimbControlConstraintsEvent,
     RightArmController, RightLegController, SpineConfig, SpineController, SpineDriveEnabled,
     SpineIndicator,
@@ -283,7 +284,7 @@ fn remap_spine_control(input: Vec2, heading: Vec2) -> Vec2 {
 /// IK↔physics limit cycle it once masked is now handled by the ω-scheduled
 /// compliance, and a small floor keeps the aim line from freezing with a
 /// visible residual tilt the way the old 0.003 deadband did.
-const FOREARM_ANGULAR_EPSILON: f32 = 1e-4;
+pub(crate) const FOREARM_ANGULAR_EPSILON: f32 = 1e-4;
 const SIGN: [f32; 5] = [-1.0, -1.0, 0.0, 1.0, 1.0];
 /// Interpolate `current` partway toward `target` (`current + alpha*step`) and
 /// clamp the resulting per-frame displacement to `max_step`. Pure function of
@@ -504,6 +505,7 @@ fn calculate_spine_drive(
                 rest_cos,
                 rest_sin,
                 compliance: config.bend_compliance,
+                zeta: 0.0, // spine bend is commanded by position constraints; no ζ damping
                 max_angle: None,
             },
         });
@@ -622,39 +624,10 @@ fn calculate_limb_ik(
         }
     };
 
-    // ---- kd velocity feedback (game-layer D term) ----
-    // Textbook PD: `correction = kp·(θ_desired − θ_current) − kd·θ̇`. In
-    // target-space form the rest angle is offset by `−kd·θ̇` so the spring
-    // opposes motion, not just position error.
-    //
-    // SIGN DERIVATION (θ̇ = −ω — do not "simplify" this away):
-    // - `cos_sin(p0,p1,p2)` represents the joint angle as θ = φ₁ − φ₂
-    //   (incoming bone angle minus outgoing bone angle): its `sin` component is
-    //   `u1.y*u2.x − u1.x*u2.y = −cross(u1,u2) = −sin(φ₂−φ₁) = sin(φ₁−φ₂)`.
-    // - `bone_angular_velocity(arm, dvel)` measures ω = dφ₂/dt of the OUTGOING
-    //   bone (upper arm at the shoulder, forearm at the elbow).
-    // - The spine/incoming bone rotates slowly and is common-mode (handled by
-    //   P), so θ̇ = d(φ₁−φ₂)/dt ≈ −ω.
-    // Therefore: rest_offset = −kd·θ̇ = −kd·(−ω) = **+kd·ω**.
-    // (A previous −kd·ω here was positive velocity feedback — the rest target
-    // ran AHEAD of the motion and pumped energy every tick, sustaining a
-    // never-decaying swing.)
-    //
-    // - Swing: the trailing target brakes the arm before it overshoots.
-    // - Rest: solver-noise velocities are subtracted instead of fought by the
-    //   (deliberately stiff) rest spring, killing residual shimmer.
-    // Note kd·ω has units [s]·[rad/s] = [rad] and is recomputed statelessly
-    // every tick — it must NOT be multiplied by dt (kd IS the time constant,
-    // mirroring the spine's `ω·(2·dt)` lead where `2·dt` occupies that slot).
-    // Bounded by `kd_max_offset` AND the existing `max_delta` chase clamp, so
-    // it cannot destabilize the solver. kd ≤ 0 disables.
-    let kd_offset = |omega: f32| -> f32 {
-        if config.kd > 0.0 {
-            (config.kd * omega).clamp(-config.kd_max_offset, config.kd_max_offset)
-        } else {
-            0.0
-        }
-    };
+    // Damping is baked into the XPBD angular solver (the damping ratio `ζ` from
+    // `LimbConfig::zeta`, forwarded via each event's `AngularConstraintConfig`).
+    // There is NO game-layer D term: the rest angle below is position-only and
+    // the solver's implicit spring-damper supplies `Kd = 2·ζ·sqrt(Kp·m)`.
 
     // Length-normalized compliance per joint: the solver's angular stiffness
     // scales with `1/l²` of the rotating bone, so the (ω-scheduled) base
@@ -717,22 +690,22 @@ fn calculate_limb_ik(
     if !is_elbow_only {
         let desired_shoulder_cs = cos_sin(p1_local, p12_local, desired_p13_local);
         let current_shoulder_cs = cos_sin(p1_local, p12_local, p13_local);
-        // kd velocity feedback: trail the desired angle behind the motion.
-        let damped_shoulder_cs = rotate_cs(desired_shoulder_cs, kd_offset(shoulder_omega));
+        // Position-only rest: the solver's ζ damping supplies the D term.
+        let rest_shoulder_cs = desired_shoulder_cs;
 
         // Dead zone on the shoulder angular error (mirror of the forearm guard):
         // without it the shoulder chases on every sub-frame correction, feeding
         // the IK↔physics oscillation that manifests as waggle.
-        let shoulder_cos_err = (current_shoulder_cs.x * damped_shoulder_cs.x
-            + current_shoulder_cs.y * damped_shoulder_cs.y)
+        let shoulder_cos_err = (current_shoulder_cs.x * rest_shoulder_cs.x
+            + current_shoulder_cs.y * rest_shoulder_cs.y)
             .clamp(-1.0, 1.0);
         let shoulder_angle_err = shoulder_cos_err.acos();
         if shoulder_angle_err > FOREARM_ANGULAR_EPSILON {
             let (blended_cos, blended_sin) = rotate_toward(
                 current_shoulder_cs.x,
                 current_shoulder_cs.y,
-                damped_shoulder_cs.x,
-                damped_shoulder_cs.y,
+                rest_shoulder_cs.x,
+                rest_shoulder_cs.y,
                 config.rest_chase_alpha,
                 max_delta,
             );
@@ -744,6 +717,7 @@ fn calculate_limb_ik(
                     rest_cos: blended_cos,
                     rest_sin: blended_sin,
                     compliance: shoulder_compliance,
+                    zeta: config.zeta,
                     max_angle: None,
                 },
             });
@@ -754,14 +728,14 @@ fn calculate_limb_ik(
     {
         let desired_elbow_cs = cos_sin(p12_local, desired_p13_local, desired_prla_local);
         let current_elbow_cs = cos_sin(p12_local, p13_local, prla_local);
-        // kd velocity feedback: trail the desired angle behind the motion.
-        let damped_elbow_cs = rotate_cs(desired_elbow_cs, kd_offset(elbow_omega));
+        // Position-only rest: the solver's ζ damping supplies the D term.
+        let rest_elbow_cs = desired_elbow_cs;
 
         let (blended_cos, blended_sin) = rotate_toward(
             current_elbow_cs.x,
             current_elbow_cs.y,
-            damped_elbow_cs.x,
-            damped_elbow_cs.y,
+            rest_elbow_cs.x,
+            rest_elbow_cs.y,
             config.rest_chase_alpha,
             max_delta,
         );
@@ -773,6 +747,7 @@ fn calculate_limb_ik(
                 rest_cos: blended_cos,
                 rest_sin: blended_sin,
                 compliance: elbow_compliance,
+                zeta: config.zeta,
                 max_angle: None,
             },
         });
@@ -786,7 +761,7 @@ fn calculate_limb_ik(
 /// `ω = cross(arm, dvel) / |arm|²`. Same estimator `tick_spine_drive` uses for
 /// its heading prediction. Returns 0 for degenerate (zero-length) bones.
 #[inline]
-fn bone_angular_velocity(arm: Vec2, dvel: Vec2) -> f32 {
+pub(crate) fn bone_angular_velocity(arm: Vec2, dvel: Vec2) -> f32 {
     let len_sq = arm.length_squared();
     if len_sq > f32::EPSILON {
         (arm.x * dvel.y - arm.y * dvel.x) / len_sq
@@ -799,7 +774,7 @@ fn bone_angular_velocity(arm: Vec2, dvel: Vec2) -> f32 {
 /// Used to apply the kd velocity-feedback offset to the IK-desired joint angle
 /// before the rest-angle chase: `rest_target = desired − kd·ω̂`.
 #[inline]
-fn rotate_cs(cs: Vec2, delta: f32) -> Vec2 {
+pub(crate) fn rotate_cs(cs: Vec2, delta: f32) -> Vec2 {
     let (sin_d, cos_d) = delta.sin_cos();
     Vec2::new(cs.x * cos_d - cs.y * sin_d, cs.y * cos_d + cs.x * sin_d)
 }
@@ -817,7 +792,7 @@ fn rotate_cs(cs: Vec2, delta: f32) -> Vec2 {
 ///   angle eases into the desired angle instead of slamming onto it in one frame.
 ///   This removes the step excitation that made the stiff P spring overshoot and
 ///   waggle, matching the spine's clean settle.
-fn rotate_toward(
+pub(crate) fn rotate_toward(
     cos_a: f32,
     sin_a: f32,
     cos_b: f32,
@@ -876,8 +851,16 @@ pub fn update_character_movement(
 
     // ---- Right leg ----
     for (leg, p_root) in &mut right_leg_q {
-        drive_limb(
+        let targets = leg_pd_targets(
+            leg.hip_target,
+            leg.knee_target,
             leg.target,
+            leg.hip_vel,
+            leg.knee_vel,
+            leg.target_vel,
+        );
+        drive_leg_pd(
+            &targets,
             &leg.particles,
             &leg.joints,
             &leg.config,
@@ -891,8 +874,16 @@ pub fn update_character_movement(
 
     // ---- Left leg ----
     for (leg, p_root) in &mut left_leg_q {
-        drive_limb(
+        let targets = leg_pd_targets(
+            leg.hip_target,
+            leg.knee_target,
             leg.target,
+            leg.hip_vel,
+            leg.knee_vel,
+            leg.target_vel,
+        );
+        drive_leg_pd(
+            &targets,
             &leg.particles,
             &leg.joints,
             &leg.config,
@@ -902,6 +893,27 @@ pub fn update_character_movement(
             &j_q,
             &mut world,
         );
+    }
+}
+
+/// Convert a leg controller's resolver-written world targets (bevy y-up) into
+/// the vello y-down frame the leg PD reads its live particles in. `bevy_to_vello`
+/// flips y only, which is valid for both positions and velocities.
+fn leg_pd_targets(
+    hip: Vec2,
+    knee: Vec2,
+    foot: Vec2,
+    hip_vel: Vec2,
+    knee_vel: Vec2,
+    foot_vel: Vec2,
+) -> LegPdTargets {
+    LegPdTargets {
+        hip: bevy_to_vello(hip),
+        knee: bevy_to_vello(knee),
+        foot: bevy_to_vello(foot),
+        hip_vel: bevy_to_vello(hip_vel),
+        knee_vel: bevy_to_vello(knee_vel),
+        foot_vel: bevy_to_vello(foot_vel),
     }
 }
 

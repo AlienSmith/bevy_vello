@@ -1241,7 +1241,7 @@ fn apply_to_arm(
         c.target = target;
         c.config.ik_mode = mode;
         c.config.rest_chase_alpha = kp;
-        c.config.kd = kd;
+        c.config.zeta = kd;
     }
 }
 
@@ -1258,7 +1258,7 @@ fn apply_to_larm(
         c.target = target;
         c.config.ik_mode = mode;
         c.config.rest_chase_alpha = kp;
-        c.config.kd = kd;
+        c.config.zeta = kd;
     }
 }
 
@@ -1275,7 +1275,7 @@ fn apply_to_rleg(
         c.target = target;
         c.config.ik_mode = mode;
         c.config.rest_chase_alpha = kp;
-        c.config.kd = kd;
+        c.config.zeta = kd;
     }
 }
 
@@ -1292,7 +1292,7 @@ fn apply_to_lleg(
         c.target = target;
         c.config.ik_mode = mode;
         c.config.rest_chase_alpha = kp;
-        c.config.kd = kd;
+        c.config.zeta = kd;
     }
 }
 
@@ -1312,7 +1312,7 @@ fn apply_set(
             config.rest_chase_alpha = kp;
         }
         if let Some(kd) = kd {
-            config.kd = kd;
+            config.zeta = kd;
         }
     };
     match limb {

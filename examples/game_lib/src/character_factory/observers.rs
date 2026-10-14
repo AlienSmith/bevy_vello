@@ -881,6 +881,11 @@ pub fn assemble_character(
                     ..Default::default()
                 },
                 target: right_target,
+                target_vel: Vec2::ZERO,
+                hip_target: right_target,
+                knee_target: right_target,
+                hip_vel: Vec2::ZERO,
+                knee_vel: Vec2::ZERO,
             };
             let left_leg = LeftLegController {
                 particles: [
@@ -896,6 +901,11 @@ pub fn assemble_character(
                     ..Default::default()
                 },
                 target: left_target,
+                target_vel: Vec2::ZERO,
+                hip_target: left_target,
+                knee_target: left_target,
+                hip_vel: Vec2::ZERO,
+                knee_vel: Vec2::ZERO,
             };
             Some((right_leg, left_leg))
         }

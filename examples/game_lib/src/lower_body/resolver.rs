@@ -250,6 +250,11 @@ pub struct ResolverState {
     /// stride, one step ahead); on a stand-still jump it is `false` and the
     /// swing lands on top of the lift-off footprint instead (no forward step).
     pub jump_arm_lead_leg: bool,
+    /// Previous tick's resolved joint positions, aligned to
+    /// `[hip, left_knee, left_foot, right_knee, right_foot]`. `None` on the
+    /// first tick. Used to finite-difference the pose into velocities for the
+    /// leg PD controller's velocity-error term.
+    pub prev_positions: Option<[Vec2; 5]>,
 }
 
 impl ResolverState {
@@ -292,6 +297,7 @@ impl ResolverState {
             vs: VerticalState::default(),
             airborne_prev: false,
             jump_arm_lead_leg: false,
+            prev_positions: None,
         }
     }
 }
@@ -300,7 +306,7 @@ impl ResolverState {
 // Outputs
 // ---------------------------------------------------------------------------
 
-/// The resolved particle positions: 1 hip + 2 knees + 2 feet.
+/// The resolved particle positions and velocities: 1 hip + 2 knees + 2 feet.
 #[derive(Debug, Clone, Copy)]
 pub struct LowerBodyPose {
     pub hip: Vec2,
@@ -308,6 +314,14 @@ pub struct LowerBodyPose {
     pub left_foot: Vec2,
     pub right_knee: Vec2,
     pub right_foot: Vec2,
+    /// Finite-differenced joint velocities (per-second), aligned with the
+    /// position fields. The hip uses the exact integrated `hip_vel`; knees/feet
+    /// are `(current − previous)/dt`.
+    pub hip_vel: Vec2,
+    pub left_knee_vel: Vec2,
+    pub left_foot_vel: Vec2,
+    pub right_knee_vel: Vec2,
+    pub right_foot_vel: Vec2,
 }
 
 /// Telemetry for the UI / debugging; the forward/backward math intermediates.
@@ -1260,13 +1274,42 @@ pub fn step_lower_body(
         config.bend_sign,
     );
 
+    // Finite-difference the pose into joint velocities for the leg PD's
+    // velocity-error (kd) term. The hip reuses the exact integrated `hip_vel`
+    // (loop-1 owns it); the knees/feet are differenced from the previous tick.
+    let inv_dt = if dt > 0.0 { 1.0 / dt } else { 0.0 };
+    let (hip_vel, left_knee_vel, left_foot_vel, right_knee_vel, right_foot_vel) =
+        match state.prev_positions {
+            Some([ph, plk, plf, prk, prf]) => (
+                state.hip_vel,
+                (left_knee - plk) * inv_dt,
+                (left_foot - plf) * inv_dt,
+                (right_knee - prk) * inv_dt,
+                (right_foot - prf) * inv_dt,
+            ),
+            None => (
+                state.hip_vel,
+                Vec2::ZERO,
+                Vec2::ZERO,
+                Vec2::ZERO,
+                Vec2::ZERO,
+            ),
+        };
+
     let pose = LowerBodyPose {
         hip: state.hip_pos,
         left_knee,
         right_knee,
         left_foot,
         right_foot,
+        hip_vel,
+        left_knee_vel,
+        left_foot_vel,
+        right_knee_vel,
+        right_foot_vel,
     };
+
+    state.prev_positions = Some([state.hip_pos, left_knee, left_foot, right_knee, right_foot]);
 
     let debug = DebugInfo {
         x_max,

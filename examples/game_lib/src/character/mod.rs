@@ -7,6 +7,7 @@ use bevy::{
 };
 
 mod ik;
+mod leg_pd;
 mod observers;
 pub mod plugin;
 mod systems;
@@ -161,36 +162,19 @@ pub struct LimbConfig {
     /// line locks crisply. 1.0 disables the schedule. Start ~8; raise toward
     /// 30+ if fast swings still ring, lower if the arm feels floaty mid-swing.
     pub soft_scale: f32,
-    /// Velocity-feedback (D-term) time constant, in seconds.
+    /// Damping ratio `ζ` of the implicit spring-damper baked into the XPBD
+    /// angular solver (see `AngularConstraint`). This is the ONLY damping knob:
+    /// the solver auto-derives `Kd = 2·ζ·sqrt(Kp·m)` from the compliance
+    /// (spring: `Kp = 1.0/compliance`) and the dynamically-varying generalized
+    /// mass `m = 1/w_sum` (bone-length/angle dependent).
     ///
-    /// Each joint's desired rest angle is rotated *behind* the IK-desired angle
-    /// so the XPBD spring pulls against motion instead of only against position
-    /// error. The constraint angle is `θ = φ_in − φ_out` while `ω` measures the
-    /// OUTGOING bone, so `θ̇ ≈ −ω` and the textbook `−kd·θ̇` offset becomes
-    /// `rest_offset = +kd·ω` (see the derivation in `calculate_limb_ik`). This
-    /// is the D half of a PD controller implemented in target space — the
-    /// solver stays untouched. Time-independent by design: `kd·ω` is an angle
-    /// ([s]·[rad/s]), recomputed statelessly each tick; kd IS the time
-    /// constant, so it must NOT be multiplied by dt.
-    ///
-    /// - Fast swing: the trailing target brakes the arm *before* it overshoots,
-    ///   so the waggle ring never starts.
-    /// - At-rest noise: solver jitter velocities are *subtracted* from the
-    ///   target instead of being fought by the stiff spring, killing the
-    ///   residual shimmer that the ω-schedule can't reach (it is stiffest at
-    ///   rest, by design).
-    ///
-    /// `kd = 0.1` means the rest target trails by 0.1 s worth of rotation.
-    /// 0 or less disables the term. Too large → aim feels rubber-banded when
-    /// tracking a moving target (the trail never closes).
-    pub kd: f32,
-    /// Hard clamp (radians) on the `kd·ω` rest-angle offset. Safety bound so a
-    /// velocity spike can never swing the rest target wildly away from the IK
-    /// solution; the offset additionally passes through the normal
-    /// `max_angle_rate` chase clamp. Keep the D contribution small relative to
-    /// P: ~0.12 rad (≈7°) is a sane ceiling — larger values make the rest
-    /// target whipsaw at swing frequency during fast flicks.
-    pub kd_max_offset: f32,
+    /// - `ζ = 1.0` (default) → critical damping: fastest approach with no
+    ///   overshoot — the target snaps and stops.
+    /// - `ζ < 1.0` → underdamped: springy, bouncy (ringing on settle).
+    /// - `ζ > 1.0` → overdamped: heavy, sluggish.
+    /// - `ζ <= 0` → disables damping, reduces exactly to the legacy (undamped)
+    ///   XPBD angular solve.
+    pub zeta: f32,
     /// Responsiveness knob for the rest-angle chase (the "Kp" of the PD in
     /// target space). Fraction of the remaining angle to the desired rest angle
     /// that is closed per tick, *before* the `max_angle_rate` clamp
@@ -220,8 +204,7 @@ impl Default for LimbConfig {
             compliance_ref_length: 30.0,
             omega_ref: 20.0,
             soft_scale: 20.0,
-            kd: 0.065,
-            kd_max_offset: 0.12,
+            zeta: 1.0,
             rest_chase_alpha: 0.5,
             max_angle_rate: 2.0 * std::f32::consts::PI,
             bend_sign: -1.0,
@@ -367,6 +350,17 @@ pub struct RightLegController {
     pub config: LimbConfig,
     /// Foot target in world space. Written by the gait/AI layer.
     pub target: Vec2,
+    /// Foot target velocity (world, y-up). Written by the resolver so the leg PD
+    /// can close on a velocity-error term instead of pure damping.
+    pub target_vel: Vec2,
+    /// Hip target in world space (y-up). The resolver's hip position.
+    pub hip_target: Vec2,
+    /// Knee target in world space (y-up). The resolver's knee position.
+    pub knee_target: Vec2,
+    /// Hip target velocity (world, y-up).
+    pub hip_vel: Vec2,
+    /// Knee target velocity (world, y-up).
+    pub knee_vel: Vec2,
 }
 
 /// Left leg controller with pre-cached entity handles + per-frame input.
@@ -378,6 +372,17 @@ pub struct LeftLegController {
     pub config: LimbConfig,
     /// Foot target in world space. Written by the gait/AI layer.
     pub target: Vec2,
+    /// Foot target velocity (world, y-up). Written by the resolver so the leg PD
+    /// can close on a velocity-error term instead of pure damping.
+    pub target_vel: Vec2,
+    /// Hip target in world space (y-up). The resolver's hip position.
+    pub hip_target: Vec2,
+    /// Knee target in world space (y-up). The resolver's knee position.
+    pub knee_target: Vec2,
+    /// Hip target velocity (world, y-up).
+    pub hip_vel: Vec2,
+    /// Knee target velocity (world, y-up).
+    pub knee_vel: Vec2,
 }
 
 // ---------------------------------------------------------------------------
