@@ -156,6 +156,39 @@ fn calculate_leg_pd(
     let rest_hip_cs = theta_hip_t_cs;
     let rest_knee_cs = theta_knee_t_cs;
 
+    // ---- Target joint angular rates (velocity projection) ----
+    // `c_dot_desired` is the desired constraint velocity (angle per frame) for
+    // the angular-constraint velocity projection: `θ̇_des · dt`. The hip
+    // reference spins with the LIVE spine (there is no target P2), exactly
+    // mirroring how `a_t` reuses `p2 - p3` above, so its rate is
+    // `ω_spine_live − ω_thigh_target`. Frame dt is used for the per-substep
+    // scale (headless harness runs 1 substep); the one-shot reset clears a
+    // stale value after each frame. Non-finite targets are gated to `None`.
+    let omega_thigh_t = bone_angular_velocity(
+        targets.knee - targets.hip,
+        targets.knee_vel - targets.hip_vel,
+    );
+    let omega_calf_t = bone_angular_velocity(
+        targets.foot - targets.knee,
+        targets.foot_vel - targets.knee_vel,
+    );
+    let c_dot_desired_hip = {
+        let v = (omega_spine - omega_thigh_t) * dt;
+        if v.is_finite() {
+            Some(v)
+        } else {
+            None
+        }
+    };
+    let c_dot_desired_knee = {
+        let v = (omega_thigh_t - omega_calf_t) * dt;
+        if v.is_finite() {
+            Some(v)
+        } else {
+            None
+        }
+    };
+
     // ---- ω-scheduled compliance keyed on each joint's own rate ----
     // Reuse the arm's back-EMF style gain schedule: fast swing → soft spring
     // (withholds correction authority instead of pumping the motion), at rest →
@@ -210,6 +243,8 @@ fn calculate_leg_pd(
                     rest_sin: blended_sin,
                     compliance: hip_compliance,
                     zeta: config.zeta,
+                    c_dot_desired: c_dot_desired_hip,
+                    sigma: 1.0,
                     max_angle: None,
                 },
             });
@@ -239,6 +274,8 @@ fn calculate_leg_pd(
                     rest_sin: blended_sin,
                     compliance: knee_compliance,
                     zeta: config.zeta,
+                    c_dot_desired: c_dot_desired_knee,
+                    sigma: 1.0,
                     max_angle: None,
                 },
             });
@@ -458,6 +495,57 @@ mod tests {
                 "joint {i}: fast swing must soften compliance ({} vs {})",
                 fast_events[i].config.compliance,
                 rest_events[i].config.compliance
+            );
+        }
+    }
+
+    /// A static live leg + a target leg with a *rotating* velocity field
+    /// produces non-zero `c_dot_desired` on the emitted constraints — the
+    /// solver's velocity projection is armed with the resolver's per-frame
+    /// joint rate. A stationary target (all-zero velocities) keeps it `None`
+    /// (or zero), so the projection stays inert when there is nothing to track.
+    #[test]
+    fn moving_target_arms_velocity_projection() {
+        let leg = standing_leg(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO);
+        let c = cfg();
+        let dt = 1.0 / 90.0;
+
+        // Bent target pose (same as the zeta test) so both joints emit.
+        let base = LegPdTargets {
+            hip: Vec2::new(0.0, 0.0),
+            knee: Vec2::new(8.0, THIGH),
+            foot: Vec2::new(16.0, THIGH + CALF),
+            hip_vel: Vec2::ZERO,
+            knee_vel: Vec2::ZERO,
+            foot_vel: Vec2::ZERO,
+        };
+
+        // Stationary target: velocities zero ⇒ desired joint rates zero.
+        let still = calculate_leg_pd(&base, dt, &leg, &joints(), &c);
+        assert_eq!(still.len(), 2, "bent target must emit both joints");
+        for e in &still {
+            assert!(
+                e.config.c_dot_desired.map_or(true, |v| v.abs() < 1e-6),
+                "stationary target must keep c_dot_desired zero/None, got {:?}",
+                e.config.c_dot_desired
+            );
+        }
+
+        // Rotating target: knee/foot sweep a circle about the hip ⇒ the thigh
+        // rotates ⇒ a non-zero target hip rate flows into the projection.
+        let moving = LegPdTargets {
+            // Rotate the whole leg: knee/foot positions unchanged, but the
+            // velocities are a rigid 90°-per-second spin about the hip.
+            knee_vel: Vec2::new(-THIGH, 0.0),
+            foot_vel: Vec2::new(-(THIGH + CALF), 0.0),
+            ..base
+        };
+        let events = calculate_leg_pd(&moving, dt, &leg, &joints(), &c);
+        assert_eq!(events.len(), 2, "rotating target must emit both joints");
+        for (i, e) in events.iter().enumerate() {
+            assert!(
+                e.config.c_dot_desired.is_some(),
+                "joint {i}: rotating target must arm the velocity projection"
             );
         }
     }

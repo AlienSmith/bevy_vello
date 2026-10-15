@@ -391,6 +391,18 @@ pub fn drive_hip_pin(
                 leg_target(seed.target_feet[0], pose.left_foot, seed.resolver_feet[0]);
             right_leg.target =
                 leg_target(seed.target_feet[1], pose.right_foot, seed.resolver_feet[1]);
+            // Feed the resolver's per-frame joint velocities (bevy y-up, px/s)
+            // into the leg PD so the angular constraint's velocity projection
+            // can drive each joint's rate toward the sandbox reference
+            // (`c_dot_desired` in `calculate_leg_pd`). Same y-up mapping as the
+            // foot-position deltas above: the resolver frame is bevy y-up, and
+            // only the pin's Vello-y-down world mapping flips y.
+            left_leg.hip_vel = pose.hip_vel;
+            left_leg.knee_vel = pose.left_knee_vel;
+            left_leg.target_vel = pose.left_foot_vel;
+            right_leg.hip_vel = pose.hip_vel;
+            right_leg.knee_vel = pose.right_knee_vel;
+            right_leg.target_vel = pose.right_foot_vel;
         }
     }
 }

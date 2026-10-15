@@ -506,6 +506,8 @@ fn calculate_spine_drive(
                 rest_sin,
                 compliance: config.bend_compliance,
                 zeta: 0.0, // spine bend is commanded by position constraints; no ζ damping
+                c_dot_desired: None,
+                sigma: 1.0,
                 max_angle: None,
             },
         });
@@ -718,6 +720,8 @@ fn calculate_limb_ik(
                     rest_sin: blended_sin,
                     compliance: shoulder_compliance,
                     zeta: config.zeta,
+                    c_dot_desired: None,
+                    sigma: 1.0,
                     max_angle: None,
                 },
             });
@@ -748,6 +752,8 @@ fn calculate_limb_ik(
                 rest_sin: blended_sin,
                 compliance: elbow_compliance,
                 zeta: config.zeta,
+                c_dot_desired: None,
+                sigma: 1.0,
                 max_angle: None,
             },
         });
