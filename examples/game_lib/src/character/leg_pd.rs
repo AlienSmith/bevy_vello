@@ -157,13 +157,14 @@ fn calculate_leg_pd(
     let rest_knee_cs = theta_knee_t_cs;
 
     // ---- Target joint angular rates (velocity projection) ----
-    // `c_dot_desired` is the desired constraint velocity (angle per frame) for
-    // the angular-constraint velocity projection: `θ̇_des · dt`. The hip
-    // reference spins with the LIVE spine (there is no target P2), exactly
+    // `angular_velocity` is the desired joint rate in **rad/s**, independent of
+    // the substep count: the solver converts it to the per-substep constraint
+    // velocity `c_dot_desired = ω · dt_substep` inside `apply_velocity_projection`
+    // (constraints.rs), so the game layer never needs to know `substeps`. The
+    // hip reference spins with the LIVE spine (there is no target P2), exactly
     // mirroring how `a_t` reuses `p2 - p3` above, so its rate is
-    // `ω_spine_live − ω_thigh_target`. Frame dt is used for the per-substep
-    // scale (headless harness runs 1 substep); the one-shot reset clears a
-    // stale value after each frame. Non-finite targets are gated to `None`.
+    // `ω_spine_live − ω_thigh_target`. The one-shot reset clears a stale value
+    // after each frame. Non-finite targets are gated to `None`.
     let omega_thigh_t = bone_angular_velocity(
         targets.knee - targets.hip,
         targets.knee_vel - targets.hip_vel,
@@ -172,16 +173,20 @@ fn calculate_leg_pd(
         targets.foot - targets.knee,
         targets.foot_vel - targets.knee_vel,
     );
-    let c_dot_desired_hip = {
-        let v = (omega_spine - omega_thigh_t) * dt;
+    // `c_dot_scale` is a unitless gain on the commanded joint rate (default 1.0
+    // = command the raw rad/s rate; lower to probe reduced projection
+    // authority). It no longer performs any unit conversion — `angular_velocity`
+    // is already rad/s and the solver multiplies by the substep dt.
+    let angular_velocity_hip = {
+        let v = (omega_spine - omega_thigh_t) * config.c_dot_scale;
         if v.is_finite() {
             Some(v)
         } else {
             None
         }
     };
-    let c_dot_desired_knee = {
-        let v = (omega_thigh_t - omega_calf_t) * dt;
+    let angular_velocity_knee = {
+        let v = (omega_thigh_t - omega_calf_t) * config.c_dot_scale;
         if v.is_finite() {
             Some(v)
         } else {
@@ -243,8 +248,8 @@ fn calculate_leg_pd(
                     rest_sin: blended_sin,
                     compliance: hip_compliance,
                     zeta: config.zeta,
-                    c_dot_desired: c_dot_desired_hip,
-                    sigma: 1.0,
+                    angular_velocity: angular_velocity_hip,
+                    sigma: config.sigma,
                     max_angle: None,
                 },
             });
@@ -274,8 +279,8 @@ fn calculate_leg_pd(
                     rest_sin: blended_sin,
                     compliance: knee_compliance,
                     zeta: config.zeta,
-                    c_dot_desired: c_dot_desired_knee,
-                    sigma: 1.0,
+                    angular_velocity: angular_velocity_knee,
+                    sigma: config.sigma,
                     max_angle: None,
                 },
             });
@@ -500,10 +505,48 @@ mod tests {
     }
 
     /// A static live leg + a target leg with a *rotating* velocity field
-    /// produces non-zero `c_dot_desired` on the emitted constraints — the
+    /// produces non-zero `angular_velocity` on the emitted constraints — the
     /// solver's velocity projection is armed with the resolver's per-frame
     /// joint rate. A stationary target (all-zero velocities) keeps it `None`
     /// (or zero), so the projection stays inert when there is nothing to track.
+    #[test]
+    /// `c_dot_scale` scales the commanded joint rate (default 1.0). Verify a
+    /// scaled config reaches a proportionally scaled `angular_velocity`.
+    #[test]
+    fn c_dot_scale_reaches_desired_rate() {
+        let leg = standing_leg(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO);
+        let dt = 1.0 / 90.0;
+
+        // Bent target pose (same as the zeta test) so both joints emit, plus a
+        // rigid 90°-per-second spin about the hip to arm the projection.
+        let moving = LegPdTargets {
+            knee: Vec2::new(8.0, THIGH),
+            foot: Vec2::new(16.0, THIGH + CALF),
+            knee_vel: Vec2::new(-THIGH, 0.0),
+            foot_vel: Vec2::new(-(THIGH + CALF), 0.0),
+            ..standing_targets()
+        };
+
+        // Full strength (1.0) vs half strength (0.5) on the same target.
+        let full = calculate_leg_pd(&moving, dt, &leg, &joints(), &cfg());
+        let half_cfg = LimbConfig {
+            c_dot_scale: 0.5,
+            ..cfg()
+        };
+        let half = calculate_leg_pd(&moving, dt, &leg, &joints(), &half_cfg);
+
+        assert_eq!(full.len(), 2);
+        assert_eq!(half.len(), 2);
+        for (f, h) in full.iter().zip(&half) {
+            let fv = f.config.angular_velocity.expect("full must arm projection");
+            let hv = h.config.angular_velocity.expect("half must arm projection");
+            assert!(
+                (hv - 0.5 * fv).abs() < 1e-6,
+                "c_dot_scale=0.5 must halve angular_velocity: full={fv} half={hv}"
+            );
+        }
+    }
+
     #[test]
     fn moving_target_arms_velocity_projection() {
         let leg = standing_leg(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO);
@@ -525,9 +568,9 @@ mod tests {
         assert_eq!(still.len(), 2, "bent target must emit both joints");
         for e in &still {
             assert!(
-                e.config.c_dot_desired.map_or(true, |v| v.abs() < 1e-6),
-                "stationary target must keep c_dot_desired zero/None, got {:?}",
-                e.config.c_dot_desired
+                e.config.angular_velocity.map_or(true, |v| v.abs() < 1e-6),
+                "stationary target must keep angular_velocity zero/None, got {:?}",
+                e.config.angular_velocity
             );
         }
 
@@ -544,7 +587,7 @@ mod tests {
         assert_eq!(events.len(), 2, "rotating target must emit both joints");
         for (i, e) in events.iter().enumerate() {
             assert!(
-                e.config.c_dot_desired.is_some(),
+                e.config.angular_velocity.is_some(),
                 "joint {i}: rotating target must arm the velocity projection"
             );
         }

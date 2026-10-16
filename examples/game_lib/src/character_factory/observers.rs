@@ -878,6 +878,7 @@ pub fn assemble_character(
                 config: LimbConfig {
                     bend_sign: 1.0,
                     ik_mode: IkMode::Reach,
+                    zeta: 2.5,
                     ..Default::default()
                 },
                 target: right_target,
@@ -898,6 +899,7 @@ pub fn assemble_character(
                 config: LimbConfig {
                     bend_sign: 1.0,
                     ik_mode: IkMode::Reach,
+                    zeta: 2.5,
                     ..Default::default()
                 },
                 target: left_target,

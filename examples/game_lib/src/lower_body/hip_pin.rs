@@ -102,17 +102,29 @@ impl Default for HipPinParams {
 }
 
 /// Foot-target seeds for the sandbox↔leg bridge: the resolver foot positions
-/// (y-up) and the character's leg-controller foot targets (bevy y-up) captured
-/// on the pin's first leg-driving tick. Per tick only the sandbox foot *delta*
-/// from `resolver_feet` is added to `target_feet`, so the resolver's absolute
-/// frame (floor at `y = 0`) never has to line up with the character's spawn
-/// `y`. See `HipPin::leg_seed`.
+/// (y-up) and the character's leg-controller targets (bevy y-up) captured on
+/// the pin's first leg-driving tick. Per tick only the sandbox *delta* from the
+/// resolver fields is added to the controller targets, so the resolver's
+/// absolute frame (floor at `y = 0`) never has to line up with the character's
+/// spawn `y`. The hip/knee pairs exist because the angular leg PD derives its
+/// *rest angles* from `hip_target`/`knee_target`; without live resolver hip/knee
+/// targets those stay degenerate (frozen `hip_target == knee_target` ⇒ a
+/// straight-leg rest pose the PD actively holds). See `HipPin::leg_seed`.
 #[derive(Debug, Clone, Copy)]
 struct LegBridgeSeed {
     /// Resolver foot positions at seed time (y-up), `[left, right]`.
     resolver_feet: [Vec2; 2],
     /// Leg-controller foot targets at seed time (bevy y-up), `[left, right]`.
     target_feet: [Vec2; 2],
+    /// Resolver hip position at seed time (y-up). Both legs share the single
+    /// resolver hip, so this is stored once and applied to both controllers.
+    resolver_hip: Vec2,
+    /// Resolver knee positions at seed time (y-up), `[left, right]`.
+    resolver_knees: [Vec2; 2],
+    /// Leg-controller hip targets at seed time (bevy y-up), `[left, right]`.
+    target_hips: [Vec2; 2],
+    /// Leg-controller knee targets at seed time (bevy y-up), `[left, right]`.
+    target_knees: [Vec2; 2],
 }
 
 /// Per-character hip pin. Attach to the character root entity. All fields are
@@ -383,14 +395,51 @@ pub fn drive_hip_pin(
             else {
                 continue;
             };
+            // Anchor the hip/knee delta bridge on the character's REAL hip/knee
+            // particle positions (vello y-down → bevy y-up), not the degenerate
+            // spawn literals (`hip_target == knee_target == foot rest`), which
+            // collapse the PD's rest triangle into a straight leg. Both legs
+            // share P3 (`particles[1]`) as the hip; each knee is `particles[2]`.
+            let vello_to_bevy = |p: &VelloParticle| Vec2::new(p.particle.pos.x, -p.particle.pos.y);
+            let hip_bevy = match p_q.get(left_leg.particles[1]) {
+                Ok(p) => vello_to_bevy(p),
+                Err(_) => left_leg.hip_target,
+            };
+            let left_knee_bevy = match p_q.get(left_leg.particles[2]) {
+                Ok(p) => vello_to_bevy(p),
+                Err(_) => left_leg.knee_target,
+            };
+            let right_knee_bevy = match p_q.get(right_leg.particles[2]) {
+                Ok(p) => vello_to_bevy(p),
+                Err(_) => right_leg.knee_target,
+            };
             let seed = *pin.leg_seed.get_or_insert(LegBridgeSeed {
                 resolver_feet: [pose.left_foot, pose.right_foot],
                 target_feet: [left_leg.target, right_leg.target],
+                resolver_hip: pose.hip,
+                resolver_knees: [pose.left_knee, pose.right_knee],
+                target_hips: [hip_bevy, hip_bevy],
+                target_knees: [left_knee_bevy, right_knee_bevy],
             });
             left_leg.target =
                 leg_target(seed.target_feet[0], pose.left_foot, seed.resolver_feet[0]);
             right_leg.target =
                 leg_target(seed.target_feet[1], pose.right_foot, seed.resolver_feet[1]);
+            // Hip/knee rest targets: same seed-delta bridge as the feet. The
+            // angular leg PD derives its rest angles from `hip_target` and
+            // `knee_target`; a frozen `hip_target == knee_target` collapses both
+            // to a degenerate straight-leg pose. Writing the resolver's live
+            // hip/knee deltas each tick gives the PD a real (bent) rest pose so
+            // the swing foot can actually lift off the floor.
+            left_leg.hip_target = leg_target(seed.target_hips[0], pose.hip, seed.resolver_hip);
+            right_leg.hip_target = leg_target(seed.target_hips[1], pose.hip, seed.resolver_hip);
+            left_leg.knee_target =
+                leg_target(seed.target_knees[0], pose.left_knee, seed.resolver_knees[0]);
+            right_leg.knee_target = leg_target(
+                seed.target_knees[1],
+                pose.right_knee,
+                seed.resolver_knees[1],
+            );
             // Feed the resolver's per-frame joint velocities (bevy y-up, px/s)
             // into the leg PD so the angular constraint's velocity projection
             // can drive each joint's rate toward the sandbox reference

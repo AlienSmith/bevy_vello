@@ -558,6 +558,16 @@ struct Probe {
     leg_t: Vec<f32>,
     leg_err: Vec<f32>,
     leg_err_lr: Vec<[f32; 2]>,
+    /// Signed world-frame x offset `foot.x - target.x` per leg, so a peak can
+    /// be classified as lag (foot behind target, negative) vs overshoot (foot
+    /// ahead of target, positive) for the +x walking direction.
+    leg_dx_lr: Vec<[f32; 2]>,
+    /// Commanded leg-target velocity (bevy y-up) from the previous tick, one per
+    /// lower-body particle in `[P3, P40, P41, PLLL, PRLL]` order, for the
+    /// finite-difference target acceleration export.
+    prev_tgt_vel: [Vec2; 5],
+    /// Whether `prev_tgt_vel` holds a real previous tick (false on the first).
+    tgt_primed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +577,15 @@ struct Probe {
 /// Engine Vello (y-down) → Bevy (y-up).
 #[inline]
 fn to_bevy(p: Vec2) -> Vec2 {
+    Vec2::new(p.x, -p.y)
+}
+
+/// Bevy (y-up) → engine Vello (y-down). The inverse of [`to_bevy`]; used to
+/// export the leg controllers' bevy y-up world targets in the same y-down frame
+/// as the realized particle channels, so `t<name>x/y` can be subtracted from
+/// `<name>x/y` directly.
+#[inline]
+fn to_vello(p: Vec2) -> Vec2 {
     Vec2::new(p.x, -p.y)
 }
 
@@ -720,6 +739,9 @@ fn main() {
         leg_t: Vec::new(),
         leg_err: Vec::new(),
         leg_err_lr: Vec::new(),
+        leg_dx_lr: Vec::new(),
+        prev_tgt_vel: [Vec2::ZERO; 5],
+        tgt_primed: false,
     };
 
     let gravity = if body { gravity_from_env() } else { Vec2::ZERO };
@@ -746,9 +768,22 @@ fn main() {
     .add_plugins(HeadlessTelemetryPlugin)
     // Physics resources (mirrors VelloCollisionResponsePlugin, minus GPU parts).
     // No colliders; gravity per `GRAVITY` in body mode, else zero (the limb case).
+    // `SUBSTEPS=<n>` overrides the XPBD substep count (default 0 → 1). The two
+    // angular constraints on the leg share the knee particle; with a single
+    // Gauss-Seidel pass per frame they never converge to a mutually-consistent
+    // bent rest (hip held tight by the pin, fight spills onto knee+foot), so
+    // more substeps is the convergence lever for foot lift.
     .insert_resource(VelloConstraintWorld::new(gravity))
     .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
-    .insert_resource(VelloCollisionWorld::default())
+    .insert_resource({
+        let mut world = VelloCollisionWorld::default();
+        if let Ok(s) = std::env::var("SUBSTEPS") {
+            if let Ok(n) = s.trim().parse::<u32>() {
+                world.substeps = n;
+            }
+        }
+        world
+    })
     .insert_resource(RemovedColliders::default())
     .insert_resource(CollisionEventBatch::default())
     // The spine drive must stay silent: in body mode the pin owns P1/P2/P3, in
@@ -1086,6 +1121,98 @@ fn drive_script(
         );
         if !probe.anchored {
             return;
+        }
+
+        // ---- A/B levers for the leg-controller tracking bandwidth (env-gated,
+        // applied once at ready; body mode never calls `apply_to_rleg`/`apply_to_lleg`
+        // so the legs otherwise hold `LimbConfig::default()`). Both target the
+        // leg-chain divergence now that the hip frame is proven tight (~0.7px).
+        //   `LEG_NO_CHASE=1`   command the resolver's rest angle directly — no
+        //                      first-order chase (`rest_chase_alpha=1.0`) and no
+        //                      `max_angle_rate` clamp (huge) — the XPBD ζ-damped
+        //                      spring is the only smoothing left.
+        //   `LEG_NO_SCHEDULE=1` disable the ω-softening compliance schedule
+        //                      (`soft_scale=1.0`) so stiffness holds during swing.
+        //   `LEG_ZETA=<ζ>`     override the solver damping ratio (default 1.0 —
+        //                      proven over-damping in the arm ζ-sweep; the large
+        //                      `gamma` starves the position correction). ζ=0.2 was
+        //                      the arm sweet spot.
+        //   `LEG_SIGMA=<σ>`    override the velocity-projection strength
+        //                      (default 1.0 = full projection). σ=0 disables the
+        //                      projection entirely — recovers the pre-projection
+        //                      positional-solve-only behaviour (37px floor), σ<1
+        //                      weakens it (soft velocity constraint).
+        //   `LEG_COMPLIANCE=<k>` override the angular stiffness (default
+        //                      5e-8 at 30px ref length). Smaller = stiffer, larger
+        //                      = softer; this is the Kp of the XPBD angular
+        //                      spring (ζ damping scales with it automatically).
+        // Baseline = none set (default chase + schedule + ζ=1.0 + σ=1.0 + k=5e-8).
+        //   `LEG_C_DOT_SCALE=<s>` override the `angular_velocity` gain
+        //                      (default 1.0). The game layer now emits rad/s
+        //                      (substep-count-independent) and the solver
+        //                      converts internally; this is a pure authority
+        //                      knob on the commanded joint rate. Root-cause probe.
+        if probe.body
+            && (env_flag("LEG_NO_CHASE")
+                || env_flag("LEG_NO_SCHEDULE")
+                || std::env::var("LEG_ZETA")
+                    .ok()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || std::env::var("LEG_SIGMA")
+                    .ok()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || std::env::var("LEG_COMPLIANCE")
+                    .ok()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || std::env::var("LEG_C_DOT_SCALE")
+                    .ok()
+                    .is_some_and(|s| !s.trim().is_empty()))
+        {
+            let no_chase = env_flag("LEG_NO_CHASE");
+            let no_schedule = env_flag("LEG_NO_SCHEDULE");
+            let zeta_opt = std::env::var("LEG_ZETA")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok());
+            let sigma_opt = std::env::var("LEG_SIGMA")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok());
+            let compliance_opt = std::env::var("LEG_COMPLIANCE")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok());
+            let c_dot_scale_opt = std::env::var("LEG_C_DOT_SCALE")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok());
+            let apply = |cfg: &mut LimbConfig| {
+                if no_chase {
+                    cfg.rest_chase_alpha = 1.0;
+                    cfg.max_angle_rate = 1e6;
+                }
+                if no_schedule {
+                    cfg.soft_scale = 1.0;
+                }
+                if let Some(z) = zeta_opt {
+                    cfg.zeta = z;
+                }
+                if let Some(s) = sigma_opt {
+                    cfg.sigma = s;
+                }
+                if let Some(k) = compliance_opt {
+                    cfg.angular_compliance = k;
+                }
+                if let Some(s) = c_dot_scale_opt {
+                    cfg.c_dot_scale = s;
+                }
+            };
+            if let Ok(mut c) = right_leg_q.get_mut(character) {
+                apply(&mut c.config);
+            }
+            if let Ok(mut c) = left_leg_q.get_mut(character) {
+                apply(&mut c.config);
+            }
+            info!(
+                "body A/B leg levers: no_chase={} no_schedule={} zeta={:?} sigma={:?} compliance={:?} c_dot_scale={:?}",
+                no_chase, no_schedule, zeta_opt, sigma_opt, compliance_opt, c_dot_scale_opt
+            );
         }
 
         let first_ready = !probe.ever_ready;
@@ -1518,9 +1645,70 @@ fn limb_sample(
                     probe.max_leg_err = emax_leg;
                     probe.leg_peak_t = tb;
                 }
+                let mut dx_lr = [0.0f32, 0.0f32];
+                for (li, target) in [left_leg.target, right_leg.target].into_iter().enumerate() {
+                    let foot_ent = if li == 0 {
+                        left_leg.particles[3]
+                    } else {
+                        right_leg.particles[3]
+                    };
+                    if let Ok(p) = particle_q.get(foot_ent) {
+                        // Signed world-frame x offset: foot.x - target.x. Negative
+                        // = lagging behind the +x command, positive = overshoot.
+                        // Both are bevy y-up world, so the x is directly comparable.
+                        dx_lr[li] = to_bevy(p.particle.pos).x - target.x;
+                    }
+                }
                 probe.leg_t.push(tb);
                 probe.leg_err.push(emax_leg);
                 probe.leg_err_lr.push(lr);
+                probe.leg_dx_lr.push(dx_lr);
+
+                // --- Commanded lower-body target state, exported in the same
+                // vello y-down frame as the realized particle channels (which
+                // `capture_telemetry` emits raw), so `<name>x - t<name>x` is
+                // directly the tracking error: negative x = lagging behind the
+                // +x command, positive x = overshoot. Velocity is the
+                // resolver/controller command; acceleration is a per-tick finite
+                // difference (fixed cadence `1/FIXED_HZ`). Order matches the 5
+                // lower-body particles: P3 (hip), P40 (left knee), P41 (right
+                // knee), PLLL (left foot), PRLL (right foot). NOTE: the pin
+                // currently writes only the foot `target` + the joint
+                // velocities; `hip_target`/`knee_target` are frozen at spawn,
+                // so a stationary `tP3`/`tP40`/`tP41` is expected and is itself
+                // diagnostic.
+                let lb_tgt = [
+                    ("tP3", left_leg.hip_target, left_leg.hip_vel),
+                    ("tP40", left_leg.knee_target, left_leg.knee_vel),
+                    ("tP41", right_leg.knee_target, right_leg.knee_vel),
+                    ("tPLLL", left_leg.target, left_leg.target_vel),
+                    ("tPRLL", right_leg.target, right_leg.target_vel),
+                ];
+                let dt_tgt = 1.0 / FIXED_HZ as f32;
+                for (i, (nm, tgt_pos, tgt_vel)) in lb_tgt.iter().enumerate() {
+                    let p = to_vello(*tgt_pos);
+                    let v = to_vello(*tgt_vel);
+                    let (ax, ay) = if probe.tgt_primed {
+                        let dv = v - probe.prev_tgt_vel[i];
+                        (dv.x / dt_tgt, dv.y / dt_tgt)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let key_x = format!("{}x", nm);
+                    let key_y = format!("{}y", nm);
+                    let key_vx = format!("{}vx", nm);
+                    let key_vy = format!("{}vy", nm);
+                    let key_ax = format!("{}ax", nm);
+                    let key_ay = format!("{}ay", nm);
+                    row.set(&key_x, format!("{:.2}", p.x));
+                    row.set(&key_y, format!("{:.2}", p.y));
+                    row.set(&key_vx, format!("{:.2}", v.x));
+                    row.set(&key_vy, format!("{:.2}", v.y));
+                    row.set(&key_ax, format!("{:.1}", ax));
+                    row.set(&key_ay, format!("{:.1}", ay));
+                    probe.prev_tgt_vel[i] = v;
+                }
+                probe.tgt_primed = true;
             }
         }
     }
@@ -2049,13 +2237,19 @@ fn report_body(probe: &Probe, buf: &TelemetryBuffer, params: Option<&HipPinParam
         Err(e) => error!("write failed ({ev_path}): {e}"),
     }
 
-    // Per-leg foot-lag trace so the worst lag can be tied to a gait phase.
+    // Per-leg foot-lag trace so the worst lag can be tied to a gait phase. The
+    // signed `*_dx_px` columns are `foot.x - target.x`: negative = lagging
+    // behind the +x command, positive = overshooting ahead of it.
     if legs_on && !probe.leg_t.is_empty() {
         let leg_path = path_with_suffix(&probe.csv_path, ".leg.csv");
-        let mut leg_out = String::from("t,left_err_px,right_err_px\n");
+        let mut leg_out = String::from("t,left_err_px,right_err_px,left_dx_px,right_dx_px\n");
         for (i, tt) in probe.leg_t.iter().enumerate() {
             let lr = probe.leg_err_lr.get(i).copied().unwrap_or([0.0, 0.0]);
-            leg_out += &format!("{tt:.4},{:.3},{:.3}\n", lr[0], lr[1]);
+            let dx = probe.leg_dx_lr.get(i).copied().unwrap_or([0.0, 0.0]);
+            leg_out += &format!(
+                "{tt:.4},{:.3},{:.3},{:.3},{:.3}\n",
+                lr[0], lr[1], dx[0], dx[1]
+            );
         }
         if let Some(dir) = std::path::Path::new(&leg_path).parent() {
             let _ = std::fs::create_dir_all(dir);

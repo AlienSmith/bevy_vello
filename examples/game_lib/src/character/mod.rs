@@ -175,6 +175,21 @@ pub struct LimbConfig {
     /// - `ζ <= 0` → disables damping, reduces exactly to the legacy (undamped)
     ///   XPBD angular solve.
     pub zeta: f32,
+    /// Strength `sigma` in [0, 1] of the angular-constraint velocity projection.
+    /// `1.0` = full projection (hard velocity constraint), `0.0` = no
+    /// projection (the positional rest-angle solve is the only authority).
+    /// Only meaningful when the joint's `angular_velocity` is `Some`. Lowering
+    /// sigma or setting it to 0 lets the leg chain fall back to position-only
+    /// XPBD, which matches the pre-projection behaviour.
+    pub sigma: f32,
+    /// Unitless gain on the commanded joint `angular_velocity` (rad/s) before
+    /// it reaches the solver's velocity projection. The projection's measured
+    /// `c_dot` is the raw joint rate `θ̇` (the unscaled gradient), and the
+    /// solver converts the commanded rate to the per-substep target
+    /// `c_dot_desired = ω · dt_substep` internally — so the game layer emits
+    /// rad/s and `c_dot_scale` is a pure authority knob (default 1.0 = command
+    /// the raw rate; lower to probe reduced projection authority).
+    pub c_dot_scale: f32,
     /// Responsiveness knob for the rest-angle chase (the "Kp" of the PD in
     /// target space). Fraction of the remaining angle to the desired rest angle
     /// that is closed per tick, *before* the `max_angle_rate` clamp
@@ -205,6 +220,8 @@ impl Default for LimbConfig {
             omega_ref: 20.0,
             soft_scale: 20.0,
             zeta: 1.0,
+            sigma: 0.0,
+            c_dot_scale: 1.0,
             rest_chase_alpha: 0.5,
             max_angle_rate: 2.0 * std::f32::consts::PI,
             bend_sign: -1.0,
