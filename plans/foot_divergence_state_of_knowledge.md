@@ -25,8 +25,8 @@ foot, yet the angular constraints have **near-zero authority** over the free
 ## 2. The rig (facts)
 
 - Headless Bevy/XPBD V10 character, walk script
-  [`walk_script.json`](../tmp/headless/walk_script.json) (wait 0.5 + move 10.0 +
-  wait 1.0), FIXED_HZ=90.
+  [`walk_script.json`](walk_script.json) (wait 0.5 + move 10.0 + wait 1.0),
+  FIXED_HZ=90. (Copy kept in `plans/` because `tmp/` is not committed.)
 - Leg particles: `[P2(ref), P3(hip), knee(P41), foot(PRLL)]`, thigh=calf=55.5px
   (total leg 111px).
 - Coordinate frame: resolver/leg-targets are bevy **y-up**; particle positions
