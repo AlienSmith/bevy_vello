@@ -46,7 +46,7 @@ use game_lib::{
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
     GroundSupport, HipPin, HipPinParams, PinMode, PlayerAction, PlayerMarker, SpineController,
-    VelloCharacterPlugin,
+    VelloCharacterPlugin, VerticalPhase,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -802,6 +802,7 @@ fn gravity_toggle_ui(
 fn hip_pin_ui(
     mut contexts: EguiContexts,
     mut params: ResMut<HipPinParams>,
+    support: Option<Res<GroundSupport>>,
     mut pin_q: Query<(Entity, &mut HipPin)>,
     action_q: Query<&ActionState<PlayerAction>>,
 ) {
@@ -815,11 +816,12 @@ fn hip_pin_ui(
             p.state.hip_pos,
             p.last_ref_p3,
             p.last_sag_y,
+            p.state.vs.phase,
         )
     });
 
     egui::Window::new("Hip Pin").show(contexts.ctx_mut(), |ui| {
-        let Some((entity, mut enabled, ready, hip_pos, ref_p3, sag_y)) = snapshot else {
+        let Some((entity, mut enabled, ready, hip_pos, ref_p3, sag_y, vphase)) = snapshot else {
             ui.label("no character / hip pin yet");
             return;
         };
@@ -869,7 +871,29 @@ fn hip_pin_ui(
         );
         ui.checkbox(
             &mut params.pin_vertical,
-            "pin vertical axis (auto-off when airborne)",
+            "pin vertical axis (master switch; the live gate is below)",
+        );
+
+        // Live gate readout: the master switch is only one input. The effective
+        // vertical authority also depends on ground contact (or a ballistic
+        // launch/flight reference), and gravity cancellation is forced to 0 in
+        // the air. This line is the ground truth while jumping.
+        let grounded = support.as_deref().map(|s| s.grounded).unwrap_or(true);
+        let contacts = support.as_deref().map(|s| s.contacts).unwrap_or(0);
+        let ballistic = matches!(vphase, VerticalPhase::Launch | VerticalPhase::Flight);
+        let vertical_active = params.pin_vertical && (grounded || ballistic);
+        let gravity_cancel = if grounded { params.support_share } else { 0.0 };
+        ui.colored_label(
+            if grounded {
+                egui::Color32::LIGHT_GREEN
+            } else {
+                egui::Color32::LIGHT_RED
+            },
+            format!(
+                "gate: grounded={grounded} (contacts {contacts})  phase={vphase:?}\n\
+                 vertical command active={vertical_active}  gravity cancelled={:.0}%",
+                gravity_cancel * 100.0
+            ),
         );
         ui.colored_label(
             egui::Color32::LIGHT_BLUE,

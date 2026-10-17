@@ -608,3 +608,9 @@ floor line — the stance-retarget task, not a support problem.
 remains a master switch. Unit tests cover airborne ballistic release,
 `support_share` cancelling 0/50/100 % of gravity, and the grounded upward
 command preserving a jump.
+
+The tuning app's Hip Pin window shows the **live gate**: `grounded` and the
+contact count (green/red), the resolver vertical phase, whether the vertical
+command is active, and the effective gravity cancellation (0 % in the air,
+`support_share` on the ground). The checkbox is only the master switch; the gate
+readout is the part that changes during a jump.
