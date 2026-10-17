@@ -860,6 +860,23 @@ pub fn assemble_character(
         Some(Vec2::new(r.x as f32, -(r.y as f32)))
     };
 
+    // Legs are driven by the resolver's angular targets, not by the arm-style
+    // reach chase. The arm defaults (rest chase α=0.5, ω-softening ×20,
+    // compliance 5e-8, ζ=2.5) stack three lags on top of each other; measured
+    // on the walk gate they plateau at ~15-38px. With the pose-aware bridge and
+    // the pinned-mass anchor, direct stiff tracking (α=1, no schedule,
+    // compliance 1e-10, ζ=0.5) brings the same walk to <1px mean / <4px peak.
+    let leg_config = || LimbConfig {
+        bend_sign: 1.0,
+        ik_mode: IkMode::Reach,
+        zeta: 0.5,
+        angular_compliance: 1e-10,
+        soft_scale: 1.0,
+        rest_chase_alpha: 1.0,
+        max_angle_rate: 1e6,
+        ..Default::default()
+    };
+
     let leg_controllers = match (
         &blueprint.data.controllers.right_leg,
         &blueprint.data.controllers.left_leg,
@@ -875,12 +892,7 @@ pub fn assemble_character(
                     get(&right_cfg.particles[3]),
                 ],
                 joints: [get(&right_cfg.joints[0]), get(&right_cfg.joints[1])],
-                config: LimbConfig {
-                    bend_sign: 1.0,
-                    ik_mode: IkMode::Reach,
-                    zeta: 2.5,
-                    ..Default::default()
-                },
+                config: leg_config(),
                 target: right_target,
                 target_vel: Vec2::ZERO,
                 hip_target: right_target,
@@ -896,12 +908,7 @@ pub fn assemble_character(
                     get(&left_cfg.particles[3]),
                 ],
                 joints: [get(&left_cfg.joints[0]), get(&left_cfg.joints[1])],
-                config: LimbConfig {
-                    bend_sign: 1.0,
-                    ik_mode: IkMode::Reach,
-                    zeta: 2.5,
-                    ..Default::default()
-                },
+                config: leg_config(),
                 target: left_target,
                 target_vel: Vec2::ZERO,
                 hip_target: left_target,

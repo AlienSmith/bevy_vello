@@ -208,6 +208,13 @@ pub struct LimbConfig {
     pub bend_sign: f32,
     /// IK mode for the arm.
     pub ik_mode: IkMode,
+    /// True while the parent frame (`P2`/`P3`) is kinematically held by the
+    /// `HipPin`. The leg PD then excludes the pinned particles from the angular
+    /// constraints' generalized mass (hip joint: only the knee free; knee joint:
+    /// only `P3` anchored), so the free chain receives the full correction
+    /// instead of the pin undoing most of it each frame. The pin sets this on
+    /// both leg controllers while `hip_drives_legs` is active.
+    pub anchor_chain: bool,
 }
 
 impl Default for LimbConfig {
@@ -226,6 +233,7 @@ impl Default for LimbConfig {
             max_angle_rate: 2.0 * std::f32::consts::PI,
             bend_sign: -1.0,
             ik_mode: IkMode::Disabled,
+            anchor_chain: false,
         }
     }
 }

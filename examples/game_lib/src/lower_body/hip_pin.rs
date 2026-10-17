@@ -101,30 +101,62 @@ impl Default for HipPinParams {
     }
 }
 
-/// Foot-target seeds for the sandbox↔leg bridge: the resolver foot positions
-/// (y-up) and the character's leg-controller targets (bevy y-up) captured on
-/// the pin's first leg-driving tick. Per tick only the sandbox *delta* from the
-/// resolver fields is added to the controller targets, so the resolver's
-/// absolute frame (floor at `y = 0`) never has to line up with the character's
-/// spawn `y`. The hip/knee pairs exist because the angular leg PD derives its
-/// *rest angles* from `hip_target`/`knee_target`; without live resolver hip/knee
-/// targets those stay degenerate (frozen `hip_target == knee_target` ⇒ a
-/// straight-leg rest pose the PD actively holds). See `HipPin::leg_seed`.
+/// One leg's pose in the bevy y-up frame (the resolver's own frame).
+#[derive(Debug, Clone, Copy)]
+struct LegPoseSeed {
+    hip: Vec2,
+    knee: Vec2,
+    foot: Vec2,
+}
+
+/// Angle-space sandbox↔leg bridge, captured once on the pin's first
+/// leg-driving tick.
+///
+/// The earlier bridge translated the *resolver pose* into the character frame.
+/// That is rigid between resolver poses, but it is not congruent with the live
+/// spawn pose: the resolver stands with a bent knee (~61° at `hip_height=90`,
+/// `thigh=calf=55`), while the V10 blueprint spawns nearly straight. The leg PD
+/// was therefore handed a ~61° step at t=0 and the whole walk was spent
+/// converging, which is the persistent foot divergence.
+///
+/// Instead, capture each leg's live pose at seed and transfer only the
+/// resolver's **per-segment rotation deltas** (thigh and calf) onto that pose.
+/// At seed every delta is zero, so the emitted targets equal the live pose
+/// exactly; afterwards the resolver's swing is added without changing the
+/// character's rest geometry or bone lengths.
 #[derive(Debug, Clone, Copy)]
 struct LegBridgeSeed {
-    /// Resolver foot positions at seed time (y-up), `[left, right]`.
-    resolver_feet: [Vec2; 2],
-    /// Leg-controller foot targets at seed time (bevy y-up), `[left, right]`.
-    target_feet: [Vec2; 2],
-    /// Resolver hip position at seed time (y-up). Both legs share the single
-    /// resolver hip, so this is stored once and applied to both controllers.
-    resolver_hip: Vec2,
-    /// Resolver knee positions at seed time (y-up), `[left, right]`.
-    resolver_knees: [Vec2; 2],
-    /// Leg-controller hip targets at seed time (bevy y-up), `[left, right]`.
-    target_hips: [Vec2; 2],
-    /// Leg-controller knee targets at seed time (bevy y-up), `[left, right]`.
-    target_knees: [Vec2; 2],
+    /// `live_hip_bevy - resolver_hip` (bevy y-up). Both legs share P3, so one
+    /// offset carries the hip translation.
+    hip_offset: Vec2,
+    /// Live leg poses at seed: `[left, right]`.
+    live: [LegPoseSeed; 2],
+    /// Resolver leg poses at seed: `[left, right]`.
+    resolver: [LegPoseSeed; 2],
+}
+
+/// Signed angle from `a` to `b`, in `(-π, π]`.
+#[inline]
+fn signed_angle(a: Vec2, b: Vec2) -> f32 {
+    a.perp_dot(b).atan2(a.dot(b))
+}
+
+/// Rotate `v` by `angle` radians (bevy y-up).
+#[inline]
+fn rotate_vec(v: Vec2, angle: f32) -> Vec2 {
+    let (s, c) = angle.sin_cos();
+    Vec2::new(c * v.x - s * v.y, s * v.x + c * v.y)
+}
+
+/// Rotate the seed segment `live0` by the resolver segment's rotation between
+/// `res0` (at seed) and `res1` (now). The length of `live0` is preserved, so the
+/// target stays on the character's own bone length.
+#[inline]
+fn transfer_segment(live0: Vec2, res0: Vec2, res1: Vec2) -> Vec2 {
+    if res0.length_squared() < 1e-6 || res1.length_squared() < 1e-6 {
+        return live0;
+    }
+    rotate_vec(live0, signed_angle(res0, res1))
 }
 
 /// Per-character hip pin. Attach to the character root entity. All fields are
@@ -230,15 +262,6 @@ pub fn softened_compliance(base: f32, soft_scale: f32, v_ref: f32, speed: f32) -
         0.0
     };
     base * (1.0 + s * (soft_scale - 1.0))
-}
-
-/// Foot-target mapping for the sandbox↔leg bridge: apply the resolver's foot
-/// **delta** from the seed to the leg controller's seeded foot target. Only the
-/// delta is used, so the resolver's absolute frame (floor at `y = 0`) never has
-/// to line up with the character's spawn `y`. Both vectors are bevy y-up. Pure;
-/// exposed for unit testing.
-pub fn leg_target(seed_target: Vec2, resolver_foot: Vec2, seed_resolver_foot: Vec2) -> Vec2 {
-    seed_target + (resolver_foot - seed_resolver_foot)
 }
 
 /// Seed the pin from the assembled character: capture the `P3` world anchor and
@@ -395,51 +418,101 @@ pub fn drive_hip_pin(
             else {
                 continue;
             };
-            // Anchor the hip/knee delta bridge on the character's REAL hip/knee
-            // particle positions (vello y-down → bevy y-up), not the degenerate
-            // spawn literals (`hip_target == knee_target == foot rest`), which
-            // collapse the PD's rest triangle into a straight leg. Both legs
-            // share P3 (`particles[1]`) as the hip; each knee is `particles[2]`.
+            // P2/P3 are owned by the pin for as long as the legs are driven.
+            // The leg PD uses this to drop them from the angular mass matrix.
+            right_leg.config.anchor_chain = true;
+            left_leg.config.anchor_chain = true;
+            // Capture the LIVE leg pose (vello y-down → bevy y-up). The old
+            // bridge only captured the hip offset and then translated the
+            // resolver triangle, which is rigid but not congruent with the
+            // character's spawn pose: the resolver stands with a ~61° knee bend
+            // while the V10 blueprint spawns nearly straight. That handed the
+            // leg PD a ~61° step at t=0 and the walk ran entirely inside the
+            // catch-up transient. Capture the whole pose instead, so the
+            // resolver's *rotation deltas* can be layered on top of it.
             let vello_to_bevy = |p: &VelloParticle| Vec2::new(p.particle.pos.x, -p.particle.pos.y);
-            let hip_bevy = match p_q.get(left_leg.particles[1]) {
-                Ok(p) => vello_to_bevy(p),
-                Err(_) => left_leg.hip_target,
+            let live_pose = |particles: [Entity; 4],
+                             hip_fb: Vec2,
+                             knee_fb: Vec2,
+                             foot_fb: Vec2|
+             -> LegPoseSeed {
+                let get = |e: Entity, fallback: Vec2| {
+                    p_q.get(e)
+                        .map(&vello_to_bevy)
+                        .unwrap_or(fallback)
+                };
+                LegPoseSeed {
+                    hip: get(particles[1], hip_fb),
+                    knee: get(particles[2], knee_fb),
+                    foot: get(particles[3], foot_fb),
+                }
             };
-            let left_knee_bevy = match p_q.get(left_leg.particles[2]) {
-                Ok(p) => vello_to_bevy(p),
-                Err(_) => left_leg.knee_target,
-            };
-            let right_knee_bevy = match p_q.get(right_leg.particles[2]) {
-                Ok(p) => vello_to_bevy(p),
-                Err(_) => right_leg.knee_target,
-            };
-            let seed = *pin.leg_seed.get_or_insert(LegBridgeSeed {
-                resolver_feet: [pose.left_foot, pose.right_foot],
-                target_feet: [left_leg.target, right_leg.target],
-                resolver_hip: pose.hip,
-                resolver_knees: [pose.left_knee, pose.right_knee],
-                target_hips: [hip_bevy, hip_bevy],
-                target_knees: [left_knee_bevy, right_knee_bevy],
-            });
-            left_leg.target =
-                leg_target(seed.target_feet[0], pose.left_foot, seed.resolver_feet[0]);
-            right_leg.target =
-                leg_target(seed.target_feet[1], pose.right_foot, seed.resolver_feet[1]);
-            // Hip/knee rest targets: same seed-delta bridge as the feet. The
-            // angular leg PD derives its rest angles from `hip_target` and
-            // `knee_target`; a frozen `hip_target == knee_target` collapses both
-            // to a degenerate straight-leg pose. Writing the resolver's live
-            // hip/knee deltas each tick gives the PD a real (bent) rest pose so
-            // the swing foot can actually lift off the floor.
-            left_leg.hip_target = leg_target(seed.target_hips[0], pose.hip, seed.resolver_hip);
-            right_leg.hip_target = leg_target(seed.target_hips[1], pose.hip, seed.resolver_hip);
-            left_leg.knee_target =
-                leg_target(seed.target_knees[0], pose.left_knee, seed.resolver_knees[0]);
-            right_leg.knee_target = leg_target(
-                seed.target_knees[1],
-                pose.right_knee,
-                seed.resolver_knees[1],
+            let live_left = live_pose(
+                left_leg.particles,
+                left_leg.hip_target,
+                left_leg.knee_target,
+                left_leg.target,
             );
+            let live_right = live_pose(
+                right_leg.particles,
+                right_leg.hip_target,
+                right_leg.knee_target,
+                right_leg.target,
+            );
+            let seed = *pin.leg_seed.get_or_insert(LegBridgeSeed {
+                hip_offset: live_left.hip - pose.hip,
+                live: [live_left, live_right],
+                resolver: [
+                    LegPoseSeed {
+                        hip: pose.hip,
+                        knee: pose.left_knee,
+                        foot: pose.left_foot,
+                    },
+                    LegPoseSeed {
+                        hip: pose.hip,
+                        knee: pose.right_knee,
+                        foot: pose.right_foot,
+                    },
+                ],
+            });
+
+            // Pose-aware target: keep the character's own thigh/calf lengths and
+            // add only the resolver's per-segment rotation since the seed. At
+            // seed both deltas are zero, so the targets equal the live pose and
+            // the PD starts with no error. The hip still carries the resolver's
+            // world translation.
+            let hip_t = pose.hip + seed.hip_offset;
+            let knee_l = hip_t
+                + transfer_segment(
+                    seed.live[0].knee - seed.live[0].hip,
+                    seed.resolver[0].knee - seed.resolver[0].hip,
+                    pose.left_knee - pose.hip,
+                );
+            let foot_l = knee_l
+                + transfer_segment(
+                    seed.live[0].foot - seed.live[0].knee,
+                    seed.resolver[0].foot - seed.resolver[0].knee,
+                    pose.left_foot - pose.left_knee,
+                );
+            let knee_r = hip_t
+                + transfer_segment(
+                    seed.live[1].knee - seed.live[1].hip,
+                    seed.resolver[1].knee - seed.resolver[1].hip,
+                    pose.right_knee - pose.hip,
+                );
+            let foot_r = knee_r
+                + transfer_segment(
+                    seed.live[1].foot - seed.live[1].knee,
+                    seed.resolver[1].foot - seed.resolver[1].knee,
+                    pose.right_foot - pose.right_knee,
+                );
+
+            left_leg.hip_target = hip_t;
+            right_leg.hip_target = hip_t;
+            left_leg.knee_target = knee_l;
+            right_leg.knee_target = knee_r;
+            left_leg.target = foot_l;
+            right_leg.target = foot_r;
             // Feed the resolver's per-frame joint velocities (bevy y-up, px/s)
             // into the leg PD so the angular constraint's velocity projection
             // can drive each joint's rate toward the sandbox reference
@@ -452,6 +525,15 @@ pub fn drive_hip_pin(
             right_leg.hip_vel = pose.hip_vel;
             right_leg.knee_vel = pose.right_knee_vel;
             right_leg.target_vel = pose.right_foot_vel;
+        } else {
+            // No pin → the frame is free again; let the leg PD use the full
+            // three-particle mass matrix.
+            if let Ok(mut right_leg) = right_leg_q.get_mut(entity) {
+                right_leg.config.anchor_chain = false;
+            }
+            if let Ok(mut left_leg) = left_leg_q.get_mut(entity) {
+                left_leg.config.anchor_chain = false;
+            }
         }
     }
 }
@@ -599,16 +681,34 @@ mod tests {
     }
 
     #[test]
-    fn leg_target_applies_only_the_resolver_delta() {
-        // Seed: resolver foot and character foot target are in different absolute
-        // frames; only the delta must transfer.
-        let seed_target = Vec2::new(340.0, 210.0); // bevy y-up foot target
-        let seed_foot = Vec2::new(0.0, 0.0); // resolver floor contact
-                                             // Unchanged resolver pose ⇒ target unchanged (no frame leak).
-        assert!((leg_target(seed_target, seed_foot, seed_foot) - seed_target).length() < 1e-6);
-        // Resolver foot steps forward +30, up +20 ⇒ target moves by exactly that.
-        let moved = leg_target(seed_target, Vec2::new(30.0, 20.0), seed_foot);
-        assert!((moved - (seed_target + Vec2::new(30.0, 20.0))).length() < 1e-6);
+    fn rigid_hip_offset_preserves_bone_lengths_and_angles() {
+        // A single shared translation (the seed `hip_offset`) must slide the
+        // whole resolver leg triangle rigidly: every emitted hip/knee/foot
+        // target is `pose + off`, so thigh/calf lengths and the joint angle
+        // transfer *exactly*. This is the fix for the foot divergence (the old
+        // per-joint delta bridge rebuilt the segments from independent deltas
+        // and corrupted the rest angles the leg PD derives from hip/knee).
+        let off = Vec2::new(120.0, -40.0); // arbitrary character-frame offset
+        let hip = Vec2::new(30.0, 90.0);
+        let knee = Vec2::new(45.0, 35.0);
+        let foot = Vec2::new(60.0, 5.0);
+
+        let hip_t = hip + off;
+        let knee_t = knee + off;
+        let foot_t = foot + off;
+
+        let thigh = (knee - hip).length();
+        let calf = (foot - knee).length();
+        let thigh_t = (knee_t - hip_t).length();
+        let calf_t = (foot_t - knee_t).length();
+
+        assert!((thigh_t - thigh).abs() < 1e-5, "thigh length must be preserved");
+        assert!((calf_t - calf).abs() < 1e-5, "calf length must be preserved");
+
+        // Joint angle (hip→knee→foot) is translation-invariant.
+        let angle = (knee - hip).angle_between(foot - knee);
+        let angle_t = (knee_t - hip_t).angle_between(foot_t - knee_t);
+        assert!((angle_t - angle).abs() < 1e-5, "joint angle must be preserved");
     }
 
     #[test]

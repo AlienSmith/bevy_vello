@@ -221,6 +221,16 @@ fn calculate_leg_pd(
 
     let max_delta = config.max_angle_rate * dt;
     let character_entity = particles[0].root_entity;
+    // Reduced-space masks when the parent frame is pinned by the HipPin:
+    //   hip joint  (P2, P3, knee)  -> only the knee is free: 0b100
+    //   knee joint (P3, knee, foot)-> P3 anchored, knee+foot free: 0b110
+    // Without this, the pinned P2/P3 absorb most of every correction and the
+    // pin undoes it on the next frame, leaving only a few percent of authority.
+    let (hip_free, knee_free) = if config.anchor_chain {
+        (0b100u8, 0b110u8)
+    } else {
+        (0b111u8, 0b111u8)
+    };
 
     // ---- Hip angular constraint (P2_P3_knee) ----
     {
@@ -250,6 +260,7 @@ fn calculate_leg_pd(
                     zeta: config.zeta,
                     angular_velocity: angular_velocity_hip,
                     sigma: config.sigma,
+                    free_mask: hip_free,
                     max_angle: None,
                 },
             });
@@ -281,6 +292,7 @@ fn calculate_leg_pd(
                     zeta: config.zeta,
                     angular_velocity: angular_velocity_knee,
                     sigma: config.sigma,
+                    free_mask: knee_free,
                     max_angle: None,
                 },
             });

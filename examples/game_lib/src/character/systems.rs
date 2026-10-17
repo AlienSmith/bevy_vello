@@ -508,6 +508,7 @@ fn calculate_spine_drive(
                 zeta: 0.0, // spine bend is commanded by position constraints; no ζ damping
                 angular_velocity: None,
                 sigma: 1.0,
+                free_mask: 0b111,
                 max_angle: None,
             },
         });
@@ -722,6 +723,7 @@ fn calculate_limb_ik(
                     zeta: config.zeta,
                     angular_velocity: None,
                     sigma: 1.0,
+                    free_mask: 0b111,
                     max_angle: None,
                 },
             });
@@ -754,6 +756,7 @@ fn calculate_limb_ik(
                 zeta: config.zeta,
                 angular_velocity: None,
                 sigma: 1.0,
+                free_mask: 0b111,
                 max_angle: None,
             },
         });
