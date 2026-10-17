@@ -44,7 +44,7 @@ use game_lib::{
     default_input_map, drive_hip_pin, reset_hip_pin, update_character_movement,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems, HipPin,
-    HipPinParams, PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
+    HipPinParams, PinMode, PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -215,6 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Startup, setup_resources)
         // The world boots at zero gravity; open it now to match the default.
         .add_systems(Startup, apply_default_gravity)
+        .add_systems(Startup, log_pin_setup)
         .add_systems(Startup, cannon::spawn_cannon_indicator)
         .add_systems(
             Update,
@@ -426,7 +427,7 @@ fn make_static_scene(commands: &mut Commands) {
     let ground_drop = std::env::var("GROUND_DROP")
         .ok()
         .and_then(|s| s.trim().parse::<f32>().ok())
-        .unwrap_or(0.0);
+        .unwrap_or(100.0);
     let ground_surface_y = -279.0 - ground_drop;
     const GROUND_HALF_THICKNESS: f32 = 20.0;
     make_static_collision_shape(
@@ -747,6 +748,16 @@ fn apply_default_gravity(
     });
 }
 
+/// Print the controller the app actually booted with. `PIN_MODE`/`KV`/
+/// `PIN_VERTICAL` are read once by [`HipPinParams::from_env`]; this line makes a
+/// "character floats in mid-air" report self-diagnosing (rigid pin by default).
+fn log_pin_setup(params: Res<HipPinParams>) {
+    info!(
+        "tuning pin controller: mode={:?} kv={:.2} vertical={} (set PIN_MODE=delta, PIN_VERTICAL=off for the drop test)",
+        params.mode, params.k_v, params.pin_vertical
+    );
+}
+
 /// Gravity toggle: an open/close checkbox plus a magnitude slider (so the app
 /// can be driven at the same `g` the `headless_arm_pd` body gate uses). Writes
 /// the world gravity only when something actually changes.
@@ -786,13 +797,19 @@ fn hip_pin_ui(
 ) {
     // Snapshot the single character's pin (all Copy) so no borrow is held across
     // the UI closure, which needs `&mut` access to edit the pin below.
-    let snapshot = pin_q
-        .iter_mut()
-        .next()
-        .map(|(e, p)| (e, p.enabled, p.ready, p.state.hip_pos));
+    let snapshot = pin_q.iter_mut().next().map(|(e, p)| {
+        (
+            e,
+            p.enabled,
+            p.ready,
+            p.state.hip_pos,
+            p.last_ref_p3,
+            p.last_sag_y,
+        )
+    });
 
     egui::Window::new("Hip Pin").show(contexts.ctx_mut(), |ui| {
-        let Some((entity, mut enabled, ready, hip_pos)) = snapshot else {
+        let Some((entity, mut enabled, ready, hip_pos, ref_p3, sag_y)) = snapshot else {
             ui.label("no character / hip pin yet");
             return;
         };
@@ -827,6 +844,27 @@ fn hip_pin_ui(
             ),
         );
         ui.label("Drive with W/A/S/D (leafwing PlayerAction). Arrow keys are unused.");
+        ui.separator();
+
+        // Live controller selection: the delta pin is the one gravity/contacts
+        // can move; the rigid pin holds the absolute pose (floats in mid-air).
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut params.mode, PinMode::Rigid, "Rigid (absolute)");
+            ui.selectable_value(&mut params.mode, PinMode::Delta, "Delta (velocity servo)");
+        });
+        ui.add(egui::Slider::new(&mut params.k_v, 0.0..=1.0).text("k_v (delta gain)"));
+        ui.checkbox(
+            &mut params.pin_vertical,
+            "pin vertical axis (off = gravity is ballistic)",
+        );
+        ui.colored_label(
+            egui::Color32::LIGHT_BLUE,
+            format!(
+                "P3 actual y {:.1}, resolver ref y {:.1}, sag {sag_y:+.1} px",
+                ref_p3.y + sag_y,
+                ref_p3.y
+            ),
+        );
         ui.separator();
 
         if ui
