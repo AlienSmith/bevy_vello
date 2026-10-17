@@ -26,6 +26,8 @@ serde_json = { workspace = true }
 #particle won't work with multi-threaded
 bevy = { workspace = true}
 vello_physics = { workspace = true }
+# Headless collision: wgpu 24 matches the version used by `bevy_vello`/vello.
+wgpu = "24.0"
 
 bevy_behave = { git = "https://github.com/AlienSmith/bevy_behave", branch = "bevy-0.16-fix" }
 bevy_vello = { path = "../../"}

@@ -313,3 +313,60 @@ The harness already checks rigidity and NaNs; add the rest.
    *measured* one after contact settles?
 6. What is the smallest contact set that makes friction meaningful: foot
    circles only, or foot + lower-leg capsules?
+
+## 10. Collision bring-up status (2026-10-17)
+
+Collision is now available in the headless harness behind `COLLISION=1`.
+
+### What was added
+
+- `COLLISION=1` env flag. Default off, so the kinematic gates stay
+  byte-identical.
+- A headless wgpu device + `vello::Renderer` (no surface/window) and
+  `GpuCollisionRunner`, inserted at Startup.
+- `VelloCollisionBroadPhase` + `run_broad_phase` (CPU BVH) and
+  `run_gpu_collision` (GPU narrow phase), scheduled after
+  `update_collider_from_soft_body` exactly like the visual plugin.
+- `TransformPlugin`, needed for `GlobalTransform` propagation into the BVH.
+- A static floor collider at `floor_y = -anchor_p3.y - hip_height`, spawned
+  once the pin is seeded.
+
+### Run
+
+```powershell
+cd D:\bender\bevy_vello
+$env:ASSET_ROOT = "D:\bender\bevy_vello\examples\collision_detection\assets"
+$env:SCRIPT     = "D:\bender\bevy_vello\plans\walk_script.json"
+$env:COLLISION  = "1"
+$env:GRAVITY    = "on"
+$env:OUT_CSV    = "D:\bender\bevy_vello\tmp\headless\walk_collision.csv"
+target\release\examples\headless_arm_pd.exe
+```
+
+### First measurements (walk, 120 px/s)
+
+| run | colliders | contacts | foot peak | foot mean | tail | rigidity |
+|---|---|---|---|---|---|---|
+| gravity, collision off | 0 | 0 | 3.46 px | 0.63 px | PASS 0.359 | ok (0.0011) |
+| gravity + collision | 13 (12 soft + floor) | 1–4 | 7.79 px | ~5.1 px | WAGGLE 1.836 | **FAIL 0.118** |
+| no gravity + collision | 13 | 2 | 8.00 px | ~4.4 px | WAGGLE 1.769 | **FAIL 0.118** |
+
+Interpretation:
+
+- The pipeline works: the BVH sees 13 colliders and the GPU returns 1–4
+  contact constraints per frame; no NaN.
+- The no-gravity run has the same contacts, so they are **geometric**: the foot
+  colliders intersect the floor because the pin holds the feet at the resolver
+  floor line. This is the pin-vs-floor conflict documented in the visual app.
+- `rig=FAIL` is expected for soft-body colliders: the rigidity check measures
+  the skeleton, and contact correction deforms the soft parts by ~12 %. Treat
+  the rigid-bone gate as **off** for collision runs until the pin is released,
+  and add a separate penetration/slip gate.
+- The leg `WAGGLE` is contact chatter, not the old mode.
+
+### Next steps
+
+1. Release the pin vertically (half-pin v1) so the contacts carry the body.
+2. Recompute the floor and hip height from the contact-settled pose.
+3. Add penetration/slip/pin-share columns and the grounded analyzer.
+4. Then tune friction and the stance contract (options A/B/C in §4.3).

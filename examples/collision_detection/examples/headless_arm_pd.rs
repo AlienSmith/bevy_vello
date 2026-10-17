@@ -94,8 +94,11 @@
 //! (main CSV), `SWEEP=1`, `GRID="kp:kd,kp:kd,..."`.
 //! Whole-body: `HIPPIN=1` (force even without a `move`/`jump`), `GRAVITY`
 //! (`on`|`off`|`x,y` vello frame), `LEGS` (`off` = pin only `P1/P2/P3`),
-//! `COMPLIANCE`, `DAMPING`. Output defaults under `/home/ubuntu/bender/tmp/headless/`.
+//! `COMPLIANCE`, `DAMPING`. `COLLISION=1` adds a headless wgpu/vello GPU
+//! narrow phase, the CPU BVH broad phase, and a static floor at the resolver
+//! floor line. Output defaults under `/home/ubuntu/bender/tmp/headless/`.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy::{
@@ -104,6 +107,7 @@ use bevy::{
     input::{ButtonInput, InputSystem},
     prelude::*,
     time::TimeUpdateStrategy,
+    transform::TransformPlugin,
     MinimalPlugins,
 };
 
@@ -111,14 +115,20 @@ use leafwing_input_manager::{plugin::InputManagerSystem, prelude::ActionState};
 
 use serde::Deserialize;
 
+use bevy_vello::vello::kurbo::Shape as _;
+
 use bevy_vello::{
-    collision::{CollisionEventBatch, RemovedColliders, VelloCollisionWorld, VelloRayTraceCommand},
+    collision::{
+        path_to_ccw_quad_path, CollisionEventBatch, GpuCollisionRunner, RemovedColliders,
+        VelloCollider, VelloCollisionBroadPhase, VelloCollisionWorld, VelloRayTraceCommand,
+        VELLO_COLLISION_COOL_DOWN_TIME,
+    },
     integrations::physics::{
         systems::{
             apply_explicit_impulse_on_connection_particle, apply_explicit_impulse_on_softbody,
             generate_connection, generate_soft_body_for_collider, make_collision_constraints,
-            remove_soft_body, update_collider_from_soft_body, update_connection_particles,
-            update_constraint_world,
+            remove_soft_body, run_broad_phase, run_gpu_collision, update_collider_from_soft_body,
+            update_connection_particles, update_constraint_world,
         },
         CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
         CharacterPivotImpulseEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
@@ -126,6 +136,8 @@ use bevy_vello::{
     },
     prelude::*,
 };
+
+use wgpu;
 
 use game_lib::{
     capture_telemetry, cell_verdict,
@@ -756,6 +768,10 @@ fn main() {
     let gravity = if body { gravity_from_env() } else { Vec2::ZERO };
 
     let mut app = App::default();
+    // Colliders need `GlobalTransform` propagation for the broad-phase BVH.
+    if !app.is_plugin_added::<TransformPlugin>() {
+        app.add_plugins(TransformPlugin);
+    }
     app.add_plugins(
         MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 240.0,
@@ -852,6 +868,18 @@ fn main() {
     }
 
     app.add_systems(Startup, register_character_assets);
+    if collision_enabled() {
+        // Headless GPU: no window/surface, but a real wgpu device + vello
+        // renderer, so the same GPU narrow phase as the visual app runs.
+        app.add_systems(Startup, setup_headless_collision);
+        app.add_systems(
+            FixedUpdate,
+            (spawn_collision_floor, run_broad_phase, run_gpu_collision)
+                .chain()
+                .after(update_collider_from_soft_body),
+        );
+        app.add_systems(FixedPostUpdate, log_collision_stats);
+    }
     app.add_systems(Update, mark_assets_loaded);
     // Apply the current script command in `FixedPreUpdate`, i.e. before the
     // controller reads the target this same fixed step (FixedPreUpdate runs
@@ -878,6 +906,126 @@ fn main() {
             .run_if(telemetry_active),
     );
     app.run();
+}
+
+/// Headless collision is opt-in so the deterministic kinematic gates stay
+/// byte-identical.
+fn collision_enabled() -> bool {
+    matches!(
+        std::env::var("COLLISION").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Build a headless wgpu device + vello renderer for the GPU narrow phase.
+/// No surface/window: the collision path only needs a device and queue.
+fn setup_headless_collision(mut commands: Commands) {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+    let adapter = bevy::tasks::block_on(wgpu::util::initialize_adapter_from_env_or_default(
+        &instance,
+        None,
+    ))
+    .expect("headless collision: no wgpu adapter");
+    let (device, queue) = bevy::tasks::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("headless collision"),
+            required_features: adapter.features(),
+            required_limits: adapter.limits(),
+            memory_hints: wgpu::MemoryHints::default(),
+        },
+        None,
+    ))
+    .expect("headless collision: no wgpu device");
+    let renderer = bevy_vello::vello::Renderer::new(
+        &device,
+        &bevy_vello::vello::RendererOptions {
+            surface_format: None,
+            timestamp_period: queue.get_timestamp_period(),
+            use_cpu: false,
+        },
+    )
+    .expect("headless collision: vello renderer");
+    commands.insert_resource(GpuCollisionRunner::new(
+        Arc::new(Mutex::new(renderer)),
+        device,
+        queue,
+    ));
+    commands.insert_resource(VelloCollisionBroadPhase::default());
+    info!("headless collision: GPU runner + CPU BVH enabled");
+}
+
+/// Spawn the static floor at the resolver's floor line once the pin is seeded.
+/// `anchor_p3` is Vello y-down; `-anchor_p3.y` is the Bevy y of the hip, and
+/// the resolver floor is `hip_height` below it.
+fn spawn_collision_floor(
+    mut commands: Commands,
+    mut done: Local<bool>,
+    pin_q: Query<&HipPin>,
+    params: Option<Res<HipPinParams>>,
+) {
+    if *done {
+        return;
+    }
+    let Some(params) = params else {
+        return;
+    };
+    let Ok(pin) = pin_q.get_single() else {
+        return;
+    };
+    if !pin.ready {
+        return;
+    }
+    let hip_y = -pin.anchor_p3.y;
+    let floor_y = hip_y - params.config.hip_height;
+    let rect = kurbo::Rect::new(-2400.0, -20.0, 2400.0, 20.0);
+    let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
+    let transform = Transform::from_xyz(0.0, floor_y, 0.0);
+    commands.spawn((
+        VelloCollider::new(
+            &shape,
+            None,
+            &rect,
+            Vec2::ZERO,
+            peniko::Brush::Solid(peniko::Color::TRANSPARENT),
+            0.0,
+            false,
+            None,
+            None,
+            None,
+            0,
+            transform,
+            VELLO_COLLISION_COOL_DOWN_TIME,
+        ),
+        transform,
+        GlobalTransform::from(transform),
+    ));
+    *done = true;
+    info!(
+        "headless collision: floor y={floor_y:.2} (hip y={hip_y:.2}, hip_height={:.2})",
+        params.config.hip_height
+    );
+}
+
+fn log_collision_stats(
+    time: Res<Time<Fixed>>,
+    batch: Res<CollisionEventBatch>,
+    colliders: Query<&VelloCollider>,
+    mut ticks: Local<u64>,
+) {
+    *ticks += 1;
+    if *ticks % FIXED_HZ as u64 != 0 {
+        return;
+    }
+    let total = colliders.iter().count();
+    let soft = colliders.iter().filter(|c| c.is_soft_body()).count();
+    info!(
+        "collision t={:.1}s colliders={total} soft={soft} contacts={}",
+        time.elapsed_secs(),
+        batch.entries.len()
+    );
 }
 
 fn register_character_assets(
