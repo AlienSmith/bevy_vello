@@ -357,6 +357,16 @@ pub struct LeftArmController {
     pub target: Vec2,
 }
 
+/// Per-leg memory for the angular PD's velocity feed-forward. Holds the
+/// previous tick's target hip/knee angles so the reference joint rate can be
+/// derived from the (smooth) target angles instead of finite-differenced
+/// resolver particle velocities, which spike at stance/lift transitions.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LegPdMemory {
+    pub prev_target_hip: Option<f32>,
+    pub prev_target_knee: Option<f32>,
+}
+
 /// Right leg controller with pre-cached entity handles + per-frame input.
 ///
 /// A leg is structurally identical to an arm — four particles in IK order
@@ -373,6 +383,8 @@ pub struct RightLegController {
     pub particles: [Entity; 4],
     pub joints: [Entity; 2],
     pub config: LimbConfig,
+    /// Previous target angles for the velocity feed-forward.
+    pub pd_memory: LegPdMemory,
     /// Foot target in world space. Written by the gait/AI layer.
     pub target: Vec2,
     /// Foot target velocity (world, y-up). Written by the resolver so the leg PD
@@ -395,6 +407,8 @@ pub struct LeftLegController {
     pub particles: [Entity; 4],
     pub joints: [Entity; 2],
     pub config: LimbConfig,
+    /// Previous target angles for the velocity feed-forward.
+    pub pd_memory: LegPdMemory,
     /// Foot target in world space. Written by the gait/AI layer.
     pub target: Vec2,
     /// Foot target velocity (world, y-up). Written by the resolver so the leg PD

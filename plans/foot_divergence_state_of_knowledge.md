@@ -308,7 +308,7 @@ py -c "import csv,math; r=list(csv.DictReader(open(r'bevy_vello\tmp\headless\wal
 | `LEGS` | `off` = pin only `P1/P2/P3` | on |
 | `COMPLIANCE`, `DAMPING`, `TARGET_SPEED` | hip-pin params | struct defaults |
 | `LEG_ZETA` | solver damping ratio ζ (leg default) | **0.5** |
-| `LEG_SIGMA` | projection strength σ (projection currently disabled) | 0 — no-op |
+| `LEG_SIGMA` | projection strength σ (0 = off; angle-derived reference) | 0 (off) |
 | `LEG_COMPLIANCE` | angular stiffness (Kp of the XPBD spring) | **1e-10** |
 | `LEG_C_DOT_SCALE` | commanded joint-rate gain | 1.0 |
 | `LEG_NO_CHASE` | command rest angle directly (no chase/rate clamp) | off |
@@ -431,15 +431,30 @@ Ablation (bridge + anchor already applied, `ζ=0.5`; numbers are the harness's
    error is 0.43 px.
 4. **The asymmetric case?** Gone: peak left 1.20 px, peak right 3.48 px.
 
-### 11.6 The velocity projection is still disabled
+### 11.6 Velocity projection: reference fixed, still not a win
 
-With the resolver-derived target velocities, enabling
-`apply_velocity_projection` (`LEG_SIGMA > 0`) regressed the walk — peak 100 px at
-σ=1 and 82 px at σ=0.5, versus 57 px with it off. The call in
+The reference rate is now derived from the **target angles** (per-tick
+difference with wrap, a 0.25 rad jump gate, and a 20 rad/s clamp) instead of the
+resolver's finite-differenced particle velocities, and the projection call in
 [`post_step`](../../study_vello/integrations/vello_physics/src/soft_body_connection.rs:387)
-is therefore intentionally left commented out, and `LEG_SIGMA` is a no-op in
-the current tree. Do not treat it as a fix until the command signs/rates have
-their own gate.
+is enabled (inert at σ=0). The remaining problem is the projection mechanism
+itself: it treats the XPBD solve's post-correction displacement
+`pos − previous_pos` as the joint velocity and rewrites `previous_pos`, which is
+the state the next frame integrates.
+
+Measured (peak hypot / mid mean):
+
+| config | σ=0 | σ=1 |
+|---|---|---|
+| compliance 1e-10 (shipped) | 3.48 / 0.61 | 3.47 / 0.74 |
+| compliance 1e-9 | — | 6.96 / 2.22 |
+| compliance 1e-8 | 12.49 / 5.90 | 17.88 / 8.85 |
+
+So the feed-forward is right in theory but not useful in this solver as written.
+Keep the leg `sigma=0` (the default); the `angular_velocity` command is now
+clean and ready for a velocity-level constraint that adjusts
+`particle.velocity` before the next prediction instead of rewriting the
+post-solve `previous_pos`.
 
 ### 11.7 Reproduce
 

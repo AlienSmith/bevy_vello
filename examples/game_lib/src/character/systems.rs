@@ -859,7 +859,7 @@ pub fn update_character_movement(
     }
 
     // ---- Right leg ----
-    for (leg, p_root) in &mut right_leg_q {
+    for (mut leg, p_root) in &mut right_leg_q {
         let targets = leg_pd_targets(
             leg.hip_target,
             leg.knee_target,
@@ -868,11 +868,17 @@ pub fn update_character_movement(
             leg.knee_vel,
             leg.target_vel,
         );
+        // Copy the handles/config out so the mutable `pd_memory` borrow is
+        // disjoint from them (a `Mut<T>` deref cannot split field borrows).
+        let particles = leg.particles;
+        let joints = leg.joints;
+        let config = leg.config.clone();
         drive_leg_pd(
             &targets,
-            &leg.particles,
-            &leg.joints,
-            &leg.config,
+            &particles,
+            &joints,
+            &config,
+            &mut leg.pd_memory,
             dt,
             p_root,
             &p_q,
@@ -882,7 +888,7 @@ pub fn update_character_movement(
     }
 
     // ---- Left leg ----
-    for (leg, p_root) in &mut left_leg_q {
+    for (mut leg, p_root) in &mut left_leg_q {
         let targets = leg_pd_targets(
             leg.hip_target,
             leg.knee_target,
@@ -891,11 +897,15 @@ pub fn update_character_movement(
             leg.knee_vel,
             leg.target_vel,
         );
+        let particles = leg.particles;
+        let joints = leg.joints;
+        let config = leg.config.clone();
         drive_leg_pd(
             &targets,
-            &leg.particles,
-            &leg.joints,
-            &leg.config,
+            &particles,
+            &joints,
+            &config,
+            &mut leg.pd_memory,
             dt,
             p_root,
             &p_q,
