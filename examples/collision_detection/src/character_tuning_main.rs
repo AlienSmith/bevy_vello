@@ -405,9 +405,22 @@ fn make_static_scene(commands: &mut Commands) {
     //     false,
     // );
 
+    // Ground line matching the headless walk. The character root is at
+    // translation y=0, scale 0.5 (setup_entity), and the headless live stance
+    // puts the foot particles at local Bevy y=-279 (hip -173 minus the 106 px
+    // live stance). World foot y = -279 * 0.5 = -139.5. The collider is a
+    // 40px-thick rect, so its center sits one half-thickness below the surface:
+    // -139.5 - 20 = -159.5. The feet therefore rest on the rect's TOP edge.
+    const GROUND_SURFACE_Y: f32 = -139.5;
+    const GROUND_HALF_THICKNESS: f32 = 20.0;
     make_static_collision_shape(
         commands,
-        Vec4::new(0.0, -540.0, 0.0, 1.0),
+        Vec4::new(
+            0.0,
+            GROUND_SURFACE_Y - GROUND_HALF_THICKNESS,
+            0.0,
+            1.0,
+        ),
         make_long_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),

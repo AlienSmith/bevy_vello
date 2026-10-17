@@ -983,7 +983,12 @@ fn spawn_collision_floor(
     // the live hip→foot distance, not the resolver's `hip_height` (the resolver
     // stands with a bent knee; the character's seed pose is straight).
     let stance_h = pin.stance_height().unwrap_or(params.config.hip_height);
-    let floor_y = hip_y - stance_h;
+    // The collider is a 40px-thick rect (local y -20..20). Its TOP surface must
+    // be at the foot line, so the center is one half-thickness below it
+    // (Bevy y-up: subtract; the earlier version put the feet 20px inside).
+    const FLOOR_HALF_THICKNESS: f32 = 20.0;
+    let floor_surface_y = hip_y - stance_h;
+    let floor_y = floor_surface_y - FLOOR_HALF_THICKNESS;
     let rect = kurbo::Rect::new(-2400.0, -20.0, 2400.0, 20.0);
     let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
     let transform = Transform::from_xyz(0.0, floor_y, 0.0);
@@ -1008,7 +1013,7 @@ fn spawn_collision_floor(
     ));
     *done = true;
     info!(
-        "headless collision: floor y={floor_y:.2} (hip y={hip_y:.2}, live_stance_h={stance_h:.2}, resolver_hip_height={:.2}, hip_drop={:.2})",
+        "headless collision: floor center y={floor_y:.2}, surface y={floor_surface_y:.2} (hip y={hip_y:.2}, live_stance_h={stance_h:.2}, resolver_hip_height={:.2}, hip_drop={:.2})",
         params.config.hip_height, params.hip_drop
     );
 }

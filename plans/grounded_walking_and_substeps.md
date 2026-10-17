@@ -328,12 +328,14 @@ Collision is now available in the headless harness behind `COLLISION=1`.
   `run_gpu_collision` (GPU narrow phase), scheduled after
   `update_collider_from_soft_body` exactly like the visual plugin.
 - `TransformPlugin`, needed for `GlobalTransform` propagation into the BVH.
-- A static floor collider at
-  `floor_y = -anchor_p3.y - live_stance_height`, spawned once the pin is
-  seeded. `live_stance_height` is the character's own hip→foot distance at the
-  bridge seed (~106 px), **not** the resolver's `hip_height=90`: the
-  pose-aware bridge preserves the live (nearly straight) leg, so the resolver's
-  bent-stance height would put the target feet ~16 px below the floor.
+- A static floor collider with its **top surface** on the foot line, spawned
+  once the pin is seeded:
+  `surface_y = -anchor_p3.y - live_stance_height`,
+  `floor_y (center) = surface_y - 20` (the rect is 40 px thick). `live_stance_height`
+  is the character's own hip→foot distance at the bridge seed (~106 px), **not**
+  the resolver's `hip_height=90`: the pose-aware bridge preserves the live
+  (nearly straight) leg, so the resolver's bent-stance height would put the
+  target feet ~16 px below the floor.
 - `HIP_DROP=<px>` lowers the whole pinned body and both leg targets relative to
   the fixed floor (positive = into the floor). `0` is the natural stance; it is
   a deliberate-penetration knob for the stroke round-end margin.
@@ -352,12 +354,19 @@ target\release\examples\headless_arm_pd.exe
 
 ### First measurements (walk, 120 px/s)
 
-| run | floor at | contacts | foot peak | foot mean | tail | rigidity |
+| run | floor surface | contacts | foot peak | foot mean | tail | rigidity |
 |---|---|---|---|---|---|---|
 | gravity, collision off | — | 0 | 3.46 px | 0.63 px | PASS 0.359 | ok (0.0011) |
 | collision, resolver `hip_height` | 90 px | 1–4 | 7.79 px | ~5.1 px | WAGGLE 1.836 | FAIL 0.118 |
-| collision, **live stance** (shipped) | **106 px** | 2 | **5.86 px** | **~3.7 px** | WAGGLE **0.720** | FAIL 0.093 |
-| collision, live stance + `HIP_DROP=1.5` | 106 px | 2 | 6.16 px | ~3.9 px | WAGGLE 0.443 | FAIL 0.096 |
+| collision, live stance, center at foot line | 126 px\* | 2 | 5.86 px | ~3.7 px | WAGGLE 0.720 | FAIL 0.093 |
+| collision, live stance + `HIP_DROP=1.5` | 126 px\* | 2 | 6.16 px | ~3.9 px | WAGGLE 0.443 | FAIL 0.096 |
+| collision, **live stance, top surface at foot line** (shipped) | **106 px** | 2 | **3.58 px** | **~1.2 px** | WAGGLE 0.298 | FAIL 0.033 |
+
+\*The earlier runs placed the *center* of the 40 px-thick rect on the foot line,
+so the rect's top surface was 20 px above the feet and the strokes were already
+20 px penetrated at spawn. Subtracting the half-thickness fixes that: the same
+walk now reports early/mid/late means of 1.16 / 1.26 / 1.25 px and a peak of
+3.58 px (deterministic across reruns).
 
 Interpretation:
 
@@ -372,9 +381,14 @@ Interpretation:
 - The remaining contacts are the leg collider's **stroke width + round end**
   below the foot particle. That margin is intentionally ignored for now; the
   foot particles are the reference.
-- `rig=FAIL` (~9 % bone-length deviation) is the soft-body contact deformation,
-  not a kinematic failure. Gate collision runs on penetration/slip/pin-share,
-  not on the rigid-bone check.
+- `rig=FAIL` (3.3 % bone-length deviation after the half-thickness fix, down
+  from 9.3 %) is the soft-body contact deformation, not a kinematic failure.
+  The worst bone is `P40-PLLL` (the foot stroke), exactly the contact site. Gate
+  collision runs on penetration/slip/pin-share, not on the rigid-bone check.
+- The visual `character_tuning_main` app now uses the same geometry: the
+  character root keeps `translation=(0,0,100)`, `scale=0.5`, so the headless
+  local foot y=−279 becomes world −139.5; the red ground rect center is placed
+  at `-139.5 − 20 = -159.5` (`GROUND_SURFACE_Y − GROUND_HALF_THICKNESS`).
 - `HIP_DROP>0` pushes the body further into the floor and does not help; keep
   it at `0` until the pin is released vertically.
 
