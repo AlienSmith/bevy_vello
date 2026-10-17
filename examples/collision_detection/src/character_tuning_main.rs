@@ -405,13 +405,19 @@ fn make_static_scene(commands: &mut Commands) {
     //     false,
     // );
 
-    // Ground line matching the headless walk. The character root is at
-    // translation y=0, scale 0.5 (setup_entity), and the headless live stance
-    // puts the foot particles at local Bevy y=-279 (hip -173 minus the 106 px
-    // live stance). World foot y = -279 * 0.5 = -139.5. The collider is a
-    // 40px-thick rect, so its center sits one half-thickness below the surface:
-    // -139.5 - 20 = -159.5. The feet therefore rest on the rect's TOP edge.
-    const GROUND_SURFACE_Y: f32 = -139.5;
+    // Ground line matching the headless walk.
+    //
+    // `assemble_character` bakes the root transform into the particles
+    // (`transform_to_affine`, observers.rs), so the root's scale 0.5 is already
+    // applied there. Blueprint feet are y=558, and the headless live stance
+    // reports the foot particles at Vello y=+279 (hip +173, stance 106) — that
+    // is the *world* physics position, not a pre-scale value. Static colliders
+    // are authored in Bevy space, and `mat4_to_affine` flips the y translation
+    // when building the physics frame, so the matching Bevy surface is -279.
+    //
+    // The collider is a 40px-thick rect, so its center sits one half-thickness
+    // below the surface: -279 - 20 = -299 (exactly the headless floor).
+    const GROUND_SURFACE_Y: f32 = -279.0;
     const GROUND_HALF_THICKNESS: f32 = 20.0;
     make_static_collision_shape(
         commands,
@@ -429,6 +435,10 @@ fn make_static_scene(commands: &mut Commands) {
         Vec2::new(0.0, 0.0),
         0.0,
         false,
+    );
+    info!(
+        "tuning ground: surface y={GROUND_SURFACE_Y:.1}, rect center y={:.1}",
+        GROUND_SURFACE_Y - GROUND_HALF_THICKNESS
     );
 
     make_static_collision_shape(

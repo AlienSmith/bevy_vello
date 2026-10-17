@@ -385,10 +385,13 @@ Interpretation:
   from 9.3 %) is the soft-body contact deformation, not a kinematic failure.
   The worst bone is `P40-PLLL` (the foot stroke), exactly the contact site. Gate
   collision runs on penetration/slip/pin-share, not on the rigid-bone check.
-- The visual `character_tuning_main` app now uses the same geometry: the
-  character root keeps `translation=(0,0,100)`, `scale=0.5`, so the headless
-  local foot y=−279 becomes world −139.5; the red ground rect center is placed
-  at `-139.5 − 20 = -159.5` (`GROUND_SURFACE_Y − GROUND_HALF_THICKNESS`).
+- The visual `character_tuning_main` app now uses the same geometry:
+  `GROUND_SURFACE_Y = -279`, rect center `-299` (top edge on the feet).
+  Careful with the scale: `assemble_character` **bakes the root transform**
+  (`scale=0.5`) into the particles via `transform_to_affine`, so the headless
+  foot at Vello y=+279 is already the world physics position. Dividing by 0.5
+  a second time (the first attempt used -139.5) puts the rect at the pelvis and
+  leaves the character sunk to the hips.
 - `HIP_DROP>0` pushes the body further into the floor and does not help; keep
   it at `0` until the pin is released vertically.
 
