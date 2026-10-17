@@ -484,3 +484,53 @@ WAGGLE).
 2. Then the stance/support work: `anchor_chain` off for the stance leg and a
    support-share force.
 3. Keep `SUBSTEPS=1` until the command becomes a per-substep force/impulse.
+
+### 11.6 Gravity gate: 100 px floor drop (2026-10-17)
+
+Test: `HIPPIN=1`, `COLLISION=1`, `GRAVITY=on`, a 3 s stand script, and the floor
+surface lowered 100 px below the seed foot line (`GROUND_DROP=100`, i.e. 1 m in
+this world). The floor is still spawned from the live stance, so only its height
+changes.
+
+| run | P3 y at t=1 / 2 / 3 | sag at t=3 | contacts | verdict |
+|---|---|---|---|---|
+| rigid | 173.2 / 173.2 / 173.1 | 0.2 | 0 | **floats** 100 px above the lowered floor |
+| delta k_v=0.3, vertical on | 218.3 / 264.6 / 273.1 | 100.2 | 0 / 0 / 4 | falls, but ~40 px/s |
+| delta k_v=0.3, `PIN_VERTICAL=off` | 266.9 / 272.2 / 273.3 | 100.3 | 2 / 4 / 4 | **ballistic**, lands in <1 s |
+| delta k_v=1.0, vertical on | 187.4 / 201.6 / 216.2 | 43.2 | 0 | slower still |
+
+**Gravity is applied** — the rigid pin floats, the delta pin falls by exactly the
+drop and lands on contacts. But the symmetric delta law is a **velocity**
+matcher, not a force: with `v_ref,y = 0` the vertical equilibrium under gravity
+is `v_y = g·dt/k_v` (980/90/0.3 ≈ 36 px/s; k_v=1 ⇒ 11 px/s). That is exactly the
+measured fall rate. The `g·dt²` in `p*` is real, but the position constraint also
+rewrites the realized velocity from the target, so gravity cannot accumulate
+ballistically.
+
+`PIN_VERTICAL=off` zeroes the y component of the velocity-error command; gravity
+then integrates freely and the drop completes in under a second (94 px by t=1).
+That is the first concrete "release the vertical" (half-pin) step. A unit test
+locks both behaviours (masked y accumulates `10·g·dt`; commanded y stays under
+half of it).
+
+Consequences for the walk: with the vertical unactuated the body sinks further
+and tracking degrades (delta k_v=0.3, vertical off: peak 82.1 px vs 52.2 px,
+rig 0.0286, tail PASS, contacts 5). So the correct shape is **one-sided**: hold
+height when the body is above/at the plan, but never damp free fall; or rely on
+stance-leg support (the `anchor_chain`/support-share work).
+
+### 11.7 Visual app
+
+`character_tuning_main` now uses `HipPinParams::from_env()`, and its ground rect
+honours `GROUND_DROP`. To see the drop:
+
+```powershell
+$env:PIN_MODE      = "delta"
+$env:PIN_VERTICAL  = "off"
+$env:KV            = "0.3"
+$env:GROUND_DROP   = "100"
+cargo run -p collision_detection --bin character_tuning_main --release
+```
+
+The startup logs print `tuning ground: surface y=...` and the pin controller
+mode/vertical flag, so a run is self-describing.

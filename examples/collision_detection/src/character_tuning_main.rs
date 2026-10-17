@@ -187,7 +187,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(PistolState::default())
         .insert_resource(cannon::CannonParams::default())
         .insert_resource(GravityToggle::default())
-        .insert_resource(HipPinParams::default())
+        // Same env-driven controller as the headless harness: `PIN_MODE`,
+        // `KV`, `HIP_DROP`, `TARGET_SPEED`, `LEGS`. Default = rigid pin.
+        .insert_resource(HipPinParams::from_env())
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
@@ -308,7 +310,7 @@ fn setup_entity(mut commands: Commands, mut pistol_state: ResMut<PistolState>) {
                 PlayerMarker,
                 default_input_map(),
                 ActionState::<PlayerAction>::default(),
-                HipPin::new(&HipPinParams::default().config),
+                HipPin::new(&HipPinParams::from_env().config),
             ))
             .id(),
     );
@@ -417,13 +419,21 @@ fn make_static_scene(commands: &mut Commands) {
     //
     // The collider is a 40px-thick rect, so its center sits one half-thickness
     // below the surface: -279 - 20 = -299 (exactly the headless floor).
-    const GROUND_SURFACE_Y: f32 = -279.0;
+    // `GROUND_DROP=<px>` lowers the floor below the seed foot line (1 m = 100 px
+    // in this world). With the rigid pin the frame cannot follow and the
+    // character floats; with the delta pin gravity must make it fall. Used as
+    // the gravity/free-fall gate.
+    let ground_drop = std::env::var("GROUND_DROP")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let ground_surface_y = -279.0 - ground_drop;
     const GROUND_HALF_THICKNESS: f32 = 20.0;
     make_static_collision_shape(
         commands,
         Vec4::new(
             0.0,
-            GROUND_SURFACE_Y - GROUND_HALF_THICKNESS,
+            ground_surface_y - GROUND_HALF_THICKNESS,
             0.0,
             1.0,
         ),
@@ -437,8 +447,8 @@ fn make_static_scene(commands: &mut Commands) {
         false,
     );
     info!(
-        "tuning ground: surface y={GROUND_SURFACE_Y:.1}, rect center y={:.1}",
-        GROUND_SURFACE_Y - GROUND_HALF_THICKNESS
+        "tuning ground: surface y={ground_surface_y:.1} (drop={ground_drop:.1}), rect center y={:.1}",
+        ground_surface_y - GROUND_HALF_THICKNESS
     );
 
     make_static_collision_shape(

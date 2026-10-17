@@ -833,8 +833,8 @@ fn main() {
             .unwrap_or(1)
             .max(1);
         info!(
-            "pin controller: mode={:?} kv={:.2} substeps={} (PIN_MODE=rigid|delta, KV=0..1)",
-            params.mode, params.k_v, substeps
+            "pin controller: mode={:?} kv={:.2} vertical={} substeps={} (PIN_MODE=rigid|delta, KV=0..1, PIN_VERTICAL=off)",
+            params.mode, params.k_v, params.pin_vertical, substeps
         );
         app.insert_resource(params);
     }
@@ -994,11 +994,16 @@ fn spawn_collision_floor(
     // the live hip→foot distance, not the resolver's `hip_height` (the resolver
     // stands with a bent knee; the character's seed pose is straight).
     let stance_h = pin.stance_height().unwrap_or(params.config.hip_height);
+    // `GROUND_DROP=<px>` lowers the floor below the seed foot line. With the
+    // rigid pin the frame cannot follow, so the character floats; with the delta
+    // pin gravity is real and the body must fall by the drop. This is the
+    // gravity/free-fall gate.
+    let floor_drop = env_f32("GROUND_DROP", 0.0);
     // The collider is a 40px-thick rect (local y -20..20). Its TOP surface must
     // be at the foot line, so the center is one half-thickness below it
     // (Bevy y-up: subtract; the earlier version put the feet 20px inside).
     const FLOOR_HALF_THICKNESS: f32 = 20.0;
-    let floor_surface_y = hip_y - stance_h;
+    let floor_surface_y = hip_y - stance_h - floor_drop;
     let floor_y = floor_surface_y - FLOOR_HALF_THICKNESS;
     let rect = kurbo::Rect::new(-2400.0, -20.0, 2400.0, 20.0);
     let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
@@ -1024,7 +1029,7 @@ fn spawn_collision_floor(
     ));
     *done = true;
     info!(
-        "headless collision: floor center y={floor_y:.2}, surface y={floor_surface_y:.2} (hip y={hip_y:.2}, live_stance_h={stance_h:.2}, resolver_hip_height={:.2}, hip_drop={:.2})",
+        "headless collision: floor center y={floor_y:.2}, surface y={floor_surface_y:.2} (hip y={hip_y:.2}, live_stance_h={stance_h:.2}, ground_drop={floor_drop:.2}, resolver_hip_height={:.2}, hip_drop={:.2})",
         params.config.hip_height, params.hip_drop
     );
 }
@@ -2239,28 +2244,8 @@ fn gravity_from_env() -> Vec2 {
 /// Pin params from env (body mode). `LEGS=off` keeps the pin on `P1/P2/P3` only;
 /// otherwise the pin also drives the legs (the whole-body default).
 fn hip_pin_params_from_env() -> HipPinParams {
-    let mut d = HipPinParams::default();
-    d.config.target_speed = env_f32("TARGET_SPEED", d.config.target_speed);
-    let drives_legs = !matches!(
-        std::env::var("LEGS").ok().as_deref().map(str::trim),
-        Some("off") | Some("0") | Some("false")
-    );
-    // `PIN_MODE=delta` opts into the state-relative velocity servo; anything
-    // else keeps the legacy rigid pin. `KV` is the servo gain (0..1).
-    let mode = match std::env::var("PIN_MODE").ok().as_deref().map(str::trim) {
-        Some("delta") | Some("DELTA") | Some("1") => PinMode::Delta,
-        Some("rigid") | Some("RIGID") | Some("0") => PinMode::Rigid,
-        _ => d.mode,
-    };
-    HipPinParams {
-        compliance: env_f32("COMPLIANCE", d.compliance),
-        damping: env_f32("DAMPING", d.damping),
-        hip_drives_legs: drives_legs,
-        hip_drop: env_f32("HIP_DROP", d.hip_drop),
-        mode,
-        k_v: env_f32("KV", d.k_v),
-        ..d
-    }
+    // Shared with the tuning app (`PinMode`, `KV`, `HIP_DROP`, ...).
+    HipPinParams::from_env()
 }
 
 /// `pin_log.csv` + `.events.csv` → `pin_log.events.csv` (same dir, suffix before

@@ -83,6 +83,12 @@ pub struct HipPinParams {
     /// matches the reference velocity outright; lower values yield to external
     /// impulses. Unused by [`PinMode::Rigid`].
     pub k_v: f32,
+    /// Whether [`PinMode::Delta`] also commands the **vertical** axis.
+    /// `true` (default) matches the previous behaviour; `false` leaves y
+    /// unactuated so gravity is ballistic until contacts/legs support the body
+    /// — the "free the vertical" half-pin step, and the gravity/free-fall gate
+    /// (`PIN_VERTICAL=off`).
+    pub pin_vertical: bool,
     /// External position constraint compliance **at rest** (lower = stiffer).
     /// The stock `ExternalPositionConstraint` is position-only, so this is the
     /// base stiffness of the pin; it is scaled up (softer) with speed by
@@ -123,6 +129,55 @@ pub enum PinMode {
     Delta,
 }
 
+impl HipPinParams {
+    /// Build from the environment shared by the headless harness and the tuning
+    /// app, so both run the same controller:
+    ///
+    /// `TARGET_SPEED`, `LEGS`, `COMPLIANCE`, `DAMPING`, `HIP_DROP`,
+    /// `PIN_MODE=rigid|delta`, `KV=0..1`.
+    pub fn from_env() -> Self {
+        let mut d = Self::default();
+        d.config.target_speed = env_f32("TARGET_SPEED", d.config.target_speed);
+        let drives_legs = !matches!(
+            std::env::var("LEGS").ok().as_deref().map(str::trim),
+            Some("off") | Some("0") | Some("false")
+        );
+        let mode = match std::env::var("PIN_MODE").ok().as_deref().map(str::trim) {
+            Some("delta") | Some("DELTA") | Some("1") => PinMode::Delta,
+            Some("rigid") | Some("RIGID") | Some("0") => PinMode::Rigid,
+            _ => d.mode,
+        };
+        Self {
+            compliance: env_f32("COMPLIANCE", d.compliance),
+            damping: env_f32("DAMPING", d.damping),
+            hip_drives_legs: drives_legs,
+            hip_drop: env_f32("HIP_DROP", d.hip_drop),
+            mode,
+            k_v: env_f32("KV", d.k_v),
+            pin_vertical: env_bool("PIN_VERTICAL", d.pin_vertical),
+            ..d
+        }
+    }
+}
+
+/// Parse a float env var, trimmed; malformed or missing ⇒ `default`.
+fn env_f32(key: &str, default: f32) -> f32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+/// Parse a boolean env var: `0/off/false/no` ⇒ false, `1/on/true/yes` ⇒ true;
+/// anything else (or missing) ⇒ `default`.
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key).ok().as_deref().map(str::trim) {
+        Some("0") | Some("off") | Some("false") | Some("no") => false,
+        Some("1") | Some("on") | Some("true") | Some("yes") => true,
+        _ => default,
+    }
+}
+
 impl Default for HipPinParams {
     fn default() -> Self {
         Self {
@@ -137,6 +192,7 @@ impl Default for HipPinParams {
             // Gentle: a third of the velocity error per tick, so a collision
             // perturbation decays over ~3 ticks instead of being erased.
             k_v: 0.3,
+            pin_vertical: true,
             // Snaps the (now-light) particles to the commanded pose.
             compliance: 1e-7,
             damping: 0.01,
@@ -342,6 +398,29 @@ pub fn predict_pos(pos: Vec2, vel: Vec2, gravity: Vec2, dt: f32) -> Vec2 {
 /// Applying the resolver's raw delta instead (`p* + v_ref·dt`) would add
 /// `v_ref` to the realized velocity every tick and diverge; the `− v` term is
 /// what makes it a servo. `k_v` is clamped to `[0, 1]`.
+///
+/// Note the law matches **velocity**, not force: with `v_ref = 0` the vertical
+/// equilibrium under gravity is `v = g·dt/k_v`, so a symmetric y command caps
+/// free fall at ~`g·dt/k_v`. Pass `pin_vertical = false` to leave y
+/// unactuated and let gravity be ballistic until contacts support the body.
+pub fn delta_target_axis(
+    pos: Vec2,
+    vel: Vec2,
+    v_ref: Vec2,
+    gravity: Vec2,
+    dt: f32,
+    k_v: f32,
+    pin_vertical: bool,
+) -> Vec2 {
+    let kv = k_v.clamp(0.0, 1.0);
+    let mut dv = v_ref - vel;
+    if !pin_vertical {
+        dv.y = 0.0;
+    }
+    predict_pos(pos, vel, gravity, dt) + dv * (kv * dt)
+}
+
+/// [`delta_target_axis`] with the vertical axis commanded (the default).
 pub fn delta_target(
     pos: Vec2,
     vel: Vec2,
@@ -350,8 +429,7 @@ pub fn delta_target(
     dt: f32,
     k_v: f32,
 ) -> Vec2 {
-    let kv = k_v.clamp(0.0, 1.0);
-    predict_pos(pos, vel, gravity, dt) + (v_ref - vel) * (kv * dt)
+    delta_target_axis(pos, vel, v_ref, gravity, dt, k_v, true)
 }
 
 /// Speed-softened compliance: `base·(1 + s·(soft_scale−1))` with
@@ -500,7 +578,15 @@ pub fn drive_hip_pin(
                 // State-relative servo: free-flight prediction plus a fraction of
                 // the velocity error. Gravity is already in `predict_pos`, so no
                 // `g_dt2` here; the resolver pose enters only through `v_hip`.
-                PinMode::Delta => delta_target(pos, vel, v_hip, g_vello, dt, params.k_v),
+                PinMode::Delta => delta_target_axis(
+                    pos,
+                    vel,
+                    v_hip,
+                    g_vello,
+                    dt,
+                    params.k_v,
+                    params.pin_vertical,
+                ),
             };
             if i == 4 {
                 pin.last_ref_p3 = *pose_t;
@@ -542,9 +628,10 @@ pub fn drive_hip_pin(
                     .map(|p| p.particle.pos)
                     .unwrap_or(pin.last_cmd_p3);
                 info!(
-                    "pin mode={:?} kv={:.2} P3 actual=({:.1},{:.1}) ref=({:.1},{:.1}) cmd=({:.1},{:.1}) sag_y={:.1}",
+                    "pin mode={:?} kv={:.2} vertical={} P3 actual=({:.1},{:.1}) ref=({:.1},{:.1}) cmd=({:.1},{:.1}) sag_y={:.1}",
                     params.mode,
                     params.k_v,
+                    params.pin_vertical,
                     p3.x,
                     p3.y,
                     pin.last_ref_p3.x,
@@ -949,6 +1036,40 @@ mod tests {
             pos = target;
         }
         assert!(vel.x <= v_ref.x + 1e-3, "servo overshot: {vel:?}");
+    }
+
+    #[test]
+    fn vertical_axis_mask_restores_ballistic_fall() {
+        // With y unactuated the only vertical change is gravity, so ten ticks
+        // must accumulate exactly 10·g·dt. With y commanded, the velocity servo
+        // damps the fall (equilibrium g·dt/k_v), which is why the drop test
+        // measured ~40 px/s instead of free fall.
+        let dt = 1.0 / 90.0;
+        let g = Vec2::new(0.0, 980.0);
+        let mut pos = Vec2::ZERO;
+        let mut vel = Vec2::ZERO;
+        for _ in 0..10 {
+            let t = delta_target_axis(pos, vel, Vec2::ZERO, g, dt, 0.3, false);
+            vel = (t - pos) / dt;
+            pos = t;
+        }
+        let ballistic = 10.0 * g.y * dt;
+        assert!(
+            (vel.y - ballistic).abs() < 1e-2,
+            "masked vertical must be ballistic: {vel:?} vs {ballistic}"
+        );
+
+        let mut pos = Vec2::ZERO;
+        let mut vel = Vec2::ZERO;
+        for _ in 0..10 {
+            let t = delta_target_axis(pos, vel, Vec2::ZERO, g, dt, 0.3, true);
+            vel = (t - pos) / dt;
+            pos = t;
+        }
+        assert!(
+            vel.y < 0.5 * ballistic,
+            "commanded vertical should damp the fall: {vel:?}"
+        );
     }
 
     #[test]
