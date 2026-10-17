@@ -80,6 +80,13 @@ pub struct HipPinParams {
     /// which must be ordered **after** this system. Set false to leave the legs
     /// under external control (the pin then only owns `P1/P2/P3`).
     pub hip_drives_legs: bool,
+    /// Vertical offset applied to the whole pinned body and both leg targets,
+    /// in px. Positive = **down** (Vello y-down for the pin, Bevy −y for the
+    /// legs). This lowers the character relative to the *fixed* floor without
+    /// invalidating the seed: the floor is spawned from the seed anchor, so a
+    /// nonzero drop makes the foot particles sit on the floor line while the
+    /// leg collider's stroke round-end margin is ignored.
+    pub hip_drop: f32,
 }
 
 impl Default for HipPinParams {
@@ -97,6 +104,7 @@ impl Default for HipPinParams {
             damping: 0.01,
             // Drive the legs from the sandbox by default (the integration).
             hip_drives_legs: true,
+            hip_drop: 0.0,
         }
     }
 }
@@ -193,6 +201,15 @@ pub struct HipPin {
 }
 
 impl HipPin {
+    /// Vertical hip→foot distance of the live leg captured at the leg-bridge
+    /// seed (Bevy y-up). This is the character's actual stance height, which is
+    /// what the floor must match — not the resolver's `hip_height`, because the
+    /// pose-aware bridge preserves the live leg's straight/bent configuration.
+    pub fn stance_height(&self) -> Option<f32> {
+        self.leg_seed
+            .map(|s| s.live[0].hip.y - s.live[0].foot.y)
+    }
+
     pub fn new(config: &LowerBodyConfig) -> Self {
         Self {
             state: ResolverState::new(config),
@@ -362,8 +379,14 @@ pub fn drive_hip_pin(
         let v_hip = Vec2::new(pin.state.hip_vel.x, -pin.state.hip_vel.y);
 
         // --- Rigid pose (attitude theta; 0 = upright). ---
-        let pose_targets =
+        let mut pose_targets =
             rigid_frame_targets(pin.anchor_p3, pin.rest_offsets, world_delta, pin.theta);
+        if params.hip_drop != 0.0 {
+            // Vello y-down: +drop lowers the pinned frame relative to the floor.
+            for t in pose_targets.iter_mut() {
+                t.y += params.hip_drop;
+            }
+        }
 
         // --- Gravity ownership on the pinned frame. ---
         // The XPBD step applies world gravity to P1/P2/P3 *before* this
@@ -481,7 +504,9 @@ pub fn drive_hip_pin(
             // seed both deltas are zero, so the targets equal the live pose and
             // the PD starts with no error. The hip still carries the resolver's
             // world translation.
-            let hip_t = pose.hip + seed.hip_offset;
+            // Bevy y-up: subtract the same drop so the leg targets follow the
+            // lowered pinned frame (the floor stays at the seed anchor).
+            let hip_t = pose.hip + seed.hip_offset - Vec2::Y * params.hip_drop;
             let knee_l = hip_t
                 + transfer_segment(
                     seed.live[0].knee - seed.live[0].hip,

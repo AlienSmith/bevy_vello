@@ -328,8 +328,15 @@ Collision is now available in the headless harness behind `COLLISION=1`.
   `run_gpu_collision` (GPU narrow phase), scheduled after
   `update_collider_from_soft_body` exactly like the visual plugin.
 - `TransformPlugin`, needed for `GlobalTransform` propagation into the BVH.
-- A static floor collider at `floor_y = -anchor_p3.y - hip_height`, spawned
-  once the pin is seeded.
+- A static floor collider at
+  `floor_y = -anchor_p3.y - live_stance_height`, spawned once the pin is
+  seeded. `live_stance_height` is the character's own hip→foot distance at the
+  bridge seed (~106 px), **not** the resolver's `hip_height=90`: the
+  pose-aware bridge preserves the live (nearly straight) leg, so the resolver's
+  bent-stance height would put the target feet ~16 px below the floor.
+- `HIP_DROP=<px>` lowers the whole pinned body and both leg targets relative to
+  the fixed floor (positive = into the floor). `0` is the natural stance; it is
+  a deliberate-penetration knob for the stroke round-end margin.
 
 ### Run
 
@@ -345,24 +352,31 @@ target\release\examples\headless_arm_pd.exe
 
 ### First measurements (walk, 120 px/s)
 
-| run | colliders | contacts | foot peak | foot mean | tail | rigidity |
+| run | floor at | contacts | foot peak | foot mean | tail | rigidity |
 |---|---|---|---|---|---|---|
-| gravity, collision off | 0 | 0 | 3.46 px | 0.63 px | PASS 0.359 | ok (0.0011) |
-| gravity + collision | 13 (12 soft + floor) | 1–4 | 7.79 px | ~5.1 px | WAGGLE 1.836 | **FAIL 0.118** |
-| no gravity + collision | 13 | 2 | 8.00 px | ~4.4 px | WAGGLE 1.769 | **FAIL 0.118** |
+| gravity, collision off | — | 0 | 3.46 px | 0.63 px | PASS 0.359 | ok (0.0011) |
+| collision, resolver `hip_height` | 90 px | 1–4 | 7.79 px | ~5.1 px | WAGGLE 1.836 | FAIL 0.118 |
+| collision, **live stance** (shipped) | **106 px** | 2 | **5.86 px** | **~3.7 px** | WAGGLE **0.720** | FAIL 0.093 |
+| collision, live stance + `HIP_DROP=1.5` | 106 px | 2 | 6.16 px | ~3.9 px | WAGGLE 0.443 | FAIL 0.096 |
 
 Interpretation:
 
-- The pipeline works: the BVH sees 13 colliders and the GPU returns 1–4
-  contact constraints per frame; no NaN.
-- The no-gravity run has the same contacts, so they are **geometric**: the foot
-  colliders intersect the floor because the pin holds the feet at the resolver
-  floor line. This is the pin-vs-floor conflict documented in the visual app.
-- `rig=FAIL` is expected for soft-body colliders: the rigidity check measures
-  the skeleton, and contact correction deforms the soft parts by ~12 %. Treat
-  the rigid-bone gate as **off** for collision runs until the pin is released,
-  and add a separate penetration/slip gate.
-- The leg `WAGGLE` is contact chatter, not the old mode.
+- The pipeline works: the BVH sees 13 colliders (12 soft character parts + the
+  floor) and the GPU returns contacts every frame; no NaN.
+- The first collision runs used `anchor_p3 − resolver.hip_height` (90 px) as the
+  floor. Because the pose-aware bridge keeps the live, nearly straight leg, the
+  target feet were ~16 px below that floor. Switching to the **live stance
+  height** (106 px) puts the foot particles on the floor line: at t=11,
+  `PLLLy=279.23`, `PRLLy=278.31`, floor `y=279.0` (Vello). This is the "lower
+  the character until the hip height matches the P3→floor distance" step.
+- The remaining contacts are the leg collider's **stroke width + round end**
+  below the foot particle. That margin is intentionally ignored for now; the
+  foot particles are the reference.
+- `rig=FAIL` (~9 % bone-length deviation) is the soft-body contact deformation,
+  not a kinematic failure. Gate collision runs on penetration/slip/pin-share,
+  not on the rigid-bone check.
+- `HIP_DROP>0` pushes the body further into the floor and does not help; keep
+  it at `0` until the pin is released vertically.
 
 ### Next steps
 

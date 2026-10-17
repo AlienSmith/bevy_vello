@@ -979,7 +979,11 @@ fn spawn_collision_floor(
         return;
     }
     let hip_y = -pin.anchor_p3.y;
-    let floor_y = hip_y - params.config.hip_height;
+    // The pose-aware bridge preserves the *live* leg, so the floor must sit at
+    // the live hip→foot distance, not the resolver's `hip_height` (the resolver
+    // stands with a bent knee; the character's seed pose is straight).
+    let stance_h = pin.stance_height().unwrap_or(params.config.hip_height);
+    let floor_y = hip_y - stance_h;
     let rect = kurbo::Rect::new(-2400.0, -20.0, 2400.0, 20.0);
     let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
     let transform = Transform::from_xyz(0.0, floor_y, 0.0);
@@ -1004,8 +1008,8 @@ fn spawn_collision_floor(
     ));
     *done = true;
     info!(
-        "headless collision: floor y={floor_y:.2} (hip y={hip_y:.2}, hip_height={:.2})",
-        params.config.hip_height
+        "headless collision: floor y={floor_y:.2} (hip y={hip_y:.2}, live_stance_h={stance_h:.2}, resolver_hip_height={:.2}, hip_drop={:.2})",
+        params.config.hip_height, params.hip_drop
     );
 }
 
@@ -2229,6 +2233,7 @@ fn hip_pin_params_from_env() -> HipPinParams {
         compliance: env_f32("COMPLIANCE", d.compliance),
         damping: env_f32("DAMPING", d.damping),
         hip_drives_legs: drives_legs,
+        hip_drop: env_f32("HIP_DROP", d.hip_drop),
         ..d
     }
 }
