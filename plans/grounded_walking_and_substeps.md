@@ -534,3 +534,39 @@ cargo run -p collision_detection --bin character_tuning_main --release
 
 The startup logs print `tuning ground: surface y=...` and the pin controller
 mode/vertical flag, so a run is self-describing.
+
+### 11.8 Frame-attitude bug in the first delta implementation (2026-10-17)
+
+Symptom (visual app): the upper body tips sideways until it rests on the ground.
+Headless confirmed it numerically — the spine angle of `P1−P3` from vertical:
+
+| run | tilt at t≈5.8 | tilt at t≈11.5 |
+|---|---|---|
+| rigid baseline | 0.0° | 0.0° |
+| delta k_v=0.3, per-particle law | −110.2° | 171.8° |
+| delta k_v=0.3, frame law (fixed) | 0.0° | 0.0° |
+
+The `rig` gate only checks bone lengths, so a rotated frame passed it. The
+distance constraints keep lengths, not attitude.
+
+**Cause:** delta mode applied the servo **per particle**. Each particle was
+predicted from its own velocity and corrected independently, so nothing held
+the frame's orientation; gravity and contact torques rotated it freely. The
+rigid pin held attitude implicitly by projecting each particle onto the
+absolute (rotated) pose targets.
+
+**Fix:** [`delta_frame_targets`](../examples/game_lib/src/lower_body/hip_pin.rs)
+moves the **frame centroid** with the delta law and rebuilds all three targets
+from the reference offsets, so shape and attitude are exact by construction.
+The offsets must be **centroid-relative** — using `ref − P3` adds a constant
+bias to the realized centroid every tick and launches the body (observed at
+`y=-118k` before the correction).
+
+**After the fix** (walk k_v=0.3, collision on): peak 63.1 px, tail PASS
+(rms 0.62 px), rig 2.78 %, contacts 2, tilt 0.0° throughout. Drop test with
+`PIN_VERTICAL=off`: lands by t=1 (contacts 4), tilt 0.0°; the remaining
+119.8 px foot error is the old-floor target, i.e. the stance-retarget task.
+
+A unit test (`delta_frame_keeps_attitude_under_differential_velocity`) locks the
+behavior: one particle moving does not shear the frame, and the centroid still
+translates.

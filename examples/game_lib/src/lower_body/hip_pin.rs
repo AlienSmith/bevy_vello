@@ -432,6 +432,44 @@ pub fn delta_target(
     delta_target_axis(pos, vel, v_ref, gravity, dt, k_v, true)
 }
 
+/// Rigid-frame delta command for [`PinMode::Delta`].
+///
+/// The per-particle [`delta_target_axis`] law has no attitude term: each
+/// particle is predicted and damped on its own, so the distance constraints
+/// keep the bone lengths but the frame is free to *rotate* under gravity and
+/// contact torques (the upper body tips over). This helper fixes that by moving
+/// the frame as one rigid body:
+///
+/// 1. take the frame centroid `c` and its mean velocity `v_c`,
+/// 2. advance the centroid with the same velocity-servo delta law,
+/// 3. rebuild every target from the **reference frame offsets about its own
+///    centroid** (`ref_frame[i] − c_ref`), so attitude and bone lengths are
+///    exact and the emitted centroid is exactly `cmd_c`.
+///
+/// The offsets must be centroid-relative, not P3-relative: using `ref − P3`
+/// adds a constant `(c_ref − P3)` bias to the realized centroid *every tick*,
+/// which is an enormous artificial acceleration (the body flies away).
+///
+/// `extra_offset` is applied to the centroid (used for `hip_drop`). Pure;
+/// exposed for unit testing.
+#[allow(clippy::too_many_arguments)]
+pub fn delta_frame_targets(
+    ref_frame: [Vec2; 3],
+    states: [(Vec2, Vec2); 3],
+    v_ref: Vec2,
+    gravity: Vec2,
+    dt: f32,
+    k_v: f32,
+    pin_vertical: bool,
+    extra_offset: Vec2,
+) -> [Vec2; 3] {
+    let c = (states[0].0 + states[1].0 + states[2].0) / 3.0;
+    let v_c = (states[0].1 + states[1].1 + states[2].1) / 3.0;
+    let cmd_c = delta_target_axis(c, v_c, v_ref, gravity, dt, k_v, pin_vertical) + extra_offset;
+    let c_ref = (ref_frame[0] + ref_frame[1] + ref_frame[2]) / 3.0;
+    ref_frame.map(|p| cmd_c + (p - c_ref))
+}
+
 /// Speed-softened compliance: `base·(1 + s·(soft_scale−1))` with
 /// `s = min(speed/v_ref, 1)`. `soft_scale = 1` (or `v_ref ≤ 0`) returns `base`
 /// unchanged. Pure; exposed for unit testing.
@@ -565,31 +603,53 @@ pub fn drive_hip_pin(
 
         // --- Per-particle command + speed-softened compliance. ---
         // Exactly 3 position constraints, nothing angular.
-        for (i, pose_t) in [2usize, 3, 4].into_iter().zip(pose_targets.iter()) {
-            let (pos, vel) = match p_q.get(spine.particles[i]) {
-                Ok(p) => (p.particle.pos, p.particle.velocity),
-                Err(_) => continue,
-            };
+        //
+        // Delta mode commands the frame **as a rigid body**: the centroid follows
+        // the state-relative servo and the reference offsets (attitude + bone
+        // lengths) are preserved. Damping each particle independently would let
+        // the distance constraints keep lengths but not attitude, and the upper
+        // body would tip over.
+        let idx = [2usize, 3, 4];
+        let mut states = [(Vec2::ZERO, Vec2::ZERO); 3];
+        let mut all_ready = true;
+        for (k, i) in idx.iter().enumerate() {
+            match p_q.get(spine.particles[*i]) {
+                Ok(p) => states[k] = (p.particle.pos, p.particle.velocity),
+                Err(_) => {
+                    all_ready = false;
+                    break;
+                }
+            }
+        }
+        if !all_ready {
+            continue;
+        }
+        let delta_targets = if params.mode == PinMode::Delta {
+            Some(delta_frame_targets(
+                pose_targets,
+                states,
+                v_hip,
+                g_vello,
+                dt,
+                params.k_v,
+                params.pin_vertical,
+                Vec2::Y * params.hip_drop,
+            ))
+        } else {
+            None
+        };
+
+        for (k, i) in idx.iter().enumerate() {
+            let (pos, vel) = states[k];
+            let pose_t = pose_targets[k];
             let target = match params.mode {
                 // Legacy kinematic pin: absolute pose + cancelled gravity.
-                PinMode::Rigid => {
-                    pd_target(*pose_t, pos, vel, v_hip, dt, params.kp, params.kd) + g_dt2
-                }
-                // State-relative servo: free-flight prediction plus a fraction of
-                // the velocity error. Gravity is already in `predict_pos`, so no
-                // `g_dt2` here; the resolver pose enters only through `v_hip`.
-                PinMode::Delta => delta_target_axis(
-                    pos,
-                    vel,
-                    v_hip,
-                    g_vello,
-                    dt,
-                    params.k_v,
-                    params.pin_vertical,
-                ),
+                PinMode::Rigid => pd_target(pose_t, pos, vel, v_hip, dt, params.kp, params.kd) + g_dt2,
+                // State-relative rigid-frame servo (see `delta_frame_targets`).
+                PinMode::Delta => delta_targets.unwrap()[k],
             };
-            if i == 4 {
-                pin.last_ref_p3 = *pose_t;
+            if *i == 4 {
+                pin.last_ref_p3 = pose_t;
                 pin.last_cmd_p3 = target;
                 pin.last_sag_y = pos.y - pose_t.y;
             }
@@ -603,7 +663,7 @@ pub fn drive_hip_pin(
             world.queue_character_one_time_external_position_constraint(
                 &CharacterExternalPositionConstraintEvent {
                     character_entity: entity,
-                    joint_entity: spine.particles[i],
+                    joint_entity: spine.particles[*i],
                     config: ExternalPositionConstraintConfig {
                         target,
                         compliance,
@@ -1070,6 +1130,41 @@ mod tests {
             vel.y < 0.5 * ballistic,
             "commanded vertical should damp the fall: {vel:?}"
         );
+    }
+
+    #[test]
+    fn delta_frame_keeps_attitude_under_differential_velocity() {
+        // Reference frame: P1 above P3, P2 slightly left (Vello y-down).
+        let frame = [Vec2::new(12.0, -60.0), Vec2::new(-3.0, -30.0), Vec2::ZERO];
+        // Only P1 is moving. A per-particle servo would shear the frame; the
+        // rigid-frame command must preserve every offset from P3 exactly.
+        let states = [
+            (frame[0], Vec2::new(200.0, 0.0)),
+            (frame[1], Vec2::ZERO),
+            (frame[2], Vec2::ZERO),
+        ];
+        let out = delta_frame_targets(
+            frame,
+            states,
+            Vec2::ZERO,
+            Vec2::ZERO,
+            1.0 / 90.0,
+            0.3,
+            true,
+            Vec2::ZERO,
+        );
+        let c_ref = (frame[0] + frame[1] + frame[2]) / 3.0;
+        let c_out = (out[0] + out[1] + out[2]) / 3.0;
+        for k in 0..3 {
+            let want = frame[k] - c_ref;
+            let got = out[k] - c_out;
+            assert!(
+                (got - want).length() < 1e-4,
+                "frame offset {k} sheared: got {got:?} want {want:?}"
+            );
+        }
+        // ...and the whole frame did translate (the centroid is physical).
+        assert!((c_out - c_ref).length() > 1e-3, "frame did not move");
     }
 
     #[test]
