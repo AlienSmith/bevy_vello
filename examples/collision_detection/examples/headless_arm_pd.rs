@@ -145,7 +145,16 @@ use game_lib::{
 // Constants
 // ---------------------------------------------------------------------------
 
-const ASSET_ROOT: &str = "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets";
+/// Asset root override (for local Windows runs). Falls back to the CI/Linux
+/// absolute path when unset, so the existing Linux pipeline is unchanged.
+fn asset_root() -> String {
+    std::env::var("ASSET_ROOT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| {
+            "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets".to_string()
+        })
+}
 const SVG_ASSET: &str = "v10.character.svg";
 const BP_ASSET: &str = "v10.character.json";
 const SVG_PATH: &str = "character/v10.character.svg";
@@ -755,7 +764,7 @@ fn main() {
     .add_plugins(bevy::log::LogPlugin::default())
     .add_plugins(AssetPlugin {
         meta_check: AssetMetaCheck::Never,
-        file_path: ASSET_ROOT.into(),
+        file_path: asset_root().into(),
         ..default()
     })
     .add_plugins(bevy::input::InputPlugin)

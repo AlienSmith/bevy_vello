@@ -11,8 +11,8 @@ mod resolver;
 mod systems;
 
 pub use hip_pin::{
-    drive_hip_pin, leg_target, pd_target, reset_hip_pin, rigid_frame_targets, softened_compliance,
-    HipPin, HipPinParams,
+    drive_hip_pin, pd_target, reset_hip_pin, rigid_frame_targets, softened_compliance, HipPin,
+    HipPinParams,
 };
 
 pub use plugin::LowerBodySandboxPlugin;
