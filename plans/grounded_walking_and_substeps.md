@@ -570,3 +570,41 @@ bias to the realized centroid every tick and launches the body (observed at
 A unit test (`delta_frame_keeps_attitude_under_differential_velocity`) locks the
 behavior: one particle moving does not shear the frame, and the centroid still
 translates.
+
+### 11.9 Ground-gated gravity cancellation (replaces global `PIN_VERTICAL=off`)
+
+Releasing the vertical axis permanently also removed jump authority: the hop
+rise fell from 53.4 px to 28.3 px. The right shape is to gate authority on
+**real ground contact**, not on a global switch.
+
+**Design**
+
+- `GroundSupport` is refreshed by `update_ground_support` from
+  `CollisionEventBatch`: a mixed pair (soft character part vs static/other
+  collider) whose contact normal is mostly vertical counts as floor contact.
+  Register the system before `drive_hip_pin`. Without a collision pipeline the
+  resource keeps its grounded default (legacy behaviour).
+- `drive_hip_pin` then decides per tick:
+  - vertical command allowed = `PIN_VERTICAL && (grounded || phase is
+    Launch/Flight)`. In flight the resolver's velocity reference is ballistic, so
+    tracking it preserves the jump instead of damping gravity;
+  - `support_share` (default **0.5**) of gravity is cancelled **only while
+    grounded**; airborne it is forced to 0.
+- Walking keeps a stance foot down at all times (duty 0.5), so support is on
+  during the whole gait; jumps and drops have no contact and are ballistic.
+
+**Results**
+
+| case | grounded | result |
+|---|---|---|
+| walk, k_v=0.3 | always | contacts 2, peak 44.4 px, rig **ok** 2.0 %, tail PASS 0.72 |
+| jump | launch → flight | rise **57.1 px** (rigid 61.8; global vertical-off gave 28.3) |
+| 100 px drop | false after the ledge | lands by t≈0.6 (contacts 2 at t=1), sag ≈100, tilt 0° |
+
+The drop's remaining ~104 px foot error is the feet still targeting the old
+floor line — the stance-retarget task, not a support problem.
+
+**Knobs:** `SUPPORT_SHARE=0..1` (env) and the matching UI slider; `PIN_VERTICAL`
+remains a master switch. Unit tests cover airborne ballistic release,
+`support_share` cancelling 0/50/100 % of gravity, and the grounded upward
+command preserving a jump.

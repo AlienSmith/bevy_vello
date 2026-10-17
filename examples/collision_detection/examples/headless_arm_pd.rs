@@ -146,9 +146,9 @@ use game_lib::{
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
     check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, flush_csv, flush_rows,
-    rows_hash, tail_verdict, update_character_movement, Bone, CharacterController, CharacterRoot,
-    HeadlessTelemetryPlugin, HipPin, HipPinParams, IkMode, InvariantConfig, LeftArmController,
-    PinMode,
+    rows_hash, tail_verdict, update_character_movement, update_ground_support, Bone,
+    CharacterController, CharacterRoot, GroundSupport, HeadlessTelemetryPlugin, HipPin,
+    HipPinParams, IkMode, InvariantConfig, LeftArmController, PinMode,
     LeftLegController, LimbConfig, ParticleTelemetryConfig, PlayerAction, PlayerMarker,
     ResetLimbControlConstraintsEvent, RightArmController, RightLegController, SpineDriveEnabled,
     TelemetryBuffer, TelemetryRow, VelloCharacterPlugin, VerticalPhase, WhichLimb,
@@ -812,6 +812,9 @@ fn main() {
     })
     .insert_resource(RemovedColliders::default())
     .insert_resource(CollisionEventBatch::default())
+    // Ground gate for the pin's vertical authority; refreshed only when the
+    // collision pipeline runs, otherwise it keeps its grounded default.
+    .insert_resource(GroundSupport::default())
     // The spine drive must stay silent: in body mode the pin owns P1/P2/P3, in
     // limb mode the frame must be passive (absent resource = ON ⇒ insert false).
     .insert_resource(SpineDriveEnabled(false))
@@ -844,6 +847,9 @@ fn main() {
     // in `FixedUpdate` before `update_constraint_world`. In body mode the pin is
     // inserted before it so the leg IK reads the foot targets the pin just wrote.
     if body {
+        if collision_enabled() {
+            app.add_systems(FixedUpdate, update_ground_support.before(drive_hip_pin));
+        }
         app.add_systems(
             FixedUpdate,
             (

@@ -42,16 +42,18 @@
 //! removed, via [`SpineDriveEnabled`](crate::character::SpineDriveEnabled).
 
 use bevy::{prelude::*, time::Fixed};
+use bevy_vello::collision::CollisionEventBatch;
 use bevy_vello::integrations::physics::{
     CharacterExternalPositionConstraintEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld,
     VelloParticle,
 };
+use bevy_vello::VelloCollider;
 use leafwing_input_manager::prelude::ActionState;
 use vello_physics::ExternalPositionConstraintConfig;
 
 use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
-use crate::lower_body::resolver::{step_lower_body, LowerBodyConfig, ResolverState};
+use crate::lower_body::resolver::{step_lower_body, LowerBodyConfig, ResolverState, VerticalPhase};
 
 /// Runtime knobs for the hip pin. Kept as a Resource (mirroring
 /// [`crate::lower_body::LowerBodyParams`]) so the tuning UI can edit it live.
@@ -83,12 +85,17 @@ pub struct HipPinParams {
     /// matches the reference velocity outright; lower values yield to external
     /// impulses. Unused by [`PinMode::Rigid`].
     pub k_v: f32,
-    /// Whether [`PinMode::Delta`] also commands the **vertical** axis.
-    /// `true` (default) matches the previous behaviour; `false` leaves y
-    /// unactuated so gravity is ballistic until contacts/legs support the body
-    /// — the "free the vertical" half-pin step, and the gravity/free-fall gate
-    /// (`PIN_VERTICAL=off`).
+    /// Whether [`PinMode::Delta`] may command the **vertical** axis at all.
+    /// The command is further gated on [`GroundSupport`]: with no ground
+    /// contact the vertical axis is unactuated and gravity is ballistic (jump
+    /// flight, falling over a ledge, the `GROUND_DROP` test). `false` disables
+    /// the vertical command even when grounded (`PIN_VERTICAL=off`).
     pub pin_vertical: bool,
+    /// Fraction of gravity the pin cancels while **grounded** (`0..=1`). With
+    /// `0` the contacts/legs carry the whole body; with `1` the pin carries it
+    /// all. Walking has a stance foot at all times, so this stays active in a
+    /// normal gait; in flight it is forced to `0` and gravity is untouched.
+    pub support_share: f32,
     /// External position constraint compliance **at rest** (lower = stiffer).
     /// The stock `ExternalPositionConstraint` is position-only, so this is the
     /// base stiffness of the pin; it is scaled up (softer) with speed by
@@ -155,6 +162,7 @@ impl HipPinParams {
             mode,
             k_v: env_f32("KV", d.k_v),
             pin_vertical: env_bool("PIN_VERTICAL", d.pin_vertical),
+            support_share: env_f32("SUPPORT_SHARE", d.support_share).clamp(0.0, 1.0),
             ..d
         }
     }
@@ -178,6 +186,75 @@ fn env_bool(key: &str, default: bool) -> bool {
     }
 }
 
+/// Ground-contact state that gates the pin's vertical authority.
+///
+/// The pin may cancel gravity and command the vertical axis **only while the
+/// character is actually supported**. Walking has a stance foot at all times
+/// (duty 0.5), so support stays on; a jump or a drop has no contact, so the
+/// vertical command is released and gravity is ballistic. Register
+/// [`update_ground_support`] before [`drive_hip_pin`].
+#[derive(Resource, Debug, Clone)]
+pub struct GroundSupport {
+    /// True when at least one character collider has a near-vertical contact
+    /// with a non-character collider (the floor).
+    pub grounded: bool,
+    /// Number of near-vertical mixed contacts seen this frame.
+    pub contacts: usize,
+}
+
+impl Default for GroundSupport {
+    fn default() -> Self {
+        // No collision pipeline ⇒ preserve the kinematic behaviour.
+        Self {
+            grounded: true,
+            contacts: 0,
+        }
+    }
+}
+
+/// Refresh [`GroundSupport`] from [`CollisionEventBatch`].
+///
+/// A contact counts as ground when the pair is mixed (a soft character part
+/// against a static/other collider) and the contact normal is mostly vertical,
+/// which excludes the side walls. The batch is populated by `run_gpu_collision`
+/// later in the same fixed tick, so this reads the previous frame's contacts —
+/// a one-tick lag, which is fine for a support gate.
+pub fn update_ground_support(
+    batch: Option<Res<CollisionEventBatch>>,
+    colliders: Query<&VelloCollider>,
+    mut support: ResMut<GroundSupport>,
+) {
+    let Some(batch) = batch else {
+        support.grounded = true;
+        support.contacts = 0;
+        return;
+    };
+    let mut contacts = 0usize;
+    for entry in &batch.entries {
+        let a_soft = colliders
+            .get(entry.event.entity_a)
+            .map(|c| c.is_soft_body())
+            .unwrap_or(false);
+        let b_soft = colliders
+            .get(entry.event.entity_b)
+            .map(|c| c.is_soft_body())
+            .unwrap_or(false);
+        if a_soft == b_soft {
+            continue;
+        }
+        let normal = if a_soft {
+            entry.event.collision_normal_a
+        } else {
+            entry.event.collision_normal_b
+        };
+        if normal.y.abs() > 0.5 {
+            contacts += 1;
+        }
+    }
+    support.contacts = contacts;
+    support.grounded = contacts > 0;
+}
+
 impl Default for HipPinParams {
     fn default() -> Self {
         Self {
@@ -193,6 +270,9 @@ impl Default for HipPinParams {
             // perturbation decays over ~3 ticks instead of being erased.
             k_v: 0.3,
             pin_vertical: true,
+            // Half the weight carried by the pin while grounded; the contacts
+            // and leg support carry the rest.
+            support_share: 0.5,
             // Snaps the (now-light) particles to the commanded pose.
             compliance: 1e-7,
             damping: 0.01,
@@ -450,8 +530,18 @@ pub fn delta_target(
 /// adds a constant `(c_ref − P3)` bias to the realized centroid *every tick*,
 /// which is an enormous artificial acceleration (the body flies away).
 ///
-/// `extra_offset` is applied to the centroid (used for `hip_drop`). Pure;
-/// exposed for unit testing.
+/// `extra_offset` is applied to the centroid (used for `hip_drop`).
+///
+/// `vertical` is the caller's ground gate: the pin may command y when the body
+/// is supported **or** the resolver is in a launch/flight phase (where the
+/// reference velocity is ballistic, so matching it preserves the jump instead of
+/// damping it). When false, the y command is removed and gravity is ballistic.
+///
+/// `support_share` is the fraction of gravity cancelled, already gated by the
+/// caller (0 while airborne). Walking keeps a stance foot down, so it stays at
+/// the configured share during a normal gait.
+///
+/// Pure; exposed for unit testing.
 #[allow(clippy::too_many_arguments)]
 pub fn delta_frame_targets(
     ref_frame: [Vec2; 3],
@@ -460,13 +550,21 @@ pub fn delta_frame_targets(
     gravity: Vec2,
     dt: f32,
     k_v: f32,
-    pin_vertical: bool,
+    vertical: bool,
+    support_share: f32,
     extra_offset: Vec2,
 ) -> [Vec2; 3] {
     let c = (states[0].0 + states[1].0 + states[2].0) / 3.0;
     let v_c = (states[0].1 + states[1].1 + states[2].1) / 3.0;
-    let cmd_c = delta_target_axis(c, v_c, v_ref, gravity, dt, k_v, pin_vertical) + extra_offset;
     let c_ref = (ref_frame[0] + ref_frame[1] + ref_frame[2]) / 3.0;
+
+    let mut dv = v_ref - v_c;
+    if !vertical {
+        dv.y = 0.0;
+    }
+    let kv = k_v.clamp(0.0, 1.0);
+    let g_eff = gravity * (1.0 - support_share.clamp(0.0, 1.0));
+    let cmd_c = predict_pos(c, v_c, g_eff, dt) + dv * (kv * dt) + extra_offset;
     ref_frame.map(|p| cmd_c + (p - c_ref))
 }
 
@@ -522,6 +620,7 @@ fn try_seed(
 pub fn drive_hip_pin(
     time: Res<Time<Fixed>>,
     params: Res<HipPinParams>,
+    ground_support: Option<Res<GroundSupport>>,
     mut pin_q: Query<(Entity, &mut HipPin)>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
     mut right_leg_q: Query<&mut RightLegController>,
@@ -601,6 +700,27 @@ pub fn drive_hip_pin(
         let g_vello = world.gravity();
         let g_dt2 = g_vello * (dt * dt);
 
+        // Ground gate: the pin may cancel gravity and command the vertical axis
+        // only while a character collider is in a near-vertical (floor) contact.
+        // Walking keeps a stance foot down, so this is on during a normal gait;
+        // a jump or a drop has no contact, so gravity is ballistic. Without a
+        // collision pipeline the resource is absent ⇒ assume grounded (legacy).
+        let grounded = ground_support.as_deref().map(|s| s.grounded).unwrap_or(true);
+        // The resolver's vertical reference is ballistic in Launch/Flight, so
+        // tracking it there preserves the jump; it does not damp gravity the way
+        // a static reference would. While grounded we also cancel `support_share`
+        // of gravity; airborne, the pin carries none of the weight.
+        let vertical_tracking = matches!(
+            pin.state.vs.phase,
+            VerticalPhase::Launch | VerticalPhase::Flight
+        );
+        let vertical_allowed = params.pin_vertical && (grounded || vertical_tracking);
+        let support_share = if grounded {
+            params.support_share
+        } else {
+            0.0
+        };
+
         // --- Per-particle command + speed-softened compliance. ---
         // Exactly 3 position constraints, nothing angular.
         //
@@ -632,7 +752,8 @@ pub fn drive_hip_pin(
                 g_vello,
                 dt,
                 params.k_v,
-                params.pin_vertical,
+                vertical_allowed,
+                support_share,
                 Vec2::Y * params.hip_drop,
             ))
         } else {
@@ -688,10 +809,12 @@ pub fn drive_hip_pin(
                     .map(|p| p.particle.pos)
                     .unwrap_or(pin.last_cmd_p3);
                 info!(
-                    "pin mode={:?} kv={:.2} vertical={} P3 actual=({:.1},{:.1}) ref=({:.1},{:.1}) cmd=({:.1},{:.1}) sag_y={:.1}",
+                    "pin mode={:?} kv={:.2} vertical={} grounded={} share={:.2} P3 actual=({:.1},{:.1}) ref=({:.1},{:.1}) cmd=({:.1},{:.1}) sag_y={:.1}",
                     params.mode,
                     params.k_v,
-                    params.pin_vertical,
+                    vertical_allowed,
+                    grounded,
+                    support_share,
                     p3.x,
                     p3.y,
                     pin.last_ref_p3.x,
@@ -1151,6 +1274,7 @@ mod tests {
             1.0 / 90.0,
             0.3,
             true,
+            0.0,
             Vec2::ZERO,
         );
         let c_ref = (frame[0] + frame[1] + frame[2]) / 3.0;
@@ -1165,6 +1289,87 @@ mod tests {
         }
         // ...and the whole frame did translate (the centroid is physical).
         assert!((c_out - c_ref).length() > 1e-3, "frame did not move");
+    }
+
+    #[test]
+    fn airborne_releases_vertical_and_gravity_share() {
+        let dt = 1.0 / 90.0;
+        let g = Vec2::new(0.0, 980.0);
+        let frame = [Vec2::new(12.0, -60.0), Vec2::new(-3.0, -30.0), Vec2::ZERO];
+        let c_ref = (frame[0] + frame[1] + frame[2]) / 3.0;
+        // Body 50 px below the plan (Vello y-down: +y is lower), at rest.
+        let c_below = c_ref + Vec2::new(0.0, 50.0);
+        let state = |k: usize| (c_below + (frame[k] - c_ref), Vec2::ZERO);
+        let states = [state(0), state(1), state(2)];
+        let pred = c_below + g * (dt * dt);
+        // Airborne (caller passes vertical=false and support_share=0): no
+        // vertical command and no gravity cancellation, so the target centroid is
+        // exactly the free-flight prediction.
+        let out = delta_frame_targets(
+            frame,
+            states,
+            Vec2::ZERO,
+            g,
+            dt,
+            0.3,
+            false,
+            0.0,
+            Vec2::ZERO,
+        );
+        let c_out = (out[0] + out[1] + out[2]) / 3.0;
+        assert!(
+            (c_out - pred).length() < 1e-3,
+            "airborne must be ballistic: {c_out:?} vs {pred:?}"
+        );
+    }
+
+    #[test]
+    fn grounded_support_share_cancels_gravity() {
+        let dt = 1.0 / 90.0;
+        let g = Vec2::new(0.0, 980.0);
+        let frame = [Vec2::new(12.0, -60.0), Vec2::new(-3.0, -30.0), Vec2::ZERO];
+        let states = [
+            (frame[0], Vec2::ZERO),
+            (frame[1], Vec2::ZERO),
+            (frame[2], Vec2::ZERO),
+        ];
+        let c = (frame[0] + frame[1] + frame[2]) / 3.0;
+        // kv = 0 isolates the gravity term.
+        let cy = |o: [Vec2; 3]| (o[0].y + o[1].y + o[2].y) / 3.0;
+        let full = delta_frame_targets(frame, states, Vec2::ZERO, g, dt, 0.0, true, 0.0, Vec2::ZERO);
+        let half = delta_frame_targets(frame, states, Vec2::ZERO, g, dt, 0.0, true, 0.5, Vec2::ZERO);
+        let none = delta_frame_targets(frame, states, Vec2::ZERO, g, dt, 0.0, true, 1.0, Vec2::ZERO);
+        assert!((cy(full) - c.y - g.y * dt * dt).abs() < 1e-3, "share 0 ⇒ full gravity");
+        assert!((cy(half) - c.y - 0.5 * g.y * dt * dt).abs() < 1e-3, "share 0.5 ⇒ half gravity");
+        assert!((cy(none) - c.y).abs() < 1e-3, "share 1 ⇒ no gravity");
+    }
+
+    #[test]
+    fn grounded_vertical_command_allows_jump() {
+        let dt = 1.0 / 90.0;
+        let g = Vec2::new(0.0, 980.0);
+        let frame = [Vec2::new(12.0, -60.0), Vec2::new(-3.0, -30.0), Vec2::ZERO];
+        let states = [
+            (frame[0], Vec2::ZERO),
+            (frame[1], Vec2::ZERO),
+            (frame[2], Vec2::ZERO),
+        ];
+        let c = (frame[0] + frame[1] + frame[2]) / 3.0;
+        let pred_y = c.y + g.y * dt * dt;
+        // Grounded + upward reference: the frame must be lifted above free fall.
+        let out = delta_frame_targets(
+            frame,
+            states,
+            Vec2::new(0.0, -600.0),
+            g,
+            dt,
+            0.3,
+            true,
+            0.5,
+            Vec2::ZERO,
+        );
+        let cy = (out[0].y + out[1].y + out[2].y) / 3.0;
+        assert!(cy < pred_y - 1.0, "jump must lift: {cy} vs pred {pred_y}");
     }
 
     #[test]

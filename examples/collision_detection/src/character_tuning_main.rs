@@ -42,9 +42,11 @@ use game_lib::{
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
     default_input_map, drive_hip_pin, reset_hip_pin, update_character_movement,
+    update_ground_support,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
-    CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems, HipPin,
-    HipPinParams, PinMode, PlayerAction, PlayerMarker, SpineController, VelloCharacterPlugin,
+    CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
+    GroundSupport, HipPin, HipPinParams, PinMode, PlayerAction, PlayerMarker, SpineController,
+    VelloCharacterPlugin,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -188,8 +190,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(cannon::CannonParams::default())
         .insert_resource(GravityToggle::default())
         // Same env-driven controller as the headless harness: `PIN_MODE`,
-        // `KV`, `HIP_DROP`, `TARGET_SPEED`, `LEGS`. Default = rigid pin.
+        // `KV`, `SUPPORT_SHARE`, `HIP_DROP`, `TARGET_SPEED`, `LEGS`.
+        // Default = rigid pin.
         .insert_resource(HipPinParams::from_env())
+        // Ground gate: vertical authority and gravity cancellation only while a
+        // character collider is in floor contact.
+        .insert_resource(GroundSupport::default())
         .add_plugins(EguiPlugin {
             enable_multipass_for_primary_context: false,
         })
@@ -204,6 +210,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // position constraints, and (when `hip_drives_legs`) write the foot
         // targets for the legs — all *before* `update_character_movement` runs
         // the leg IK, and before the constraint world is stepped.
+        .add_systems(
+            FixedUpdate,
+            update_ground_support.before(drive_hip_pin),
+        )
         .add_systems(
             FixedUpdate,
             drive_hip_pin
@@ -853,9 +863,13 @@ fn hip_pin_ui(
             ui.selectable_value(&mut params.mode, PinMode::Delta, "Delta (velocity servo)");
         });
         ui.add(egui::Slider::new(&mut params.k_v, 0.0..=1.0).text("k_v (delta gain)"));
+        ui.add(
+            egui::Slider::new(&mut params.support_share, 0.0..=1.0)
+                .text("support_share (gravity cancelled while grounded)"),
+        );
         ui.checkbox(
             &mut params.pin_vertical,
-            "pin vertical axis (off = gravity is ballistic)",
+            "pin vertical axis (auto-off when airborne)",
         );
         ui.colored_label(
             egui::Color32::LIGHT_BLUE,
