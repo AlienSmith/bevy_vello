@@ -614,3 +614,17 @@ contact count (green/red), the resolver vertical phase, whether the vertical
 command is active, and the effective gravity cancellation (0 % in the air,
 `support_share` on the ground). The checkbox is only the master switch; the gate
 readout is the part that changes during a jump.
+
+### 11.10 Tuning app: jump-height slider and a small test course (2026-10-17)
+
+- **`GROUND_DROP` default bug:** the app defaulted it to **100**, so every launch
+  had the floor 1 m below the spawn line even without the env var — this is the
+  "pinned in mid-air" report. Default is now **0**; the drop test still uses
+  `GROUND_DROP=100` explicitly.
+- **`jump_apex` slider** (10..200 px above stand) added to the Hip Pin window,
+  next to `target_speed`.
+- **Ramp + platform** added to the static scene (cyan): ramp `x=120..270` rising
+  30 px (≈20°), platform `x=270..470` at +30 px, and a 30 px drop at `x=470`.
+  The rise is deliberately small so the current pose-aware leg bridge can still
+  reach; larger steps need terrain-aware foot targets (the stance-retarget item).
+  Walking right climbs the ramp, crosses the platform, and drops off the edge.

@@ -437,7 +437,7 @@ fn make_static_scene(commands: &mut Commands) {
     let ground_drop = std::env::var("GROUND_DROP")
         .ok()
         .and_then(|s| s.trim().parse::<f32>().ok())
-        .unwrap_or(100.0);
+        .unwrap_or(0.0);
     let ground_surface_y = -279.0 - ground_drop;
     const GROUND_HALF_THICKNESS: f32 = 20.0;
     make_static_collision_shape(
@@ -460,6 +460,69 @@ fn make_static_scene(commands: &mut Commands) {
     info!(
         "tuning ground: surface y={ground_surface_y:.1} (drop={ground_drop:.1}), rect center y={:.1}",
         ground_surface_y - GROUND_HALF_THICKNESS
+    );
+
+    // Small ramp + raised platform for climb / step / fall testing:
+    //   ramp   x = 120..270, rises 30 px (≈20°)
+    //   platform x = 270..470, top 30 px above the ground
+    //   right edge at x = 470 is a 30 px drop back to the ground.
+    // The 30 px rise keeps the hip inside the leg workspace, so the pose-aware
+    // bridge can still reach without terrain-aware foot targets.
+    const RAMP_RISE: f32 = 30.0;
+    const RAMP_X0: f32 = 120.0;
+    const RAMP_X1: f32 = 270.0;
+    const PLATFORM_X1: f32 = 470.0;
+    let ramp = {
+        let half_x = ((RAMP_X1 - RAMP_X0) * 0.5) as f64;
+        let half_y = (RAMP_RISE * 0.5) as f64;
+        let mut path = BezPath::new();
+        path.move_to((-half_x, -half_y));
+        path.line_to((half_x, half_y));
+        path.line_to((half_x, -half_y));
+        path.close_path();
+        (path, kurbo::Rect::new(-half_x, -half_y, half_x, half_y))
+    };
+    make_static_collision_shape(
+        commands,
+        Vec4::new(
+            (RAMP_X0 + RAMP_X1) * 0.5,
+            ground_surface_y + RAMP_RISE * 0.5,
+            0.0,
+            1.0,
+        ),
+        move || ramp.clone(),
+        GlowColor {
+            color: peniko::Color::rgb(0.1, 0.8, 1.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, 0.0),
+        0.0,
+        false,
+    );
+    make_static_collision_shape(
+        commands,
+        Vec4::new(
+            (RAMP_X1 + PLATFORM_X1) * 0.5,
+            ground_surface_y + RAMP_RISE * 0.5,
+            0.0,
+            1.0,
+        ),
+        || {
+            let half_w = ((PLATFORM_X1 - RAMP_X1) * 0.5) as f64;
+            let half_h = (RAMP_RISE * 0.5) as f64;
+            let rect = kurbo::Rect::new(-half_w, -half_h, half_w, half_h);
+            (rect.to_path(0.1), rect)
+        },
+        GlowColor {
+            color: peniko::Color::rgb(0.1, 0.8, 1.0),
+            glow: 1.0,
+        },
+        Vec2::new(0.0, 0.0),
+        0.0,
+        false,
+    );
+    info!(
+        "tuning ramp: x={RAMP_X0:.0}..{RAMP_X1:.0} rise {RAMP_RISE:.0} px, platform x={RAMP_X1:.0}..{PLATFORM_X1:.0}"
     );
 
     make_static_collision_shape(
@@ -930,6 +993,10 @@ fn hip_pin_ui(
         ui.label("Raibert lower-body resolver → rigid P1/P2/P3 frame.");
         ui.add(
             egui::Slider::new(&mut params.config.target_speed, 0.0..=600.0).text("target_speed"),
+        );
+        ui.add(
+            egui::Slider::new(&mut params.config.jump_apex, 10.0..=200.0)
+                .text("jump_apex (px above stand)"),
         );
         ui.add(egui::Slider::new(&mut params.config.hip_height, 40.0..=200.0).text("hip_height"));
         ui.add(egui::Slider::new(&mut params.config.thigh_len, 20.0..=120.0).text("thigh_len"));
