@@ -180,8 +180,17 @@ fn calculate_leg_pd(
         }
         Some((delta / dt * config.c_dot_scale).clamp(-MAX_REF_RATE, MAX_REF_RATE))
     };
-    let angular_velocity_hip = target_rate(theta_hip_t, memory.prev_target_hip);
-    let angular_velocity_knee = target_rate(theta_knee_t, memory.prev_target_knee);
+    // `sigma <= 0` means the projection is off: emit `None` so the intent is
+    // explicit in the event (the solver also returns early on `None`/σ=0).
+    // The memory still advances so enabling σ later does not see a stale jump.
+    let (angular_velocity_hip, angular_velocity_knee) = if config.sigma > 1e-6 {
+        (
+            target_rate(theta_hip_t, memory.prev_target_hip),
+            target_rate(theta_knee_t, memory.prev_target_knee),
+        )
+    } else {
+        (None, None)
+    };
     memory.prev_target_hip = Some(theta_hip_t);
     memory.prev_target_knee = Some(theta_knee_t);
 
@@ -330,6 +339,7 @@ mod tests {
     fn cfg() -> LimbConfig {
         LimbConfig {
             zeta: 1.5, // distinct from the 1.0 default so tests can assert passthrough
+            sigma: 1.0, // arm the feed-forward in the unit tests
             ..Default::default()
         }
     }
