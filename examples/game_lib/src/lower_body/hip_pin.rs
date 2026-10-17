@@ -126,13 +126,15 @@ pub struct HipPinParams {
 pub enum PinMode {
     /// Legacy kinematic pin: every particle is projected toward the absolute
     /// resolver pose (`pose + a·dt²`, gravity cancelled by a `+g·dt²`
-    /// feed-forward). The frame cannot be pushed off the plan.
-    #[default]
+    /// feed-forward). The frame cannot be pushed off the plan. Kept for A/B
+    /// (`PIN_MODE=rigid`).
     Rigid,
     /// State-relative velocity servo: the target is the free-flight prediction
     /// plus a fraction of the reference-vs-realized velocity error,
     /// `p* + k_v·(v_ref − v)·dt`. No absolute pose term, so collisions, contacts
     /// and gravity move the frame and the error decays over a few ticks.
+    /// **Default**: this is the intended controller.
+    #[default]
     Delta,
 }
 
@@ -672,6 +674,24 @@ pub fn drive_hip_pin(
         // --- Step the resolver (deterministic, fixed-cadence). ---
         let (pose, _debug) = step_lower_body(input_dir, &params.config, &mut pin.state, dt);
 
+        // Capture the actual spine frame once; the delta leg bridge below is
+        // built from it so the legs cannot anchor the body to a world pose.
+        let idx = [2usize, 3, 4];
+        let mut states = [(Vec2::ZERO, Vec2::ZERO); 3];
+        let mut all_ready = true;
+        for (k, i) in idx.iter().enumerate() {
+            match p_q.get(spine.particles[*i]) {
+                Ok(p) => states[k] = (p.particle.pos, p.particle.velocity),
+                Err(_) => {
+                    all_ready = false;
+                    break;
+                }
+            }
+        }
+        if !all_ready {
+            continue;
+        }
+
         // --- Map resolver hip (y-up) → Vello world (y-down) translation. ---
         // Only the delta from the seed hip is used, so the resolver's absolute
         // frame never leaks into the world. The resolver's hip velocity is the
@@ -726,24 +746,7 @@ pub fn drive_hip_pin(
         //
         // Delta mode commands the frame **as a rigid body**: the centroid follows
         // the state-relative servo and the reference offsets (attitude + bone
-        // lengths) are preserved. Damping each particle independently would let
-        // the distance constraints keep lengths but not attitude, and the upper
-        // body would tip over.
-        let idx = [2usize, 3, 4];
-        let mut states = [(Vec2::ZERO, Vec2::ZERO); 3];
-        let mut all_ready = true;
-        for (k, i) in idx.iter().enumerate() {
-            match p_q.get(spine.particles[*i]) {
-                Ok(p) => states[k] = (p.particle.pos, p.particle.velocity),
-                Err(_) => {
-                    all_ready = false;
-                    break;
-                }
-            }
-        }
-        if !all_ready {
-            continue;
-        }
+        // lengths) are preserved. The `states`/`idx` captured above are reused.
         let delta_targets = if params.mode == PinMode::Delta {
             Some(delta_frame_targets(
                 pose_targets,
@@ -899,13 +902,19 @@ pub fn drive_hip_pin(
             });
 
             // Pose-aware target: keep the character's own thigh/calf lengths and
-            // add only the resolver's per-segment rotation since the seed. At
-            // seed both deltas are zero, so the targets equal the live pose and
-            // the PD starts with no error. The hip still carries the resolver's
-            // world translation.
+            // add only the resolver's per-segment rotation since the seed.
+            //
+            // Delta mode bases the targets on the **actual** P3 (`states[2]`),
+            // so the legs follow the body instead of anchoring it to the
+            // resolver's absolute world hip. This is what lets an external
+            // impulse move the character; Rigid keeps the legacy world anchor.
             // Bevy y-up: subtract the same drop so the leg targets follow the
-            // lowered pinned frame (the floor stays at the seed anchor).
-            let hip_t = pose.hip + seed.hip_offset - Vec2::Y * params.hip_drop;
+            // lowered pinned frame.
+            let actual_p3_bevy = Vec2::new(states[2].0.x, -states[2].0.y);
+            let hip_t = match params.mode {
+                PinMode::Delta => actual_p3_bevy - Vec2::Y * params.hip_drop,
+                PinMode::Rigid => pose.hip + seed.hip_offset - Vec2::Y * params.hip_drop,
+            };
             let knee_l = hip_t
                 + transfer_segment(
                     seed.live[0].knee - seed.live[0].hip,

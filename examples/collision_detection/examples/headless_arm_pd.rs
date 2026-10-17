@@ -850,6 +850,12 @@ fn main() {
         if collision_enabled() {
             app.add_systems(FixedUpdate, update_ground_support.before(drive_hip_pin));
         }
+        if std::env::var("HIT").is_ok() {
+            app.add_systems(
+                FixedUpdate,
+                inject_test_hit.before(apply_explicit_impulse_on_connection_particle),
+            );
+        }
         app.add_systems(
             FixedUpdate,
             (
@@ -1057,6 +1063,46 @@ fn log_collision_stats(
         time.elapsed_secs(),
         batch.entries.len()
     );
+}
+
+/// `HIT=<px/s>` injects a one-shot lateral velocity into the pinned frame at
+/// `HIT_T` seconds (default 2.0), for the "heavy strike" gate. Uses
+/// [`CharacterFrameForceEvent`] on the three frame particles; the solver applies
+/// `pos += impulse * inv_mass * dt`, so an impulse of `dv/dt` produces `dv`.
+fn inject_test_hit(
+    time: Res<Time<Fixed>>,
+    mut done: Local<bool>,
+    pin_q: Query<Entity, With<HipPin>>,
+    mut events: EventWriter<CharacterFrameForceEvent>,
+) {
+    if *done {
+        return;
+    }
+    let dv = match std::env::var("HIT") {
+        Ok(s) => s.trim().parse::<f32>().unwrap_or(0.0),
+        Err(_) => return,
+    };
+    if dv.abs() < 1e-3 {
+        return;
+    }
+    let t_hit = env_f32("HIT_T", 2.0);
+    if time.elapsed_secs() < t_hit {
+        return;
+    }
+    let Ok(character) = pin_q.get_single() else {
+        return;
+    };
+    let dt = time.delta_secs().max(1e-6);
+    let impulse = Vec2::new(dv / dt, 0.0);
+    events.write(CharacterFrameForceEvent {
+        character_entity: character,
+        forces: vec![impulse; 3],
+    });
+    info!(
+        "test hit: dv={dv:.0} px/s on P1/P2/P3 at t={:.2}",
+        time.elapsed_secs()
+    );
+    *done = true;
 }
 
 fn register_character_assets(

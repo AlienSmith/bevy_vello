@@ -628,3 +628,44 @@ readout is the part that changes during a jump.
   The rise is deliberately small so the current pose-aware leg bridge can still
   reach; larger steps need terrain-aware foot targets (the stance-retarget item).
   Walking right climbs the ramp, crosses the platform, and drops off the edge.
+
+### 11.11 Delta is now the default; legs no longer anchor the body (2026-10-17)
+
+Symptom: a heavy strike barely moved the character. Two remaining world anchors
+were responsible, not the solver ordering:
+
+1. **`PinMode::default()` was still `Rigid`.** The app (and any `HipPinParams`
+   built without `PIN_MODE`) ran the absolute-pose pin, which re-projects
+   `P1/P2/P3` every tick and erases any collision displacement. `Delta` is now
+   the default; `PIN_MODE=rigid` selects the legacy pin for A/B.
+2. **The leg targets were still resolver-anchored.** `hip_t = pose.hip +
+   seed.hip_offset` made every foot target an absolute world point, so the leg
+   servos pulled the body back to the resolver's pose through the distance
+   constraints. In Delta mode the bridge now bases the targets on the **actual
+   P3** (`states[2]`) — the legs follow the body, and only their per-segment
+   rotations come from the resolver. Rigid mode keeps the old anchor.
+
+**Heavy-strike gate** (`HIT=<px/s>`, `HIT_T=<s>`): a one-shot velocity change is
+injected into the frame via `CharacterFrameForceEvent` on P1/P2/P3.
+
+| mode | peak displacement | final position |
+|---|---|---|
+| rigid | 37.4 px | **returns to 173.5** (snap-back) |
+| delta | **132.7 px** | stays at ~306.7 (no restore) |
+
+So the "barely moves" was the rigid pin + resolver-anchored legs, exactly as
+suspected. With Delta, an impulse displaces the body and the displacement
+persists; the velocity decays through `k_v`, but there is no position
+restoration.
+
+**Tracking after the leg change** (all with collision on, `SUBSTEPS=1`):
+walk peak **4.7 px** (was 44.4), jump peak 3.4 px (rise 56.9 px), drop peak
+4.2 px (was 104). The previous "foot error" was largely hip lag measured against
+resolver-anchored targets. Caveat: the stance foot now rides the body, so world
+foot slip is no longer measured by this metric — the stance plant/re-seat work
+is the next step.
+
+**Still kinematic by construction:** `apply_collision_correction` applies the
+contact offsets to P1/P2/P3 as **pure position changes** (no velocity), so a
+real collider strike displaces the body but does not inject knock-back
+momentum. Carrying `vel_delta` on the frame is a separate follow-up.
