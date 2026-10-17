@@ -148,6 +148,7 @@ use game_lib::{
     check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, flush_csv, flush_rows,
     rows_hash, tail_verdict, update_character_movement, Bone, CharacterController, CharacterRoot,
     HeadlessTelemetryPlugin, HipPin, HipPinParams, IkMode, InvariantConfig, LeftArmController,
+    PinMode,
     LeftLegController, LimbConfig, ParticleTelemetryConfig, PlayerAction, PlayerMarker,
     ResetLimbControlConstraintsEvent, RightArmController, RightLegController, SpineDriveEnabled,
     TelemetryBuffer, TelemetryRow, VelloCharacterPlugin, VerticalPhase, WhichLimb,
@@ -825,7 +826,17 @@ fn main() {
     .insert_resource(probe);
 
     if body {
-        app.insert_resource(hip_pin_params_from_env());
+        let params = hip_pin_params_from_env();
+        let substeps = std::env::var("SUBSTEPS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(1)
+            .max(1);
+        info!(
+            "pin controller: mode={:?} kv={:.2} substeps={} (PIN_MODE=rigid|delta, KV=0..1)",
+            params.mode, params.k_v, substeps
+        );
+        app.insert_resource(params);
     }
 
     // Real physics stepping, same order as VelloCollisionResponsePlugin minus the
@@ -2234,11 +2245,20 @@ fn hip_pin_params_from_env() -> HipPinParams {
         std::env::var("LEGS").ok().as_deref().map(str::trim),
         Some("off") | Some("0") | Some("false")
     );
+    // `PIN_MODE=delta` opts into the state-relative velocity servo; anything
+    // else keeps the legacy rigid pin. `KV` is the servo gain (0..1).
+    let mode = match std::env::var("PIN_MODE").ok().as_deref().map(str::trim) {
+        Some("delta") | Some("DELTA") | Some("1") => PinMode::Delta,
+        Some("rigid") | Some("RIGID") | Some("0") => PinMode::Rigid,
+        _ => d.mode,
+    };
     HipPinParams {
         compliance: env_f32("COMPLIANCE", d.compliance),
         damping: env_f32("DAMPING", d.damping),
         hip_drives_legs: drives_legs,
         hip_drop: env_f32("HIP_DROP", d.hip_drop),
+        mode,
+        k_v: env_f32("KV", d.k_v),
         ..d
     }
 }

@@ -401,3 +401,86 @@ Interpretation:
 2. Recompute the floor and hip height from the contact-settled pose.
 3. Add penetration/slip/pin-share columns and the grounded analyzer.
 4. Then tune friction and the stance contract (options A/B/C in §4.3).
+
+## 11. Delta (state-relative) pin experiment (2026-10-17)
+
+Goal: remove the absolute-pose projection that made the hip kinematic, and let
+gravity + contacts own the vertical before adding any half-pin masking.
+
+### 11.1 Control law
+
+`PinMode::Delta` (`PIN_MODE=delta`) computes, per pinned particle:
+
+```text
+p*     = p + v·dt + g·dt²              // the free-flight prediction
+target = p* + k_v·(v_ref − v)·dt      // k_v clamped to [0, 1]
+```
+
+No absolute pose term and no `+g·dt²` feed-forward: gravity is already in the
+prediction the physics step makes, so the constraint adds only the velocity-error
+correction. The resolver pose enters only through `v_ref` (its hip velocity).
+
+Applying the resolver's **raw** delta instead (`p* + v_ref·dt`) would add `v_ref`
+to the realized velocity every tick (`v_{n+1} = v_n + v_ref`) — the "constant
+speed gets faster and faster" failure. The `− v` term is what turns it into a
+servo; a unit test locks both behaviors.
+
+`PinMode::Rigid` is the previous absolute-pose pin, kept selectable for A/B.
+The law is only valid at `SUBSTEPS=1`: the position constraint carries a
+frame-level prediction and is re-solved per substep.
+
+### 11.2 Run
+
+```powershell
+$env:ASSET_ROOT = "D:\bender\bevy_vello\examples\collision_detection\assets"
+$env:SCRIPT     = "D:\bender\bevy_vello\plans\walk_script.json"
+$env:COLLISION  = "1"
+$env:GRAVITY    = "on"
+$env:PIN_MODE   = "delta"
+$env:KV         = "0.3"          # sweep 0.1 / 0.3 / 0.6 / 1.0
+$env:PIN_LOG    = "1"            # once-per-second pin line (optional)
+$env:OUT_CSV    = "D:\bender\bevy_vello\tmp\headless\walk_delta_k03.csv"
+target\release\examples\headless_arm_pd.exe
+```
+
+The pin log line reports `P3 actual`, the resolver `ref`, the emitted `cmd`, and
+`sag_y = actual.y − ref.y` in the Vello y-down frame (positive = body lower than
+the plan). The `PIN_MODE`, `KV` and `SUBSTEPS` are printed once at startup.
+
+### 11.3 Results (walk, 120 px/s reference; 11.5 s)
+
+| run | foot peak | hip lag mean/max | sag mean (min..max) | realized vx | rig dev | contacts |
+|---|---|---|---|---|---|---|
+| rigid baseline | **3.58 px** | 0 | ~0 | 115.5 | 0.033 | 2 |
+| delta k_v=0.1 | 259.1 px | 121.5 / 258.1 px | −5.3 (−9.0 .. 2.2) | 92.3 | 0.0231 | 5 |
+| delta k_v=0.3 | 52.2 px | 30.6 / 50.4 px | −5.9 (−10.7 .. 1.6) | 112.4 | 0.0233 | 5 |
+| delta k_v=0.6 | 43.3 px | 24.5 / 41.3 px | −4.8 (−8.9 .. 1.2) | 113.3 | 0.0238 | 3 |
+| delta k_v=1.0 | 34.8 px | 18.6 / 32.7 px | −4.3 (−8.7 .. 1.0) | 112.5 | 0.0252 | 3 |
+
+All delta runs: `nan_rows=0`, deterministic, `tail=PASS` (the rigid tail was
+WAGGLE).
+
+### 11.4 Interpretation
+
+- **No runaway.** Realized speed sits at 112–113 px/s against a 115.5 px/s
+  reference for every usable `k_v`. The raw-delta accumulation is absent.
+- **No sitting.** The frame does not collapse when the pin stops cancelling
+  gravity. The mean sag is *negative* (a few px **above** the reference) and the
+  worst downward excursion is ~1–2 px: contacts and the leg chain already carry
+  the body in this configuration. The predicted "legs not strong enough" failure
+  did not appear, so support authority is not the first problem.
+- **The residual is horizontal position lag**, 18–30 px mean at usable `k_v`,
+  because the law has no position feedback. Foot error (35–52 px) is mostly that
+  lag: the leg targets are still built from the resolver hip (`pose.hip`), so the
+  legs chase a point the body is not at.
+- Rig deviation improved (2.3–2.5 % vs 3.3 %) and the tail verdict improved,
+  consistent with contacts doing more of the work.
+
+### 11.5 Next
+
+1. Add a bounded position term (`k_p·clamp(p_ref − p, ±e_max)·dt²`) or retarget
+   the stance foot from the **actual** hip, so the lag is corrected without
+   restoring a hard absolute pose.
+2. Then the stance/support work: `anchor_chain` off for the stance leg and a
+   support-share force.
+3. Keep `SUBSTEPS=1` until the command becomes a per-substep force/impulse.

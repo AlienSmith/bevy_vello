@@ -1,9 +1,21 @@
 //! Hip-pin bridge: drive the character's rigid `P1/P2/P3` frame from the
 //! Raibert lower-body resolver.
 //!
-//! The resolver's hip output — **position and velocity** — is the model; the
-//! pin realizes it on the three pinned particles with a **PD command + a stiff
-//! external position constraint**:
+//! Two realization modes are available ([`PinMode`]):
+//!
+//! * [`PinMode::Rigid`] (legacy, default) — an **absolute** pose projection with
+//!   a PD command and a `+g·dt²` feed-forward. The frame cannot be pushed off
+//!   the plan; this is the kinematic behaviour the delta mode replaces.
+//! * [`PinMode::Delta`] — a **state-relative velocity servo**. The target is the
+//!   free-flight prediction `p* = p + v·dt + g·dt²` plus `k_v·(v_ref − v)·dt`.
+//!   There is no absolute pose term and no gravity feed-forward, so collisions,
+//!   contacts and gravity move the frame and the velocity error decays over
+//!   `~1/k_v` ticks. Requires `SUBSTEPS=1` while the command is a frame-level
+//!   position constraint.
+//!
+//! Under the rigid mode the resolver's hip output — **position and velocity** —
+//! is the model; the pin realizes it on the three pinned particles with a
+//! **PD command + a stiff external position constraint**:
 //!
 //! * the resolver is stepped with the live fixed `dt` and the game input map
 //!   ([`PlayerAction`]),
@@ -64,6 +76,13 @@ pub struct HipPinParams {
     /// (larger ⇒ softer-on-fast). `1.0` disables softening (constant
     /// compliance).
     pub soft_scale: f32,
+    /// How the pin builds each particle's constraint target.
+    pub mode: PinMode,
+    /// Velocity-servo gain used by [`PinMode::Delta`], in `0..=1`: the fraction
+    /// of the reference-vs-realized velocity error removed per tick. `1.0`
+    /// matches the reference velocity outright; lower values yield to external
+    /// impulses. Unused by [`PinMode::Rigid`].
+    pub k_v: f32,
     /// External position constraint compliance **at rest** (lower = stiffer).
     /// The stock `ExternalPositionConstraint` is position-only, so this is the
     /// base stiffness of the pin; it is scaled up (softer) with speed by
@@ -89,6 +108,21 @@ pub struct HipPinParams {
     pub hip_drop: f32,
 }
 
+/// How the hip pin realizes the resolver on `P1/P2/P3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PinMode {
+    /// Legacy kinematic pin: every particle is projected toward the absolute
+    /// resolver pose (`pose + a·dt²`, gravity cancelled by a `+g·dt²`
+    /// feed-forward). The frame cannot be pushed off the plan.
+    #[default]
+    Rigid,
+    /// State-relative velocity servo: the target is the free-flight prediction
+    /// plus a fraction of the reference-vs-realized velocity error,
+    /// `p* + k_v·(v_ref − v)·dt`. No absolute pose term, so collisions, contacts
+    /// and gravity move the frame and the error decays over a few ticks.
+    Delta,
+}
+
 impl Default for HipPinParams {
     fn default() -> Self {
         Self {
@@ -99,6 +133,10 @@ impl Default for HipPinParams {
             kd: 0.0,
             v_ref: 300.0,
             soft_scale: 1.0, // 1 ⇒ constant compliance (softening off)
+            mode: PinMode::default(),
+            // Gentle: a third of the velocity error per tick, so a collision
+            // perturbation decays over ~3 ticks instead of being erased.
+            k_v: 0.3,
             // Snaps the (now-light) particles to the commanded pose.
             compliance: 1e-7,
             damping: 0.01,
@@ -198,6 +236,15 @@ pub struct HipPin {
     /// pin drives the legs. `None` until then (and after a reset). See
     /// `LegBridgeSeed`.
     leg_seed: Option<LegBridgeSeed>,
+    /// Resolver reference for `P3` in Vello world (y-down), refreshed each tick.
+    pub last_ref_p3: Vec2,
+    /// The constraint target actually emitted for `P3` this tick.
+    pub last_cmd_p3: Vec2,
+    /// Realized vertical sag of `P3` against the resolver reference:
+    /// `P3.y − last_ref_p3.y` (Vello y-down, positive = body below the plan).
+    /// Near zero in [`PinMode::Rigid`]; this is the number to watch when the
+    /// pin stops cancelling gravity.
+    pub last_sag_y: f32,
 }
 
 impl HipPin {
@@ -221,6 +268,9 @@ impl HipPin {
             theta: 0.0,
             jump_was_held: false,
             leg_seed: None,
+            last_ref_p3: Vec2::ZERO,
+            last_cmd_p3: Vec2::ZERO,
+            last_sag_y: 0.0,
         }
     }
 
@@ -256,6 +306,10 @@ pub fn rigid_frame_targets(
 /// position offset (`target = pose + a·dt²`). `v_hip` is the resolver's hip
 /// velocity (the rigid frame translates as one, so all three particles carry
 /// it). Pure; exposed for unit testing.
+///
+/// This is the [`PinMode::Rigid`] command: it is anchored on the **absolute**
+/// pose, so the frame cannot be pushed off the resolver's plan. Use
+/// [`delta_target`] when the frame should participate in physics.
 pub fn pd_target(
     pose_t: Vec2,
     pos: Vec2,
@@ -267,6 +321,37 @@ pub fn pd_target(
 ) -> Vec2 {
     let a = kp * (pose_t - pos) + kd * (v_hip - vel);
     pose_t + a * (dt * dt)
+}
+
+/// Free-flight prediction the XPBD step will make this tick (Vello y-down):
+/// `p* = p + v·dt + g·dt²`. Pure; exposed for unit testing.
+pub fn predict_pos(pos: Vec2, vel: Vec2, gravity: Vec2, dt: f32) -> Vec2 {
+    pos + vel * dt + gravity * (dt * dt)
+}
+
+/// State-relative velocity-servo target for [`PinMode::Delta`].
+///
+/// `target = p* + k_v·(v_ref − v)·dt` with `p* = p + v·dt + g·dt²`.
+///
+/// The target is built **from the particle's own state**, so the only thing the
+/// constraint adds on top of free flight is the velocity-error correction. If a
+/// collision changes `v`, next tick's prediction starts from the new velocity
+/// and the error decays over `~1/k_v` ticks. There is no absolute pose term and
+/// no accumulated error, so no wind-up.
+///
+/// Applying the resolver's raw delta instead (`p* + v_ref·dt`) would add
+/// `v_ref` to the realized velocity every tick and diverge; the `− v` term is
+/// what makes it a servo. `k_v` is clamped to `[0, 1]`.
+pub fn delta_target(
+    pos: Vec2,
+    vel: Vec2,
+    v_ref: Vec2,
+    gravity: Vec2,
+    dt: f32,
+    k_v: f32,
+) -> Vec2 {
+    let kv = k_v.clamp(0.0, 1.0);
+    predict_pos(pos, vel, gravity, dt) + (v_ref - vel) * (kv * dt)
 }
 
 /// Speed-softened compliance: `base·(1 + s·(soft_scale−1))` with
@@ -328,6 +413,7 @@ pub fn drive_hip_pin(
     p_q: Query<&VelloParticle>,
     action_q: Query<&ActionState<PlayerAction>>,
     mut world: ResMut<VelloConstraintWorld>,
+    mut log_tick: Local<u64>,
 ) {
     let dt = time.delta_secs();
 
@@ -399,14 +485,28 @@ pub fn drive_hip_pin(
         let g_vello = world.gravity();
         let g_dt2 = g_vello * (dt * dt);
 
-        // --- Per-particle PD command + speed-softened compliance. ---
+        // --- Per-particle command + speed-softened compliance. ---
         // Exactly 3 position constraints, nothing angular.
         for (i, pose_t) in [2usize, 3, 4].into_iter().zip(pose_targets.iter()) {
             let (pos, vel) = match p_q.get(spine.particles[i]) {
                 Ok(p) => (p.particle.pos, p.particle.velocity),
                 Err(_) => continue,
             };
-            let target = pd_target(*pose_t, pos, vel, v_hip, dt, params.kp, params.kd) + g_dt2;
+            let target = match params.mode {
+                // Legacy kinematic pin: absolute pose + cancelled gravity.
+                PinMode::Rigid => {
+                    pd_target(*pose_t, pos, vel, v_hip, dt, params.kp, params.kd) + g_dt2
+                }
+                // State-relative servo: free-flight prediction plus a fraction of
+                // the velocity error. Gravity is already in `predict_pos`, so no
+                // `g_dt2` here; the resolver pose enters only through `v_hip`.
+                PinMode::Delta => delta_target(pos, vel, v_hip, g_vello, dt, params.k_v),
+            };
+            if i == 4 {
+                pin.last_ref_p3 = *pose_t;
+                pin.last_cmd_p3 = target;
+                pin.last_sag_y = pos.y - pose_t.y;
+            }
             let compliance = softened_compliance(
                 params.compliance,
                 params.soft_scale,
@@ -425,6 +525,35 @@ pub fn drive_hip_pin(
                     },
                 },
             );
+        }
+
+        // --- Pin telemetry (opt-in via `PIN_LOG=1`). ---
+        // `sag_y` is the vertical gap between the realized `P3` and the resolver
+        // reference; it is ~0 for the rigid pin and grows if the frame falls
+        // because the legs/contacts cannot support it.
+        let pin_log = std::env::var("PIN_LOG")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if pin_log {
+            *log_tick += 1;
+            if *log_tick % 90 == 0 {
+                let p3 = p_q
+                    .get(spine.particles[4])
+                    .map(|p| p.particle.pos)
+                    .unwrap_or(pin.last_cmd_p3);
+                info!(
+                    "pin mode={:?} kv={:.2} P3 actual=({:.1},{:.1}) ref=({:.1},{:.1}) cmd=({:.1},{:.1}) sag_y={:.1}",
+                    params.mode,
+                    params.k_v,
+                    p3.x,
+                    p3.y,
+                    pin.last_ref_p3.x,
+                    pin.last_ref_p3.y,
+                    pin.last_cmd_p3.x,
+                    pin.last_cmd_p3.y,
+                    pin.last_sag_y,
+                );
+            }
         }
 
         // --- Sandbox → legs: write the resolver foot poses into the leg
@@ -756,5 +885,83 @@ mod tests {
         // soft_scale = 1 and v_ref = 0 are both no-ops.
         assert!((softened_compliance(base, 1.0, 300.0, 9999.0) - base).abs() < 1e-12);
         assert!((softened_compliance(base, 10.0, 0.0, 9999.0) - base).abs() < 1e-12);
+    }
+
+    #[test]
+    fn delta_target_reduces_to_prediction_when_velocity_matches() {
+        let dt = 1.0 / 90.0;
+        let g = Vec2::new(0.0, 980.0);
+        let p = Vec2::new(10.0, 20.0);
+        let v = Vec2::new(50.0, -5.0);
+        let t = delta_target(p, v, v, g, dt, 0.4);
+        let pred = predict_pos(p, v, g, dt);
+        assert!(
+            (t - pred).length() < 1e-5,
+            "matched velocity ⇒ prediction only: {t:?} vs {pred:?}"
+        );
+    }
+
+    #[test]
+    fn delta_target_converges_to_reference_velocity() {
+        // Horizontal, gravity-free: the servo must drive `v → v_ref` and never
+        // accumulate. Models the stiff constraint as `pos_{n+1} = target` and
+        // `v_{n+1} = (target − pos)/dt`.
+        let dt = 1.0 / 90.0;
+        let v_ref = Vec2::new(120.0, 0.0);
+        let mut pos = Vec2::ZERO;
+        let mut vel = Vec2::ZERO;
+        for _ in 0..240 {
+            let target = delta_target(pos, vel, v_ref, Vec2::ZERO, dt, 0.3);
+            vel = (target - pos) / dt;
+            pos = target;
+        }
+        assert!(
+            (vel - v_ref).length() < 1e-3,
+            "servo did not converge: {vel:?}"
+        );
+    }
+
+    #[test]
+    fn raw_reference_delta_accumulates_velocity() {
+        // Regression guard for the runaway: applying the resolver's raw delta
+        // on top of the prediction adds `v_ref` to the realized velocity every
+        // tick (`v_{n+1} = v_n + v_ref`).
+        let dt = 1.0 / 90.0;
+        let v_ref = Vec2::new(120.0, 0.0);
+        let mut pos = Vec2::ZERO;
+        let mut vel = Vec2::ZERO;
+        for _ in 0..10 {
+            let raw = predict_pos(pos, vel, Vec2::ZERO, dt) + v_ref * dt;
+            vel = (raw - pos) / dt;
+            pos = raw;
+        }
+        assert!(
+            (vel.x - 10.0 * v_ref.x).abs() < 1e-3,
+            "expected 10×v_ref after 10 ticks, got {vel:?}"
+        );
+
+        // The error form over the same 10 ticks stays bounded by `v_ref`.
+        let mut pos = Vec2::ZERO;
+        let mut vel = Vec2::ZERO;
+        for _ in 0..10 {
+            let target = delta_target(pos, vel, v_ref, Vec2::ZERO, dt, 0.3);
+            vel = (target - pos) / dt;
+            pos = target;
+        }
+        assert!(vel.x <= v_ref.x + 1e-3, "servo overshot: {vel:?}");
+    }
+
+    #[test]
+    fn delta_target_clamps_kv() {
+        let dt = 1.0 / 90.0;
+        let p = Vec2::ZERO;
+        let v = Vec2::new(10.0, 0.0);
+        let v_ref = Vec2::new(110.0, 0.0);
+        let pred = predict_pos(p, v, Vec2::ZERO, dt);
+        let full = delta_target(p, v, v_ref, Vec2::ZERO, dt, 2.0);
+        let one = delta_target(p, v, v_ref, Vec2::ZERO, dt, 1.0);
+        let none = delta_target(p, v, v_ref, Vec2::ZERO, dt, -1.0);
+        assert!((full - one).length() < 1e-6, "k_v clamps at 1");
+        assert!((none - pred).length() < 1e-6, "k_v clamps at 0");
     }
 }

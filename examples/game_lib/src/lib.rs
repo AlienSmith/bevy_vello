@@ -54,10 +54,10 @@ pub use crate::{
     },
     lower_body::{
         compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max,
-        drive_hip_pin, pd_target, reset_hip_pin, rigid_frame_targets, softened_compliance,
-        solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin, HipPinParams, LegState,
-        LowerBodyConfig, LowerBodyController, LowerBodyInput, LowerBodyParams, LowerBodyPose,
-        LowerBodySandboxPlugin, ResolverState, VerticalPhase,
+        delta_target, drive_hip_pin, pd_target, predict_pos, reset_hip_pin, rigid_frame_targets,
+        softened_compliance, solve_leg_ik, DebugInfo, GaitLimits, GaitPhase, HipPin, HipPinParams,
+        LegState, LowerBodyConfig, LowerBodyController, LowerBodyInput, LowerBodyParams,
+        LowerBodyPose, LowerBodySandboxPlugin, PinMode, ResolverState, VerticalPhase,
     },
 };
 
