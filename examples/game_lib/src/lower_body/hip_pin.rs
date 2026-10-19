@@ -5,6 +5,14 @@
 //! centroid velocity servo toward the resolver hip velocity, and the
 //! `support_share` fraction of gravity. There is no absolute pose term.
 //!
+//! The loop is closed: at the top of each step the solved `P3` (synced into
+//! [`VelloParticle`] by `update_connection_particles` at the end of the
+//! previous fixed step) is written back into the resolver state, so the next
+//! step starts from where physics actually left the body. While the `P3` pin
+//! is stiff this is a near-identity correction; it becomes the real feedback
+//! path once the hard pin is later removed. `FEEDBACK=0` disables it for A/B
+//! against the feed-forward baseline.
+//!
 //! The spine drive must stay disabled while the pin runs
 //! ([`crate::character::SpineDriveEnabled`]).
 
@@ -41,11 +49,14 @@ pub struct HipPinParams {
     pub hip_drives_legs: bool,
     /// Vertical offset of the whole pinned body in px, positive = down.
     pub hip_drop: f32,
+    /// Close the XPBD↔Raibert loop: write the solved `P3` back into the
+    /// resolver state each step (`FEEDBACK=0` to disable).
+    pub feedback: bool,
 }
 
 impl HipPinParams {
     /// Read the shared harness/tuning environment: `TARGET_SPEED`, `LEGS`,
-    /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`.
+    /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`, `FEEDBACK`.
     pub fn from_env() -> Self {
         let mut p = Self::default();
         p.config.target_speed = env_f32("TARGET_SPEED", p.config.target_speed);
@@ -57,6 +68,7 @@ impl HipPinParams {
             std::env::var("LEGS").ok().as_deref().map(str::trim),
             Some("off") | Some("0") | Some("false")
         );
+        p.feedback = env_bool("FEEDBACK", true);
         p
     }
 }
@@ -67,6 +79,15 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .ok()
         .and_then(|s| s.trim().parse::<f32>().ok())
         .unwrap_or(default)
+}
+
+/// Parse a boolean env var (`1`/`true`/`yes`/`on` ⇒ true); missing ⇒ `default`.
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key).ok().as_deref().map(str::trim) {
+        Some("1") | Some("true") | Some("yes") | Some("on") => true,
+        Some("0") | Some("false") | Some("no") | Some("off") => false,
+        _ => default,
+    }
 }
 
 /// Ground-contact state gating the pin's vertical authority.
@@ -140,6 +161,7 @@ impl Default for HipPinParams {
             damping: 0.01,
             hip_drives_legs: true,
             hip_drop: 0.0,
+            feedback: true,
         }
     }
 }
@@ -220,8 +242,7 @@ pub struct HipPin {
 impl HipPin {
     /// Live hip→foot distance captured at the leg-bridge seed (bevy y-up).
     pub fn stance_height(&self) -> Option<f32> {
-        self.leg_seed
-            .map(|s| s.live[0].hip.y - s.live[0].foot.y)
+        self.leg_seed.map(|s| s.live[0].hip.y - s.live[0].foot.y)
     }
 
     pub fn new(config: &LowerBodyConfig) -> Self {
@@ -368,6 +389,32 @@ pub fn drive_hip_pin(
             continue;
         }
 
+        // Feedback: close the XPBD↔Raibert loop *scoped to the horizontal
+        // channel*. `update_connection_particles` synced the solved physics
+        // into `VelloParticle` at the end of the previous fixed step, so `P3`
+        // (spine.particles[4], the hip anchor) holds the realized pose.
+        //
+        // Only the realized horizontal position is written back into the
+        // resolver: foot placement must start from where physics actually left
+        // the body. The vertical channel is left to the resolver's own
+        // `tick_vertical` authority — its `regulate_height` spring already
+        // closes that loop against the measured state, and re-injecting the
+        // measured y (with its steady `g_eff·dt²` sag) would accumulate into
+        // drift. The commanded hip *velocity* is likewise preserved, because
+        // `delta_frame_targets` uses it as the servo reference
+        // (`(v_hip − v_c)·dt`); overwriting it with the measured velocity would
+        // cancel that command-vs-realized correction. `FEEDBACK=0` disables it
+        // for A/B against the feed-forward baseline.
+        if params.feedback {
+            if let Ok(p3) = p_q.get(spine.particles[4]) {
+                // Vello y-down → resolver y-up (flip y). Horizontal only.
+                let measured_x = p3.particle.pos.x;
+                let anchor_x = pin.anchor_p3.x;
+                let world_dx = measured_x - anchor_x;
+                pin.state.hip_pos.x = pin.seed_hip.x + world_dx;
+            }
+        }
+
         // Game input → resolver input. The jump is edge-triggered here because
         // a held key would re-arm the hop on every landing.
         let mut input_dir = Vec2::ZERO;
@@ -426,17 +473,16 @@ pub fn drive_hip_pin(
 
         // Vertical authority: supported, or a ballistic resolver phase (where
         // tracking the reference preserves the jump).
-        let grounded = ground_support.as_deref().map(|s| s.grounded).unwrap_or(true);
+        let grounded = ground_support
+            .as_deref()
+            .map(|s| s.grounded)
+            .unwrap_or(true);
         let vertical_tracking = matches!(
             pin.state.vs.phase,
             VerticalPhase::Launch | VerticalPhase::Flight
         );
         let vertical_allowed = grounded || vertical_tracking;
-        let support_share = if grounded {
-            params.support_share
-        } else {
-            0.0
-        };
+        let support_share = if grounded { params.support_share } else { 0.0 };
 
         let targets = delta_frame_targets(
             states,
@@ -521,11 +567,8 @@ pub fn drive_hip_pin(
                              knee_fb: Vec2,
                              foot_fb: Vec2|
              -> LegPoseSeed {
-                let get = |e: Entity, fallback: Vec2| {
-                    p_q.get(e)
-                        .map(&vello_to_bevy)
-                        .unwrap_or(fallback)
-                };
+                let get =
+                    |e: Entity, fallback: Vec2| p_q.get(e).map(&vello_to_bevy).unwrap_or(fallback);
                 LegPoseSeed {
                     hip: get(particles[1], hip_fb),
                     knee: get(particles[2], knee_fb),

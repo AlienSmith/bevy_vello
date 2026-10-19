@@ -32,6 +32,10 @@ EXAMPLE="$REPO/examples/collision_detection"
 BINARY="$REPO/target/release/collision_detection"
 DISPLAY_NUM="${DISPLAY_NUM:-:99}"
 SCREEN="${SCREEN:-1280x720x24}"
+# Window-title pattern the capture greps for. Defaults to the default game bin
+# ("Vello Study"); set to "Vello Character Tuning" to target the character
+# tuning app, which is the host that wires the hip-pin/feedback path.
+WINDOW_TITLE="${WINDOW_TITLE:-Vello Study}"
 
 # Set to 1 to ask the game to suppress particle/VFX layers while capturing.
 # The vision judge must see the character silhouette, not explosion effects:
@@ -171,7 +175,7 @@ fi
 # --- run ------------------------------------------------------------------
 # A stale instance on the same display would own the window we capture, so
 # refuse to start unless the display is clear of game windows.
-STALE="$(DISPLAY="$DISPLAY_NUM" xwininfo -root -tree 2>/dev/null | grep -c 'Vello Study')"
+STALE="$(DISPLAY="$DISPLAY_NUM" xwininfo -root -tree 2>/dev/null | grep -c "$WINDOW_TITLE")"
 if [[ "$STALE" -gt 0 ]]; then
   echo "{\"ok\":false,\"stage\":\"precheck\",\"error\":\"$STALE stale game window(s) already on $DISPLAY_NUM\"}"
   exit 5
@@ -201,7 +205,7 @@ for _ in $(seq 1 120); do
     exit 1
   fi
   WIN="$(DISPLAY="$DISPLAY_NUM" xwininfo -root -tree 2>/dev/null \
-        | grep -o '0x[0-9a-f]* "Vello Study[^"]*"' | head -1 | awk '{print $1}')"
+        | grep -o "0x[0-9a-f]* \"$WINDOW_TITLE[^\"]*\"" | head -1 | awk '{print $1}')"
   [[ -n "$WIN" ]] && break
   sleep 0.25
 done
