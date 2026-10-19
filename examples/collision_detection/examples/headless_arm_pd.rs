@@ -149,9 +149,9 @@ use game_lib::{
     rows_hash, tail_verdict, update_character_movement, update_ground_support, Bone,
     CharacterController, CharacterRoot, GroundSupport, HeadlessTelemetryPlugin, HipPin,
     HipPinParams, IkMode, InvariantConfig, LeftArmController, LeftLegController, LimbConfig,
-    ParticleTelemetryConfig, PlayerAction, PlayerMarker,
-    ResetLimbControlConstraintsEvent, RightArmController, RightLegController, SpineDriveEnabled,
-    TelemetryBuffer, TelemetryRow, VelloCharacterPlugin, VerticalPhase, WhichLimb,
+    ParticleTelemetryConfig, PlayerAction, PlayerMarker, ResetLimbControlConstraintsEvent,
+    RightArmController, RightLegController, SpineDriveEnabled, TelemetryBuffer, TelemetryRow,
+    VelloCharacterPlugin, VerticalPhase, WhichLimb,
 };
 
 // ---------------------------------------------------------------------------
@@ -945,8 +945,7 @@ fn setup_headless_collision(mut commands: Commands) {
         ..Default::default()
     });
     let adapter = bevy::tasks::block_on(wgpu::util::initialize_adapter_from_env_or_default(
-        &instance,
-        None,
+        &instance, None,
     ))
     .expect("headless collision: no wgpu adapter");
     let (device, queue) = bevy::tasks::block_on(adapter.request_device(
@@ -1800,6 +1799,26 @@ fn limb_sample(
         };
         row.set("cmd_vx", format!("{cmd_vx:.2}"));
         row.set("vphase", vphase.to_string());
+
+        // --- Loop 3 (attitude/tilt) telemetry, from the same pin. The resolver's
+        // persistent `theta`/`omega` (rad, rad/s) plus the per-tick control input
+        // `u` (rad/s²) and measured hip acceleration (px/s²) latched by
+        // `drive_hip_pin`. Keyed `body_*`/`att_*` so they never collide with the
+        // limb classifier's `theta_deg`/`omega` columns above. Order is fixed so
+        // the frozen header stays stable.
+        let (body_theta, body_omega, att_torque, hip_accel_x) = match pin_q.get(character) {
+            Ok(pin) => (
+                pin.state.attitude.theta,
+                pin.state.attitude.omega,
+                pin.last_attitude_torque,
+                pin.last_hip_accel_x,
+            ),
+            Err(_) => (0.0, 0.0, 0.0, 0.0),
+        };
+        row.set("body_theta", format!("{body_theta:.4}"));
+        row.set("body_omega", format!("{body_omega:.4}"));
+        row.set("att_torque", format!("{att_torque:.2}"));
+        row.set("hip_accel_x", format!("{hip_accel_x:.2}"));
 
         // Realized hip vx = the pinned `P3` (each leg controller's `pivot`,
         // `particles[1]`). Cached on the first tick it resolves.

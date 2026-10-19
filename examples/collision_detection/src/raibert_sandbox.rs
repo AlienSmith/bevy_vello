@@ -119,6 +119,23 @@ pub fn update_sandbox(
         &h_path,
     );
 
+    // Torso (loop 3): the upper-body point sits `torso_len` from the hip along
+    // the tilt axis (`hip + L·(sinθ, cosθ)` in y-up; `to_vello` flips it down).
+    // A forward lean (+θ) pushes the marker toward +x on screen.
+    let upper_color = peniko::GlowColor::new(peniko::Color::rgba(0.95, 0.8, 0.2, 0.95), 1.0);
+    {
+        let mut torso_path = kurbo::BezPath::new();
+        torso_path.move_to(point(to_vello(hip)));
+        torso_path.line_to(point(to_vello(pose.upper)));
+        s.stroke(
+            &kurbo::Stroke::new(8.0),
+            kurbo::Affine::IDENTITY,
+            upper_color,
+            None,
+            &torso_path,
+        );
+    }
+
     // Leg bones: hip → knee → foot for each side.
     let thigh_color = peniko::GlowColor::new(peniko::Color::rgba(0.9, 0.4, 0.2, 0.95), 1.0);
     let calf_color = peniko::GlowColor::new(peniko::Color::rgba(0.2, 0.6, 0.95, 0.95), 1.0);
@@ -178,6 +195,15 @@ pub fn update_sandbox(
             &c,
         );
     }
+    // Loop-3 upper-body marker (amber), distinct from the white hip.
+    let upper_circle = kurbo::Circle::new(point(to_vello(pose.upper)), 9.0);
+    s.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::rgba(0.95, 0.8, 0.2, 0.95),
+        None,
+        &upper_circle,
+    );
 
     *scene = s;
 
@@ -280,6 +306,21 @@ pub fn tuning_ui(
         ui.add(
             egui::Slider::new(&mut cfg.launch_accel, 500.0..=20000.0).text("launch_accel (px/s²)"),
         );
+        ui.separator();
+
+        ui.heading("Attitude (loop 3)");
+        ui.add(egui::Slider::new(&mut cfg.torso_len, 20.0..=200.0).text("torso_len (px)"));
+        ui.add(egui::Slider::new(&mut cfg.attitude_kp, 0.0..=200.0).text("attitude Kp (rad/s²)"));
+        ui.add(egui::Slider::new(&mut cfg.attitude_kd, 0.0..=50.0).text("attitude Kd (rad/s)"));
+        ui.add(
+            egui::Slider::new(&mut cfg.attitude_accel_coupling, 0.0..=4.0)
+                .text("accel coupling (gain)"),
+        );
+        ui.checkbox(
+            &mut cfg.attitude_gravity_coupling,
+            "gravity coupling (inverted pend.)",
+        );
+        ui.add(egui::Slider::new(&mut cfg.theta_max, 0.1..=2.0).text("theta_max (rad)"));
 
         if let Ok(controller) = controller_q.single() {
             let d = &controller.debug;
@@ -308,6 +349,16 @@ pub fn tuning_ui(
             ui.label(format!("h_apex    : {:.1} px", d.h_apex));
             ui.label(format!("delta_l   : {:.1} px", d.delta_l));
             ui.label(format!("v_x       : {:.1} px/s", d.v_clamped));
+            ui.separator();
+            ui.heading("Attitude telemetry");
+            ui.label(format!(
+                "theta     : {:+.3} rad ({:+.1}°)",
+                d.theta,
+                d.theta.to_degrees()
+            ));
+            ui.label(format!("omega     : {:+.3} rad/s", d.omega));
+            ui.label(format!("attitude_u: {:+.1} rad/s²", d.attitude_torque));
+            ui.label(format!("a_x       : {:+.1} px/s²", d.hip_accel_x));
         }
     });
 }

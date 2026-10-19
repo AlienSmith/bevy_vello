@@ -237,6 +237,10 @@ pub struct HipPin {
     pub last_ref_p3: Vec2,
     /// Realized vertical sag of `P3` against the reference, positive = below.
     pub last_sag_y: f32,
+    /// Loop-3 control input `u` from the last resolver tick, rad/s².
+    pub last_attitude_torque: f32,
+    /// Measured hip horizontal acceleration from the last resolver tick, px/s².
+    pub last_hip_accel_x: f32,
 }
 
 impl HipPin {
@@ -259,6 +263,8 @@ impl HipPin {
             leg_seed: None,
             last_ref_p3: Vec2::ZERO,
             last_sag_y: 0.0,
+            last_attitude_torque: 0.0,
+            last_hip_accel_x: 0.0,
         }
     }
 
@@ -435,7 +441,21 @@ pub fn drive_hip_pin(
             }
         }
 
-        let (pose, _) = step_lower_body(input_dir, &params.config, &mut pin.state, dt);
+        let (pose, debug) = step_lower_body(input_dir, &params.config, &mut pin.state, dt);
+        // Loop-3 telemetry latch: the torque/accel are per-tick `DebugInfo`
+        // values (not persistent state), so keep the last tick's for the
+        // headless harness's whole-body row.
+        pin.last_attitude_torque = debug.attitude_torque;
+        pin.last_hip_accel_x = debug.hip_accel_x;
+
+        // Loop 3 → physics: write the resolved attitude tilt into the rigid-frame
+        // theta consumed by `rigid_frame_targets` below. Sign is consistent with
+        // no flip: resolver positive θ = forward lean in its y-up travel frame
+        // (+x), `world_delta` maps resolver +x → Vello +x, and rotating an
+        // up-on-screen rest offset `(0, −L)` by positive θ yields `(L·sinθ, −L·cosθ)`
+        // — also a lean toward +x. The P1/P2/P3 frame therefore physically tilts
+        // with loop 3 and recovers to upright.
+        pin.theta = pin.state.attitude.theta;
 
         // Live P1/P2/P3 states, in the same order as `idx`.
         let idx = [2usize, 3, 4];

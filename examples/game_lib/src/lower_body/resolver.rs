@@ -84,6 +84,20 @@ pub struct LowerBodyConfig {
     /// px/s². This is a **force authority**, not a stiffness: the loop still
     /// closes on measured velocity, never on this number (doc §2.2, §4.1).
     pub launch_accel: f32,
+
+    // --- Attitude (loop 3) knobs. See `plans/raibert_sandbox_attitude_loop.md`. ---
+    /// Upper-body pivot-to-COM distance above the hip, px.
+    pub torso_len: f32,
+    /// Rotational spring gain for the attitude PD, rad/s² per rad.
+    pub attitude_kp: f32,
+    /// Rotational damper gain for the attitude PD, 1/s.
+    pub attitude_kd: f32,
+    /// Gain (0..1) on the hip-accel inertial-coupling term (the tilt source).
+    pub attitude_accel_coupling: f32,
+    /// Toggle the destabilizing gravity term (true = inverted-pendulum pole).
+    pub attitude_gravity_coupling: bool,
+    /// Tilt clamp, rad (default 1.30 ≈ 75° — never spin past "fallen over").
+    pub theta_max: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -110,6 +124,12 @@ impl Default for LowerBodyConfig {
             jump_apex: 60.0,
             k_p_apex: 0.5,
             launch_accel: 2200.0,
+            torso_len: 70.0,
+            attitude_kp: 45.0,
+            attitude_kd: 11.0,
+            attitude_accel_coupling: 1.0,
+            attitude_gravity_coupling: true,
+            theta_max: 1.30,
         }
     }
 }
@@ -230,6 +250,29 @@ impl Default for VerticalState {
     }
 }
 
+/// Loop-3 (attitude) persistent state. See `plans/raibert_sandbox_attitude_loop.md`.
+///
+/// The torso is a balancing pole about the hip: `θ = 0` is upright, positive θ is
+/// leaning forward (y-up travel frame). `omega` is the angular velocity. The PD in
+/// [`tick_attitude`] holds `θ` at `0` against the destabilizing gravity term and
+/// the inertial coupling of hip horizontal acceleration.
+#[derive(Debug, Clone, Copy)]
+pub struct AttitudeState {
+    /// Torso lean relative to world vertical, rad. `0` = upright; `+` = forward.
+    pub theta: f32,
+    /// Angular velocity of the torso, rad/s.
+    pub omega: f32,
+}
+
+impl Default for AttitudeState {
+    fn default() -> Self {
+        Self {
+            theta: 0.0,
+            omega: 0.0,
+        }
+    }
+}
+
 /// The resolver's full persistent state.
 #[derive(Debug, Clone)]
 pub struct ResolverState {
@@ -241,6 +284,12 @@ pub struct ResolverState {
     pub right: LegState,
     /// Loop-1 (vertical) controller state.
     pub vs: VerticalState,
+    /// Loop-3 (attitude) controller state: torso lean + angular velocity.
+    pub attitude: AttitudeState,
+    /// Previous tick's horizontal hip velocity, for finite-differencing the
+    /// hip acceleration `a_x` that feeds loop 3's inertial-coupling term.
+    /// `None` on the first tick (and when `dt ≤ 0`).
+    pub prev_hip_vel_x: Option<f32>,
     /// True on the most recent tick if the body was airborne (`Flight`). Used to
     /// detect the `Launch→Flight` (arm) and `Flight→Land` (seed) edges of the
     /// jump's airborne swing.
@@ -295,6 +344,8 @@ impl ResolverState {
             left,
             right,
             vs: VerticalState::default(),
+            attitude: AttitudeState::default(),
+            prev_hip_vel_x: None,
             airborne_prev: false,
             jump_arm_lead_leg: false,
             prev_positions: None,
@@ -314,6 +365,10 @@ pub struct LowerBodyPose {
     pub left_foot: Vec2,
     pub right_knee: Vec2,
     pub right_foot: Vec2,
+    /// Loop-3 upper-body point: `torso_len` above the hip along the tilt axis
+    /// (`hip + L·(sinθ, cosθ)` in the y-up travel frame). This is the visual
+    /// torso tip / upper-body marker the frame tilt rotates about the hip.
+    pub upper: Vec2,
     /// Finite-differenced joint velocities (per-second), aligned with the
     /// position fields. The hip uses the exact integrated `hip_vel`; knees/feet
     /// are `(current − previous)/dt`.
@@ -364,6 +419,16 @@ pub struct DebugInfo {
     pub h_apex: f32,
     /// Current commanded extra crouch displacement `Δl`, px.
     pub delta_l: f32,
+
+    // --- Loop 3 (attitude) telemetry. See `plans/raibert_sandbox_attitude_loop.md`. ---
+    /// Torso lean relative to world vertical, rad (`+` = forward in travel frame).
+    pub theta: f32,
+    /// Angular velocity of the torso, rad/s.
+    pub omega: f32,
+    /// Loop-3 control input `u` (an angular acceleration), rad/s².
+    pub attitude_torque: f32,
+    /// Measured hip horizontal acceleration (finite-differenced), px/s².
+    pub hip_accel_x: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +640,91 @@ fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Loop 3: the attitude (tilt) PD controller (pure math)
+// ---------------------------------------------------------------------------
+
+/// The loop-3 control input. With `θ_desired = 0` (upright) this is the
+/// textbook rotational spring-damper:
+///
+/// ```text
+/// u = Kp · (θ_desired − θ) − Kd · ω
+/// ```
+///
+/// `u` is an **angular acceleration** (rad/s²) — inertia is normalized out
+/// (`I = m·L²`), so `Kp` is rad/s² per rad and `Kd` is 1/s. Positive `u`
+/// torques the torso forward.
+#[inline]
+pub fn attitude_pd(theta: f32, omega: f32, theta_desired: f32, kp: f32, kd: f32) -> f32 {
+    kp * (theta_desired - theta) - kd * omega
+}
+
+/// One tick of the loop-3 (attitude) controller: the inverted-pendulum EOM at
+/// the hip plus the PD, integrated with semi-implicit (symplectic) Euler.
+///
+/// ```text
+/// θ̈ =  (g̃ · sinθ) / L_upper · GRV      ← gravity: DESTABILIZING
+///    − (a_x · cosθ) / L_upper · ACC      ← hip horizontal accel: tilt source
+///    +  u                                 ← loop-3 control input
+/// ```
+///
+/// In `Flight` the torso is weightless in its own frame, so `GRV` is dropped
+/// (no `g·sinθ` term) and `a_x` is ~0 (ballistic carry) — the only authority
+/// left is the PD, which acts as air reorientation toward upright.
+///
+/// See `plans/raibert_sandbox_attitude_loop.md` §3.2–§4.
+#[inline]
+pub fn tick_attitude(
+    state: &mut AttitudeState,
+    config: &LowerBodyConfig,
+    hip_accel_x: f32,
+    dt: f32,
+    airborne: bool,
+) -> f32 {
+    if dt <= 0.0 {
+        // No step: nothing moves (the caller still reports the current PD output).
+        return attitude_pd(
+            state.theta,
+            state.omega,
+            0.0,
+            config.attitude_kp,
+            config.attitude_kd,
+        );
+    }
+
+    let theta = state.theta;
+    let omega = state.omega;
+    let (sin_t, cos_t) = theta.sin_cos();
+
+    // Gravity term: destabilizing pole about the hip. Dropped in flight
+    // (weightless torso) and when the coupling toggle is off.
+    let gravity_term = if config.attitude_gravity_coupling && !airborne {
+        (config.gravity * sin_t) / config.torso_len.max(f32::EPSILON)
+    } else {
+        0.0
+    };
+
+    // Inertial-coupling term: hip horizontal acceleration tilts the torso
+    // backwards under forward acceleration, forwards under braking.
+    let accel_term =
+        (config.attitude_accel_coupling * hip_accel_x * cos_t) / config.torso_len.max(f32::EPSILON);
+
+    // PD control input toward upright.
+    let u = attitude_pd(theta, omega, 0.0, config.attitude_kp, config.attitude_kd);
+
+    // Semi-implicit Euler: update ω first, then θ from the new ω.
+    let theta_ddot = gravity_term - accel_term + u;
+    let omega_new = omega + theta_ddot * dt;
+    let theta_new = theta + omega_new * dt;
+
+    // Clamp so the torso can never spin past "fallen over" in one tick.
+    let theta_max = config.theta_max.max(0.05);
+    state.omega = omega_new;
+    state.theta = theta_new.clamp(-theta_max, theta_max);
+
+    u
 }
 
 /// The backward velocity clamp. Isolates the maximum horizontal speed the hip
@@ -1254,6 +1404,18 @@ pub fn step_lower_body(
     }
     state.airborne_prev = airborne;
 
+    // 6c. --- Attitude (loop 3) ---
+    // Derive the measured hip horizontal acceleration by finite-differencing
+    // the resolver's own integrated `hip_vel.x` (the physics-like tilt source:
+    // start/stop walking leans the torso, ballistic flight does not). Then tick
+    // the inverted-pendulum + PD and expose the state for the pose/debug.
+    let hip_accel_x = match state.prev_hip_vel_x {
+        Some(prev_vx) if dt > 0.0 => (state.hip_vel.x - prev_vx) / dt,
+        _ => 0.0,
+    };
+    state.prev_hip_vel_x = Some(state.hip_vel.x);
+    let attitude_torque = tick_attitude(&mut state.attitude, config, hip_accel_x, dt, airborne);
+
     // 7-8. --- IK ---
 
     // IK returns the *effective* foot (clamped to the reachable annulus), so the
@@ -1296,12 +1458,22 @@ pub fn step_lower_body(
             ),
         };
 
+    // Upper-body point: `torso_len` above the hip along the tilt axis, in the
+    // y-up travel frame (`hip + L·(sinθ, cosθ)`). At rest (θ = 0) it is exactly
+    // `torso_len` above the hip; a forward lean (θ > 0) carries it in +x.
+    let upper = state.hip_pos
+        + Vec2::new(
+            config.torso_len * state.attitude.theta.sin(),
+            config.torso_len * state.attitude.theta.cos(),
+        );
+
     let pose = LowerBodyPose {
         hip: state.hip_pos,
         left_knee,
         right_knee,
         left_foot,
         right_foot,
+        upper,
         hip_vel,
         left_knee_vel,
         left_foot_vel,
@@ -1330,6 +1502,10 @@ pub fn step_lower_body(
         h_desired: config.jump_apex,
         h_apex: state.vs.h_apex_prev,
         delta_l: state.vs.delta_l,
+        theta: state.attitude.theta,
+        omega: state.attitude.omega,
+        attitude_torque,
+        hip_accel_x,
     };
 
     (pose, debug)
@@ -4592,5 +4768,222 @@ mod tests {
             max_step <= bound,
             "pose moved too fast: {max_step:.1}px > {bound:.1}px"
         );
+    }
+
+    // --- Loop 3 (attitude) ---
+
+    #[test]
+    fn test_attitude_pd_sign_and_magnitude() {
+        // Leaning forward (+θ) must command a restoring (negative) torque; the
+        // magnitude scales with Kp, and a positive spin adds damping torque.
+        let (kp, kd) = (45.0, 11.0);
+        let u = attitude_pd(0.3, 0.0, 0.0, kp, kd);
+        assert!(
+            u < 0.0,
+            "positive lean must push back toward upright, got {u}"
+        );
+        assert!((u - (-kp * 0.3)).abs() < 1e-3);
+        let u_spin = attitude_pd(0.0, 2.0, 0.0, kp, kd);
+        assert!(u_spin < 0.0 && (u_spin - (-kd * 2.0)).abs() < 1e-3);
+        // At the setpoint with no spin the PD output is exactly zero.
+        assert!(attitude_pd(0.0, 0.0, 0.0, kp, kd).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_attitude_pendulum_diverges_without_pd() {
+        // With no control (Kp = Kd = 0) and gravity coupling on, the inverted
+        // pendulum about the hip is an unstable pole: a small lean must grow
+        // (and saturate at `theta_max`) instead of recovering.
+        let mut cfg = LowerBodyConfig::default();
+        cfg.attitude_kp = 0.0;
+        cfg.attitude_kd = 0.0;
+        cfg.attitude_gravity_coupling = true;
+        let dt = 1.0 / 90.0;
+        let mut st = AttitudeState {
+            theta: 0.05,
+            omega: 0.0,
+        };
+        let start = st.theta.abs();
+        for _ in 0..300 {
+            tick_attitude(&mut st, &cfg, 0.0, dt, false);
+        }
+        assert!(
+            st.theta.abs() > start * 2.0,
+            "uncontrolled pendulum should fall away from upright: {start} → {}",
+            st.theta
+        );
+        assert!(
+            st.theta.abs() <= cfg.theta_max + 1e-3,
+            "θ escaped the clamp"
+        );
+    }
+
+    #[test]
+    fn test_attitude_settles_to_upright_with_pd() {
+        // Default Kp/Kd exceed the pendulum pole (g/L ≈ 14 rad/s²/rad): a
+        // perturbed torso settles back to upright and stops.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 90.0;
+        let mut st = AttitudeState {
+            theta: 0.6,
+            omega: 0.0,
+        };
+        for _ in 0..600 {
+            tick_attitude(&mut st, &cfg, 0.0, dt, false);
+        }
+        assert!(st.theta.abs() < 0.01, "θ did not settle: {}", st.theta);
+        assert!(st.omega.abs() < 0.1, "ω did not settle: {}", st.omega);
+    }
+
+    #[test]
+    fn test_attitude_settles_through_step_lower_body() {
+        // Full wiring: a stationary character (no horizontal motion → a_x = 0)
+        // with a pre-tilted torso returns to upright through `step_lower_body`,
+        // and the attitude telemetry stays finite the whole way.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 90.0;
+        let mut s = ResolverState::new(&cfg);
+        for _ in 0..30 {
+            step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+        }
+        s.attitude.theta = 0.5;
+        s.attitude.omega = 0.0;
+        for _ in 0..900 {
+            let (_pose, d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            assert!(d.theta.is_finite() && d.attitude_torque.is_finite());
+        }
+        assert!(
+            s.attitude.theta.abs() < 0.02,
+            "θ did not settle via step: {}",
+            s.attitude.theta
+        );
+        assert!(
+            s.attitude.omega.abs() < 0.1,
+            "ω did not settle via step: {}",
+            s.attitude.omega
+        );
+    }
+
+    #[test]
+    fn test_attitude_accel_coupling_leans_and_recovers() {
+        // A sustained forward hip acceleration tilts the torso backward (−θ)
+        // via the inertial-coupling term; cutting the acceleration lets the PD
+        // swing it back to upright.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 90.0;
+        let mut st = AttitudeState::default();
+        let a_x = 600.0; // px/s², ~ the resolver's start/stop authority
+        for _ in 0..300 {
+            tick_attitude(&mut st, &cfg, a_x, dt, false);
+        }
+        assert!(
+            st.theta < -0.05,
+            "forward accel should lean the torso backward, got θ={}",
+            st.theta
+        );
+        for _ in 0..600 {
+            tick_attitude(&mut st, &cfg, 0.0, dt, false);
+        }
+        assert!(
+            st.theta.abs() < 0.01,
+            "torso did not recover: θ={}",
+            st.theta
+        );
+    }
+
+    #[test]
+    fn test_attitude_upper_point_geometry() {
+        // The upper-body point must always sit exactly `torso_len` from the hip
+        // along the tilt axis, and a forward lean carries it in +x. `theta` is
+        // set directly before a single step; the step's own PD correction is
+        // tiny (|Δθ| < 2e-3 for the default Kp·dt²), so the geometry holds.
+        let cfg = LowerBodyConfig::default();
+        let dt = 1.0 / 90.0;
+        let mut s = ResolverState::new(&cfg);
+        for theta in [-1.2, -0.5, 0.0, 0.4, 1.3] {
+            s.attitude.theta = theta;
+            s.attitude.omega = 0.0;
+            let (pose, _d) = step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+            let off = pose.upper - pose.hip;
+            assert!(
+                (off.length() - cfg.torso_len).abs() < 1e-2,
+                "upper distance wrong at θ={theta}: {} (L={})",
+                off.length(),
+                cfg.torso_len
+            );
+            if theta >= 0.0 {
+                assert!(off.x >= -1e-3, "upper should lean +x at θ={theta}");
+            } else {
+                assert!(off.x <= 1e-3, "upper should lean -x at θ={theta}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_attitude_theta_clamp() {
+        // No matter how hard the coupling pushes, θ never exceeds `theta_max`.
+        let mut cfg = LowerBodyConfig::default();
+        cfg.theta_max = 0.6;
+        let dt = 1.0 / 90.0;
+        let mut st = AttitudeState {
+            theta: 0.4,
+            omega: 0.0,
+        };
+        // A huge forward accel drives the torso hard backward.
+        for _ in 0..2000 {
+            tick_attitude(&mut st, &cfg, 20_000.0, dt, false);
+        }
+        assert!(
+            st.theta.abs() <= 0.6 + 1e-3,
+            "θ escaped the clamp: {}",
+            st.theta
+        );
+    }
+
+    #[test]
+    fn test_attitude_flight_drops_gravity_term() {
+        // Airborne == gravity-coupling-off: in flight the torso is weightless,
+        // so the inverted-pendulum pole must vanish (identical trajectory to a
+        // gravity-free run, tick for tick). Grounded keeps the pole, which fights
+        // the recovery and shows up during the transient (both settle to upright,
+        // so only the transient distinguishes them).
+        let mut airborne_cfg = LowerBodyConfig::default();
+        airborne_cfg.attitude_gravity_coupling = true;
+        let mut no_g_cfg = LowerBodyConfig::default();
+        no_g_cfg.attitude_gravity_coupling = false;
+        let dt = 1.0 / 90.0;
+
+        let mut a = AttitudeState {
+            theta: 0.6,
+            omega: 0.0,
+        };
+        let mut b = AttitudeState {
+            theta: 0.6,
+            omega: 0.0,
+        };
+        let mut c = AttitudeState {
+            theta: 0.6,
+            omega: 0.0,
+        };
+        let mut max_grounded_dev = 0.0f32;
+        for _ in 0..300 {
+            tick_attitude(&mut a, &airborne_cfg, 0.0, dt, true);
+            tick_attitude(&mut b, &no_g_cfg, 0.0, dt, false);
+            tick_attitude(&mut c, &airborne_cfg, 0.0, dt, false);
+            assert!(
+                (a.theta - b.theta).abs() < 1e-6 && (a.omega - b.omega).abs() < 1e-6,
+                "airborne must be identical to gravity-off: θ {} vs {}",
+                a.theta,
+                b.theta
+            );
+            max_grounded_dev = max_grounded_dev.max((a.theta - c.theta).abs());
+        }
+        assert!(
+            max_grounded_dev > 1e-3,
+            "grounded should deviate from airborne during the transient, \
+             max dev = {max_grounded_dev}"
+        );
+        // Both must still settle to upright.
+        assert!(a.theta.abs() < 1e-3 && c.theta.abs() < 1e-3);
     }
 }

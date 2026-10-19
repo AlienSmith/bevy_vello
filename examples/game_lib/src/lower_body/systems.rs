@@ -38,6 +38,7 @@ impl LowerBodyController {
             left_foot: state.left.foot_pos,
             right_knee: state.hip_pos,
             right_foot: state.right.foot_pos,
+            upper: state.hip_pos + Vec2::new(0.0, config.torso_len),
             hip_vel: Vec2::ZERO,
             left_knee_vel: Vec2::ZERO,
             left_foot_vel: Vec2::ZERO,
@@ -63,6 +64,10 @@ impl LowerBodyController {
             h_desired: config.jump_apex,
             h_apex: 0.0,
             delta_l: 0.0,
+            theta: 0.0,
+            omega: 0.0,
+            attitude_torque: 0.0,
+            hip_accel_x: 0.0,
         };
         Self { state, pose, debug }
     }
