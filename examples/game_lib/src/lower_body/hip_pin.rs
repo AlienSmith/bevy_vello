@@ -52,11 +52,23 @@ pub struct HipPinParams {
     /// Close the XPBD↔Raibert loop: write the solved `P3` back into the
     /// resolver state each step (`FEEDBACK=0` to disable).
     pub feedback: bool,
+    /// Enable loop-3 attitude control. When on, `P1` is rotated about `P2` by
+    /// the `P1_P2_P3` XPBD angular joint instead of being position-pinned.
+    pub attitude_enabled: bool,
+    /// Compliance of the P2-centred frame pin while loop 3 is active
+    /// (lower = stiffer attitude).
+    pub attitude_compliance: f32,
+    /// Additional desired torso lean, radians (`+` = forward).
+    pub attitude_target_bias: f32,
+    /// Hard cap on the commanded torso lean, radians. Keeps a saturated
+    /// sandbox attitude from driving the hard-pinned body horizontal.
+    pub attitude_max_angle: f32,
 }
 
 impl HipPinParams {
     /// Read the shared harness/tuning environment: `TARGET_SPEED`, `LEGS`,
-    /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`, `FEEDBACK`.
+    /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`, `FEEDBACK`,
+    /// `ATTITUDE`, `ATT_COMPLIANCE`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`.
     pub fn from_env() -> Self {
         let mut p = Self::default();
         p.config.target_speed = env_f32("TARGET_SPEED", p.config.target_speed);
@@ -69,6 +81,13 @@ impl HipPinParams {
             Some("off") | Some("0") | Some("false")
         );
         p.feedback = env_bool("FEEDBACK", true);
+        p.attitude_enabled = env_bool("ATTITUDE", p.attitude_enabled);
+        p.attitude_compliance = env_f32("ATT_COMPLIANCE", p.attitude_compliance).max(1e-12);
+        p.attitude_target_bias =
+            env_f32("ATT_TARGET_DEG", p.attitude_target_bias.to_degrees()).to_radians();
+        p.attitude_max_angle = env_f32("ATT_MAX_DEG", p.attitude_max_angle.to_degrees())
+            .to_radians()
+            .max(0.0);
         p
     }
 }
@@ -162,6 +181,10 @@ impl Default for HipPinParams {
             hip_drives_legs: true,
             hip_drop: 0.0,
             feedback: true,
+            attitude_enabled: true,
+            attitude_compliance: 1e-7,
+            attitude_target_bias: 0.0,
+            attitude_max_angle: 0.35, // ~20°
         }
     }
 }
@@ -241,6 +264,13 @@ pub struct HipPin {
     pub last_attitude_torque: f32,
     /// Measured hip horizontal acceleration from the last resolver tick, px/s².
     pub last_hip_accel_x: f32,
+    /// Last measured physical torso attitude (`P2→P1` vs world vertical), rad.
+    pub last_meas_theta: f32,
+    /// Last loop-3 angular rest basis written to `P1_P2_P3` (`cos`, `sin`).
+    pub last_att_rest_cos: f32,
+    pub last_att_rest_sin: f32,
+    /// Last commanded loop-3 attitude target, rad (`+` = forward lean).
+    pub last_att_target: f32,
 }
 
 impl HipPin {
@@ -265,6 +295,10 @@ impl HipPin {
             last_sag_y: 0.0,
             last_attitude_torque: 0.0,
             last_hip_accel_x: 0.0,
+            last_meas_theta: 0.0,
+            last_att_rest_cos: 1.0,
+            last_att_rest_sin: 0.0,
+            last_att_target: 0.0,
         }
     }
 
@@ -275,19 +309,63 @@ impl HipPin {
     }
 }
 
-/// Rigid-frame targets: translate the anchor by `world_delta` and rotate each
-/// rest offset by `theta`. Bone lengths are preserved.
-fn rigid_frame_targets(
-    anchor_p3: Vec2,
-    rest_offsets: [Vec2; 3],
-    world_delta: Vec2,
-    theta: f32,
-) -> [Vec2; 3] {
+/// Signed physical torso attitude: the `P2→P1` axis against world vertical.
+///
+/// Vello is y-down, so upright is `(0, -1)` and `+` means a forward lean
+/// toward `+x`. Returns `0` when the torso is vertical.
+#[inline]
+fn measured_attitude(p1: Vec2, p2: Vec2) -> f32 {
+    let axis = p1 - p2;
+    axis.x.atan2(-axis.y)
+}
+
+/// Mirror the solver's `P1_P2_P3` angle measurement
+/// (`v1 = P1→P2`, `v2 = P2→P3`, `cos = u1·u2`,
+/// `sin = u1.y*u2.x - u1.x*u2.y`), returning only the rest basis.
+#[inline]
+fn angle_basis(pos0: Vec2, pos1: Vec2, pos2: Vec2) -> Option<(f32, f32)> {
+    let v1 = pos1 - pos0;
+    let v2 = pos2 - pos1;
+    let l1 = v1.length();
+    let l2 = v2.length();
+    if l1 < 1e-6 || l2 < 1e-6 {
+        return None;
+    }
+    let u1 = v1 / l1;
+    let u2 = v2 / l2;
+    Some((u1.dot(u2), u1.y * u2.x - u1.x * u2.y))
+}
+
+/// Rest basis that holds the `P2→P1` upper-body axis at `theta` while `P2`
+/// and `P3` remain where the hard pin holds them.
+///
+/// This is loop 3 about P2: the `P1_P2_P3` angular joint rotates **P1 only**
+/// (when `free_mask` excludes P2/P3), so `P3` stays hard-pinned and the upper
+/// body is corrected relative to the `P2→P3` lower-body axis.
+#[inline]
+fn attitude_rest_basis(p1: Vec2, p2: Vec2, p3: Vec2, theta: f32) -> Option<(f32, f32)> {
+    let upper_len = (p1 - p2).length().max(1e-3);
+    let upper_dir = Vec2::new(theta.sin(), -theta.cos());
+    let p1_target = p2 + upper_dir * upper_len;
+    angle_basis(p1_target, p2, p3)
+}
+
+/// Rigid `[P1, P2, P3]` targets rotated by `theta` about `P2`.
+///
+/// `rest_offsets` is the seeded `[P1-P3, P2-P3, 0]`, so the P2-relative arms
+/// are `P1-P2 = rest[0] - rest[1]` and `P3-P2 = -rest[1]`. Rotating both by the
+/// same angle keeps every frame distance unchanged (no triangle over-constraint).
+#[inline]
+fn p2_rigid_frame_targets(p2_target: Vec2, rest_offsets: [Vec2; 3], theta: f32) -> [Vec2; 3] {
     let (sin, cos) = theta.sin_cos();
-    rest_offsets.map(|o| {
-        let rotated = Vec2::new(o.x * cos - o.y * sin, o.x * sin + o.y * cos);
-        anchor_p3 + world_delta + rotated
-    })
+    let rotate = |v: Vec2| Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos);
+    let r_p1 = rest_offsets[0] - rest_offsets[1];
+    let r_p3 = -rest_offsets[1];
+    [
+        p2_target + rotate(r_p1),
+        p2_target,
+        p2_target + rotate(r_p3),
+    ]
 }
 
 /// Advance the pinned frame by the Raibert hip delta plus a centroid
@@ -448,13 +526,11 @@ pub fn drive_hip_pin(
         pin.last_attitude_torque = debug.attitude_torque;
         pin.last_hip_accel_x = debug.hip_accel_x;
 
-        // Loop 3 → physics: write the resolved attitude tilt into the rigid-frame
-        // theta consumed by `rigid_frame_targets` below. Sign is consistent with
-        // no flip: resolver positive θ = forward lean in its y-up travel frame
-        // (+x), `world_delta` maps resolver +x → Vello +x, and rotating an
-        // up-on-screen rest offset `(0, −L)` by positive θ yields `(L·sinθ, −L·cosθ)`
-        // — also a lean toward +x. The P1/P2/P3 frame therefore physically tilts
-        // with loop 3 and recovers to upright.
+        // Loop 3 → physics: the resolver's attitude is the desired torso lean.
+        // Sign is consistent with no flip: resolver positive θ = forward lean in
+        // its y-up travel frame (+x), `world_delta` maps resolver +x → Vello +x,
+        // and an up-on-screen axis `(0, −L)` rotated by positive θ becomes
+        // `(L·sinθ, −L·cosθ)` — also a lean toward +x.
         pin.theta = pin.state.attitude.theta;
 
         // Live P1/P2/P3 states, in the same order as `idx`.
@@ -474,20 +550,36 @@ pub fn drive_hip_pin(
             continue;
         }
 
+        // Loop 3: rotate the whole [P1,P2,P3] rigid frame about P2. The
+        // angular-joint path is *not* used here: with P2/P3 hard-pinned and the
+        // rigid P1-P3 frame distance, changing only the P1_P2_P3 angle would
+        // over-constrain the triangle (the solver can flip P1 through the
+        // collinear singularity). Rotating all three by the same R(theta) about
+        // P2 preserves every frame distance and makes the hip follow the torso.
+        let p1_live = states[0].0;
+        let p2_live = states[1].0;
+        let p3_live = states[2].0;
+        pin.last_meas_theta = measured_attitude(p1_live, p2_live);
+        let theta = if params.attitude_enabled {
+            (pin.theta + params.attitude_target_bias).clamp(
+                -params.attitude_max_angle.abs(),
+                params.attitude_max_angle.abs(),
+            )
+        } else {
+            0.0
+        };
+        pin.last_att_target = theta;
+        if let Some((rest_cos, rest_sin)) = attitude_rest_basis(p1_live, p2_live, p3_live, theta) {
+            pin.last_att_rest_cos = rest_cos;
+            pin.last_att_rest_sin = rest_sin;
+        }
+
         // Resolver hip (y-up) → Vello world (y-down). Only the delta from the
         // seed is used, so the resolver's absolute frame never leaks.
         let world_delta = Vec2::new(pose.hip.x - pin.seed_hip.x, -(pose.hip.y - pin.seed_hip.y));
         let hip_delta = world_delta - pin.prev_world_delta;
         pin.prev_world_delta = world_delta;
         let v_hip = Vec2::new(pin.state.hip_vel.x, -pin.state.hip_vel.y);
-
-        let mut pose_targets =
-            rigid_frame_targets(pin.anchor_p3, pin.rest_offsets, world_delta, pin.theta);
-        if params.hip_drop != 0.0 {
-            for t in pose_targets.iter_mut() {
-                t.y += params.hip_drop;
-            }
-        }
 
         let g_vello = world.gravity();
 
@@ -514,17 +606,35 @@ pub fn drive_hip_pin(
             support_share,
         );
 
-        // Exactly 3 position constraints; nothing angular.
+        // P2 carries the delta/velocity/gravity servo. P1/P3 are the rest
+        // offsets from P2, rotated by theta; this rotates the whole rigid frame
+        // about P2 and preserves all three frame distances.
+        let p2_target = targets[1];
+        let pose_targets = if params.attitude_enabled {
+            p2_rigid_frame_targets(p2_target, pin.rest_offsets, theta)
+        } else {
+            // Legacy translation-only path: no attitude authority.
+            targets
+        };
+
+        // All three frame particles are commanded to the rigid, P2-centered
+        // pose. P3 remains hard-pinned, but to the attitude-adjusted target.
         for (k, i) in idx.iter().enumerate() {
             let (pos, vel) = states[k];
-            let pose_t = pose_targets[k];
-            let target = targets[k];
+            let target = pose_targets[k];
             if *i == 4 {
-                pin.last_ref_p3 = pose_t;
-                pin.last_sag_y = pos.y - pose_t.y;
+                pin.last_ref_p3 = target;
+                pin.last_sag_y = pos.y - target.y;
             }
+            // While loop 3 is active the whole frame is a P2-centred attitude
+            // pin, so the attitude compliance is the relevant stiffness.
+            let base_compliance = if params.attitude_enabled {
+                params.attitude_compliance
+            } else {
+                params.compliance
+            };
             let compliance = softened_compliance(
-                params.compliance,
+                base_compliance,
                 params.soft_scale,
                 params.v_ref,
                 vel.length(),
@@ -690,5 +800,84 @@ pub fn reset_hip_pin(
         pin.ready = false;
         pin.leg_seed = None;
         pin.prev_world_delta = Vec2::ZERO;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LEN: f32 = 70.0;
+
+    #[test]
+    fn measured_attitude_is_zero_when_upright() {
+        let p2 = Vec2::ZERO;
+        let p1 = Vec2::new(0.0, -LEN);
+        assert!(measured_attitude(p1, p2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn measured_attitude_is_positive_for_forward_lean() {
+        let p2 = Vec2::ZERO;
+        let angle = 0.3_f32;
+        let p1 = Vec2::new(LEN * angle.sin(), -LEN * angle.cos());
+        assert!((measured_attitude(p1, p2) - angle).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rest_basis_upright_is_collinear() {
+        let p1 = Vec2::new(0.0, -LEN);
+        let p2 = Vec2::ZERO;
+        let p3 = Vec2::new(0.0, LEN);
+        let (cos, sin) = attitude_rest_basis(p1, p2, p3, 0.0).expect("non-degenerate");
+        assert!((cos - 1.0).abs() < 1e-6);
+        assert!(sin.abs() < 1e-6);
+    }
+
+    #[test]
+    fn rest_basis_encodes_the_requested_upper_lean() {
+        let p1 = Vec2::new(0.0, -LEN);
+        let p2 = Vec2::ZERO;
+        let p3 = Vec2::new(0.0, LEN);
+        let theta = 0.3_f32;
+        let (cos, sin) = attitude_rest_basis(p1, p2, p3, theta).expect("non-degenerate");
+        assert!((cos - theta.cos()).abs() < 1e-5);
+        assert!((sin - theta.sin()).abs() < 1e-5);
+        assert!((sin.atan2(cos) - theta).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rest_basis_compensates_for_lower_body_tilt() {
+        let p1 = Vec2::new(0.0, -LEN);
+        let p2 = Vec2::ZERO;
+        let lower = 0.2_f32;
+        let p3 = Vec2::new(LEN * lower.sin(), LEN * lower.cos());
+        let (cos, sin) = attitude_rest_basis(p1, p2, p3, 0.0).expect("non-degenerate");
+        // With the lower body tilted forward, holding the upper body vertical
+        // requires a joint rest angle equal to that lower-body tilt.
+        assert!((sin.atan2(cos) - lower).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rest_basis_rejects_degenerate_geometry() {
+        let p = Vec2::new(0.0, -LEN);
+        assert!(attitude_rest_basis(p, p, p, 0.0).is_none());
+    }
+
+    #[test]
+    fn p2_rotation_preserves_all_frame_distances() {
+        // Rest geometry: P1 above P2, P3 below, both at distance LEN.
+        let p1 = Vec2::new(0.0, -LEN);
+        let p2 = Vec2::ZERO;
+        let p3 = Vec2::new(0.0, LEN);
+        let rest_offsets = [p1 - p3, p2 - p3, Vec2::ZERO];
+        let p2_target = Vec2::new(25.0, 10.0);
+
+        let [t1, t2, t3] = p2_rigid_frame_targets(p2_target, rest_offsets, 0.3);
+        assert!((t2 - p2_target).length() < 1e-6);
+        // Rotating the whole frame about P2 must preserve every side length.
+        assert!(((t1 - t2).length() - LEN).abs() < 1e-5);
+        assert!(((t3 - t2).length() - LEN).abs() < 1e-5);
+        assert!(((t1 - t3).length() - 2.0 * LEN).abs() < 1e-5);
     }
 }

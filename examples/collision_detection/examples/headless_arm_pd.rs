@@ -1806,19 +1806,43 @@ fn limb_sample(
         // `drive_hip_pin`. Keyed `body_*`/`att_*` so they never collide with the
         // limb classifier's `theta_deg`/`omega` columns above. Order is fixed so
         // the frozen header stays stable.
-        let (body_theta, body_omega, att_torque, hip_accel_x) = match pin_q.get(character) {
+        let (
+            body_theta,
+            body_omega,
+            att_torque,
+            hip_accel_x,
+            att_target,
+            att_rest_cos,
+            att_rest_sin,
+            meas_theta,
+        ) = match pin_q.get(character) {
             Ok(pin) => (
                 pin.state.attitude.theta,
                 pin.state.attitude.omega,
                 pin.last_attitude_torque,
                 pin.last_hip_accel_x,
+                pin.last_att_target,
+                pin.last_att_rest_cos,
+                pin.last_att_rest_sin,
+                pin.last_meas_theta,
             ),
-            Err(_) => (0.0, 0.0, 0.0, 0.0),
+            Err(_) => (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0),
         };
         row.set("body_theta", format!("{body_theta:.4}"));
         row.set("body_omega", format!("{body_omega:.4}"));
         row.set("att_torque", format!("{att_torque:.2}"));
         row.set("hip_accel_x", format!("{hip_accel_x:.2}"));
+        row.set(
+            "att_enabled",
+            format!(
+                "{}",
+                params.as_ref().map(|p| p.attitude_enabled).unwrap_or(false)
+            ),
+        );
+        row.set("att_target", format!("{att_target:.4}"));
+        row.set("att_rest_cos", format!("{att_rest_cos:.5}"));
+        row.set("att_rest_sin", format!("{att_rest_sin:.5}"));
+        row.set("meas_theta", format!("{meas_theta:.4}"));
 
         // Realized hip vx = the pinned `P3` (each leg controller's `pivot`,
         // `particles[1]`). Cached on the first tick it resolves.

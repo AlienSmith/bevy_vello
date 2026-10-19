@@ -135,3 +135,40 @@ python3 /home/ubuntu/bender/tmp/headless/att_baseline/analyze_att3_regression.py
 
 Expected for DoD (a): every column in the set `max|d| < 0.001` (unchanged).
 Actual: `~50 px` (walk) / `~13 px` (jump) at the tail → FAIL.
+
+## 7. Implementation note — the missing actuator (2026-10-19)
+
+The WIP computed `pin.theta` but never applied it: the θ-rotated
+`rigid_frame_targets()` result was used only for `last_ref_p3`/`last_sag_y`
+telemetry, while the actual constraints came from the translation-only
+`delta_frame_targets()`. Loop 3 therefore had no physical authority.
+
+The first actuator wiring is now in `drive_hip_pin`:
+
+- The whole `[P1, P2, P3]` rigid frame rotates about **P2**. P2 carries the
+  existing delta/velocity/gravity servo target; P1 and P3 are placed at
+  `P2 + R(θ)·r` using the seeded rest offsets.
+- This preserves every frame distance (P1–P2, P2–P3, P1–P3), so it does not
+  over-constrain the rigid triangle. P3 remains hard-pinned, but to its
+  attitude-adjusted target `P3* = P2* + R(θ)·r_hip`; the hip therefore follows
+  the torso lean.
+- The angular-joint path (`CharacterAngularConstraintEvent` on `P1_P2_P3`
+  with only P1 free) was tried first and rejected: with P2/P3 pinned and the
+  rigid P1–P3 frame distance, changing only the joint angle forces the solver
+  through the collinear singularity, and the whole character spins about P3.
+- `attitude_rest_basis()` is retained for telemetry (`att_rest_cos/sin`), but
+  it no longer drives the actuator.
+- New knobs: `ATTITUDE` (`0`/`1`), `ATT_COMPLIANCE`, `ATT_TARGET_DEG`,
+  `ATT_MAX_DEG` (default 20°, caps the commanded lean so a saturated sandbox
+  θ cannot drive the hard-pinned body horizontal). New telemetry:
+  `att_enabled`, `att_target`, `att_rest_cos`, `att_rest_sin`, `meas_theta`.
+
+Still open:
+
+- The target attitude is still `pin.state.attitude.theta` (the hip-pivoted
+  sandbox model) plus `ATT_TARGET_DEG`. The next step is to close the loop on
+  the **measured** `P2→P1` attitude instead of replaying the model lean.
+- Runtime A/B (`ATTITUDE=0` vs `1`) and the revised DoD still need to be run.
+  Compare resolver commands (`pose.hip`/`pose.foot`), not realized P1/P2/P3.
+- When the hard hip pin is removed, the same P2-centred rotation can carry P3
+  without a pin target; only the P2 translation command remains.

@@ -874,11 +874,30 @@ fn hip_pin_ui(
             p.last_ref_p3,
             p.last_sag_y,
             p.state.vs.phase,
+            p.theta,
+            p.last_meas_theta,
+            p.last_att_target,
+            p.last_att_rest_cos,
+            p.last_att_rest_sin,
         )
     });
 
     egui::Window::new("Hip Pin").show(contexts.ctx_mut(), |ui| {
-        let Some((entity, mut enabled, ready, hip_pos, ref_p3, sag_y, vphase)) = snapshot else {
+        let Some((
+            entity,
+            mut enabled,
+            ready,
+            hip_pos,
+            ref_p3,
+            sag_y,
+            vphase,
+            model_theta,
+            meas_theta,
+            att_target,
+            rest_cos,
+            rest_sin,
+        )) = snapshot
+        else {
             ui.label("no character / hip pin yet");
             return;
         };
@@ -959,9 +978,40 @@ fn hip_pin_ui(
                 pin.enabled = enabled;
             }
         }
-        if let Some((_, mut pin)) = pin_q.iter_mut().next() {
-            ui.add(egui::Slider::new(&mut pin.theta, -1.5..=1.5).text("theta (attitude)"));
-        }
+
+        // Loop 3: the whole P1/P2/P3 rigid frame rotates about P2, carrying
+        // P3 to an attitude-adjusted target.
+        ui.checkbox(
+            &mut params.attitude_enabled,
+            "loop 3: attitude (rigid frame about P2)",
+        );
+        let rest_angle = rest_sin.atan2(rest_cos).to_degrees();
+        ui.colored_label(
+            egui::Color32::LIGHT_YELLOW,
+            format!(
+                "model θ {:+.2}°  measured θ {:+.2}°  target {:+.2}°  rest {:+.2}°\n\
+                 rest cos/sin {:+.4}/{:+.4}",
+                model_theta.to_degrees(),
+                meas_theta.to_degrees(),
+                att_target.to_degrees(),
+                rest_angle,
+                rest_cos,
+                rest_sin,
+            ),
+        );
+        ui.add(
+            egui::Slider::new(&mut params.attitude_compliance, 1e-9..=1e-5)
+                .logarithmic(true)
+                .text("loop-3 compliance"),
+        );
+        ui.add(
+            egui::Slider::new(&mut params.attitude_target_bias, -0.5..=0.5)
+                .text("loop-3 target bias (rad)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut params.attitude_max_angle, 0.0..=1.3)
+                .text("loop-3 max lean (rad)"),
+        );
         if let Some((_, mut pin)) = pin_q.iter_mut().next() {
             let mut drives = params.hip_drives_legs;
             if ui
