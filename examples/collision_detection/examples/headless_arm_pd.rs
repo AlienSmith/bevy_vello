@@ -148,8 +148,8 @@ use game_lib::{
     check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, flush_csv, flush_rows,
     rows_hash, tail_verdict, update_character_movement, update_ground_support, Bone,
     CharacterController, CharacterRoot, GroundSupport, HeadlessTelemetryPlugin, HipPin,
-    HipPinParams, IkMode, InvariantConfig, LeftArmController, PinMode,
-    LeftLegController, LimbConfig, ParticleTelemetryConfig, PlayerAction, PlayerMarker,
+    HipPinParams, IkMode, InvariantConfig, LeftArmController, LeftLegController, LimbConfig,
+    ParticleTelemetryConfig, PlayerAction, PlayerMarker,
     ResetLimbControlConstraintsEvent, RightArmController, RightLegController, SpineDriveEnabled,
     TelemetryBuffer, TelemetryRow, VelloCharacterPlugin, VerticalPhase, WhichLimb,
 };
@@ -835,10 +835,7 @@ fn main() {
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(1)
             .max(1);
-        info!(
-            "pin controller: mode={:?} kv={:.2} vertical={} substeps={} (PIN_MODE=rigid|delta, KV=0..1, PIN_VERTICAL=off)",
-            params.mode, params.k_v, params.pin_vertical, substeps
-        );
+        info!("pin controller: delta velocity servo, substeps={substeps}");
         app.insert_resource(params);
     }
 
@@ -2296,7 +2293,7 @@ fn gravity_from_env() -> Vec2 {
 /// Pin params from env (body mode). `LEGS=off` keeps the pin on `P1/P2/P3` only;
 /// otherwise the pin also drives the legs (the whole-body default).
 fn hip_pin_params_from_env() -> HipPinParams {
-    // Shared with the tuning app (`PinMode`, `KV`, `HIP_DROP`, ...).
+    // Shared with the tuning app (`SUPPORT_SHARE`, `HIP_DROP`, ...).
     HipPinParams::from_env()
 }
 

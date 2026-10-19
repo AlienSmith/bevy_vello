@@ -45,7 +45,7 @@ use game_lib::{
     update_ground_support,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
-    GroundSupport, HipPin, HipPinParams, PinMode, PlayerAction, PlayerMarker, SpineController,
+    GroundSupport, HipPin, HipPinParams, PlayerAction, PlayerMarker, SpineController,
     VelloCharacterPlugin, VerticalPhase,
 };
 use leafwing_input_manager::prelude::*;
@@ -189,8 +189,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(PistolState::default())
         .insert_resource(cannon::CannonParams::default())
         .insert_resource(GravityToggle::default())
-        // Same env-driven controller as the headless harness: `PIN_MODE`,
-        // `KV`, `SUPPORT_SHARE`, `HIP_DROP`, `TARGET_SPEED`, `LEGS`.
+        // Same env-driven controller as the headless harness: `SUPPORT_SHARE`,
+        // `HIP_DROP`, `TARGET_SPEED`, `LEGS`.
         // Default = rigid pin.
         .insert_resource(HipPinParams::from_env())
         // Ground gate: vertical authority and gravity cancellation only while a
@@ -821,14 +821,8 @@ fn apply_default_gravity(
     });
 }
 
-/// Print the controller the app actually booted with. `PIN_MODE`/`KV`/
-/// `PIN_VERTICAL` are read once by [`HipPinParams::from_env`]; this line makes a
-/// "character floats in mid-air" report self-diagnosing (rigid pin by default).
-fn log_pin_setup(params: Res<HipPinParams>) {
-    info!(
-        "tuning pin controller: mode={:?} kv={:.2} vertical={} (set PIN_MODE=delta, PIN_VERTICAL=off for the drop test)",
-        params.mode, params.k_v, params.pin_vertical
-    );
+fn log_pin_setup() {
+    info!("tuning pin controller: delta velocity servo");
 }
 
 /// Gravity toggle: an open/close checkbox plus a magnitude slider (so the app
@@ -921,20 +915,9 @@ fn hip_pin_ui(
         ui.label("Drive with W/A/S/D (leafwing PlayerAction). Arrow keys are unused.");
         ui.separator();
 
-        // Live controller selection: the delta pin is the one gravity/contacts
-        // can move; the rigid pin holds the absolute pose (floats in mid-air).
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut params.mode, PinMode::Rigid, "Rigid (absolute)");
-            ui.selectable_value(&mut params.mode, PinMode::Delta, "Delta (velocity servo)");
-        });
-        ui.add(egui::Slider::new(&mut params.k_v, 0.0..=1.0).text("k_v (delta gain)"));
         ui.add(
             egui::Slider::new(&mut params.support_share, 0.0..=1.0)
                 .text("support_share (gravity cancelled while grounded)"),
-        );
-        ui.checkbox(
-            &mut params.pin_vertical,
-            "pin vertical axis (master switch; the live gate is below)",
         );
 
         // Live gate readout: the master switch is only one input. The effective
@@ -944,7 +927,7 @@ fn hip_pin_ui(
         let grounded = support.as_deref().map(|s| s.grounded).unwrap_or(true);
         let contacts = support.as_deref().map(|s| s.contacts).unwrap_or(0);
         let ballistic = matches!(vphase, VerticalPhase::Launch | VerticalPhase::Flight);
-        let vertical_active = params.pin_vertical && (grounded || ballistic);
+        let vertical_active = grounded || ballistic;
         let gravity_cancel = if grounded { params.support_share } else { 0.0 };
         ui.colored_label(
             if grounded {
@@ -1002,10 +985,6 @@ fn hip_pin_ui(
         ui.add(egui::Slider::new(&mut params.config.thigh_len, 20.0..=120.0).text("thigh_len"));
         ui.add(egui::Slider::new(&mut params.config.calf_len, 20.0..=120.0).text("calf_len"));
         ui.add(egui::Slider::new(&mut params.config.gravity, 0.0..=2000.0).text("gravity"));
-        ui.separator();
-        ui.label("PD command  a = kp·(pose−x) + kd·(v_hip−v)");
-        ui.add(egui::Slider::new(&mut params.kp, 0.0..=4000.0).text("pin kp (P term)"));
-        ui.add(egui::Slider::new(&mut params.kd, 0.0..=200.0).text("pin kd (v match)"));
         ui.separator();
         ui.label("Speed-softened compliance (softer when moving fast)");
         ui.add(egui::Slider::new(&mut params.v_ref, 1.0..=2000.0).text("v_ref (px/s)"));
