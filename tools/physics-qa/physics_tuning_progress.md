@@ -329,3 +329,84 @@ What the numbers say, in order of importance:
 - [ ] Gate the fix on both tools: `analyze_swing.py --gate-gain 20` (lead must
   gain a real step) plus `analyze_foot_slide.py --skip-start 1.6` (stance must
   not slide). A gait that passes only one of them is still broken.
+
+## 8. Leg stiffness: "just make the legs stiffer" does not work (session 4)
+
+The hypothesis was that the leg angular constraints are too compliant to hold the
+body, let alone swing the trailing leg forward. Three things had to be
+established before testing it.
+
+### 8.1 The asset cannot set the leg angular stiffness
+
+`drive_hip_pin` **owns** the leg angular compliance and rewrites it every frame
+([`hip_pin.rs:772`](../examples/game_lib/src/lower_body/hip_pin.rs:772)):
+
+```rust
+right_leg.config.angular_compliance = params.leg_compliance.max(1e-12);
+left_leg.config.angular_compliance  = params.leg_compliance.max(1e-12);
+```
+
+So the `Angular` compliance of `P2_P3_P40/P41` and `P3_P40/P41_PLLL/PRLL` in
+`v10.character.json` is **dead at runtime**. The live value is
+`HipPinParams::leg_compliance` (default `1e-6`), overridable with
+`LEG_COMPLIANCE`. The `Distance` (bone) compliance is *not* rewritten, so
+`set_joint_compliance.py` does reach it.
+
+### 8.2 Sweep (`sweep_leg_compliance.py`, bones at their asset values)
+
+| LEG_COMPLIANCE | body px/s (cmd 104) | lift mean | swing advance | lead gain | stance drift max | rig `max_rel_dev` |
+| --- | --- | --- | --- | --- | --- | --- |
+| **1e-6 (default)** | +10.3 (10%) | 3.1 px | +1.9 px | +3.6 px | 3.13 px | 0.0497 |
+| 5e-7 | −0.6 (−1%) | 5.5 px | +1.4 px | −3.6 px | 34.71 px | 0.2929 |
+| 1e-7 | −1.1 (−1%) | 10.8 px | −1.9 px | −5.3 px | 10.40 px | 0.2741 |
+| 5e-8 | −1.8 (−2%) | 17.4 px | −3.4 px | −6.1 px | 15.77 px | 0.3443 |
+| 1e-8 | −25.7 (−25%) | 47.1 px | −1.0 px | −2.1 px | 36.33 px | 0.4075 |
+| 5e-9 | +85.9 (83%) | 25.7 px | +32.0 px | +71.0 px | 52.43 px | 0.2577 |
+| 1e-9 | **−179.1 (−172%)** | 57.6 px | −19.1 px | −36.1 px | 66.15 px | 0.4598 |
+
+(The 5e-9 row is the earlier run with the bone compliance also at 1e-9; with the
+bones back at 5e-7/1e-6 the same point reads −39 px/s, adv +8.6, gain +15.7 —
+i.e. it is a knife edge, not a reproducible operating point.)
+
+### 8.3 What 1e-9 actually does
+
+Run in the renderer (`visual_arm_pd`, legs at 1e-9): the character walks
+**backwards** at 172% of the commanded speed — it is funny to watch and it is a
+real measurement: `body: travelled -179.4 px/s against cmd_vx=104.4 px/s`.
+
+At 1e-9 the legs overpower the hip pin: the pinned-frame rigidity collapses
+(`max_rel_dev` 0.0497 → 0.38–0.62, versus 0.05 baseline) and the per-joint
+solves overshoot into a limit cycle. Taming it does **not** work either:
+
+| LEG_COMPLIANCE | extra lever | body px/s | stance drift | rig dev |
+| --- | --- | --- | --- | --- |
+| 1e-9 | `LEG_MAX_ANG_RATE=20` | −109.8 | 64.50 px | 0.2396 |
+| 1e-9 | `LEG_ALPHA=0.5` | −86.0 | 64.77 px | 0.4470 |
+| 1e-9 | `ATT_COMPLIANCE=1e-9` (stiffer pin) | −182.4 | 82.62 px | 0.6184 |
+| 5e-9 | `ATT_COMPLIANCE=1e-8` | −62.2 | 54.25 px | 0.4378 |
+
+### 8.4 Conclusion
+
+- Stiffening the legs past **1e-6** does not buy a walk: the body stops or runs
+  backwards, the stance foot slides 10–80 px, and the pinned frame tears. `1e-6`
+  is the edge of stability, not a soft default — which is presumably why it was
+  chosen.
+- The one regime that looks like walking is ~5e-9 (`body +86 px/s`, swing advance
+  +32 px, lead gain +71 px), but it is unstable run-to-run and slides 52 px while
+  planted. Do not hard-code it.
+- The real defect to fix is the **per-frame rest-angle jump** that the stiff
+  spring then amplifies: `leg_alpha = 1.0` and `leg_max_angle_rate = 1e6` mean the
+  rest angle teleports to the IK target every tick, and a stiff constraint turns
+  that into an impulse. A rate-limited / critically-damped rest chase (or solving
+  the IK target saturation from §7.3 first) is the way to make stiffness usable.
+- Code state: `HipPinParams::default().leg_compliance` stays **1e-6** with the
+  sweep documented at the field; the asset keeps its authored `5e-07` / `1e-06`
+  joint values (dead for the legs' `Angular`, live for `Distance`).
+
+Reproduce:
+
+```bat
+py bevy_vello\tools\physics-qa\sweep_leg_compliance.py --values 1e-6,5e-7,1e-7,5e-8,1e-8,5e-9,1e-9
+py bevy_vello\tools\physics-qa\sweep_leg_compliance.py --values 1e-9 --extra-env ATT_COMPLIANCE=1e-9
+py bevy_vello\tools\physics-qa\set_joint_compliance.py --compliance 1e-9 --dry-run
+```

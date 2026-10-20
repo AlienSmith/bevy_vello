@@ -41,6 +41,8 @@ Editable per collider: `softbody` (`max_complexity`, `resititution`,
 | `analyze_foot_slide.py` | objective stance-phase foot-slide gate over a walk telemetry CSV |
 | `analyze_swing.py` | objective swing gate: does each swing lift, advance relative to the body, and overtake the stance foot? Also reports foot-vs-target tracking error and foot separation |
 | `sweep_foot_friction.py` | headless sweep of `friction_compliance_scaler` on the foot colliders (LLL/RLL): patch asset → run walk → report steady-state stance drift → restore byte-exactly |
+| `sweep_leg_compliance.py` | headless sweep of `LEG_COMPLIANCE`: scores swing (advance/lead gain), stance drift and the pinned-frame `rig max_rel_dev` per candidate |
+| `set_joint_compliance.py` | patch the `Distance`/`Angular` joint compliance of named joints in the character asset (textual, `--restore` puts the backup back) |
 | `physics_tuning_progress.md` | running log of the walking physics tuning loop (configs, runs, numbers, verdicts) |
 | `tune.py` | the search loop: apply an edit, capture, score, keep or revert |
 | `qa_prompt.txt` | the vision judge's prompt: what EXPLOSION / WOBBLE / COLLAPSE mean |

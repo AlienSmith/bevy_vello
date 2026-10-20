@@ -206,8 +206,20 @@ impl Default for HipPinParams {
             // explicit mid-air direction changes.
             external_pin: false,
             air_control: true,
-            // Angular-only default from the headless sweep: the world-upright
-            // reference needs a softer leg spring (`1e-6`) to avoid tearing.
+            // The pin OWNS the leg angular compliance and rewrites it every
+            // frame (see `drive_hip_pin`), so the asset's leg `Angular`
+            // compliance is dead at runtime — THIS is the value that matters.
+            //
+            // `1e-6` is the edge of stability, not a soft choice: the measured
+            // sweep (`tools/physics-qa/sweep_leg_compliance.py`,
+            // `physics_tuning_progress.md` §8) shows 5e-7 and below drive the
+            // body BACKWARDS at up to -193 px/s with the pinned frame tearing
+            // (`rig max_rel_dev` 0.05 -> 0.38). Stiffening the loop-3 attitude
+            // (`ATT_COMPLIANCE`) or damping the rest-angle chase (`LEG_ALPHA`,
+            // `LEG_MAX_ANG_RATE`) does not tame it. So the stiffness knob is
+            // not the fix for the non-stepping gait until the per-frame
+            // rest-angle jump (alpha 1.0, rate 1e6) is solved properly.
+            // `LEG_COMPLIANCE` still overrides for experiments.
             leg_compliance: 1e-6,
             leg_zeta: 1.0,
             leg_alpha: 1.0,
