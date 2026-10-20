@@ -172,3 +172,203 @@ Still open:
   Compare resolver commands (`pose.hip`/`pose.foot`), not realized P1/P2/P3.
 - When the hard hip pin is removed, the same P2-centred rotation can carry P3
   without a pin target; only the P2 translation command remains.
+
+## 8. Angular-only walking mode (2026-10-19)
+
+Normal floor walking no longer needs the external `P1/P2/P3` position pin:
+
+- `HipPinParams::external_pin` defaults **off** (`EXTERNAL_PIN=1` re-enables
+  the debug hard pin).
+- `HipPinParams::air_control` defaults **on** (`AIR_CONTROL=0` disables it).
+  An external pin tick is allowed only when airborne **and** horizontal input
+  is held, i.e. the mid-air direction-change assist:
+  `external_pin || (air_control && !grounded && |input_x| > 0)`.
+- When the external pin is off, `drive_hip_pin` still runs the resolver and
+  writes the leg targets, but emits **no** external position constraints and
+  sets `anchor_chain = false` on both leg controllers.
+- [`tick_loop3_angular`](bevy_vello/examples/game_lib/src/lower_body/hip_pin.rs:806)
+  runs after `drive_hip_pin` and before the constraint world step. It emits a
+  `CharacterAngularConstraintEvent` for `P1_P2_P3` with `free_mask = 0b111`,
+  so loop 3 is driven purely by the angular joint. The legs are driven by the
+  existing leg-PD angular constraints; contacts/physics provide support.
+- `att_rest_basis` / `att_target` / `meas_theta` remain in telemetry, and the
+  new `ext_pin` column records whether the external pin ran that tick.
+
+The tuning app exposes both switches plus the loop-3 compliance/zeta/bias/max
+controls. The floor/contact path must be active for support (the current tuning
+scene still has the static ground wall disabled for the old pin bridge).
+
+## 9. Headless angular-only result (2026-10-19)
+
+Run: `COLLISION=1 GRAVITY=on EXTERNAL_PIN=0 ATTITUDE=1 SUBSTEPS=1
+SCRIPT=plans/walk_script.json` through `headless_arm_pd` (1036 rows, no NaN).
+
+### What was fixed
+
+The first angular-only run drove the leg targets from the **live hip y**.
+When the body sank, the foot targets sank with it and the leg PD pushed the
+feet through the floor:
+
+| metric | v1 (live hip y) | v2 (resolver-relative hip y + foot clamp) |
+|---|---|---|
+| max foot penetration | **53–54 px** | **2.4 / 1.9 px** |
+| rows with >10 px penetration | 149 / 184 | **0 / 0** |
+| calf stretch | **33.8% / 30.0%** | **2.3% / 2.0%** |
+| thigh stretch | 7.4% / 6.7% | 0.5% / 0.5% |
+| P1–P3 frame diagonal | 29.2% | 2.8% |
+| leg tracking peak | 126 px | **16.9 px** |
+
+The fix in `drive_hip_pin`: the hip target x follows the live P3, but y follows
+the resolver's vertical command relative to the seed; foot target y is clamped
+to the seed floor line. This is still angular-only (no external position pin).
+
+### Remaining serious blocker: the torso falls
+
+With the stable-leg configuration, the physical torso attitude runs away:
+
+- `meas_theta` reaches **−2.3 rad** at the tail (the classifier sees the body
+  fold/roll); `att_target` stays within ±0.11 rad.
+- The `P1_P2_P3` joint's required upright rest angle reaches **~3.06 rad**,
+  while the live joint angle stays at ~0.3 rad: the authored **15° hard wall**
+  is saturated, so the torso follows the falling lower body.
+- Removing the wall is worse: the joint then tries to fold the torso ~175°
+  while the lower body is inverted, tearing the frame (P1–P3 98%, leg peak
+  122 px).
+- Blending the leg hip-target reference toward world-upright is also unstable:
+  blend 0.1 → 71% rigidity failure / 218 px leg peak; blend 0.2 → `DIVERGED`.
+  Rate-limiting the rest-angle chase did not fix it (blend 0.1 → `DIVERGED`).
+
+So this is **not a tuning-only problem**. The live-spine reference is what keeps
+the legs/feet stable, but it deliberately makes the hip joint follow the torso;
+without the external pin there is no absolute torso-orientation authority. The
+15° wall only masks the failure by clamping the torso to the falling lower body.
+
+### Next control decision
+
+To make angular-only walking work, add an absolute torso/balance authority that
+does not rely on the leg hip-target reference. Options:
+
+1. A torque/force at P2 driven by a world-referenced attitude PD (the original
+   loop-3 intent), with a bounded budget so it cannot tear the frame.
+2. A lightweight external attitude constraint during ground walking (an
+   exception to “no external constraints”, but only rotational).
+3. A CoM/pitch balance controller that adjusts foot placement and hip height
+   from `meas_theta`/`meas_omega`, i.e. a real loop-2 + loop-3 closure.
+
+The height-aware leg targets and foot clamp should stay regardless; they reduced
+penetration by ~20× and leg stretch by ~15×.
+
+## 10. Breakthrough: world-upright reference + softer legs (2026-10-19)
+
+The blend was unnecessary. The correct target is the resolver's **world-upright**
+spine, and the XPBD angular solver handles the dynamics if the leg spring is not
+over-stiff.
+
+Run: `EXTERNAL_PIN=0 ATTITUDE=1 SUBSTEPS=1 SPINE_REF=upright` with
+`LEG_COMPLIANCE` swept `1e-8 / 1e-7 / 1e-6`, `LEG_ZETA=1.0`, `LEG_ALPHA=1.0`,
+`LEG_MAX_ANG_RATE=1e6`, `P1_P2_P3 max_angle=null`.
+
+| `LEG_COMPLIANCE` | torso `meas_theta` | P1–P2 / P2–P3 / P1–P3 | calf stretch | max foot penetration | leg peak |
+|---|---|---|---|---|---|
+| `1e-8` | ±1.2 rad (falls) | 6.7 / 17.9 / 22.1% | 31.6 / 30.1% | 139 / 140 px | 147 px |
+| `1e-7` | ±1.3 rad (falls) | 3.3 / 6.5 / 15.1% | 7.9 / 10.3% | 71 / 67 px | 177 px |
+| **`1e-6`** | **−0.084 … +0.233 rad (upright)** | **0.7 / 0.3 / 3.5%** | **1.7 / 1.1%** | **3.7 / 3.8 px** | 131 px @ start |
+
+At `1e-6`:
+
+- The torso stays upright for the whole script; no row exceeds 0.5 rad.
+- All bones are within ~3.5%; the frame diagonal P1–P3 is the worst at 3.5%.
+- Foot penetration is <4 px, none >5 px.
+- `P3` travels ~131 px in +x over the 11.5 s script, so it moves forward but the
+  stride/speed is still far below the resolver command (`target_speed=120`).
+- The remaining work is walking quality: leg tracking peak ~131 px at move
+  start, tail WAGGLE rms ~7 px, and a hip sag (`P3y` up to 232 vs 173 rest).
+
+So the three-loop architecture is sufficient; the previous failure was the
+incorrect live-spine target plus an over-stiff leg spring. The blend and the
+15° wall are not needed.
+
+Next tuning matrix (all through `headless_arm_pd`):
+
+1. `LEG_COMPLIANCE` around `1e-6`: `1.5e-6`, `2e-6`, `3e-6`, `1e-5`.
+2. `LEG_ZETA`: `0.6`, `0.8`, `1.0`; `LEG_ALPHA`: `0.5`, `0.75`, `1.0`.
+3. `SUBSTEPS`: `1`, `2`, `4` at the best compliance.
+4. v10 particle `inv_mass` ratios for hip/knee/foot (the user's suggested
+   weight ratios) once the compliance band is found.
+5. Re-run the headless `walk` and `jump` scripts; the target is upright torso,
+   no bone stretch >5%, penetration <2 px, and foot tracking under ~20 px.
+
+### Mass-ratio result (v10)
+
+The original v10 masses are `P1/P2/P3 = 10` and `P40/P41/PLLL/PRLL = 1`.
+That 30:4 torso/leg ratio compresses the soft leg springs ~58 px (`P2y`
+138→196, `P3y` 173→231), which is what reads as “standing on P2”.
+
+Sweep at `LEG_COMPLIANCE=1e-6`, `LEG_ZETA=1.0`, torso/leg `inv_mass`:
+
+| torso / leg `inv_mass` | torso mass / leg mass | `P2y` max | `P3y` max | `meas_theta` | penetration >5 px | `P3x` travel |
+|---|---|---|---|---|---|---|
+| `0.1 / 1.0` (original) | 10 / 1 | 198.7 | 232.5 | −0.084…0.233 | 0 | 130.9 |
+| `0.5 / 0.5` | 2 / 2 | 189.6 | 221.0 | −0.022…0.088 | 0 | 104.2 |
+| **`1.0 / 0.5` (chosen)** | **1 / 2** | **179.9** | **211.1** | **−0.028…0.121** | **0** | **124.7** |
+| `0.5 / 0.25` | 2 / 4 | 195.5 | 230.0 | −0.033…0.091 | 0 | 46.2 |
+
+Chosen v10 masses: `P1/P2/P3 inv_mass = 1.0`, `P40/P41/PLLL/PRLL inv_mass = 0.5`.
+This cuts the waist/hip sag by ~20 px, keeps the torso within ±0.12 rad, and
+removes all >5 px penetration. It still does not reach the commanded stride;
+leg tracking peak remains ~129 px and the tail is `WAGGLE`, so the next pass is
+compliance/zeta/alpha/substeps around this ratio.
+
+## 11. Why compliance cannot make the legs support the body
+
+The angular constraints are internal to the skeleton. Internal springs cannot
+hold a body against gravity without an external reaction. The external reaction
+must come from the floor, and right now it does not reach the skeleton:
+
+- `skeleton_drives_body` makes the visual soft-body parts **follow** the
+  skeleton one-way.
+- Collision reaches the skeleton only through the kinematic channel
+  (`apply_collision_correction`, with `collision_damping` /
+  `rotation_resistance`), not as a load-bearing contact force.
+- The floor normal force acts on the soft-body foot collider, not on the
+  skeleton foot particle. The skeleton has no upward reaction, so the leg
+  angular springs compress until the geometry bottoms out.
+
+That is exactly what the numbers show: `LEG_COMPLIANCE=1e-6` gives a ~40 px
+squat, `5e-7` collapses (P3y 281), and `SUBSTEPS=2/4` at `5e-7` still folds
+(30% P1–P3) or NaNs. Compliance, mass ratio, and substeps only change how the
+unsupported body deforms; they cannot create a support force.
+
+The old external pin worked because it **was** the missing external reaction.
+To remove it, the skeleton needs one of:
+
+1. A P2-only vertical support constraint (soft, grounded-only) — the minimal
+   change, and still angular-only for the pose.
+2. Skeleton foot contact constraints, so the floor can push the actual
+   `PLLL`/`PRLL` particles.
+3. A two-way collision→skeleton channel that transmits a load-bearing normal
+   force, not just a damped kinematic delta.
+
+Until one of those exists, angular-only walking will always squat or collapse
+under gravity, regardless of the compliance settings.
+
+## 12. Substep convergence result (2026-10-19)
+
+The tuning app and headless now share `Time<Fixed> = 90 Hz` and the same
+`SUBSTEPS` env, default **2** in both. Sweep at mass B + `LEG_COMPLIANCE=1e-6`:
+
+| SUBSTEPS | P2y max | P3y max | P3x travel | rigidity | leg peak |
+|---|---|---|---|---|---|
+| 1 | 179.9 | 211.1 | 124.7 | 3.0% | 126 px |
+| **2** | 187.9 | 222.8 | **262.0** | **1.4% (pass)** | **101 px** |
+| 4 | 194.0 | 228.4 | **506.1** | 2.2% | 152 px |
+| 8 | — | — | — | NaN (now guarded) | — |
+
+Substeps are a real convergence lever: `2` gives the best rigidity and roughly
+doubles the traveled distance. But the squat does **not** disappear — it gets
+slightly deeper as substeps increase, because the skeleton still lacks a
+load-bearing floor reaction. So `SUBSTEPS=2` is the new shared default and the
+best tuning baseline, but section 11’s support-path fix is still required.
+
+High substeps exposed a NaN panic in `drive_hip_pin`; it is now guarded by
+`clamp_attitude` plus finite-vector checks in `angle_basis`/`attitude_rest_basis`.

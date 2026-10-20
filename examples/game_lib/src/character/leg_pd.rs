@@ -149,7 +149,16 @@ fn calculate_leg_pd(
     // the measured and target hip angles share one reference — robust even if
     // the frame tilts. P2 itself is never commanded (the resolver assumes the
     // spine is perfectly vertical).
-    let a_t = targets.hip + (p2 - p3);
+    //
+    // When no external pin holds the torso, reference the target hip angle to
+    // the resolver's desired world-upright spine instead. This is the correct
+    // control target; the XPBD angular solver resolves it against the contacts.
+    let spine = p2 - p3;
+    let a_t = if config.upright_spine_reference {
+        targets.hip + Vec2::new(0.0, -spine.length())
+    } else {
+        targets.hip + spine
+    };
     let theta_hip_t_cs = cos_sin(a_t, targets.hip, targets.knee);
     let theta_knee_t_cs = cos_sin(targets.hip, targets.knee, targets.foot);
 

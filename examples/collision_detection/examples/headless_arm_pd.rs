@@ -146,7 +146,8 @@ use game_lib::{
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
     check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, flush_csv, flush_rows,
-    rows_hash, tail_verdict, update_character_movement, update_ground_support, Bone,
+    rows_hash, tail_verdict, tick_loop3_angular, update_character_movement, update_ground_support,
+    Bone,
     CharacterController, CharacterRoot, GroundSupport, HeadlessTelemetryPlugin, HipPin,
     HipPinParams, IkMode, InvariantConfig, LeftArmController, LeftLegController, LimbConfig,
     ParticleTelemetryConfig, PlayerAction, PlayerMarker, ResetLimbControlConstraintsEvent,
@@ -802,7 +803,9 @@ fn main() {
     .insert_resource(VelloConstraintWorld::new(gravity))
     .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
     .insert_resource({
+        // Match the tuning app: 2 XPBD substeps by default. `SUBSTEPS` overrides.
         let mut world = VelloCollisionWorld::default();
+        world.substeps = 2;
         if let Ok(s) = std::env::var("SUBSTEPS") {
             if let Ok(n) = s.trim().parse::<u32>() {
                 world.substeps = n;
@@ -833,7 +836,7 @@ fn main() {
         let substeps = std::env::var("SUBSTEPS")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(1)
+            .unwrap_or(2)
             .max(1);
         info!("pin controller: delta velocity servo, substeps={substeps}");
         app.insert_resource(params);
@@ -858,6 +861,7 @@ fn main() {
             (
                 make_collision_constraints,
                 drive_hip_pin.before(update_character_movement),
+                tick_loop3_angular.after(drive_hip_pin),
                 update_constraint_world,
                 update_connection_particles,
                 remove_soft_body,
@@ -1815,6 +1819,7 @@ fn limb_sample(
             att_rest_cos,
             att_rest_sin,
             meas_theta,
+            ext_pin,
         ) = match pin_q.get(character) {
             Ok(pin) => (
                 pin.state.attitude.theta,
@@ -1825,8 +1830,9 @@ fn limb_sample(
                 pin.last_att_rest_cos,
                 pin.last_att_rest_sin,
                 pin.last_meas_theta,
+                pin.last_external_pin,
             ),
-            Err(_) => (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            Err(_) => (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, false),
         };
         row.set("body_theta", format!("{body_theta:.4}"));
         row.set("body_omega", format!("{body_omega:.4}"));
@@ -1839,6 +1845,7 @@ fn limb_sample(
                 params.as_ref().map(|p| p.attitude_enabled).unwrap_or(false)
             ),
         );
+        row.set("ext_pin", format!("{ext_pin}"));
         row.set("att_target", format!("{att_target:.4}"));
         row.set("att_rest_cos", format!("{att_rest_cos:.5}"));
         row.set("att_rest_sin", format!("{att_rest_sin:.5}"));

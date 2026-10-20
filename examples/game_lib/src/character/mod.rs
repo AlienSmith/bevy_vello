@@ -215,6 +215,10 @@ pub struct LimbConfig {
     /// instead of the pin undoing most of it each frame. The pin sets this on
     /// both leg controllers while `hip_drives_legs` is active.
     pub anchor_chain: bool,
+    /// Reference the target hip angle to the resolver's desired world-upright
+    /// spine instead of the live spine. Use when no external pin holds the
+    /// torso; the solver then resolves the desired pose against the contacts.
+    pub upright_spine_reference: bool,
 }
 
 impl Default for LimbConfig {
@@ -234,6 +238,7 @@ impl Default for LimbConfig {
             bend_sign: -1.0,
             ik_mode: IkMode::Disabled,
             anchor_chain: false,
+            upright_spine_reference: false,
         }
     }
 }

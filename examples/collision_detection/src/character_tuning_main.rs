@@ -19,7 +19,8 @@ use bevy_vello::integrations::physics::systems::update_constraint_world;
 use bevy_vello::{
     collision::{
         generate_uvs, path_to_ccw_quad_path, CollisionConstraintConfig, CollisionSystems,
-        SoftBodyInitConfig, VelloCollisionTrigger, VELLO_COLLISION_COOL_DOWN_TIME,
+        SoftBodyInitConfig, VelloCollisionTrigger, VelloCollisionWorld,
+        VELLO_COLLISION_COOL_DOWN_TIME,
     },
     integrations::{
         particles::{self, ExplosionEffect},
@@ -41,12 +42,12 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    default_input_map, drive_hip_pin, reset_hip_pin, update_character_movement,
-    update_ground_support,
+    default_input_map, drive_hip_pin, reset_hip_pin, tick_loop3_angular,
+    update_character_movement, update_ground_support,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
     GroundSupport, HipPin, HipPinParams, PlayerAction, PlayerMarker, SpineController,
-    VelloCharacterPlugin, VerticalPhase,
+    SpineDriveEnabled, VelloCharacterPlugin, VerticalPhase,
 };
 use leafwing_input_manager::prelude::*;
 
@@ -134,6 +135,16 @@ enum GameState {
 
 /// Tracks whether the pistol collider has been registered to the character.
 /// Used to guard the UnregisterPart event so we don't try to unregister twice.
+/// The pistol is a body part with mass/contacts attached to the right arm. It
+/// is off by default so the tuning app matches the pistol-free headless walk;
+/// `PISTOL=1` re-enables it.
+#[derive(Resource)]
+struct PistolEnabled(bool);
+
+fn pistol_enabled(enabled: Res<PistolEnabled>) -> bool {
+    enabled.0
+}
+
 #[derive(Resource, Default)]
 struct PistolState {
     registered: bool,
@@ -187,12 +198,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init_state::<GameState>()
         .add_plugins(VelloCharacterPlugin::default())
         .insert_resource(PistolState::default())
+        .insert_resource(PistolEnabled(matches!(
+            std::env::var("PISTOL").ok().as_deref().map(str::trim),
+            Some("1") | Some("true") | Some("yes")
+        )))
         .insert_resource(cannon::CannonParams::default())
         .insert_resource(GravityToggle::default())
         // Same env-driven controller as the headless harness: `SUPPORT_SHARE`,
         // `HIP_DROP`, `TARGET_SPEED`, `LEGS`.
-        // Default = rigid pin.
+        // Default = angular-only loop 3; the hip pin owns the resolver/leg
+        // targets, so the spine drive must stay silent or it will emit
+        // conflicting external P1/P2/P3 position constraints and snap the spine.
         .insert_resource(HipPinParams::from_env())
+        .insert_resource(SpineDriveEnabled(false))
         // Ground gate: vertical authority and gravity cancellation only while a
         // character collider is in floor contact.
         .insert_resource(GroundSupport::default())
@@ -220,6 +238,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .before(update_character_movement)
                 .before(update_constraint_world),
         )
+        // Angular-only loop 3: drive P1_P2_P3 when the external pin is off.
+        .add_systems(
+            FixedUpdate,
+            tick_loop3_angular
+                .after(drive_hip_pin)
+                .before(update_constraint_world),
+        )
+        // Match the headless harness exactly: 90 Hz fixed physics and the same
+        // `SUBSTEPS` env (default 1). Without this the two apps can silently
+        // run different XPBD convergence settings.
+        .add_systems(Startup, configure_physics)
         .add_systems(Startup, setup_back_ground)
         .add_systems(Startup, add_light)
         .add_systems(Startup, setup_resources)
@@ -237,7 +266,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 setup_entity,
                 setup_pistol
                     .after(setup_entity)
-                    .before(GameLabSystems::WriteCharacterPartEvent),
+                    .before(GameLabSystems::WriteCharacterPartEvent)
+                    .run_if(pistol_enabled),
             ),
         )
         .add_systems(
@@ -258,6 +288,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run();
 
     Ok(())
+}
+
+/// Align the real-time tuning app with the headless harness:
+/// `Time<Fixed> = 90 Hz`, `VelloCollisionWorld::substeps = SUBSTEPS` (default 1).
+fn configure_physics(
+    mut collision_world: ResMut<VelloCollisionWorld>,
+    mut fixed: ResMut<Time<Fixed>>,
+) {
+    let substeps = std::env::var("SUBSTEPS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(2)
+        .max(1);
+    collision_world.substeps = substeps;
+    *fixed = Time::<Fixed>::from_hz(90.0);
+    info!("tuning physics: fixed 90 Hz, substeps={substeps}");
 }
 
 //make a white background
@@ -468,6 +514,15 @@ fn make_static_scene(commands: &mut Commands) {
     //   right edge at x = 470 is a 30 px drop back to the ground.
     // The 30 px rise keeps the hip inside the leg workspace, so the pose-aware
     // bridge can still reach without terrain-aware foot targets.
+    //
+    // Off by default for angular-only flat-floor tuning (`RAMP=1` re-enables).
+    // There is no terrain-aware foot target yet, so walking into the ramp
+    // collapses the body and produces the move-time snap.
+    let ramp_enabled = matches!(
+        std::env::var("RAMP").ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("yes")
+    );
+    if ramp_enabled {
     const RAMP_RISE: f32 = 30.0;
     const RAMP_X0: f32 = 120.0;
     const RAMP_X1: f32 = 270.0;
@@ -524,6 +579,7 @@ fn make_static_scene(commands: &mut Commands) {
     info!(
         "tuning ramp: x={RAMP_X0:.0}..{RAMP_X1:.0} rise {RAMP_RISE:.0} px, platform x={RAMP_X1:.0}..{PLATFORM_X1:.0}"
     );
+    }
 
     make_static_collision_shape(
         commands,
@@ -861,11 +917,19 @@ fn hip_pin_ui(
     mut params: ResMut<HipPinParams>,
     support: Option<Res<GroundSupport>>,
     mut pin_q: Query<(Entity, &mut HipPin)>,
+    spine_q: Query<&SpineController>,
+    p_q: Query<&VelloParticle>,
     action_q: Query<&ActionState<PlayerAction>>,
 ) {
     // Snapshot the single character's pin (all Copy) so no borrow is held across
     // the UI closure, which needs `&mut` access to edit the pin below.
     let snapshot = pin_q.iter_mut().next().map(|(e, p)| {
+        let live_y = spine_q.get(e).ok().and_then(|spine| {
+            let p1 = p_q.get(spine.particles[2]).ok()?.particle.pos.y;
+            let p2 = p_q.get(spine.particles[3]).ok()?.particle.pos.y;
+            let p3 = p_q.get(spine.particles[4]).ok()?.particle.pos.y;
+            Some((p1, p2, p3))
+        });
         (
             e,
             p.enabled,
@@ -879,6 +943,8 @@ fn hip_pin_ui(
             p.last_att_target,
             p.last_att_rest_cos,
             p.last_att_rest_sin,
+            p.last_external_pin,
+            live_y,
         )
     });
 
@@ -896,6 +962,8 @@ fn hip_pin_ui(
             att_target,
             rest_cos,
             rest_sin,
+            ext_pin,
+            live_y,
         )) = snapshot
         else {
             ui.label("no character / hip pin yet");
@@ -971,19 +1039,51 @@ fn hip_pin_ui(
         ui.separator();
 
         if ui
-            .checkbox(&mut enabled, "hip pin enabled (drives P1/P2/P3)")
+            .checkbox(&mut enabled, "hip controller enabled (resolver + leg targets)")
             .changed()
         {
             for (_, mut pin) in pin_q.iter_mut() {
                 pin.enabled = enabled;
             }
         }
+        ui.checkbox(
+            &mut params.external_pin,
+            "external pin (debug / hard pin)",
+        );
+        ui.checkbox(
+            &mut params.air_control,
+            "mid-air direction assist (external pin)",
+        );
+        ui.colored_label(
+            if ext_pin {
+                egui::Color32::LIGHT_RED
+            } else {
+                egui::Color32::LIGHT_GREEN
+            },
+            format!("external pin active this tick: {ext_pin}"),
+        );
+        if let Some((p1, p2, p3)) = live_y {
+            // Vello y-down: floor surface is y = +279 in this scene.
+            const FLOOR_Y: f32 = 279.0;
+            ui.label(format!(
+                "live y: P1={p1:.1} P2={p2:.1} P3={p3:.1}  floor={FLOOR_Y:.1}"
+            ));
+            ui.colored_label(
+                if p3 > FLOOR_Y - 5.0 {
+                    egui::Color32::LIGHT_RED
+                } else {
+                    egui::Color32::LIGHT_GREEN
+                },
+                format!("hip clearance above floor: {:.1} px", FLOOR_Y - p3),
+            );
+        } else {
+            ui.colored_label(egui::Color32::YELLOW, "live P1/P2/P3 unavailable");
+        }
 
-        // Loop 3: the whole P1/P2/P3 rigid frame rotates about P2, carrying
-        // P3 to an attitude-adjusted target.
+        // Loop 3: angular-only P1_P2_P3 drive when the external pin is off.
         ui.checkbox(
             &mut params.attitude_enabled,
-            "loop 3: attitude (rigid frame about P2)",
+            "loop 3: angular attitude (P1_P2_P3)",
         );
         let rest_angle = rest_sin.atan2(rest_cos).to_degrees();
         ui.colored_label(
@@ -1004,6 +1104,7 @@ fn hip_pin_ui(
                 .logarithmic(true)
                 .text("loop-3 compliance"),
         );
+        ui.add(egui::Slider::new(&mut params.attitude_zeta, 0.0..=2.0).text("loop-3 zeta"));
         ui.add(
             egui::Slider::new(&mut params.attitude_target_bias, -0.5..=0.5)
                 .text("loop-3 target bias (rad)"),
@@ -1011,6 +1112,19 @@ fn hip_pin_ui(
         ui.add(
             egui::Slider::new(&mut params.attitude_max_angle, 0.0..=1.3)
                 .text("loop-3 max lean (rad)"),
+        );
+        ui.separator();
+        ui.label("Leg angular solver (world-upright reference when pin off)");
+        ui.add(
+            egui::Slider::new(&mut params.leg_compliance, 1e-12..=1e-6)
+                .logarithmic(true)
+                .text("leg compliance"),
+        );
+        ui.add(egui::Slider::new(&mut params.leg_zeta, 0.0..=2.0).text("leg zeta"));
+        ui.add(egui::Slider::new(&mut params.leg_alpha, 0.0..=1.0).text("leg alpha"));
+        ui.add(
+            egui::Slider::new(&mut params.leg_max_angle_rate, 0.5..=20.0)
+                .text("leg max angle rate (rad/s)"),
         );
         if let Some((_, mut pin)) = pin_q.iter_mut().next() {
             let mut drives = params.hip_drives_legs;

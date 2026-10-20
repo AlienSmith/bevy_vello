@@ -19,12 +19,12 @@
 use bevy::{prelude::*, time::Fixed};
 use bevy_vello::collision::CollisionEventBatch;
 use bevy_vello::integrations::physics::{
-    CharacterExternalPositionConstraintEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld,
-    VelloParticle,
+    CharacterAngularConstraintEvent, CharacterExternalPositionConstraintEvent,
+    VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloParticle,
 };
 use bevy_vello::VelloCollider;
 use leafwing_input_manager::prelude::ActionState;
-use vello_physics::ExternalPositionConstraintConfig;
+use vello_physics::{AngularConstraintConfig, ExternalPositionConstraintConfig};
 
 use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
@@ -52,23 +52,37 @@ pub struct HipPinParams {
     /// Close the XPBD↔Raibert loop: write the solved `P3` back into the
     /// resolver state each step (`FEEDBACK=0` to disable).
     pub feedback: bool,
-    /// Enable loop-3 attitude control. When on, `P1` is rotated about `P2` by
-    /// the `P1_P2_P3` XPBD angular joint instead of being position-pinned.
+    /// Emit the `P1/P2/P3` external position constraints. Off for normal floor
+    /// walking: the skeleton is then driven by angular constraints only.
+    pub external_pin: bool,
+    /// Allow the external pin as a short mid-air direction-change assist.
+    pub air_control: bool,
+    /// Leg angular-constraint compliance (lower = stiffer).
+    pub leg_compliance: f32,
+    /// Leg angular-constraint damping ratio (`1.0` = critical).
+    pub leg_zeta: f32,
+    /// Leg rest-angle chase fraction per tick (`1.0` = full target).
+    pub leg_alpha: f32,
+    /// Leg rest-angle chase rate cap, rad/s.
+    pub leg_max_angle_rate: f32,
+    /// Enable loop-3 attitude control.
     pub attitude_enabled: bool,
-    /// Compliance of the P2-centred frame pin while loop 3 is active
-    /// (lower = stiffer attitude).
+    /// Compliance of the loop-3 actuator (frame pin or `P1_P2_P3` joint).
     pub attitude_compliance: f32,
+    /// Damping ratio of the angular-only loop-3 joint (`1.0` = critical).
+    pub attitude_zeta: f32,
     /// Additional desired torso lean, radians (`+` = forward).
     pub attitude_target_bias: f32,
-    /// Hard cap on the commanded torso lean, radians. Keeps a saturated
-    /// sandbox attitude from driving the hard-pinned body horizontal.
+    /// Hard cap on the commanded torso lean, radians.
     pub attitude_max_angle: f32,
 }
 
 impl HipPinParams {
     /// Read the shared harness/tuning environment: `TARGET_SPEED`, `LEGS`,
     /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`, `FEEDBACK`,
-    /// `ATTITUDE`, `ATT_COMPLIANCE`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`.
+    /// `EXTERNAL_PIN`, `AIR_CONTROL`, `LEG_COMPLIANCE`, `LEG_ZETA`,
+    /// `LEG_ALPHA`, `LEG_MAX_ANG_RATE`, `ATTITUDE`, `ATT_COMPLIANCE`,
+    /// `ATT_ZETA`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`.
     pub fn from_env() -> Self {
         let mut p = Self::default();
         p.config.target_speed = env_f32("TARGET_SPEED", p.config.target_speed);
@@ -81,8 +95,15 @@ impl HipPinParams {
             Some("off") | Some("0") | Some("false")
         );
         p.feedback = env_bool("FEEDBACK", true);
+        p.external_pin = env_bool("EXTERNAL_PIN", p.external_pin);
+        p.air_control = env_bool("AIR_CONTROL", p.air_control);
+        p.leg_compliance = env_f32("LEG_COMPLIANCE", p.leg_compliance).max(1e-12);
+        p.leg_zeta = env_f32("LEG_ZETA", p.leg_zeta).max(0.0);
+        p.leg_alpha = env_f32("LEG_ALPHA", p.leg_alpha).clamp(0.0, 1.0);
+        p.leg_max_angle_rate = env_f32("LEG_MAX_ANG_RATE", p.leg_max_angle_rate).max(0.0);
         p.attitude_enabled = env_bool("ATTITUDE", p.attitude_enabled);
         p.attitude_compliance = env_f32("ATT_COMPLIANCE", p.attitude_compliance).max(1e-12);
+        p.attitude_zeta = env_f32("ATT_ZETA", p.attitude_zeta).max(0.0);
         p.attitude_target_bias =
             env_f32("ATT_TARGET_DEG", p.attitude_target_bias.to_degrees()).to_radians();
         p.attitude_max_angle = env_f32("ATT_MAX_DEG", p.attitude_max_angle.to_degrees())
@@ -181,10 +202,21 @@ impl Default for HipPinParams {
             hip_drives_legs: true,
             hip_drop: 0.0,
             feedback: true,
+            // Normal walking is angular-only; the external pin is reserved for
+            // explicit mid-air direction changes.
+            external_pin: false,
+            air_control: true,
+            // Angular-only default from the headless sweep: the world-upright
+            // reference needs a softer leg spring (`1e-6`) to avoid tearing.
+            leg_compliance: 1e-6,
+            leg_zeta: 1.0,
+            leg_alpha: 1.0,
+            leg_max_angle_rate: 1e6,
             attitude_enabled: true,
             attitude_compliance: 1e-7,
+            attitude_zeta: 1.0,
             attitude_target_bias: 0.0,
-            attitude_max_angle: 0.35, // ~20°
+            attitude_max_angle: 0.25, // ~14°, inside the 15° joint wall
         }
     }
 }
@@ -271,6 +303,8 @@ pub struct HipPin {
     pub last_att_rest_sin: f32,
     /// Last commanded loop-3 attitude target, rad (`+` = forward lean).
     pub last_att_target: f32,
+    /// Whether the external `P1/P2/P3` pin was active this tick.
+    pub last_external_pin: bool,
 }
 
 impl HipPin {
@@ -299,6 +333,7 @@ impl HipPin {
             last_att_rest_cos: 1.0,
             last_att_rest_sin: 0.0,
             last_att_target: 0.0,
+            last_external_pin: false,
         }
     }
 
@@ -319,11 +354,25 @@ fn measured_attitude(p1: Vec2, p2: Vec2) -> f32 {
     axis.x.atan2(-axis.y)
 }
 
+/// Clamp a commanded lean, falling back to upright if the input is not finite.
+/// A raw `f32::clamp` panics on NaN (`min > max, or either was NaN`).
+#[inline]
+fn clamp_attitude(raw: f32, max_angle: f32) -> f32 {
+    if raw.is_finite() {
+        raw.clamp(-max_angle.abs(), max_angle.abs())
+    } else {
+        0.0
+    }
+}
+
 /// Mirror the solver's `P1_P2_P3` angle measurement
 /// (`v1 = P1→P2`, `v2 = P2→P3`, `cos = u1·u2`,
 /// `sin = u1.y*u2.x - u1.x*u2.y`), returning only the rest basis.
 #[inline]
 fn angle_basis(pos0: Vec2, pos1: Vec2, pos2: Vec2) -> Option<(f32, f32)> {
+    if !pos0.is_finite() || !pos1.is_finite() || !pos2.is_finite() {
+        return None;
+    }
     let v1 = pos1 - pos0;
     let v2 = pos2 - pos1;
     let l1 = v1.length();
@@ -344,6 +393,9 @@ fn angle_basis(pos0: Vec2, pos1: Vec2, pos2: Vec2) -> Option<(f32, f32)> {
 /// body is corrected relative to the `P2→P3` lower-body axis.
 #[inline]
 fn attitude_rest_basis(p1: Vec2, p2: Vec2, p3: Vec2, theta: f32) -> Option<(f32, f32)> {
+    if !theta.is_finite() {
+        return None;
+    }
     let upper_len = (p1 - p2).length().max(1e-3);
     let upper_dir = Vec2::new(theta.sin(), -theta.cos());
     let p1_target = p2 + upper_dir * upper_len;
@@ -406,6 +458,21 @@ fn softened_compliance(base: f32, soft_scale: f32, v_ref: f32, speed: f32) -> f3
         0.0
     };
     base * (1.0 + s * (soft_scale - 1.0))
+}
+
+/// Whether the external `P1/P2/P3` position pin should run this tick.
+///
+/// Normal floor walking is angular-only. The pin is allowed only when the
+/// explicit debug switch is on, or as a short mid-air direction-change assist
+/// (airborne + horizontal input).
+#[inline]
+fn use_external_pin(
+    external_pin: bool,
+    air_control: bool,
+    grounded: bool,
+    input_x: f32,
+) -> bool {
+    external_pin || (air_control && !grounded && input_x.abs() > 0.0)
 }
 
 /// Capture the `P3` world anchor and the `P1/P2` rest offsets once the
@@ -519,6 +586,21 @@ pub fn drive_hip_pin(
             }
         }
 
+        // External pin policy: normal floor walking is angular-only. The pin is
+        // allowed only behind the explicit debug switch, or as a mid-air
+        // direction-change assist (airborne + horizontal input).
+        let grounded = ground_support
+            .as_deref()
+            .map(|s| s.grounded)
+            .unwrap_or(true);
+        let ext_pin = use_external_pin(
+            params.external_pin,
+            params.air_control,
+            grounded,
+            input_dir.x,
+        );
+        pin.last_external_pin = ext_pin;
+
         let (pose, debug) = step_lower_body(input_dir, &params.config, &mut pin.state, dt);
         // Loop-3 telemetry latch: the torque/accel are per-tick `DebugInfo`
         // values (not persistent state), so keep the last tick's for the
@@ -561,9 +643,9 @@ pub fn drive_hip_pin(
         let p3_live = states[2].0;
         pin.last_meas_theta = measured_attitude(p1_live, p2_live);
         let theta = if params.attitude_enabled {
-            (pin.theta + params.attitude_target_bias).clamp(
-                -params.attitude_max_angle.abs(),
-                params.attitude_max_angle.abs(),
+            clamp_attitude(
+                pin.theta + params.attitude_target_bias,
+                params.attitude_max_angle,
             )
         } else {
             0.0
@@ -585,10 +667,6 @@ pub fn drive_hip_pin(
 
         // Vertical authority: supported, or a ballistic resolver phase (where
         // tracking the reference preserves the jump).
-        let grounded = ground_support
-            .as_deref()
-            .map(|s| s.grounded)
-            .unwrap_or(true);
         let vertical_tracking = matches!(
             pin.state.vs.phase,
             VerticalPhase::Launch | VerticalPhase::Flight
@@ -625,6 +703,9 @@ pub fn drive_hip_pin(
             if *i == 4 {
                 pin.last_ref_p3 = target;
                 pin.last_sag_y = pos.y - target.y;
+            }
+            if !ext_pin {
+                continue;
             }
             // While loop 3 is active the whole frame is a P2-centred attitude
             // pin, so the attitude compliance is the relevant stiffness.
@@ -686,10 +767,21 @@ pub fn drive_hip_pin(
             else {
                 continue;
             };
-            // The pin owns P2/P3 while the legs are driven; drop them from the
-            // leg PD's angular mass matrix.
-            right_leg.config.anchor_chain = true;
-            left_leg.config.anchor_chain = true;
+            // Only the external pin owns P2/P3. In angular-only mode the leg
+            // PD uses the full mass matrix and references the desired upright
+            // spine, so it supports the torso instead of following it.
+            right_leg.config.anchor_chain = ext_pin;
+            left_leg.config.anchor_chain = ext_pin;
+            right_leg.config.upright_spine_reference = !ext_pin;
+            left_leg.config.upright_spine_reference = !ext_pin;
+            right_leg.config.angular_compliance = params.leg_compliance.max(1e-12);
+            left_leg.config.angular_compliance = params.leg_compliance.max(1e-12);
+            right_leg.config.zeta = params.leg_zeta.max(0.0);
+            left_leg.config.zeta = params.leg_zeta.max(0.0);
+            right_leg.config.rest_chase_alpha = params.leg_alpha.clamp(0.0, 1.0);
+            left_leg.config.rest_chase_alpha = params.leg_alpha.clamp(0.0, 1.0);
+            right_leg.config.max_angle_rate = params.leg_max_angle_rate.max(0.0);
+            left_leg.config.max_angle_rate = params.leg_max_angle_rate.max(0.0);
 
             let vello_to_bevy = |p: &VelloParticle| Vec2::new(p.particle.pos.x, -p.particle.pos.y);
             let live_pose = |particles: [Entity; 4],
@@ -733,16 +825,23 @@ pub fn drive_hip_pin(
                 ],
             });
 
-            // Follow the live P3 so impulses move the character.
+            // Hip target: x follows the live P3 (so impulses move the body),
+            // but y follows the resolver's vertical command relative to the
+            // seed. Without the external pin, using live y here makes the foot
+            // targets sink with the body and the leg PD then drives the feet
+            // through the floor.
             let actual_p3_bevy = Vec2::new(states[2].0.x, -states[2].0.y);
-            let hip_t = actual_p3_bevy - Vec2::Y * params.hip_drop;
+            let seed_hip_y = 0.5 * (seed.live[0].hip.y + seed.live[1].hip.y);
+            let desired_hip_y = seed_hip_y + (pose.hip.y - pin.seed_hip.y);
+            let hip_t =
+                Vec2::new(actual_p3_bevy.x, desired_hip_y) - Vec2::Y * params.hip_drop;
             let knee_l = hip_t
                 + transfer_segment(
                     seed.live[0].knee - seed.live[0].hip,
                     seed.resolver[0].knee - seed.resolver[0].hip,
                     pose.left_knee - pose.hip,
                 );
-            let foot_l = knee_l
+            let mut foot_l = knee_l
                 + transfer_segment(
                     seed.live[0].foot - seed.live[0].knee,
                     seed.resolver[0].foot - seed.resolver[0].knee,
@@ -754,12 +853,16 @@ pub fn drive_hip_pin(
                     seed.resolver[1].knee - seed.resolver[1].hip,
                     pose.right_knee - pose.hip,
                 );
-            let foot_r = knee_r
+            let mut foot_r = knee_r
                 + transfer_segment(
                     seed.live[1].foot - seed.live[1].knee,
                     seed.resolver[1].foot - seed.resolver[1].knee,
                     pose.right_foot - pose.right_knee,
                 );
+            // Safety clamp: never command a foot below its seed floor line.
+            // (Bevy y-up, so the floor is the seed foot y.)
+            foot_l.y = foot_l.y.max(seed.live[0].foot.y);
+            foot_r.y = foot_r.y.max(seed.live[1].foot.y);
 
             left_leg.hip_target = hip_t;
             right_leg.hip_target = hip_t;
@@ -778,11 +881,73 @@ pub fn drive_hip_pin(
             // No pin ⇒ the frame is free; use the full mass matrix.
             if let Ok(mut right_leg) = right_leg_q.get_mut(entity) {
                 right_leg.config.anchor_chain = false;
+                right_leg.config.upright_spine_reference = false;
             }
             if let Ok(mut left_leg) = left_leg_q.get_mut(entity) {
                 left_leg.config.anchor_chain = false;
+                left_leg.config.upright_spine_reference = false;
             }
         }
+    }
+}
+
+/// Angular-only loop 3: drive the `P1_P2_P3` joint about P2 with no external
+/// position constraints.
+///
+/// This is the normal floor-walking path once the hard pin is off. The torso
+/// attitude is corrected by the angular joint alone; the legs/contacts provide
+/// the support. Runs after [`drive_hip_pin`] (which updates `pin.theta` and
+/// `last_external_pin`) and before the constraint world is stepped.
+pub fn tick_loop3_angular(
+    params: Res<HipPinParams>,
+    mut pin_q: Query<(Entity, &mut HipPin)>,
+    spine_q: Query<&SpineController>,
+    p_q: Query<&VelloParticle>,
+    mut world: ResMut<VelloConstraintWorld>,
+) {
+    for (entity, mut pin) in pin_q.iter_mut() {
+        // The external pin, when active, already owns the frame pose.
+        if !pin.enabled || pin.last_external_pin || !params.attitude_enabled {
+            continue;
+        }
+        let Ok(spine) = spine_q.get(entity) else {
+            continue;
+        };
+        let (Ok(p1), Ok(p2), Ok(p3)) = (
+            p_q.get(spine.particles[2]),
+            p_q.get(spine.particles[3]),
+            p_q.get(spine.particles[4]),
+        ) else {
+            continue;
+        };
+        let p1 = p1.particle.pos;
+        let p2 = p2.particle.pos;
+        let p3 = p3.particle.pos;
+        pin.last_meas_theta = measured_attitude(p1, p2);
+        let theta =
+            clamp_attitude(pin.theta + params.attitude_target_bias, params.attitude_max_angle);
+        pin.last_att_target = theta;
+        let Some((rest_cos, rest_sin)) = attitude_rest_basis(p1, p2, p3, theta) else {
+            continue;
+        };
+        pin.last_att_rest_cos = rest_cos;
+        pin.last_att_rest_sin = rest_sin;
+        world.queue_character_angular_constraints(&CharacterAngularConstraintEvent {
+            character_entity: entity,
+            joint_entity: spine.angulars[2], // P1_P2_P3, pivot at P2
+            config: AngularConstraintConfig {
+                rest_cos,
+                rest_sin,
+                compliance: params.attitude_compliance.max(1e-12),
+                zeta: params.attitude_zeta.max(0.0),
+                angular_velocity: None,
+                sigma: 1.0,
+                // No external pin: all three frame particles are free to
+                // receive the corrective torque.
+                free_mask: 0b111,
+                max_angle: None,
+            },
+        });
     }
 }
 
@@ -862,6 +1027,20 @@ mod tests {
     fn rest_basis_rejects_degenerate_geometry() {
         let p = Vec2::new(0.0, -LEN);
         assert!(attitude_rest_basis(p, p, p, 0.0).is_none());
+    }
+
+    #[test]
+    fn external_pin_policy_is_walking_off_and_air_assist_on() {
+        // Debug switch always wins.
+        assert!(use_external_pin(true, true, true, 0.0));
+        // Grounded + walking: no external pin.
+        assert!(!use_external_pin(false, true, true, 1.0));
+        // Airborne + horizontal input: assist.
+        assert!(use_external_pin(false, true, false, 1.0));
+        // Airborne without input: no assist.
+        assert!(!use_external_pin(false, true, false, 0.0));
+        // Air assist disabled.
+        assert!(!use_external_pin(false, false, false, 1.0));
     }
 
     #[test]
