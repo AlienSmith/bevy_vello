@@ -24,6 +24,11 @@ Status legend: `[x]` done, `[-]` in progress, `[ ]` planned.
 - **Next:** the residual ~3 px is **foot-vs-target tracking error**, not grip
   (commanded target moves only ~0.7 px per stance). Friction cannot reach the
   2 px gate; see §6.5 for the non-friction levers.
+- **Swing gate added** (§7). The walk does **not step**: the realized feet stay
+  ~195 px apart while their commanded targets are 2–7 px apart, each swing gains
+  only 1.3–2.7 px relative to the body, and the body travels **9.9 px/s against
+  `cmd_vx = 104 px/s` (10%)**. The rendered twin reproduces it to within ~0.3 px,
+  so this is the shared controller/physics, not the renderer.
 
 ## 1. What changed this session
 
@@ -245,3 +250,82 @@ Every candidate still fails the 2 px gate on the worst stance.
   not worth the asymmetry. The right (support) foot stays the limiter.
 - [ ] The startup transient (31 px at 0.35, first ~1.7 s) is a separate
   phenomenon and needs the wobble/straightness gate, not a friction knob.
+
+## 7. Rendered twin + swing gate (session 3)
+
+### 7.1 The rendered twin reproduces the headless walk
+
+`visual_arm_pd` (the rendered twin, `examples/headless_arm_pd/visual.rs`) was run
+on the same asset and script and its CSV compared row-by-row with the headless
+one (same 90 Hz cadence ⇒ index-aligned; 1036 rows each, 802 ticks in the
+`t ∈ [1.6, 10.5] s` window):
+
+| column | what | mean abs diff | max abs diff | mean magnitude |
+| --- | --- | --- | --- | --- |
+| `t` | time | 0.000 | 0.000 | 6.05 s |
+| `cmd_vx` | commanded hip vx | 0.000 | 0.000 | 120.0 |
+| `tPLLLx` | left foot target x | 0.950 | 3.310 | 240.4 |
+| `tPRLLx` | right foot target x | 0.941 | 3.330 | 242.8 |
+| `PLLLx` | left foot x | 0.719 | 2.120 | 121.3 |
+| `PRLLx` | right foot x | 0.631 | 1.540 | 316.4 |
+| `P3x` | spine end x | 0.574 | 1.290 | 215.1 |
+| `PHx` | head x | 0.772 | 2.640 | 185.0 |
+
+Gait phase: **3.7% of ticks disagree** and both runs have the **same 30 phase
+transitions per leg** (the disagreement is one-tick edge positioning). Body
+travel over the window: 109.4 px headless vs 108.6 px visual (0.7%). Foot-slide
+gate: 3.14 px headless vs 3.20 px visual.
+
+So **the renderer does not change the physics** — the twins agree to sub-pixel
+mean / ~3 px worst. Any walking bug seen in the window is real, and the headless
+CSV is a faithful proxy for what is on screen.
+
+### 7.2 The walk does not step (swing gate)
+
+[`analyze_swing.py`](analyze_swing.py) segments `gait_* == 1` and measures, per
+swing, whether the foot lifts, advances *relative to the body*, and **overtakes**
+the opposite foot (lead crosses zero). Result on both twins (identical):
+
+| metric | left | right | what a walk needs |
+| --- | --- | --- | --- |
+| swings (window) | 15 | 14 | — |
+| lift mean / min / max | 4.40 / 3.81 / 4.90 px | 2.06 / 1.60 / 2.67 px | a real clearance |
+| advance rel. body mean / min | +2.70 / +1.42 px | +1.33 / +0.83 px | ≈ a step length |
+| lead at liftoff → touchdown | −197.3 → −192.9 px | +192.8 → +196.1 px | crosses 0 |
+| lead gain mean / min | +4.40 / +2.65 px | +3.38 / +1.36 px | ≈ a step length |
+| tracking error (foot − target) | −113 / −115 px | +80 / +76 px | small |
+| realized foot separation | 197.3 px | 192.8 px | ≈ target separation |
+| **commanded** target separation | **6.6 px** | **2.0 px** | — |
+| body speed vs `cmd_vx` | **9.9 px/s vs 104 px/s (10%)** | same run | ≈ 100% |
+
+Verdict: **FAIL** — every left swing is `NO_OVERTAKE`; 6 of 14 right swings are
+`NO_LIFT` (they never clear 2 px).
+
+What the numbers say, in order of importance:
+
+1. **The legs are splayed, not stepping.** The feet sit ~195 px apart (left ~115
+   px behind its own IK target, right ~77 px ahead) while the commanded targets
+   are 2–7 px apart. The swing foot only gains 1–3 px relative to the body and
+   the lead never crosses zero: it lifts, comes back down in front of where it
+   started *in body space*, and the split stance persists.
+2. **The body does not travel at the commanded speed.** 9.9 px/s realized vs
+   104 px/s commanded — the hip pin commands walking, the contact/friction
+   response and the splayed legs absorb it. This is why the walk reads as
+   "wobbling forward" rather than walking.
+3. **Friction cannot fix this** (§6): it is a foot-placement / leg-reach failure,
+   not a grip failure. The stance-drift number (3 px) was always a second-order
+   symptom of it.
+
+### 7.3 Next (walking, not friction)
+
+- [ ] Why does the leg not reach its own IK target? The feet end up ~100 px
+  outside the commanded span, close to the 55+55 px thigh+calf reach from the
+  hip. Check whether the leg IK is saturating (target outside the reachable
+  disc) before blaming the PD gains — dump the hip→foot distance against the
+  thigh+calf sum.
+- [ ] With the feet splayed, the body is being held back by contact. Verify
+  whether the pin's `cmd_vx` is being cancelled by the collision response
+  (`apply_explicit_impulse_on_*`) or by the leg constraint pulling the hip.
+- [ ] Gate the fix on both tools: `analyze_swing.py --gate-gain 20` (lead must
+  gain a real step) plus `analyze_foot_slide.py --skip-start 1.6` (stance must
+  not slide). A gait that passes only one of them is still broken.

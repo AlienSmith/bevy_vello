@@ -39,6 +39,7 @@ Editable per collider: `softbody` (`max_complexity`, `resititution`,
 | `run_capture.sh` | builds nothing, runs the game on a private Xvfb display, captures a burst of PNGs, prints a JSON summary |
 | `metrics.py` | objective stability metrics and pass/fail gates for a frame burst |
 | `analyze_foot_slide.py` | objective stance-phase foot-slide gate over a walk telemetry CSV |
+| `analyze_swing.py` | objective swing gate: does each swing lift, advance relative to the body, and overtake the stance foot? Also reports foot-vs-target tracking error and foot separation |
 | `sweep_foot_friction.py` | headless sweep of `friction_compliance_scaler` on the foot colliders (LLL/RLL): patch asset → run walk → report steady-state stance drift → restore byte-exactly |
 | `physics_tuning_progress.md` | running log of the walking physics tuning loop (configs, runs, numbers, verdicts) |
 | `tune.py` | the search loop: apply an edit, capture, score, keep or revert |
@@ -160,6 +161,38 @@ object. Like `metrics.py`, the verdict is meant as a gate in the tuning loop:
 use `analyze_foot_slide.py` on the headless walk telemetry, and the rendered twin
 must produce the same CSV so the slide measurement can be diffed between the two
 (rendering must not change physics).
+
+## Swing gate (does the swing actually step?)
+
+The foot-slide gate asks "does the planted foot stay put?"; it says nothing about
+whether the *swing* foot ever goes anywhere. A gait can pass a naive stability
+check while both feet ride along with the body: the body creeps forward, the legs
+cycle, and the swing never passes the stance foot. That is the "wobble while
+moving forward" failure, and `analyze_swing.py` is its gate.
+
+Per swing (contiguous `gait_* == 1` run, default t ∈ [1.6, 10.5] s) it measures:
+
+| metric | meaning | expected |
+| --- | --- | --- |
+| `lift` | `floor_y - min(y)` over the swing (vello y-down) | > ~2 px, ideally a visible clearance |
+| `advance` | `(x - body_x)` gained across the swing | a real step length, not ~0 |
+| `lead0` → `lead1` | swing foot minus opposite foot at liftoff → touchdown | crosses 0 (behind → ahead) |
+| `lead_gain` | `lead1 - lead0` | ≈ one step length |
+| `track0` / `track1` | realized foot minus its commanded IK target | small; large means the leg never reaches its own placement |
+| `sep` vs `tsep` | realized foot separation vs commanded target separation | similar |
+
+It also prints the body's travelled speed against `cmd_vx` for the run — a body
+at 10% of the commanded speed is the tell-tale of a jog-in-place.
+
+```bash
+python3 tools/physics-qa/analyze_swing.py /tmp/headless/walk.csv --per-swing
+python3 tools/physics-qa/analyze_swing.py /tmp/headless/walk.csv --gate-gain 20
+```
+
+Exit code 1 when any swing fails (`NO_LIFT`, `NO_ADVANCE`, `NO_OVERTAKE`,
+`NO_LEAD_GAIN`); `--json` emits per-leg summaries. Gates: `--gate-lift` (2 px),
+`--gate-lead` (0 px) and `--gate-gain` (0 px) — raise `--gate-gain` to demand a
+real step length rather than merely "passed the other foot".
 
 ## The tuning loop
 
