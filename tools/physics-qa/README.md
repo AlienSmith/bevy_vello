@@ -39,6 +39,7 @@ Editable per collider: `softbody` (`max_complexity`, `resititution`,
 | `run_capture.sh` | builds nothing, runs the game on a private Xvfb display, captures a burst of PNGs, prints a JSON summary |
 | `metrics.py` | objective stability metrics and pass/fail gates for a frame burst |
 | `analyze_foot_slide.py` | objective stance-phase foot-slide gate over a walk telemetry CSV |
+| `sweep_foot_friction.py` | headless sweep of `friction_compliance_scaler` on the foot colliders (LLL/RLL): patch asset → run walk → report steady-state stance drift → restore byte-exactly |
 | `physics_tuning_progress.md` | running log of the walking physics tuning loop (configs, runs, numbers, verdicts) |
 | `tune.py` | the search loop: apply an edit, capture, score, keep or revert |
 | `qa_prompt.txt` | the vision judge's prompt: what EXPLOSION / WOBBLE / COLLAPSE mean |
@@ -144,6 +145,13 @@ never lifts is then stance for the whole run, which is exactly the symptom to
 catch). The `segmentation:` line in the output says which path ran. Short
 touchdown blips shorter than `--min-frames` (default 5) are ignored.
 
+`--skip-start` / `--skip-end` (seconds) trim stance segments that are not fully
+inside the steady window, so the startup acceleration transient and the stop
+transient can be excluded from the reported drift. Defaults are "no trimming".
+Use `--skip-start 1.6` for this walk: at 1.1 s the window still catches the tail
+of the startup transient, which is what makes a mid-walk candidate look like a
+cliff (see `physics_tuning_progress.md` §6.2).
+
 Per foot it reports the stance-segment count, total stance duration, mean / max /
 total horizontal drift, peak horizontal speed (px/s), and the worst segment's
 time window. Exit code 1 (SLIDING) when the worst stance drift exceeds `--gate`
@@ -167,6 +175,19 @@ python3 tools/physics-qa/tune.py try --set softbody.substeps=3 \
 python3 tools/physics-qa/tune.py sweep --candidates cands.json --out-root /tmp/sweep
 python3 tools/physics-qa/tune.py restore --from-file /tmp/sweep/original.character.json
 ```
+
+`tune.py` is the **rendered** loop (screenshots + metrics). The **headless**
+friction loop is `sweep_foot_friction.py`, which needs no display:
+
+```bash
+python3 tools/physics-qa/sweep_foot_friction.py \
+        --frictions 0.0,0.05,0.1,0.2,0.3,0.35,0.4,0.5 --repeat 2
+```
+
+It resolves its own paths (asset, binary, script, output root), so it can be
+launched from any directory; it writes `friction_sweep.md` and
+`friction_sweep.json` next to the run CSVs and restores the asset even on
+failure or interrupt (`--keep` skips the restore).
 
 Score is lower-is-better: `mean_rmse + 100 * motion_frac`, plus a large penalty
 when any gate trips.

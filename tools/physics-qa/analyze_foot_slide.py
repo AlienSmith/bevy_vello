@@ -21,9 +21,16 @@ stance phase (a false "SLIDING" verdict equal to the foot's forward travel).
 For older CSVs that predate the `gait_*` columns, the analyzer falls back to the
 geometric test (foot y within `--floor-tol` of the run's floor height).
 
+The startup and stop transients are a different phenomenon from steady-state
+sliding, so `--skip-start` / `--skip-end` drop stance segments that fall outside
+the steady window (a segment is kept only when `t0 >= skip-start` and
+`t1 <= skip-end`). Both default to "no trimming" so existing verdicts are
+unchanged.
+
 Usage:
   analyze_foot_slide.py <telemetry.csv> [--floor-tol px] [--gate px]
-                        [--min-frames N] [--json]
+                        [--min-frames N] [--skip-start s] [--skip-end s]
+                        [--json]
 
 Exit codes: 0 = no stance slide beyond the gate, 1 = sliding, 2 = bad input.
 """
@@ -132,6 +139,11 @@ def finalize_segment(seg, key_x, key_t):
             "n": len(seg)}
 
 
+def filter_window(segs, skip_start, skip_end):
+    """Keep only stance segments fully inside the steady-state window."""
+    return [s for s in segs if s["t0"] >= skip_start and s["t1"] <= skip_end]
+
+
 def summarize(segs, label):
     """Collapse a foot's stance segments into a report row."""
     if not segs:
@@ -159,6 +171,11 @@ def main():
                     help="px; stance drift beyond this flags the run (exit 1)")
     ap.add_argument("--min-frames", type=int, default=DEFAULT_MIN_FRAMES,
                     help="shortest stance run counted as a real stance phase")
+    ap.add_argument("--skip-start", type=float, default=0.0,
+                    help="s; drop stance segments starting earlier (startup "
+                         "transient)")
+    ap.add_argument("--skip-end", type=float, default=float("inf"),
+                    help="s; drop stance segments ending later (stop transient)")
     ap.add_argument("--json", action="store_true", help="compact output")
     args = ap.parse_args()
 
@@ -184,8 +201,14 @@ def main():
     segs_r = stance_segments(rows, floor_r, "rry", "rrx", "t", "gr",
                              args.floor_tol, args.min_frames)
 
-    rep_l = summarize(segs_l, "left ")
-    rep_r = summarize(segs_r, "right")
+    # Steady-state window: the startup (`t < ~1.1 s`) and stop transients are a
+    # different phenomenon from steady-state sliding, so allow them to be
+    # excluded from the reported drift.
+    steady_l = filter_window(segs_l, args.skip_start, args.skip_end)
+    steady_r = filter_window(segs_r, args.skip_start, args.skip_end)
+
+    rep_l = summarize(steady_l, "left ")
+    rep_r = summarize(steady_r, "right")
 
     dur = rows[-1]["t"] - rows[0]["t"] if not math.isnan(rows[-1]["t"]) else 0.0
     worst_drift = max(rep_l["max_drift"], rep_r["max_drift"])
@@ -195,11 +218,16 @@ def main():
     if not (use_event_l and use_event_r):
         seg_signal = "geometric floor tolerance (no gait_* columns present)"
 
+    window = {"skip_start_s": args.skip_start, "skip_end_s": args.skip_end}
+    dropped = (len(segs_l) + len(segs_r)) - (len(steady_l) + len(steady_r))
+
     if args.json:
         out = {
             "file": args.telemetry_csv,
             "dur_s": round(dur, 2),
             "segmentation": seg_signal,
+            "window": window,
+            "segments_dropped_by_window": dropped,
             "gate_px": args.gate,
             "feet": [rep_l, rep_r],
             "worst_stance_drift_px": round(worst_drift, 3),
@@ -209,6 +237,8 @@ def main():
     else:
         print(f"run:          {dur:.1f}s, {len(rows)} ticks ({args.telemetry_csv})")
         print(f"segmentation: {seg_signal}")
+        print(f"window:       t >= {args.skip_start:.2f}s and t <= "
+              f"{args.skip_end:.2f}s ({dropped} stance segment(s) trimmed)")
         print(f"floor height: left={floor_l:.1f}px  right={floor_r:.1f}px "
               f"(fallback tol {args.floor_tol}px)")
         for rep in (rep_l, rep_r):

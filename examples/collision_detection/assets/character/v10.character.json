@@ -140,7 +140,7 @@
       },
       "collision": {
         "push_compliance_penetration_scaler": 0.3,
-        "friction_compliance_scaler": 0.1,
+        "friction_compliance_scaler": 0.35,
         "pull_compliance_scaler": 0.7
       }
     },
@@ -184,7 +184,7 @@
       },
       "collision": {
         "push_compliance_penetration_scaler": 0.3,
-        "friction_compliance_scaler": 0.1,
+        "friction_compliance_scaler": 0.35,
         "pull_compliance_scaler": 0.7
       }
     },
