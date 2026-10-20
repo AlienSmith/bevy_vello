@@ -38,6 +38,7 @@ Editable per collider: `softbody` (`max_complexity`, `resititution`,
 | --- | --- |
 | `run_capture.sh` | builds nothing, runs the game on a private Xvfb display, captures a burst of PNGs, prints a JSON summary |
 | `metrics.py` | objective stability metrics and pass/fail gates for a frame burst |
+| `analyze_foot_slide.py` | objective stance-phase foot-slide gate over a walk telemetry CSV |
 | `tune.py` | the search loop: apply an edit, capture, score, keep or revert |
 | `qa_prompt.txt` | the vision judge's prompt: what EXPLOSION / WOBBLE / COLLAPSE mean |
 | `vision.py` | optional direct-API path for calling a vision model on frames |
@@ -115,6 +116,35 @@ naming which parameter looks responsible; it is not reliable as a gate. On
 near-identical frames the same model returned `OK` and then `EXPLOSION`. Use its
 `suspect_params` / `suggested_direction` to pick the next edit, and the metrics
 to decide whether the edit helped.
+
+## Foot-slide gate (stance-phase drift)
+
+`analyze_foot_slide.py` is a second objective gate, over the **telemetry CSV**
+rather than screenshots. A planted foot must not slide in world space while the
+body advances, so it measures how far each realized foot (`PLLL`/`PRLL`) moves
+during its stance phase. This is the friction/shape-holding symptom before it is
+visible in frames, and it is a smooth number the tuning loop can gate on.
+
+```bash
+python3 tools/physics-qa/analyze_foot_slide.py \
+        /tmp/headless/pin_log.csv --gate 2.0
+```
+
+Stance detection is geometric, not gait-model dependent: in the vello y-down
+frame the floor is the *largest* foot y (99th percentile per foot), and a foot
+within `--floor-tol` (default 8px) of it is in stance. A foot that never lifts —
+the known failure mode — is therefore stance for the whole run, and its drift is
+reported as sliding, exactly the symptom to catch. Short touchdown blips shorter
+than `--min-frames` (default 5) are ignored.
+
+Per foot it reports the stance-segment count, total stance duration, mean / max /
+total horizontal drift, peak horizontal speed (px/s), and the worst segment's
+time window. Exit code 1 (SLIDING) when the worst stance drift exceeds `--gate`
+(default 2px); 0 otherwise; 2 on bad input. `--json` emits a machine-readable
+object. Like `metrics.py`, the verdict is meant as a gate in the tuning loop:
+use `analyze_foot_slide.py` on the headless walk telemetry, and the rendered twin
+must produce the same CSV so the slide measurement can be diffed between the two
+(rendering must not change physics).
 
 ## The tuning loop
 
