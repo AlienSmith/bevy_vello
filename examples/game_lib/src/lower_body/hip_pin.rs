@@ -466,12 +466,7 @@ fn softened_compliance(base: f32, soft_scale: f32, v_ref: f32, speed: f32) -> f3
 /// explicit debug switch is on, or as a short mid-air direction-change assist
 /// (airborne + horizontal input).
 #[inline]
-fn use_external_pin(
-    external_pin: bool,
-    air_control: bool,
-    grounded: bool,
-    input_x: f32,
-) -> bool {
+fn use_external_pin(external_pin: bool, air_control: bool, grounded: bool, input_x: f32) -> bool {
     external_pin || (air_control && !grounded && input_x.abs() > 0.0)
 }
 
@@ -721,17 +716,17 @@ pub fn drive_hip_pin(
                 vel.length(),
             );
 
-            world.queue_character_one_time_external_position_constraint(
-                &CharacterExternalPositionConstraintEvent {
-                    character_entity: entity,
-                    joint_entity: spine.particles[*i],
-                    config: ExternalPositionConstraintConfig {
-                        target,
-                        compliance,
-                        damping: params.damping,
-                    },
-                },
-            );
+            // world.queue_character_one_time_external_position_constraint(
+            //     &CharacterExternalPositionConstraintEvent {
+            //         character_entity: entity,
+            //         joint_entity: spine.particles[*i],
+            //         config: ExternalPositionConstraintConfig {
+            //             target,
+            //             compliance,
+            //             damping: params.damping,
+            //         },
+            //     },
+            // );
         }
 
         // Opt-in telemetry (`PIN_LOG=1`).
@@ -833,8 +828,7 @@ pub fn drive_hip_pin(
             let actual_p3_bevy = Vec2::new(states[2].0.x, -states[2].0.y);
             let seed_hip_y = 0.5 * (seed.live[0].hip.y + seed.live[1].hip.y);
             let desired_hip_y = seed_hip_y + (pose.hip.y - pin.seed_hip.y);
-            let hip_t =
-                Vec2::new(actual_p3_bevy.x, desired_hip_y) - Vec2::Y * params.hip_drop;
+            let hip_t = Vec2::new(actual_p3_bevy.x, desired_hip_y) - Vec2::Y * params.hip_drop;
             let knee_l = hip_t
                 + transfer_segment(
                     seed.live[0].knee - seed.live[0].hip,
@@ -924,8 +918,10 @@ pub fn tick_loop3_angular(
         let p2 = p2.particle.pos;
         let p3 = p3.particle.pos;
         pin.last_meas_theta = measured_attitude(p1, p2);
-        let theta =
-            clamp_attitude(pin.theta + params.attitude_target_bias, params.attitude_max_angle);
+        let theta = clamp_attitude(
+            pin.theta + params.attitude_target_bias,
+            params.attitude_max_angle,
+        );
         pin.last_att_target = theta;
         let Some((rest_cos, rest_sin)) = attitude_rest_basis(p1, p2, p3, theta) else {
             continue;

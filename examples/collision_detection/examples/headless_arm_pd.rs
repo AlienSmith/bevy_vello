@@ -147,8 +147,7 @@ use game_lib::{
     },
     check_bone_rigidity, check_invariants, default_input_map, drive_hip_pin, flush_csv, flush_rows,
     rows_hash, tail_verdict, tick_loop3_angular, update_character_movement, update_ground_support,
-    Bone,
-    CharacterController, CharacterRoot, GroundSupport, HeadlessTelemetryPlugin, HipPin,
+    Bone, CharacterController, CharacterRoot, GroundSupport, HeadlessTelemetryPlugin, HipPin,
     HipPinParams, IkMode, InvariantConfig, LeftArmController, LeftLegController, LimbConfig,
     ParticleTelemetryConfig, PlayerAction, PlayerMarker, ResetLimbControlConstraintsEvent,
     RightArmController, RightLegController, SpineDriveEnabled, TelemetryBuffer, TelemetryRow,
@@ -935,9 +934,12 @@ fn main() {
 /// Headless collision is opt-in so the deterministic kinematic gates stay
 /// byte-identical.
 fn collision_enabled() -> bool {
-    matches!(
-        std::env::var("COLLISION").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
+    // Default ON: the angular-only walking/standing target needs the floor's
+    // normal reaction + the soft-body contact. `COLLISION=0|off|false` opts out
+    // (keeps the deterministic limb-PD gates byte-identical).
+    !matches!(
+        std::env::var("COLLISION").ok().as_deref().map(str::trim),
+        Some("0") | Some("off") | Some("false") | Some("no")
     )
 }
 
@@ -1268,7 +1270,7 @@ fn drive_script(
             let mut ent = commands.spawn((
                 VelloSceneBundle {
                     transform: Transform {
-                        translation: Vec3::new(0.0, 0.0, 100.0),
+                        translation: Vec3::new(0.0, env_f32("DROP_Y", 0.0), 100.0),
                         scale: Vec3::new(0.5, 0.5, 1.0),
                         ..Default::default()
                     },
@@ -2323,7 +2325,11 @@ fn jumpwalk_window(script: &[Command]) -> Option<(f32, f32)> {
 /// → zero; `x,y` → a raw vello-frame vector (x right, y down).
 fn gravity_from_env() -> Vec2 {
     match std::env::var("GRAVITY").ok().as_deref().map(str::trim) {
-        None | Some("") | Some("off") | Some("0") => Vec2::ZERO,
+        // Default ON in body mode (this fn is only called when `body` is true):
+        // the character must fall onto the floor to test standing. Explicit
+        // `off`/`0` still opt out.
+        None | Some("") => GRAVITY_ON,
+        Some("off") | Some("0") => Vec2::ZERO,
         Some("on") | Some("1") => GRAVITY_ON,
         Some(spec) => {
             let mut it = spec.split(',');
