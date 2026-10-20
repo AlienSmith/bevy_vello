@@ -57,7 +57,7 @@ pub const PI: f32 = std::f32::consts::PI;
 /// (x right, y down ⇒ down is +y).
 pub const GRAVITY_ON: Vec2 = Vec2::new(0.0, 980.0);
 /// Bone-length tolerance for the pinned `P1/P2/P3` frame (and, when the legs are
-/// driven, both legs' thigh + calf).
+/// driven, both legs' thigh + calf) in csv reporting only.
 pub const PIN_RIGID_TOL: f32 = 0.02;
 /// Foot-tracking tail window (s) + wobble thresholds (matches the retired
 /// `headless_pin` leg verdict).
@@ -111,6 +111,24 @@ pub fn collision_enabled() -> bool {
         Some("0") | Some("off") | Some("false") | Some("no")
     )
 }
+
+// ---------------------------------------------------------------------------
+// Sweep grid
+// ---------------------------------------------------------------------------
+//
+// NOTE ON NAMING: the `kp` / `kd` axis names are a legacy convention from the
+// old explicit force-based PD controller. Today these do NOT map to a P/D gain
+// pair (there is no force/torque output). They map onto the XPBD angular
+// solver's own parameters, forwarded through `LimbConfig`:
+//
+//   `kp` → `LimbConfig::rest_chase_alpha`  (how much of the target rest angle is
+//                                           chased per tick — the stiffness /
+//                                           reference-chase term)
+//   `kd` → `LimbConfig::zeta`              (the damping ratio ζ the XPBD angular
+//                                           constraint solves with)
+//
+// So a `(kp, kd)` cell is really a (stiffness, damping) point for the angular
+// constraint solve, not a classical force-based PD setting.
 
 /// Parse a `kp:kd,kp:kd,...` sweep grid, capped at [`MAX_CELLS`].
 pub fn parse_grid(spec: &str) -> Vec<(f32, f32)> {
