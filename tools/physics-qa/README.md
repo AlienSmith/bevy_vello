@@ -39,6 +39,7 @@ Editable per collider: `softbody` (`max_complexity`, `resititution`,
 | `run_capture.sh` | builds nothing, runs the game on a private Xvfb display, captures a burst of PNGs, prints a JSON summary |
 | `metrics.py` | objective stability metrics and pass/fail gates for a frame burst |
 | `analyze_foot_slide.py` | objective stance-phase foot-slide gate over a walk telemetry CSV |
+| `physics_tuning_progress.md` | running log of the walking physics tuning loop (configs, runs, numbers, verdicts) |
 | `tune.py` | the search loop: apply an edit, capture, score, keep or revert |
 | `qa_prompt.txt` | the vision judge's prompt: what EXPLOSION / WOBBLE / COLLAPSE mean |
 | `vision.py` | optional direct-API path for calling a vision model on frames |
@@ -130,12 +131,18 @@ python3 tools/physics-qa/analyze_foot_slide.py \
         /tmp/headless/pin_log.csv --gate 2.0
 ```
 
-Stance detection is geometric, not gait-model dependent: in the vello y-down
-frame the floor is the *largest* foot y (99th percentile per foot), and a foot
-within `--floor-tol` (default 8px) of it is in stance. A foot that never lifts —
-the known failure mode — is therefore stance for the whole run, and its drift is
-reported as sliding, exactly the symptom to catch. Short touchdown blips shorter
-than `--min-frames` (default 5) are ignored.
+Stance detection uses the **event signal** the resolver exports — the per-leg
+gait phase (`gait_l` / `gait_r`, 0 = Stance, 1 = Swing) written by the harness —
+so stance and swing are separated by the gait model, not by a geometric floor
+test. This matters because the realized foot lift is only ~5px: a geometric
+tolerance would swallow it and classify a whole run as one continuous stance
+phase (a false SLIDING verdict equal to the foot's forward travel). For older
+CSVs that predate the `gait_*` columns, the analyzer falls back to the
+geometric test (a foot within `--floor-tol`, default 8px, of the run's floor
+height — the ~99th percentile of that foot's y — is in stance; a foot that
+never lifts is then stance for the whole run, which is exactly the symptom to
+catch). The `segmentation:` line in the output says which path ran. Short
+touchdown blips shorter than `--min-frames` (default 5) are ignored.
 
 Per foot it reports the stance-segment count, total stance duration, mean / max /
 total horizontal drift, peak horizontal speed (px/s), and the worst segment's

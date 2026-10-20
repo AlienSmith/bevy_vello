@@ -8,7 +8,8 @@ use bevy::input::ButtonInput;
 use bevy::prelude::{error, info, ResMut};
 
 use game_lib::{
-    check_bone_rigidity, tail_verdict, Bone, HipPinParams, TelemetryBuffer, VerticalPhase,
+    check_bone_rigidity, tail_verdict, Bone, GaitPhase, HipPinParams, TelemetryBuffer,
+    VerticalPhase,
 };
 
 use crate::config::{
@@ -25,6 +26,15 @@ pub fn vphase_code(p: VerticalPhase) -> u8 {
         VerticalPhase::Launch => 2,
         VerticalPhase::Flight => 3,
         VerticalPhase::Land => 4,
+    }
+}
+
+/// Compact code for the per-leg gait phase, for the `gait_l`/`gait_r` CSV
+/// columns (matches the `GaitPhase` declaration order). 0 = Stance, 1 = Swing.
+pub fn gait_code(p: GaitPhase) -> u8 {
+    match p {
+        GaitPhase::Stance => 0,
+        GaitPhase::Swing => 1,
     }
 }
 

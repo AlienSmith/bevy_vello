@@ -7,18 +7,19 @@ in whole-body walk mode. The relevant columns are the realized foot particles
 
   PLLLx/PLLLy, PRLLx/PRLLy     realized foot position (vello y-down)
   tPLLLx/tPLLLy, tPRLLx/tPRLLy commanded IK foot target (same frame)
+  gait_l/gait_r                per-leg resolver gait phase (0 = Stance, 1 = Swing)
 
 A *planted* foot must not move in world space while the body advances. Sliding is
 the horizontal drift of a realized foot during a stance interval.
 
-Stance detection is deliberately geometric and independent of the gait model:
-in the vello y-down frame the floor is at the *largest* y (smaller y = higher
-up), so a foot is in stance whenever its realized y sits within `--floor-tol` of
-the run's floor height (the ~99th percentile of that foot's y). A foot that
-never lifts (a known failure mode) is therefore classified as stance for the
-whole run and its horizontal drift is reported as sliding — which is exactly the
-symptom we want to catch. Short touchdown blips (shorter than `--min-frames`)
-are ignored so transient contacts do not count as stance phases.
+Stance is segmented by the **event signal** the resolver exports (`gait_l` /
+`gait_r`, 0 = Stance, 1 = Swing) rather than by a geometric floor tolerance.
+This is the correct signal because the realized foot lift is small (~5 px) and a
+geometric tolerance would swallow it, classifying a whole run as one continuous
+stance phase (a false "SLIDING" verdict equal to the foot's forward travel).
+
+For older CSVs that predate the `gait_*` columns, the analyzer falls back to the
+geometric test (foot y within `--floor-tol` of the run's floor height).
 
 Usage:
   analyze_foot_slide.py <telemetry.csv> [--floor-tol px] [--gate px]
@@ -34,7 +35,8 @@ import sys
 
 # vello y-down frame: floor is at the largest y.
 FLOOR_PERCENTILE = 99.0
-# Per-foot stance-phase tolerance above the floor height (px).
+# Per-foot stance-phase tolerance above the floor height (px). Only used as a
+# fallback when the `gait_l`/`gait_r` event columns are absent.
 DEFAULT_FLOOR_TOL = 8.0
 # A stance run shorter than this many ticks is treated as a touchdown blip.
 DEFAULT_MIN_FRAMES = 5
@@ -47,13 +49,17 @@ HZ = 90.0
 def load(path):
     rows = []
     with open(path, newline="") as f:
-        for r in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return rows
+        has_gait = "gait_l" in reader.fieldnames and "gait_r" in reader.fieldnames
+        for r in reader:
             def g(key):
                 try:
                     return float(r[key])
                 except (ValueError, KeyError):
                     return float("nan")
-            rows.append({
+            row = {
                 "t": g("t"),
                 # realized feet
                 "lrx": g("PLLLx"), "lry": g("PLLLy"),
@@ -61,7 +67,13 @@ def load(path):
                 # commanded targets (same frame)
                 "tlx": g("tPLLLx"), "tly": g("tPLLLy"),
                 "trx": g("tPRLLx"), "try": g("tPRLLy"),
-            })
+                # event signal: per-leg gait phase (0 = Stance, 1 = Swing).
+                # If the columns are missing, both read as NaN and the caller
+                # falls back to the geometric floor test.
+                "gl": g("gait_l"), "gr": g("gait_r"),
+                "has_gait": has_gait,
+            }
+            rows.append(row)
     return rows
 
 
@@ -75,19 +87,25 @@ def floor_height(rows, key):
     return ys[idx]
 
 
-def stance_segments(rows, floor, key_y, key_x, key_t, tol, min_frames):
+def stance_segments(rows, floor, key_y, key_x, key_t, key_gait, tol, min_frames):
     """Return the contiguous stance intervals as (t0, t1, drift_px, max_speed).
 
-    A row is in stance when its realized y is within `tol` of the floor. Runs
-    shorter than `min_frames` are dropped. `drift_px` is the total horizontal
-    displacement of the realized foot across the run; `max_speed` is the peak
-    per-frame horizontal speed in px/s.
+    A row is in stance when its per-leg gait phase reads Stance (0). When the
+    `gait_*` event columns are absent (all NaN), fall back to the geometric
+    test: realized y within `tol` of the floor. Runs shorter than `min_frames`
+    are dropped. `drift_px` is the total horizontal displacement of the
+    realized foot across the run; `max_speed` is the peak per-frame horizontal
+    speed in px/s.
     """
     segs = []
     cur = []
+    use_event = all(not math.isnan(r[key_gait]) for r in rows)
     for r in rows:
-        y = r[key_y]
-        in_stance = not math.isnan(y) and y >= floor - tol
+        if use_event:
+            in_stance = r[key_gait] == 0
+        else:
+            y = r[key_y]
+            in_stance = not math.isnan(y) and y >= floor - tol
         if in_stance:
             cur.append(r)
         else:
@@ -136,7 +154,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("telemetry_csv")
     ap.add_argument("--floor-tol", type=float, default=DEFAULT_FLOOR_TOL,
-                    help="px; a foot within this of the floor is in stance")
+                    help="px; fallback stance test when gait_* columns are absent")
     ap.add_argument("--gate", type=float, default=DEFAULT_GATE,
                     help="px; stance drift beyond this flags the run (exit 1)")
     ap.add_argument("--min-frames", type=int, default=DEFAULT_MIN_FRAMES,
@@ -152,13 +170,19 @@ def main():
         print("missing PLLL/PRLL columns (not a whole-body walk telemetry CSV)")
         sys.exit(2)
 
-    # Floor per foot from its own realized trajectory.
+    # Preferred signal: per-leg gait phase from the resolver event columns.
+    # Fallback: floor height per foot from its own realized trajectory.
+    use_event_l = rows[0]["has_gait"] and all(
+        not math.isnan(r["gl"]) for r in rows)
+    use_event_r = rows[0]["has_gait"] and all(
+        not math.isnan(r["gr"]) for r in rows)
+
     floor_l = floor_height(rows, "lry")
     floor_r = floor_height(rows, "rry")
-    segs_l = stance_segments(rows, floor_l, "lry", "lrx", "t", args.floor_tol,
-                             args.min_frames)
-    segs_r = stance_segments(rows, floor_r, "rry", "rrx", "t", args.floor_tol,
-                             args.min_frames)
+    segs_l = stance_segments(rows, floor_l, "lry", "lrx", "t", "gl",
+                             args.floor_tol, args.min_frames)
+    segs_r = stance_segments(rows, floor_r, "rry", "rrx", "t", "gr",
+                             args.floor_tol, args.min_frames)
 
     rep_l = summarize(segs_l, "left ")
     rep_r = summarize(segs_r, "right")
@@ -167,11 +191,15 @@ def main():
     worst_drift = max(rep_l["max_drift"], rep_r["max_drift"])
     sliding = worst_drift > args.gate
 
+    seg_signal = "gait-phase event columns"
+    if not (use_event_l and use_event_r):
+        seg_signal = "geometric floor tolerance (no gait_* columns present)"
+
     if args.json:
         out = {
             "file": args.telemetry_csv,
             "dur_s": round(dur, 2),
-            "floor_tol_px": args.floor_tol,
+            "segmentation": seg_signal,
             "gate_px": args.gate,
             "feet": [rep_l, rep_r],
             "worst_stance_drift_px": round(worst_drift, 3),
@@ -180,8 +208,9 @@ def main():
         print(json.dumps(out, indent=2))
     else:
         print(f"run:          {dur:.1f}s, {len(rows)} ticks ({args.telemetry_csv})")
+        print(f"segmentation: {seg_signal}")
         print(f"floor height: left={floor_l:.1f}px  right={floor_r:.1f}px "
-              f"(tol {args.floor_tol}px)")
+              f"(fallback tol {args.floor_tol}px)")
         for rep in (rep_l, rep_r):
             print(f"foot {rep['foot']}: stances={rep['segs']} "
                   f"dur={rep['dur']:.1f}s  "

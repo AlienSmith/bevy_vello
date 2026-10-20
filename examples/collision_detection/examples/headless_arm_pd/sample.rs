@@ -1,7 +1,8 @@
 //! Telemetry collection + cell classification.
 //!
-//! [`limb_sample`] writes the frozen 102-column row (harness scalars + body
-//! telemetry + per-leg foot lag + lower-body target exports) via the shared
+//! [`limb_sample`] writes the frozen 104-column row (harness scalars + body
+//! telemetry + per-leg gait phase + per-leg foot lag + lower-body target
+//! exports) via the shared
 //! [`TelemetryRow`]; [`limb_finalize`] closes a cell once the script completes,
 //! and [`finalize_cell`] classifies the settled tail.
 
@@ -25,7 +26,7 @@ use crate::config::{
 };
 use crate::math::{bone_ang_vel, to_bevy, to_vello};
 use crate::probe::{CellReport, Probe, Sample};
-use crate::report::{report_body, vphase_code};
+use crate::report::{gait_code, report_body, vphase_code};
 
 /// Whether telemetry should collect this tick: only while the rig is up and a
 /// cell is in progress, so no row lands in the brief not-ready gap between cells.
@@ -125,12 +126,23 @@ pub fn limb_sample(
         // The pin seeds lazily; degrade to zeros rather than dropping the row, so
         // the frozen header (scalars set in this exact order on the first capture)
         // always matches the values.
-        let (cmd_vx, vphase) = match pin_q.get(character) {
-            Ok(pin) => (pin.state.hip_vel.x, vphase_code(pin.state.vs.phase)),
-            Err(_) => (0.0, 0),
+        let (cmd_vx, vphase, gait_l, gait_r) = match pin_q.get(character) {
+            Ok(pin) => (
+                pin.state.hip_vel.x,
+                vphase_code(pin.state.vs.phase),
+                gait_code(pin.state.left.phase),
+                gait_code(pin.state.right.phase),
+            ),
+            Err(_) => (0.0, 0, 0, 0),
         };
         row.set("cmd_vx", format!("{cmd_vx:.2}"));
         row.set("vphase", vphase.to_string());
+        // Per-leg gait phase (0 = Stance, 1 = Swing) from the resolver. This is
+        // the event signal that segments stance from swing independently of the
+        // realized foot height, so the foot-slide analyzer no longer needs a
+        // geometric floor tolerance to tell the two apart.
+        row.set("gait_l", gait_l.to_string());
+        row.set("gait_r", gait_r.to_string());
 
         // --- Loop 3 (attitude/tilt) telemetry, from the same pin. The resolver's
         // persistent `theta`/`omega` (rad, rad/s) plus the per-tick control input
