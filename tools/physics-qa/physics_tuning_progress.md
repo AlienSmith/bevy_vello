@@ -490,3 +490,25 @@ target\release\examples\visual_arm_pd.exe
 
 The startup line now prints what the process actually got
 (`walk params: leg_compliance=1.0e-9 ...`), so the window is self-identifying.
+
+### 9.4 The startup "lean left" is an attitude-rest transient, not a body tilt
+
+Watching the run, the upper body leans left for the first ~1.5 s (the body barely
+moves), then leans right and the walk settles. Measured on `visual_step70.csv`
+(loop-3 attitude columns):
+
+| window | min `att_rest_cos` | equivalent rest re-aim | `meas_theta` RMS | `body_theta` range |
+| --- | --- | --- | --- | --- |
+| t < 2 s | 0.434 (@ t=1.59 s) | **64.3°** | 0.37 | −0.11 … 0.00 |
+| t ≥ 2 s | 0.505 | 59.7° | 0.24 | 0.00 … 0.11 |
+
+So the *reference* swings by up to 64° while the *measured* body angle stays
+within ±0.11 (≈ ±6°): the lean is the attitude loop re-aiming its rest during
+startup, and the body follows it back. `att_target` (the commanded bias) stays
+within ±0.07 rad (≈ 4°), so it is the rest re-aim, not the commanded target.
+
+Upper-body tuning is untouched, as noted — the levers are already there and can
+be swept the same way: `ATT_COMPLIANCE`, `ATT_ZETA`, `ATT_TARGET_DEG`,
+`ATT_MAX_DEG`, plus `COMPLIANCE`/`DAMPING` for the position pin. The natural first
+question is whether the startup re-aim should be rate-limited the way the leg rest
+angle should be (§8.4) — both are rest targets teleporting under a stiff spring.
