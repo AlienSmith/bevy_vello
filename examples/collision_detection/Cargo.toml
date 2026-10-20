@@ -19,6 +19,14 @@ path = "src/character_tuning_main.rs"
 name = "raibert_sandbox"
 path = "src/raibert_sandbox_main.rs"
 
+# Rendered (DefaultPlugins + VelloPlugin) twin of the headless command-driven
+# harness. Shares the same harness modules (command/config/math/probe/dispatch/
+# assets/collision/report/sample) via sibling `mod` declarations.
+# Runs from: cargo run -p collision_detection --example visual_arm_pd --release
+[[example]]
+name = "visual_arm_pd"
+path = "examples/headless_arm_pd/visual.rs"
+
 [dependencies]
 ron = "0.8"
 serde = { version = "1", features = ["derive"] }

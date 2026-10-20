@@ -122,3 +122,81 @@ pub struct Probe {
     /// Whether `prev_tgt_vel` holds a real previous tick (false on the first).
     pub tgt_primed: bool,
 }
+
+/// Constructor inputs for [`Probe`] — the env/script-derived fields that differ
+/// between harnesses (headless vs visual). This keeps the two binaries from
+/// duplicating the ~55-field struct literal.
+pub struct ProbeArgs {
+    pub focus: LimbId,
+    pub script: Vec<Command>,
+    pub script_src: String,
+    pub body: bool,
+    pub sweep: bool,
+    pub grid: Vec<(f32, f32)>,
+    pub kp: f32,
+    pub kd: f32,
+    pub csv_path: String,
+    pub target_dist: f32,
+    pub jw_window: Option<(f32, f32)>,
+}
+
+impl Probe {
+    pub fn new(args: ProbeArgs) -> Self {
+        Self {
+            character: None,
+            tick: 0,
+            spawn_tick: None,
+            ever_ready: false,
+            focus: args.focus,
+            ready: false,
+            ticks_ready: 0,
+            anchors: [Vec2::ZERO; 4],
+            limb_len: [0.0; 4],
+            anchored: false,
+            target_dist: args.target_dist,
+            script: args.script,
+            script_src: args.script_src,
+            action: 0,
+            action_start_tick: 0,
+            applied_action: None,
+            script_done: false,
+            kp: args.kp,
+            kd: args.kd,
+            grid: args.grid,
+            cell: 0,
+            samples: Vec::new(),
+            reports: Vec::new(),
+            done: false,
+            csv_path: args.csv_path,
+            sweep: args.sweep,
+            body: args.body,
+            held_prev: 0,
+            events: Vec::new(),
+            next_event_id: 0,
+            p3_entity: None,
+            jw_window: args.jw_window,
+            jw_prev_cmd_vx: 0.0,
+            jw_prev_real_vx: 0.0,
+            jw_primed: false,
+            jw_cmd_step: 0.0,
+            jw_cmd_step_t: 0.0,
+            jw_real_step: 0.0,
+            jw_real_step_t: 0.0,
+            jw_lag: 0.0,
+            jw_lag_t: 0.0,
+            jw_phase: 0,
+            nan_rows: 0,
+            leg_active: false,
+            max_leg_err: 0.0,
+            leg_peak_t: 0.0,
+            max_leg_err_lr: [0.0, 0.0],
+            max_leg_err_lr_t: [0.0, 0.0],
+            leg_t: Vec::new(),
+            leg_err: Vec::new(),
+            leg_err_lr: Vec::new(),
+            leg_dx_lr: Vec::new(),
+            prev_tgt_vel: [Vec2::ZERO; 5],
+            tgt_primed: false,
+        }
+    }
+}

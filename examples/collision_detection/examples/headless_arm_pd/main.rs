@@ -147,7 +147,7 @@ use crate::config::{
     parse_grid, FIXED_HZ,
 };
 use crate::math::{env_f32, env_flag};
-use crate::probe::Probe;
+use crate::probe::{Probe, ProbeArgs};
 
 use crate::assets::{mark_assets_loaded, register_character_assets};
 use crate::collision::{
@@ -199,62 +199,19 @@ fn main() {
         body
     );
 
-    let probe = Probe {
-        character: None,
-        tick: 0,
-        spawn_tick: None,
-        ever_ready: false,
+    let probe = Probe::new(ProbeArgs {
         focus,
-        ready: false,
-        ticks_ready: 0,
-        anchors: [Vec2::ZERO; 4],
-        limb_len: [0.0; 4],
-        anchored: false,
-        target_dist: env_f32("TARGET_DIST", 0.0),
         script,
         script_src,
-        action: 0,
-        action_start_tick: 0,
-        applied_action: None,
-        script_done: false,
+        body,
+        sweep,
+        grid,
         kp: kp0,
         kd: kd0,
-        grid,
-        cell: 0,
-        samples: Vec::new(),
-        reports: Vec::new(),
-        done: false,
         csv_path,
-        sweep,
-        body,
-        held_prev: 0,
-        events: Vec::new(),
-        next_event_id: 0,
-        p3_entity: None,
+        target_dist: env_f32("TARGET_DIST", 0.0),
         jw_window,
-        jw_prev_cmd_vx: 0.0,
-        jw_prev_real_vx: 0.0,
-        jw_primed: false,
-        jw_cmd_step: 0.0,
-        jw_cmd_step_t: 0.0,
-        jw_real_step: 0.0,
-        jw_real_step_t: 0.0,
-        jw_lag: 0.0,
-        jw_lag_t: 0.0,
-        jw_phase: 0,
-        nan_rows: 0,
-        leg_active: false,
-        max_leg_err: 0.0,
-        leg_peak_t: 0.0,
-        max_leg_err_lr: [0.0, 0.0],
-        max_leg_err_lr_t: [0.0, 0.0],
-        leg_t: Vec::new(),
-        leg_err: Vec::new(),
-        leg_err_lr: Vec::new(),
-        leg_dx_lr: Vec::new(),
-        prev_tgt_vel: [Vec2::ZERO; 5],
-        tgt_primed: false,
-    };
+    });
 
     let gravity = if body { gravity_from_env() } else { Vec2::ZERO };
 
