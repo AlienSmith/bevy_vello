@@ -193,7 +193,22 @@ fn main() {
         .add_systems(Update, mark_assets_loaded);
 
     if body {
-        app.insert_resource(hip_pin_params_from_env())
+        // Self-identify the run: `LEG_COMPLIANCE` is env-only (the asset's leg
+        // angular compliance is overwritten every frame by the pin) and it is
+        // the difference between walking forwards (1e-6) and walking backwards
+        // (1e-9), so print what this process actually got.
+        let params = hip_pin_params_from_env();
+        info!(
+            "walk params: leg_compliance={:.1e} leg_zeta={:.2} leg_alpha={:.2} \
+             target_speed={:.0}px/s external_pin={} attitude={}",
+            params.leg_compliance,
+            params.leg_zeta,
+            params.leg_alpha,
+            params.config.target_speed,
+            params.external_pin,
+            params.attitude_enabled,
+        );
+        app.insert_resource(params)
             .add_systems(FixedUpdate, update_ground_support.before(drive_hip_pin))
             .add_systems(
                 FixedUpdate,

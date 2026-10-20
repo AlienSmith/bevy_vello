@@ -82,10 +82,18 @@ impl HipPinParams {
     /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`, `FEEDBACK`,
     /// `EXTERNAL_PIN`, `AIR_CONTROL`, `LEG_COMPLIANCE`, `LEG_ZETA`,
     /// `LEG_ALPHA`, `LEG_MAX_ANG_RATE`, `ATTITUDE`, `ATT_COMPLIANCE`,
-    /// `ATT_ZETA`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`.
+    /// `ATT_ZETA`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`, and the gait timing /
+    /// swing-arc shape: `STANCE`, `SWING`, `STEP_HEIGHT`.
     pub fn from_env() -> Self {
         let mut p = Self::default();
         p.config.target_speed = env_f32("TARGET_SPEED", p.config.target_speed);
+        // Gait shape. `SWING` shorter = the foot must travel the step in less
+        // time (a faster swing); `STEP_HEIGHT` is the swing arc apex above the
+        // plant line, i.e. how high the foot lifts to clear the floor.
+        p.config.stance_duration_ts =
+            env_f32("STANCE", p.config.stance_duration_ts).max(1e-3);
+        p.config.swing_duration_ts = env_f32("SWING", p.config.swing_duration_ts).max(1e-3);
+        p.config.step_height = env_f32("STEP_HEIGHT", p.config.step_height).max(0.0);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);

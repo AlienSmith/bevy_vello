@@ -29,6 +29,13 @@ Status legend: `[x]` done, `[-]` in progress, `[ ]` planned.
   only 1.3–2.7 px relative to the body, and the body travels **9.9 px/s against
   `cmd_vx = 104 px/s` (10%)**. The rendered twin reproduces it to within ~0.3 px,
   so this is the shared controller/physics, not the renderer.
+- **Best walk so far** (§9): `LEG_COMPLIANCE=1e-9` **plus** `STEP_HEIGHT=70`.
+  Stiff legs alone made it walk backwards (§8) because the default 28 px swing arc
+  was absorbed by the compliant joint — at `1e-6` a 70 px arc still realizes only
+  6.9 px of lift. With both, the swing gate **passes 29/29** (lift 55 px, advance
+  +29…+49 px, lead −37 → +42 px), foot separation 38 px vs 36 px commanded, body
+  at 84–101% of `cmd_vx`. Remaining: stance slide 32–52 px and rig `max_rel_dev`
+  0.10–0.16 (vs 0.05).
 
 ## 1. What changed this session
 
@@ -410,3 +417,76 @@ py bevy_vello\tools\physics-qa\sweep_leg_compliance.py --values 1e-6,5e-7,1e-7,5
 py bevy_vello\tools\physics-qa\sweep_leg_compliance.py --values 1e-9 --extra-env ATT_COMPLIANCE=1e-9
 py bevy_vello\tools\physics-qa\set_joint_compliance.py --compliance 1e-9 --dry-run
 ```
+
+## 9. The gait was arc-starved: stiff legs + a taller step arc step properly
+
+§8's conclusion ("stiff legs do not work") was **only half right**: it is true for
+the *default step arc*. The user's read of the animation was better than the
+table — the swing wasn't reaching ahead of the hip before touchdown, so the leg
+pushed the body backwards. Two independent axes were being conflated:
+
+- **stiffness** (`LEG_COMPLIANCE`) — can the leg execute the arc at all?
+- **arc shape** (`STEP_HEIGHT`, `SWING`) — what arc is it asked to execute?
+
+Both are now env-overridable (`STANCE`, `SWING`, `STEP_HEIGHT` in
+[`HipPinParams::from_env`](../examples/game_lib/src/lower_body/hip_pin.rs:86)),
+so they can be separated. `1e-6` × `1e-9` × `SWING` 0.28/0.14 at
+`STEP_HEIGHT=70`:
+
+| LEG_COMPLIANCE | STEP_HEIGHT | SWING | body px/s (cmd 104) | lift mean | swing adv | lead gain | stance drift | rig dev |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1e-6 | 28 (default) | 0.28 | +10.3 (10%) | 3.1 px | +1.9 px | +3.6 px | 3.13 px | 0.0497 |
+| 1e-6 | 70 | 0.28 | +5.1 (5%) | **6.9 px** | −2.8 px | −11.4 px | 56.83 px | 0.3008 |
+| 1e-6 | 70 | 0.14 | +4.5 (4%) | **6.4 px** | −0.7 px | −4.1 px | 53.64 px | 0.3055 |
+| 1e-9 | 70 | 0.14 | +94.8 (91%) | 48.1 px | +49.2 px | +74.6 px | 78.54 px | 0.0858 |
+| **1e-9** | **70** | **0.28** | **+104.5 (101%)** | **46.3 px** | **+42.4 px** | **+86.6 px** | 52.17 px | 0.1586 |
+
+Reading the rows:
+
+1. **At `1e-6` the leg cannot execute any arc.** Command `STEP_HEIGHT=70` and the
+   realized lift is **6.9 px** — the compliant joint absorbs 90% of the swing
+   amplitude, so the foot never clears the floor, never overtakes, and the body
+   does not travel. Raising the arc or halving the swing time changes nothing.
+2. **At `1e-9` the same 70 px arc is executed** (46 px realized) and the gait
+   steps: advance +42 px, lead −42.8 → +43.7 px, body at 101% of command.
+3. **Swing speed is not the driver** (the user's point): 0.28 s and 0.14 s give
+   nearly the same result at `1e-9` — 0.28 s is actually *better* on body speed
+   and stance slide. What mattered was stiffness *plus* a big enough arc.
+
+### 9.1 The swing gate now passes (rendered twin, `LEG_COMPLIANCE=1e-9 STEP_HEIGHT=70`)
+
+`analyze_swing.py` on `visual_step70.csv`:
+
+| leg | swings | verdict | lift mean/min/max | advance | lead liftoff → touchdown | lead gain |
+| --- | --- | --- | --- | --- | --- | --- |
+| left | 15 | **PASS 15/15** | 55.6 / 43.6 / 89.3 px | +49.4 px | −38.1 → **+37.5** | +75.5 |
+| right | 14 | **PASS 14/14** | 55.1 / 40.5 / 74.1 px | +28.8 px | −36.9 → **+42.4** | +79.4 |
+
+Foot separation is now 38.1 px against a commanded 36.4 px (it was 197 vs 6.6),
+and the body travels 87.6 px/s against 103.9 px/s (84%). This is a walk.
+
+### 9.2 What is left
+
+- **Stance slide 32–38 px** (rendered) / 52 px (headless): the planted foot is
+  still dragged. Now that the gait is real, the grip axis of §6 is worth
+  revisiting — it was tuned against a non-stepping gait.
+- **Frame rigidity 0.10–0.16** vs 0.05 baseline: the stiff legs pull harder on
+  the pin. `COMPLIANCE` / `ATT_COMPLIANCE` are the levers.
+- Contact duty is now 0–1 contacts at the 1 s sampling points instead of 4–6:
+  the big arc means long air time, so `stance`/`swing` timing deserves a sweep
+  of its own.
+
+### 9.3 Best known walk (reproduce)
+
+```bat
+cd /d D:\bender\bevy_vello
+set "ASSET_ROOT=D:\bender\bevy_vello\examples\collision_detection\assets"
+set "SCRIPT=D:\bender\bevy_vello\plans\walk_script.json"
+set "LEG_COMPLIANCE=1e-9"
+set "STEP_HEIGHT=70"
+set "OUT_CSV=D:\bender\bevy_vello\tmp\headless\visual_step70.csv"
+target\release\examples\visual_arm_pd.exe
+```
+
+The startup line now prints what the process actually got
+(`walk params: leg_compliance=1.0e-9 ...`), so the window is self-identifying.

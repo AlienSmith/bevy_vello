@@ -284,7 +284,11 @@ fn main() {
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(2)
             .max(1);
-        info!("pin controller: delta velocity servo, substeps={substeps}");
+        info!(
+            "pin controller: delta velocity servo, substeps={substeps}, \
+             leg_compliance={:.1e}, target_speed={:.0}px/s",
+            params.leg_compliance, params.config.target_speed
+        );
         app.insert_resource(params);
     }
 
