@@ -1069,6 +1069,71 @@ fn plan_target_x(
     raw.clamp(hip_x - plan.x_max, hip_x + plan.x_max)
 }
 
+/// Three-phase swing profile (plan §3): maps normalized swing progress `s ∈
+/// [0,1]` to the foot's world position along a C¹-continuous piecewise path from
+/// the lift-off plant `from` to the touchdown plant `to`:
+///
+/// - **Lift** (s 0 → 0.25): knee flex — the foot rises steeply to `step_height`
+///   while advancing only ~16% of the step length, so it clears the toe before
+///   moving forward.
+/// - **Advance** (s 0.25 → 0.8): hip flex — the foot sweeps most of the step
+///   length forward at roughly constant height.
+/// - **Extend / plant** (s 0.8 → 1.0): knee extend — the foot descends to the
+///   touchdown x, decelerating to a gentle plant.
+///
+/// Each segment is a cubic Hermite spline through endpoint positions AND
+/// derivatives, with the junction derivatives matched across segments, so the
+/// path is C¹-continuous: no velocity discontinuity (and no touchdown "kick")
+/// at any segment joint. `+y` is up (resolver frame); the profile returns an
+/// absolute foot position.
+#[inline]
+fn swing_profile_foot(s: f32, from: Vec2, to: Vec2, step_height: f32) -> Vec2 {
+    let s = s.clamp(0.0, 1.0);
+    let dx = to.x - from.x;
+    let h = step_height.max(0.0);
+
+    // Control points (relative to `from`) and their s-space derivatives
+    // (dP/ds across the full swing) encoding the choreography above.
+    let p0 = Vec2::new(0.0, 0.0);
+    let v0 = Vec2::new(0.30 * dx, 2.0 * h);
+    let p1 = Vec2::new(0.16 * dx, h);
+    let v1 = Vec2::new(1.20 * dx, 0.0);
+    let p2 = Vec2::new(0.86 * dx, 0.50 * h);
+    let v2 = Vec2::new(0.90 * dx, -1.50 * h);
+    let p3 = Vec2::new(dx, 0.0);
+    let v3 = Vec2::new(0.12 * dx, 0.0);
+
+    // Cubic Hermite basis over local `u ∈ [0,1]` (position + derivative at both
+    // endpoints). The passed derivative is dP/du; the caller converts the
+    // s-space velocity by the segment width (dP/du = dP/ds * width).
+    let hermite = |u: f32, pa: Vec2, va: Vec2, pb: Vec2, vb: Vec2| -> Vec2 {
+        let u2 = u * u;
+        let u3 = u2 * u;
+        let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+        let h10 = u3 - 2.0 * u2 + u;
+        let h01 = -2.0 * u3 + 3.0 * u2;
+        let h11 = u3 - u2;
+        pa * h00 + va * h10 + pb * h01 + vb * h11
+    };
+
+    const S_LIFT: f32 = 0.25;
+    const S_ADV: f32 = 0.80;
+    let off = if s <= S_LIFT {
+        let w = S_LIFT;
+        let u = s / w;
+        hermite(u, p0, v0 * w, p1, v1 * w)
+    } else if s <= S_ADV {
+        let w = S_ADV - S_LIFT;
+        let u = (s - S_LIFT) / w;
+        hermite(u, p1, v1 * w, p2, v2 * w)
+    } else {
+        let w = 1.0 - S_ADV;
+        let u = (s - S_ADV) / w;
+        hermite(u, p2, v2 * w, p3, v3 * w)
+    };
+    from + off
+}
+
 /// Advance a single leg through the stance → swing → plant state machine.
 ///
 /// Updates `leg` in place. `v_desired` is the *signed* desired cruise velocity
@@ -1134,10 +1199,11 @@ fn step_leg(
             let total = config.swing_duration_ts.max(f32::EPSILON);
             let t = (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0);
 
-            let x = leg.swing_from.x + (leg.swing_to.x - leg.swing_from.x) * t;
-            let y = leg.swing_from.y + (leg.swing_to.y - leg.swing_from.y) * t;
-            let lift = (t * (1.0 - t) * 4.0) * config.step_height;
-            leg.foot_pos = Vec2::new(x, y + lift);
+            // Three-phase swing profile (plan §3): lift → advance → extend,
+            // C¹-continuous through the IK foot path. Replaces the old single
+            // symmetric parabola, which cleared no toe before advancing and
+            // arrived at the plant at full swing speed.
+            leg.foot_pos = swing_profile_foot(t, leg.swing_from, leg.swing_to, config.step_height);
 
             if leg.phase_timer <= 0.0 {
                 leg.foot_pos = leg.swing_to;
@@ -1893,6 +1959,96 @@ mod tests {
                 (target - state.hip_pos.x).abs() <= x_max + 1e-2,
                 "swing target escaped the reach window: {target} vs hip {}",
                 state.hip_pos.x
+            );
+        }
+    }
+
+    #[test]
+    fn test_swing_profile_lift_advance_extend_phases() {
+        // The 3-phase profile (plan §3): endpoints are the lift-off and plant
+        // plants, the lift clears to `step_height` with little x advance, the
+        // advance sweeps most of the step at height, and the extend descends to
+        // the plant x. The foot must never go below the floor.
+        let from = Vec2::new(10.0, 0.0);
+        let to = Vec2::new(60.0, 0.0);
+        let h = 40.0;
+        let dx = to.x - from.x;
+
+        // Endpoints: exactly the lift-off and touchdown plants (no pop, no
+        // floating at touch-down).
+        assert!((swing_profile_foot(0.0, from, to, h) - from).length() < 1e-3);
+        assert!((swing_profile_foot(1.0, from, to, h) - to).length() < 1e-3);
+
+        // Lift end (s = 0.25): apex `step_height`, only ~16% of the step.
+        let p = swing_profile_foot(0.25, from, to, h);
+        assert!((p.x - (from.x + 0.16 * dx)).abs() < 1e-3, "lift x={}", p.x);
+        assert!((p.y - h).abs() < 1e-3, "lift y={}", p.y);
+
+        // Advance end (s = 0.80): ~86% of the step at half height.
+        let p = swing_profile_foot(0.80, from, to, h);
+        assert!((p.x - (from.x + 0.86 * dx)).abs() < 1e-3, "adv x={}", p.x);
+        assert!((p.y - 0.5 * h).abs() < 1e-3, "adv y={}", p.y);
+
+        // The lift is steeper than the advance: by s = 0.12 the foot is already
+        // well off the floor, yet has barely advanced.
+        let early = swing_profile_foot(0.12, from, to, h);
+        assert!(
+            early.y > 0.5 * h,
+            "lift too shallow at s=0.12: y={}",
+            early.y
+        );
+        assert!(
+            early.x < from.x + 0.12 * dx,
+            "lift advanced too far: {}",
+            early.x
+        );
+
+        // Mid-swing is elevated but below the lift apex (descent starts).
+        let mid = swing_profile_foot(0.5, from, to, h);
+        assert!(
+            mid.y > 0.0 && mid.y < h,
+            "mid height out of band: {}",
+            mid.y
+        );
+
+        // Never below the floor, sampled finely across the whole swing.
+        for i in 0..=200 {
+            let s = i as f32 / 200.0;
+            let p = swing_profile_foot(s, from, to, h);
+            assert!(p.y >= from.y - 1e-3, "foot below floor at s={s}: y={}", p.y);
+        }
+    }
+
+    #[test]
+    fn test_swing_profile_c1_continuity() {
+        // C¹ continuity at the segment junctions: both the position and the
+        // velocity (finite difference of dP/ds) must match across s = 0.25 and
+        // s = 0.80, so no junction reintroduces a "kick".
+        let from = Vec2::new(0.0, 0.0);
+        let to = Vec2::new(50.0, 0.0);
+        let h = 40.0;
+        let eps = 1e-4;
+        let d = |s: f32| -> Vec2 {
+            let a = swing_profile_foot(s, from, to, h);
+            let b = swing_profile_foot(s + eps, from, to, h);
+            (b - a) / eps
+        };
+        for junction in [0.25, 0.80] {
+            let (dl, dr) = (d(junction - eps), d(junction + eps));
+            assert!(
+                (dl - dr).length() < 1.0,
+                "velocity discontinuity at s={junction}: {dl:?} vs {dr:?}"
+            );
+            // Across a `2·eps` sampling window the position moves by
+            // `≈ 2·eps·|velocity|` (≈0.02px here), so allow that sampling
+            // width rather than an exact match.
+            let (pl, pr) = (
+                swing_profile_foot(junction - eps, from, to, h),
+                swing_profile_foot(junction + eps, from, to, h),
+            );
+            assert!(
+                (pl - pr).length() < 0.2,
+                "position discontinuity at s={junction}: {pl:?} vs {pr:?}"
             );
         }
     }
