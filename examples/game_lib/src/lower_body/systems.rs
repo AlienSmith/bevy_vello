@@ -4,7 +4,8 @@ use bevy::prelude::*;
 use bevy::time::Fixed;
 
 use crate::lower_body::resolver::{
-    step_lower_body, DebugInfo, LowerBodyConfig, LowerBodyPose, ResolverState, VerticalPhase,
+    step_lower_body, DebugInfo, LegThrust, LowerBodyConfig, LowerBodyPose, ResolverState,
+    VerticalPhase,
 };
 
 /// Runtime-tuneable resolver config, exposed as a single UI-editable Resource.
@@ -65,6 +66,7 @@ impl LowerBodyController {
             h_desired: config.jump_apex,
             h_apex: 0.0,
             delta_l: 0.0,
+            thrust: LegThrust::default(),
             theta: 0.0,
             omega: 0.0,
             attitude_torque: 0.0,

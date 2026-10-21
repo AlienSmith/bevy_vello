@@ -308,6 +308,13 @@ pub struct ResolverState {
     /// the ECS layer from [`measure_body`]; `None` in the pure kinematic
     /// sandbox, where `plan_target_x` falls back to the Raibert neutral point.
     pub measured: Option<CaptureMeasure>,
+    /// Measured whole-body CoM apex **rise** above the standing height, px
+    /// (loop 2, plan §4). Fed in by the ECS layer from the §1 measurement each
+    /// tick. When present, `Flight` latches `h_apex_prev` from this physics
+    /// measurement instead of the resolver's internal ballistic model, so the
+    /// `Δl` integrator closes on the real ground reaction. `None` in the pure
+    /// kinematic sandbox (internal model only).
+    pub measured_apex: Option<f32>,
 }
 
 impl ResolverState {
@@ -354,6 +361,7 @@ impl ResolverState {
             jump_arm_lead_leg: false,
             prev_positions: None,
             measured: None,
+            measured_apex: None,
         }
     }
 }
@@ -382,6 +390,25 @@ pub struct LowerBodyPose {
     pub left_foot_vel: Vec2,
     pub right_knee_vel: Vec2,
     pub right_foot_vel: Vec2,
+}
+
+/// Virtual-leg thrust command (plan §4, loop 2 delivery).
+///
+/// The banked stroke `Δl` is spent as knee/ankle **extension** during stance
+/// (the foot is pinned by friction, so extension pushes the CoM up via ground
+/// reaction), as **retraction** during flight (shorten the virtual leg so the
+/// swing clears), and as controlled **flexion** on landing (absorb the
+/// touchdown). All values are px of extra leg-extension demand; the ECS layer
+/// converts them into angular-constraint targets through the leg PD.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LegThrust {
+    /// Stance push-off extension demand, px. `> 0` during `Load`/`Launch`
+    /// (the crouch stroke being spent), `0` at idle.
+    pub stance_extend: f32,
+    /// Flight retract demand, px (`> 0` tucks the knee for swing clearance).
+    pub flight_retract: f32,
+    /// Landing absorb flexion demand, px (`> 0` bends the knee to absorb).
+    pub land_absorb: f32,
 }
 
 /// Telemetry for the UI / debugging; the forward/backward math intermediates.
@@ -429,6 +456,11 @@ pub struct DebugInfo {
     pub h_apex: f32,
     /// Current commanded extra crouch displacement `Δl`, px.
     pub delta_l: f32,
+    /// Virtual-leg thrust command (plan §4, loop 2 delivery): how the banked
+    /// stroke `Δl` is spent as knee/ankle extension each tick. Read by the ECS
+    /// layer to bias the leg-PD angular targets — stance pushes off (extend),
+    /// flight retracts for clearance, landing absorbs.
+    pub thrust: LegThrust,
 
     // --- Loop 3 (attitude) telemetry. See `plans/raibert_sandbox_attitude_loop.md`. ---
     /// Torso lean relative to world vertical, rad (`+` = forward in travel frame).
@@ -625,9 +657,15 @@ fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
                 state.vs.h_apex = rise;
             }
             // Latch the apex at the sign change of vertical velocity. This is
-            // the boundary measurement the per-hop law consumes.
+            // the boundary measurement the per-hop law consumes. When the ECS
+            // layer feeds a measured whole-body CoM apex (plan §4), prefer that
+            // physics measurement over the resolver's internal ballistic model,
+            // so the `Δl` integrator closes on the real ground reaction.
             if state.hip_vel.y <= 0.0 && !state.vs.apex_latched {
-                state.vs.h_apex_prev = state.vs.h_apex;
+                state.vs.h_apex_prev = match state.measured_apex {
+                    Some(measured) => measured.max(0.0),
+                    None => state.vs.h_apex,
+                };
                 state.vs.apex_latched = true;
             }
             // The hop ends only when the hip is truly back down on the planted
@@ -1629,6 +1667,49 @@ pub fn step_lower_body(
 
     state.prev_positions = Some([state.hip_pos, left_knee, left_foot, right_knee, right_foot]);
 
+    // Loop 2 delivery (plan §4): map the vertical FSM phase to a virtual-leg
+    // thrust command. During stance the banked stroke `Δl` is spent as knee/
+    // ankle EXTENSION (the foot is pinned, so extension pushes the CoM up via
+    // ground reaction); in Flight the knee RETRACTS for swing clearance; on
+    // Landing it FLEXES to absorb. The ECS layer converts these px demands
+    // into angular-constraint targets through the leg PD.
+    let thrust = match state.vs.phase {
+        VerticalPhase::Load | VerticalPhase::Launch => {
+            // Push-off: the deeper the crouch stroke, the harder the extension.
+            let extend = state.vs.delta_l.max(0.0);
+            LegThrust {
+                stance_extend: extend,
+                flight_retract: 0.0,
+                land_absorb: 0.0,
+            }
+        }
+        VerticalPhase::Flight => {
+            // Retract: tuck the knee, scaled by swing progress (more tuck as
+            // the foot comes through).
+            let prog = if state.vs.swing_period > f32::EPSILON {
+                (state.vs.swing_t / state.vs.swing_period).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            LegThrust {
+                stance_extend: 0.0,
+                flight_retract: config.step_height * FLIGHT_SWING_LIFT_FRACTION * prog,
+                land_absorb: 0.0,
+            }
+        }
+        VerticalPhase::Land => {
+            // Absorb: controlled flexion that decays as the landing settles.
+            let absorb =
+                state.vs.delta_l.max(0.0) * (1.0 - (state.vs.land_timer * 3.0).clamp(0.0, 1.0));
+            LegThrust {
+                stance_extend: 0.0,
+                flight_retract: 0.0,
+                land_absorb: absorb,
+            }
+        }
+        VerticalPhase::Stand => LegThrust::default(),
+    };
+
     let debug = DebugInfo {
         x_max,
         v_max: v_ceil,
@@ -1649,6 +1730,7 @@ pub fn step_lower_body(
         h_desired: config.jump_apex,
         h_apex: state.vs.h_apex_prev,
         delta_l: state.vs.delta_l,
+        thrust,
         theta: state.attitude.theta,
         omega: state.attitude.omega,
         attitude_torque,
@@ -2591,6 +2673,107 @@ mod tests {
         assert!(
             (mean - target).abs() < 0.45 * target,
             "integrator did not converge near target {target}: mean={mean} apexes={apexes:?}"
+        );
+    }
+
+    #[test]
+    fn test_measured_apex_overrides_internal_model() {
+        // Loop 2 measurement (plan §4): when the ECS layer feeds a measured
+        // whole-body CoM apex, the `Δl` integrator must latch THAT value (the
+        // physics truth) instead of the resolver's internal ballistic apex.
+        // The difference then drives the next hop's stroke.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+
+        // Without a measurement the latch uses the internal model (> 0 on a hop).
+        let apex_internal = run_one_jump(&cfg, &mut state, dt);
+        assert!(apex_internal > 0.0, "internal model latched nothing");
+
+        // Now feed a measured apex: the next hop must latch exactly that value.
+        state.vs.h_apex_prev = 0.0;
+        state.measured_apex = Some(37.5);
+        let apex_measured = run_one_jump(&cfg, &mut state, dt);
+        assert!(
+            (apex_measured - 37.5).abs() < 1e-3,
+            "measured apex not latched: got {apex_measured}, expected 37.5"
+        );
+        // A non-finite/negative measured apex clamps to 0 (never poison the loop).
+        state.vs.h_apex_prev = 0.0;
+        state.measured_apex = Some(-5.0);
+        let apex_neg = run_one_jump(&cfg, &mut state, dt);
+        assert!(
+            apex_neg >= 0.0,
+            "negative measured apex must clamp: {apex_neg}"
+        );
+    }
+
+    #[test]
+    fn test_leg_thrust_maps_vertical_phases() {
+        // Loop 2 delivery (plan §4): the resolver's `DebugInfo.thrust` command
+        // must map the vertical FSM phase to a virtual-leg extension demand —
+        // push-off during Load/Launch, retract during Flight, absorb during
+        // Land, and nothing at idle Stand.
+        let cfg = LowerBodyConfig::default();
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+
+        // Stand: no thrust (all zero).
+        let (_, d) = step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+        assert_eq!(d.v_phase, VerticalPhase::Stand);
+        assert_eq!(d.thrust.stance_extend, 0.0);
+        assert_eq!(d.thrust.flight_retract, 0.0);
+        assert_eq!(d.thrust.land_absorb, 0.0);
+
+        // Request a jump → Load/Lance: stance extension equals the banked Δl.
+        state.vs.jump_requested = true;
+        let mut saw_load = false;
+        let mut saw_flight = false;
+        let mut saw_land = false;
+        let mut flight_retract_max = 0.0f32;
+        for _ in 0..4000 {
+            let (_p, d) = step_lower_body(Vec2::ZERO, &cfg, &mut state, dt);
+            match d.v_phase {
+                VerticalPhase::Load | VerticalPhase::Launch => {
+                    saw_load = true;
+                    assert!(
+                        d.thrust.stance_extend > 0.0,
+                        "no push-off during Load/Launch: {:?}",
+                        d.thrust
+                    );
+                    assert_eq!(d.thrust.flight_retract, 0.0);
+                    assert_eq!(d.thrust.land_absorb, 0.0);
+                }
+                VerticalPhase::Flight => {
+                    saw_flight = true;
+                    assert_eq!(d.thrust.stance_extend, 0.0);
+                    assert_eq!(d.thrust.land_absorb, 0.0);
+                    // Retract ramps from 0 at lift-off (swing_t == 0) to full
+                    // tuck as the foot comes through, so track the peak.
+                    flight_retract_max = flight_retract_max.max(d.thrust.flight_retract);
+                }
+                VerticalPhase::Land => {
+                    saw_land = true;
+                    assert_eq!(d.thrust.stance_extend, 0.0);
+                    assert_eq!(d.thrust.flight_retract, 0.0);
+                    assert!(
+                        d.thrust.land_absorb >= 0.0,
+                        "negative absorb during Land: {:?}",
+                        d.thrust
+                    );
+                }
+                VerticalPhase::Stand => {}
+            }
+            if d.v_phase == VerticalPhase::Stand && state.vs.h_apex_prev > 0.0 {
+                break;
+            }
+        }
+        assert!(saw_load, "never reached Load/Launch");
+        assert!(saw_flight, "never reached Flight");
+        assert!(saw_land, "never reached Land");
+        assert!(
+            flight_retract_max > 0.0,
+            "knee never retracted during Flight: max {flight_retract_max}"
         );
     }
 

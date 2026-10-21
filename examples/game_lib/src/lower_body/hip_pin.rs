@@ -32,7 +32,7 @@ use crate::lower_body::measure::{
     update_measurements, BodyMeasureFilter, BodyMeasurements, ParticleSample,
 };
 use crate::lower_body::resolver::{
-    step_lower_body, CaptureMeasure, LowerBodyConfig, ResolverState, VerticalPhase,
+    step_lower_body, CaptureMeasure, GaitPhase, LowerBodyConfig, ResolverState, VerticalPhase,
 };
 
 /// Runtime knobs for the hip pin, editable from the tuning UI.
@@ -669,9 +669,16 @@ pub fn drive_hip_pin(
                     v_com: pin.measured.v_com.x,
                     z_com: pin.measured.z_com,
                 });
+                // Loop 2 (plan §4): close the `Δl` integrator on the measured
+                // whole-body CoM apex instead of the resolver's internal
+                // ballistic model. `z_com` is the CoM height above the floor;
+                // the resolver's `h_apex_prev` is an apex RISE above the
+                // standing height, so feed `z_com − standing_hip_height`.
+                pin.state.measured_apex = Some(pin.measured.z_com - params.config.hip_height);
             }
         } else {
             pin.state.measured = None;
+            pin.state.measured_apex = None;
         }
 
         // Game input → resolver input. The jump is edge-triggered here because
@@ -942,7 +949,7 @@ pub fn drive_hip_pin(
             let seed_hip_y = 0.5 * (seed.live[0].hip.y + seed.live[1].hip.y);
             let desired_hip_y = seed_hip_y + (pose.hip.y - pin.seed_hip.y);
             let hip_t = Vec2::new(actual_p3_bevy.x, desired_hip_y) - Vec2::Y * params.hip_drop;
-            let knee_l = hip_t
+            let mut knee_l = hip_t
                 + transfer_segment(
                     seed.live[0].knee - seed.live[0].hip,
                     seed.resolver[0].knee - seed.resolver[0].hip,
@@ -954,7 +961,7 @@ pub fn drive_hip_pin(
                     seed.resolver[0].foot - seed.resolver[0].knee,
                     pose.left_foot - pose.left_knee,
                 );
-            let knee_r = hip_t
+            let mut knee_r = hip_t
                 + transfer_segment(
                     seed.live[1].knee - seed.live[1].hip,
                     seed.resolver[1].knee - seed.resolver[1].hip,
@@ -970,6 +977,27 @@ pub fn drive_hip_pin(
             // (Bevy y-up, so the floor is the seed foot y.)
             foot_l.y = foot_l.y.max(seed.live[0].foot.y);
             foot_r.y = foot_r.y.max(seed.live[1].foot.y);
+
+            // Loop 2 delivery (plan §4): the resolver's virtual-leg thrust
+            // command biases the leg-PD targets. In Bevy y-up, `stance_extend`
+            // pushes the stance foot DOWN (extend the leg → ground reaction
+            // lifts the CoM), `flight_retract` tucks the knee UP (swing
+            // clearance), and `land_absorb` bends the knee DOWN (controlled
+            // flexion to absorb the touchdown). Each is applied only to the leg
+            // in the matching gait phase, so a swing leg is never extended into
+            // the ground and a stance leg is never retracted.
+            let thrust = debug.thrust;
+            if debug.left_phase == GaitPhase::Swing {
+                knee_l.y = knee_l.y + thrust.flight_retract; // tuck knee up
+            } else {
+                // stance (or flight-sync stance): extend/absorb as commanded
+                foot_l.y = foot_l.y - thrust.stance_extend.max(thrust.land_absorb);
+            }
+            if debug.right_phase == GaitPhase::Swing {
+                knee_r.y = knee_r.y + thrust.flight_retract;
+            } else {
+                foot_r.y = foot_r.y - thrust.stance_extend.max(thrust.land_absorb);
+            }
 
             left_leg.hip_target = hip_t;
             right_leg.hip_target = hip_t;
