@@ -31,7 +31,9 @@ use crate::input_management::actions::PlayerAction;
 use crate::lower_body::measure::{
     update_measurements, BodyMeasureFilter, BodyMeasurements, ParticleSample,
 };
-use crate::lower_body::resolver::{step_lower_body, LowerBodyConfig, ResolverState, VerticalPhase};
+use crate::lower_body::resolver::{
+    step_lower_body, CaptureMeasure, LowerBodyConfig, ResolverState, VerticalPhase,
+};
 
 /// Runtime knobs for the hip pin, editable from the tuning UI.
 #[derive(Resource)]
@@ -648,6 +650,28 @@ pub fn drive_hip_pin(
                 let world_dx = measured_x - anchor_x;
                 pin.state.hip_pos.x = pin.seed_hip.x + world_dx;
             }
+        }
+
+        // Loop 1 balance feedback (plan §2): feed the measured whole-body CoM
+        // into the resolver so `plan_target_x` uses the LIPM capture point
+        // `x_foot = x_CoM + (v_CoM − v_des)/ω₀` instead of the Raibert neutral
+        // point. `pin.measured` is in the Vello y-down frame: horizontal x is
+        // unaffected by the flip, and `z_com` is already positive-up. The CoM x
+        // is mapped into the resolver's seed-relative frame the same way the P3
+        // feedback above maps the hip. When no valid measurement exists
+        // (`n == 0`, e.g. the pure kinematic sandbox path) the resolver falls
+        // back to its Raibert neutral point.
+        if pin.measured.n > 0 {
+            if let Ok(p3) = p_q.get(spine.particles[4]) {
+                let com_offset_x = pin.measured.com.x - p3.particle.pos.x;
+                pin.state.measured = Some(CaptureMeasure {
+                    com_x: pin.state.hip_pos.x + com_offset_x,
+                    v_com: pin.measured.v_com.x,
+                    z_com: pin.measured.z_com,
+                });
+            }
+        } else {
+            pin.state.measured = None;
         }
 
         // Game input → resolver input. The jump is edge-triggered here because

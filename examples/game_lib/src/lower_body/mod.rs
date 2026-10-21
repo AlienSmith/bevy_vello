@@ -22,10 +22,11 @@ pub use measure::{
 
 pub use plugin::LowerBodySandboxPlugin;
 pub use resolver::{
-    apex_to_launch_speed, attitude_pd, compute_forward_target, compute_support_velocity,
-    compute_v_max, compute_x_max, landing_speed, predict_apex_rise, solve_leg_ik, tick_attitude,
-    update_delta_l, AttitudeState, DebugInfo, GaitLimits, GaitPhase, LegState, LowerBodyConfig,
-    LowerBodyPose, ResolverState, VerticalPhase, VerticalState,
+    apex_to_launch_speed, attitude_pd, capture_point, compute_forward_target,
+    compute_support_velocity, compute_v_max, compute_x_max, landing_speed, predict_apex_rise,
+    solve_leg_ik, tick_attitude, update_delta_l, AttitudeState, CaptureMeasure, DebugInfo,
+    GaitLimits, GaitPhase, LegState, LowerBodyConfig, LowerBodyPose, ResolverState, VerticalPhase,
+    VerticalState,
 };
 pub use systems::{
     drive_lower_body, reset_lower_body, LowerBodyController, LowerBodyInput, LowerBodyParams,

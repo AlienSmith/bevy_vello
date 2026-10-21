@@ -304,6 +304,10 @@ pub struct ResolverState {
     /// first tick. Used to finite-difference the pose into velocities for the
     /// leg PD controller's velocity-error term.
     pub prev_positions: Option<[Vec2; 5]>,
+    /// Measured whole-body capture state (loop 1 balance, plan §2). Fed in by
+    /// the ECS layer from [`measure_body`]; `None` in the pure kinematic
+    /// sandbox, where `plan_target_x` falls back to the Raibert neutral point.
+    pub measured: Option<CaptureMeasure>,
 }
 
 impl ResolverState {
@@ -349,6 +353,7 @@ impl ResolverState {
             airborne_prev: false,
             jump_arm_lead_leg: false,
             prev_positions: None,
+            measured: None,
         }
     }
 }
@@ -405,6 +410,11 @@ pub struct DebugInfo {
     /// Signed capture-point offset from the hip while braking to a stop
     /// (0 when not stopping).
     pub capture_x: f32,
+    /// `true` when the unclamped §2 capture point fell outside the reachable
+    /// `hip ± x_max` window this tick — the leg-geometry clamp fired, i.e. the
+    /// "in trouble" signal. `false` when there is no measurement (pure
+    /// kinematic fallback) or the capture point is within reach.
+    pub capture_saturated: bool,
 
     // --- Loop 1 (vertical) telemetry. See `plans/raibert_vertical_loop.md`. ---
     /// Current vertical-controller phase.
@@ -958,6 +968,40 @@ const FLIGHT_SWING_REACH_FRACTION: f32 = 0.5;
 /// stride rather than a knee-to-chest tuck.
 const FLIGHT_SWING_LIFT_FRACTION: f32 = 0.8;
 
+/// Measured whole-body CoM capture state (loop 1 balance, plan §2), fed into
+/// the resolver each tick by the ECS layer. `com_x` / `v_com` are already in
+/// the resolver's y-up frame (horizontal x is unaffected by the Vello y-down
+/// flip); `z_com` is the CoM height above the floor, positive-up.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureMeasure {
+    /// CoM x in the resolver's y-up frame (equal to Vello x).
+    pub com_x: f32,
+    /// EMA-filtered CoM horizontal velocity, px/s (equal to Vello x).
+    pub v_com: f32,
+    /// CoM height above the floor line, px (positive-up).
+    pub z_com: f32,
+}
+
+/// LIPM capture point shifted by the desired CoM velocity (plan §2):
+/// `x_foot = x_CoM + (v_CoM − v_des) / ω₀`, with `ω₀ = √(g / z_CoM)`.
+///
+/// Returns `None` when the pendulum frequency is undefined (`z_com ≤ 0` or
+/// `gravity ≤ 0`), so callers fall back to the Raibert neutral point.
+#[inline]
+pub fn capture_point(
+    com_x: f32,
+    v_com: f32,
+    v_desired: f32,
+    z_com: f32,
+    gravity: f32,
+) -> Option<f32> {
+    if z_com <= 0.0 || gravity <= 0.0 {
+        return None;
+    }
+    let omega0 = (gravity / z_com).sqrt();
+    Some(com_x + (v_com - v_desired) / omega0)
+}
+
 /// Per-tick planning context shared by both legs.
 #[derive(Debug, Clone, Copy)]
 struct StepPlan {
@@ -972,6 +1016,10 @@ struct StepPlan {
     /// `v·|v| / (2·a_eff)`. Aimed at the point where the hip will come to rest
     /// under the effective deceleration, so the hip brakes *onto* its foot.
     capture_offset: f32,
+    /// Measured whole-body capture state (plan §2). `None` in the pure
+    /// kinematic sandbox; `plan_target_x` then falls back to the Raibert
+    /// neutral point.
+    measured: Option<CaptureMeasure>,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the
@@ -990,6 +1038,24 @@ fn plan_target_x(
 ) -> f32 {
     let raw = if plan.stopping {
         hip_x + plan.capture_offset
+    } else if let Some(m) = plan.measured {
+        // Loop 1 balance (plan §2): the LIPM capture point shifted by the
+        // desired CoM velocity, `x_foot = x_CoM + (v_CoM − v_des)/ω₀`. This is
+        // a WORLD-space target — `x_CoM` is the measured CoM position — so it
+        // needs no `v·t_flight` prediction (unlike the hip-relative Raibert
+        // neutral point, which must predict where the hip will be at
+        // touchdown). Re-planning every frame with the fresh measurement makes
+        // the target track CoM motion mid-swing. If the measurement is
+        // degenerate (`z_com ≤ 0` or `gravity ≤ 0`), fall back to the Raibert
+        // neutral point below.
+        match capture_point(m.com_x, m.v_com, v_desired, m.z_com, config.gravity) {
+            Some(x) => x,
+            None => {
+                let x_target =
+                    compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
+                hip_x + v * t_flight + x_target
+            }
+        }
     } else {
         let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
         // Raibert's `x_target` is the offset from the hip **at touchdown**, not
@@ -1248,6 +1314,20 @@ pub fn step_lower_body(
         x_max,
         stopping,
         capture_offset,
+        measured: state.measured,
+    };
+
+    // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
+    // unclamped capture point — the foot the balance law demands is outside the
+    // leg's geometric workspace `hip ± x_max`. `false` when no measurement is
+    // active (pure kinematic fallback) or the capture point is within reach.
+    let capture_saturated = match state.measured {
+        Some(m) => match capture_point(m.com_x, m.v_com, v_desired_scalar, m.z_com, config.gravity)
+        {
+            Some(raw) => raw < state.hip_pos.x - x_max || raw > state.hip_pos.x + x_max,
+            None => false,
+        },
+        None => false,
     };
 
     // 5b. --- Jump landing seed (Flight→Land edge): both feet plant together ---
@@ -1496,6 +1576,7 @@ pub fn step_lower_body(
         v_abs: limits.v_abs,
         v_support,
         capture_x: capture_offset,
+        capture_saturated,
         v_phase: state.vs.phase,
         hip_height: h,
         hip_vel_y: state.hip_vel.y,
@@ -1551,6 +1632,7 @@ mod tests {
             ),
             stopping: false,
             capture_offset: 0.0,
+            measured: None,
         }
     }
 
@@ -1661,6 +1743,158 @@ mod tests {
         // At v == 0, x_target = -kv·v_desired (foot steps behind the hip).
         let stop = compute_forward_target(0.0, 120.0, cfg.kv, cfg.stance_duration_ts);
         assert!((stop - (-cfg.kv * 120.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_capture_point_formula_and_sign() {
+        // x_foot = x_CoM + (v_CoM − v_des)/ω₀, ω₀ = √(g/z_CoM). The target is
+        // world-space: it does NOT depend on the hip position at all.
+        let g: f32 = 980.0;
+        let z: f32 = 90.0; // CoM height ≈ hip height
+        let omega0 = (g / z).sqrt();
+        // CoM at origin, standing still, want to stop: foot plants at origin.
+        let x = capture_point(0.0, 0.0, 0.0, z, g).unwrap();
+        assert!(
+            x.abs() < 1e-3,
+            "standing capture point should be at CoM: {x}"
+        );
+        // Moving at v_des: foot leads ahead of the CoM by v_des/ω₀ (speed
+        // regulation is a target shift, not a separate gain).
+        let x = capture_point(0.0, 0.0, 120.0, z, g).unwrap();
+        let expected = -120.0 / omega0;
+        assert!(
+            (x - expected).abs() < 1e-3,
+            "capture x={x} expected={expected}"
+        );
+        // Positive velocity error (v_CoM > v_des) pushes the foot further ahead.
+        let x = capture_point(10.0, 150.0, 120.0, z, g).unwrap();
+        assert!(
+            (x - (10.0 + (150.0 - 120.0) / omega0)).abs() < 1e-3,
+            "capture x={x}"
+        );
+        // Higher CoM ⇒ lower ω₀ ⇒ larger stride for the same velocity error.
+        let x_low = capture_point(0.0, 0.0, 120.0, z, g).unwrap();
+        let x_high = capture_point(0.0, 0.0, 120.0, 200.0, g).unwrap();
+        assert!(x_high.abs() > x_low.abs(), "{x_high} vs {x_low}");
+    }
+
+    #[test]
+    fn test_capture_point_degnerate_returns_none() {
+        // Degenerate z_com / gravity ⇒ undefined pendulum frequency ⇒ None so
+        // the caller falls back to the Raibert neutral point.
+        assert_eq!(capture_point(0.0, 0.0, 120.0, 0.0, 980.0), None);
+        assert_eq!(capture_point(0.0, 0.0, 120.0, -10.0, 980.0), None);
+        assert_eq!(capture_point(0.0, 0.0, 120.0, 90.0, 0.0), None);
+        assert_eq!(capture_point(0.0, 0.0, 120.0, 90.0, -980.0), None);
+    }
+
+    #[test]
+    fn test_capture_point_worldspace_independent_of_hip() {
+        // The capture point is a world-space CoM target, so for identical
+        // measured CoM the same target must come out regardless of where the
+        // hip is (unlike the Raibert neutral point, which predicts hip travel).
+        let g: f32 = 980.0;
+        let z: f32 = 90.0;
+        for hip_x in [-500.0, 0.0, 1234.0] {
+            // CoM at the hip, so the capture point is always within a generous
+            // reach window and nothing clamps (x is world-space, independent of
+            // the hip position).
+            let m = CaptureMeasure {
+                com_x: hip_x,
+                v_com: 40.0,
+                z_com: z,
+            };
+            let plan = StepPlan {
+                x_max: 1000.0,
+                stopping: false,
+                capture_offset: 0.0,
+                measured: Some(m),
+            };
+            let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &default_config(), &plan);
+            let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
+            assert!(
+                (target - expected).abs() < 1e-2,
+                "hip_x={hip_x} target={target} expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_capture_point_clamps_and_reports_saturation() {
+        // A capture point beyond the leg reach is clamped to hip ± x_max, and
+        // the "in trouble" saturation flag reports the clamp fired.
+        let cfg = default_config();
+        let limits = GaitLimits::from_config(&cfg, cfg.hip_height, cfg.target_speed);
+        let x_max = limits.x_max;
+        // CoM far ahead of the hip with forward motion: capture point is way out
+        // of reach.
+        let m = CaptureMeasure {
+            com_x: 500.0,
+            v_com: 300.0,
+            z_com: cfg.hip_height,
+        };
+        let plan = StepPlan {
+            x_max,
+            stopping: false,
+            capture_offset: 0.0,
+            measured: Some(m),
+        };
+        let hip_x = 0.0;
+        let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);
+        assert!(
+            (target - (hip_x + x_max)).abs() < 1e-2,
+            "clamped target={target} expected={}",
+            hip_x + x_max
+        );
+        // Direct saturation check on the unclamped capture point.
+        let raw = capture_point(m.com_x, m.v_com, 120.0, cfg.hip_height, cfg.gravity).unwrap();
+        assert!(
+            raw > hip_x + x_max,
+            "raw capture point {raw} should be out of reach"
+        );
+    }
+
+    #[test]
+    fn test_capture_saturation_reported_through_step_lower_body() {
+        // With a measured CoM far outside the workspace, `step_lower_body`
+        // reports `capture_saturated == true` (the "in trouble" signal) and
+        // still clamps the swing target into reach. Without any measurement it
+        // stays false (pure Raibert fallback, existing sandbox behavior).
+        let mut cfg = default_config();
+        cfg.target_speed = 350.0;
+        let mut state = ResolverState::new(&cfg);
+        let dt = 1.0 / 60.0;
+        let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+        // Cruise to speed without a measurement first.
+        for _ in 0..((stride * 4.0) / dt) as usize {
+            step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        }
+        assert!(state.hip_vel.x > 100.0, "not cruising");
+
+        // Fallback: no measurement ⇒ never "in trouble".
+        let (_p, d0) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        assert!(!d0.capture_saturated, "fallback must not report saturation");
+
+        // Measured CoM pulled far off the hip ⇒ balance law demands an
+        // unreachable foot ⇒ saturation fires.
+        state.measured = Some(CaptureMeasure {
+            com_x: state.hip_pos.x + 1000.0,
+            v_com: 400.0,
+            z_com: cfg.hip_height,
+        });
+        let (_p, d1) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        assert!(d1.capture_saturated, "must report the in-trouble clamp");
+        // The balance-law demand is unreachable, so the per-leg swing target
+        // must sit on the reach boundary (this is the clamp the flag reports).
+        let x_max = d1.x_max;
+        for leg in [&state.left, &state.right] {
+            let target = leg.swing_to.x;
+            assert!(
+                (target - state.hip_pos.x).abs() <= x_max + 1e-2,
+                "swing target escaped the reach window: {target} vs hip {}",
+                state.hip_pos.x
+            );
+        }
     }
 
     #[test]
