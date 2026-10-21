@@ -1,0 +1,336 @@
+# Raibert XPBD 2D Walker — Required Changes
+
+Concrete changes needed to bring the current implementation up to the converged design in
+[`raibert-xpbd-2d-walker.md`](raibert-xpbd-2d-walker.md). Each row is `Current → Change`.
+
+> **Concepts reference** (capture point vs Raibert neutral point, hip vs CoM) — §0.
+
+---
+
+## 1. Balance reference — the CoM and the P3-heavy hip coincide
+
+- **Current:** resolver runs at the hip (`state.hip_pos`); there is no whole-body CoM
+  anywhere in the code.
+- **Change:** compute whole-body CoM from all character particles × mass
+  (`m_i = 1/inv_mass`, including arms), plus EMA-filtered `v_CoM` and `z_CoM` (height
+  above the floor). With the §7 **P3-heavy** budget the CoM lands essentially at the
+  hip, so the resolver's hip reference and the measured CoM coincide — loops 1 & 2 can
+  use the hip as the balance origin *and* the whole-body CoM as the exact quantity.
+  `resolver.rs` / new measurement module + system; mass values from
+  `v10.character.json`.
+
+## 2. Loop 1 — capture point replaces the Raibert neutral point
+
+- **Current:** `plan_target_x` uses `x_target = v·Ts/2 + kv·(v − v_desired)` (heuristic,
+  hip-based).
+- **Change:** `x_foot = x_CoM + (v_CoM − v_des) / ω₀`, `ω₀ = √(g/z_CoM)` — the capture
+  point shifted by the desired CoM velocity, so speed regulation is implicit (a target
+  shift, not a separate gain). Recompute every frame during swing; reachability clamp
+  from leg geometry (clamping = "in trouble" signal, log it). `resolver.rs`.
+  (Raw balance-only form is `x_capture = x_CoM + v_CoM/ω₀`; see §0.)
+
+## 3. Loop 1 — scripted swing profile replaces the parabolic arc
+
+- **Current:** swing is a parabolic `step_height` arc (`step_leg`: linear x/y lerp +
+  `lift = (t·(1−t)·4)·step_height`, [`resolver.rs:1073`](../examples/game_lib/src/lower_body/resolver.rs:1073)).
+- **Change:** scripted profile lift (knee flex) → advance (hip flex) → extend (knee
+  extend) → plant; loop 1 sets only the touchdown x. `resolver.rs`.
+
+**Default (chosen): 3-phase foot-space piecewise profile.** Split normalized swing phase
+`s ∈ [0,1]` into three segments, each a foot-space path through the existing
+`solve_leg_ik`:
+- **Lift** (s 0 → ~0.25): knee flex, foot rises steeply, little x advance — clears the
+  toe before moving forward.
+- **Advance** (s ~0.25 → ~0.8): foot travels forward at roughly constant height (hip
+  flexion), covering the step length.
+- **Extend / plant** (s ~0.8 → 1.0): knee extends, foot descends to the touchdown x
+  `x_foot = x_CoM + (v_CoM − v_des)/ω₀`, decelerating to a gentle plant.
+
+**Why a single symmetric parabola fails:** (1) clearance can't lead advance — it is at
+floor height at t=0 and starts moving forward while still scraping; (2) no extension/
+plant phase — the foot arrives descending at full swing speed = the "random touchdown
+kick"; (3) constant horizontal rate means a hard stop at the plant point; (4) foot-space
+shape doesn't encode the knee-flex/hip-flex/knee-extend choreography that actually clears
+the toe. Cautions: keep segments C¹-continuous (match position + velocity at junctions,
+blend the parabolas) so segment joints don't reintroduce a kick; the cycloid foot path is
+a one-segment alternative to piecewise parabolas.
+
+## 4. Loop 2 — virtual-leg thrust replaces the displacement spring
+
+- **Current:** `tick_vertical` is a resolver-internal displacement spring/integrator
+  (`Δl = Δl_prev + k_p·(h_desired − h_apex)`) with a vertical FSM.
+- **Change:** thrust = knee/ankle extension through angular constraints during stance
+  (bones are rigid; extension pushes CoM up via ground reaction); apex-height feedback
+  (predicted apex vs target height scales next stance's extension — energy-based,
+  mass-adaptive); flight = knee flex/retract; landing = controlled flexion (absorb).
+  `resolver.rs` + leg-PD angular channel.
+
+### The law is unchanged — the actuator and the measurement change
+
+The algorithm **is** exactly `Δl = Δl_prev + k_p·(h_desired − h_apex)`
+([`update_delta_l`](../examples/game_lib/src/lower_body/resolver.rs:498)) — a per-hop
+integrator that learns the baseline stroke needed to fight gravity (no mass, no
+stiffness by construction). We keep that verbatim. What loop 2 actually changes is the
+**delivery** of that stroke and the **measurement** that closes the loop:
+
+- **Measurement — measured CoM apex, not the resolver's own ballistic model.** Today the
+  whole vertical loop closes *inside* `tick_vertical`: `Flight` integrates
+  `hip_vel.y -= g·dt` in the resolver's own model and latches `h_apex_prev` from that
+  internal trajectory ([`resolver.rs:607`](../examples/game_lib/src/lower_body/resolver.rs:607)).
+  The real XPBD CoM apex is never read, so when compliance / contact / terrain make the
+  physics differ from the model, the loop has no idea. Change: measure the physics CoM
+  apex (ties to §1) and feed that to the integrator.
+- **Delivery — already angular-only, but a *hip-height target*, not a leg stroke.**
+  There is **no external hip pin** in normal walking: the constraint queue is gated off
+  and commented out ([`hip_pin.rs:722`](../examples/game_lib/src/lower_body/hip_pin.rs:722)
+  `if !ext_pin { continue; }`, queue call at
+  [`hip_pin.rs:739`](../examples/game_lib/src/lower_body/hip_pin.rs:739)); the pin is
+  air-control assist only. What reaches the physics today: the vertical spring's
+  `state.hip_pos.y` becomes the leg PD's `hip_target` y
+  ([`hip_pin.rs:850`](../examples/game_lib/src/lower_body/hip_pin.rs:850),
+  [`hip_pin.rs:881`](../examples/game_lib/src/lower_body/hip_pin.rs:881)), and the leg PD
+  converts those foot/knee/hip targets into angular joint commands. So the vertical loop
+  *is* delivered angular-only — but **indirectly**, by asking the leg's angular joints to
+  hold a kinematic pose the resolver computed. In `Load`/`Launch` the stroke is banked as
+  a crouch depth (`target = (stand − Δl)` through `regulate_height`,
+  [`resolver.rs:562`](../examples/game_lib/src/lower_body/resolver.rs:562)) and spent as a
+  fixed vertical hip acceleration (`hip_vel.y += (launch_accel − g)·dt`,
+  [`resolver.rs:578`](../examples/game_lib/src/lower_body/resolver.rs:578)) — a kinematic
+  hip trajectory. Change: spend `Δl` **directly** as knee/ankle **extension** during
+  stance (an angular push-off), not as a hip setpoint the leg must chase; the leg pushes
+  the ground, the ground pushes the CoM up, and the learned `Δl` scales *next stance's
+  extension*.
+- **Phase behavior — a virtual leg, not a hip-height setpoint.** `regulate_height` is a
+  critically-damped spring on the resolver's *internal* `state.hip_pos.y`
+  ([`resolver.rs:511`](../examples/game_lib/src/lower_body/resolver.rs:511)); it never
+  creates an XPBD constraint — it only sets the hip target the leg PD chases. During
+  stance it fights contact through that indirect chase, and in flight there is nothing to
+  push on. Change: stance = controlled push-off (extend), flight = knee flex/retract
+  (shorten the virtual leg so it clears), landing = controlled flexion (absorb the
+  touchdown) — all as angular-constraint targets, no hip setpoint.
+
+### Why these changes are needed
+
+1. **The loop is closed on a model, not on the physics.** `h_apex_prev` is latched from
+   the resolver's internal ballistic flight, so the integrator learns nothing about the
+   real ground reaction. If the leg's compliance or contact timing makes the actual CoM
+   apex differ, the stroke keeps being wrong and no signal exists to fix it. This is the
+   same open-loop problem as the current walk's stance slide: the resolver *asks* for a
+   height, the physics does something else, and nothing measures the difference.
+2. **A fixed launch accel is not a leg stroke.** A real run's height is set by *how far*
+   the leg extends into the ground during stance, not by a velocity kick applied to a hip
+   setpoint the leg chases. The `Δl` integrator's currency is displacement, so spending
+   it as a constant hip acceleration (then handing that pose to the leg PD) discards the
+   learned stroke; spending it as next stance's knee/ankle **extension** keeps the
+   currency and is automatically mass-adaptive (a heavier body just needs the same
+   extension, the ground reaction scales).
+3. **The hip-height setpoint has no phase authority.** `regulate_height` commands the
+   resolver's internal hip height, which the leg PD only chases through angular joints;
+   in stance it fights contact *indirectly*, and in flight there is nothing to push on.
+   The virtual leg splits the phases: extend in stance (ground reaction), retract in
+   flight (clearance), flex on landing (absorb energy). Each phase is a different
+   angular-constraint target, all through the existing leg-PD channel.
+4. **Measurement is at the hip, and the §7 budget makes that exact.** Apex is read at
+   `state.hip_pos.y`; with P3 heavy the CoM is at the hip, so the hip-based apex is the
+   CoM apex. (Arms and a leaning stick still offset it a little, so the whole-body CoM
+   of §1 remains the exact reference, but the divergence the old budget worried about is
+   gone by construction.)
+
+## 5. Loop 3 — measured world-frame attitude, flight-gated, not replayed
+
+- **Current:** `tick_attitude` is the resolver's own inverted-pendulum PD replayed as a
+  target (`pin.theta`), continuous, pelvis-referenced (`P1_P2_P3` pivot). Physics
+  delivery is already angular-only: `tick_loop3_angular` queues a
+  `CharacterAngularConstraintEvent` on the `P1_P2_P3` joint with `free_mask: 0b111`
+  (all three frame particles free to receive torque — **no particle pin**)
+  ([`hip_pin.rs:915`](../examples/game_lib/src/lower_body/hip_pin.rs:915)). But the angle
+  it commands is the resolver's own replayed model angle, not a measurement.
+- **Change:** PD on `(theta_cmd − theta)` and `omega` using the **measured** world-frame
+  torso angle (from hip→shoulder vector, filtered); absolute world-frame target (upright
+  + small scripted lean); keep the angular-constraint delivery (`P1_P2_P3`, `free_mask`
+  0b111 — nothing to change there); **gated mainly to flight** (in stance, foot placement
+  + leg already give attitude authority). `resolver.rs` + `hip_pin.rs`.
+
+## 6. Gait clock — contact-gated authority (additive, not a replacement)
+
+- **Current:** the resolver's per-leg `Stance/Swing` clock is a pure config-timer — `Stance`
+  holds the foot at `plant_pos` for `stance_duration_ts`, `Swing` flies for
+  `swing_duration_ts` ([`step_leg`](../examples/game_lib/src/lower_body/resolver.rs:1021)).
+  It is a kinematic pose generator: it *assumes* the foot is planted whenever the timer
+  says Stance, and never checks whether contact is real. Loops are not gated by real
+  contacts. Delivery is already angular (leg PD targets + `P1_P2_P3` joint).
+- **Change (additive — keep the resolver's `Stance/Swing` as the pose state machine):** add
+  a foot-contact event layer that **gates loop authority** to real ground truth and
+  **corrects drift** when the physics disagrees with the timer:
+  - **Loop 2 thrust only while the foot is genuinely in contact** (there must be a ground
+    reaction to push against) — a timer that says Stance while the foot is airborne makes
+    loop 2 extend a leg against nothing.
+  - **Loop 1 foot placement only during actual swing**; **loop 3 mainly during actual
+    flight** (ungated continuous loops interfere).
+  - **Correct the timer:** a leg whose foot is still sliding gets no thrust authority; a
+    leg that left the ground early exits Stance on lift-off, not on `stance_duration_ts`;
+    a long flight (from loop 2's vertical control) extends the swing until the foot really
+    touches. This is the fix for the stance slide — the resolver currently *asks* for a
+    pose the physics doesn't deliver, and nothing measures the difference.
+  - Gating stays angular-only — each phase changes *which angular-constraint target* is
+    active (stance thrust = knee/ankle extension, flight = retract + attitude, swing =
+    foot placement), never a particle pin. `hip_pin.rs` (or a contact system) +
+    `resolver.rs`.
+
+## 7. Body design — P3-heavy hip, light upper body, modest waist (asset)
+
+**Design rule: make P3 (the hip) the heavy particle and keep the rest light.** The
+resolver runs at `hip_pos`; the capture-point and neutral-point theories are written in
+terms of hip = CoM. With the mass concentrated at P3, the measured CoM sits essentially
+at the hip, so loops 1–2 can measure the hip directly and the CoM≈hip divergence the
+user worried about disappears by construction. The upper body is a *rigid stick* the
+spine PD holds upright — it carries almost no load-bearing mass, so it should be light.
+
+- **Current:** P3 = 0.05 (weight 20, already heavy); P0/P1/P2 = 1.0 (weight 1);
+  knees = 0.2 (weight 5); arms/feet = 1.0.
+- **Change (mostly a *tuning* refinement, not a rebuild):**
+  - **P3 (hip) stays heavy** — the single dominant mass. This is what makes a
+    knee/ankle extension (loop 2) move the CoM, and makes the resolver's hip-based
+    balance measurement exact (the capture point then needs no CoM correction).
+  - **P2 (waist) a bit heavier than P1/P0** — gives the `P1_P2_P3` joint (pivot at
+    P2) enough inertia contrast to rotate the light upper stick about the heavy hip
+    when airborne (loop 3 attitude authority).
+  - **P0/P1 (head-bottom / chest) light** — the spine PD's vertical-hold constraint
+    is more than enough to keep a light stick upright; low inertia means its own
+    motion disturbs balance less.
+  - **Arms low but nonzero** (pivot on P1) — arm mass must stay well below the
+    spine's hold authority so a light P1 is stable; nonzero so the arm PD has
+    something to act on.
+  - Spine angular constraints stiff + critically damped (zeta ≈ 1); rigid bones
+    near-zero compliance. `v10.character.json`.
+
+---
+
+## Not changing (already aligned)
+
+- Actuation is already angular-only (no external pin in normal walking; pin is
+  air-control assist + telemetry). Ground is the only external force — matches the doc.
+
+---
+
+## 0. Concepts reference — capture point, Raibert neutral point, hip vs CoM
+
+### Raibert neutral point (the heuristic)
+
+Raibert's original hopper (1986) placed the foot at a "neutral point" ahead of the
+hip proportional to horizontal speed, plus a velocity correction:
+
+```
+x_foot = x_hip + (v · Ts)/2 + kv · (v − v_desired)
+```
+
+- `(v · Ts)/2` — the **forward offset**: where the foot lands if the body just coasts
+  at speed `v` for the stance duration. This is the "neutral" point that holds speed.
+- `kv · (v − v_desired)` — **feedback correction**: faster than desired → step further
+  ahead; slower → step closer/behind. Regulates speed toward `v_desired`.
+
+Measured at the **hip**. That works only because Raibert's robot hip ≈ CoM by
+construction (point mass on a massless leg). It is a **tuned heuristic** — the forward
+offset was hand-derived from observing how far the hopper needed to step to hold speed.
+It has **no notion of falling**: it regulates speed, and balance is an *emergent* side
+effect ("steps land in roughly the right place"). If the target lands where the leg
+can't reach, it commands it anyway and the character collapses silently.
+
+### Capture point (the LIPM exact solution)
+
+Derived from the **Linear Inverted Pendulum Model**: CoM at constant height `z` on a
+massless leg. The dynamics are linear with natural frequency `ω₀ = √(g/z)`, and the
+exact solution to "where must the foot go so the CoM comes to rest directly above it" is:
+
+```
+x_capture = x_CoM + v_CoM / ω₀
+```
+
+Formalized by Kajita (2001, "extrapolated CoM") and Pratt et al. (2006, "capture
+point"). Placing the foot at `x_capture` brings the CoM to zero velocity directly
+above the contact in exactly one step — the **boundary between capturability and
+falling**, computed, not tuned.
+
+The two formulas look near-identical (`x + v·√(h/g)` vs `x + v/ω₀`) — because Raibert's
+neutral point was an approximation of exactly this quantity. The upgrade is not the
+formula; it is everything that comes with the derivation:
+
+| | Raibert neutral point | Capture point (LIPM) |
+|---|---|---|
+| Origin | tuned heuristic from observation | exact solution of the template dynamics |
+| Reference point | hip (assumes hip ≈ CoM) | true whole-body CoM (measured) |
+| Pendulum length | fixed assumed h | measured `z_CoM` — adapts to crouch, lean, thrust |
+| Meaning of result | "step roughly here to hold speed" | "step exactly here to stop the fall" |
+| Failure awareness | none — steps saturate silently | reachability of `x_capture` IS the balance verdict |
+| Speed regulation | explicit `kv` on velocity error | implicit (desired CoM velocity enters via the target) |
+
+### Hip vs CoM — and how they relate
+
+- **Hip** = the joint where the legs attach to the body — a physical particle (`P3` in
+  this codebase). A single point you can read directly.
+- **CoM** = the mass-weighted average of ALL particle positions:
+  `CoM = Σ mᵢ·pᵢ / Σ mᵢ` — a property of the whole body, including torso lean, arms,
+  head, and any carried props.
+
+Why it matters: Raibert could use the hip because his hip ≈ CoM by construction. On our
+character, **torso lean shifts the CoM relative to the hip exactly when balance
+matters** — measure at the hip and loop 1 steps for a mass distribution that no longer
+exists. The CoM always works, costs a few lines, and stays correct if the body changes.
+
+The three loops decompose 2D template dynamics around the CoM:
+
+- **Loops 1–2 = translation of the CoM** (x, z). The capture point uses `CoM_x`,
+  `v_CoM`, `z_CoM`.
+- **Loop 3 = rotation about the CoM** (pitch) — but attitude uses the *measured torso angle*
+  `theta` (hip→shoulder vector), a different object than the CoM.
+- The CoM is momentum bookkeeping (Koenig decomposition), **not a joint** — actuation
+  happens at the hip/knee/ankle; effects are referenced to the CoM.
+
+### Does CoM–hip x-divergence still threaten the capture point?
+
+**No for the formula, yes for two secondary channels.** The capture point is written in
+terms of the whole-body CoM, so it is exact for *any* CoM–hip offset — the foot is
+placed relative to the CoM wherever it is. That is the entire upgrade over the hip-based
+Raibert neutral point (which genuinely broke under divergence). But divergence still
+matters through two secondary effects that the balance law alone does not cover:
+
+1. **Reachability margin.** The leg is anchored at the hip while the target is
+   CoM-relative, so the required leg extension is `x_foot − x_hip =
+   (x_CoM − x_hip) + (v_CoM − v_des)/ω₀`. A large CoM–hip offset adds directly into the
+   reachable envelope and shrinks the margin before the reachability clamp fires
+   (clamping = "in trouble", §2). It is a margin reduction, not a correctness failure.
+2. **Attitude torque load.** Ground reaction at the foot has a moment arm to the CoM
+   when the CoM is displaced from the hip, so supporting the CoM requires *sustained
+   torque*, not just a vertical reaction. That is rotation — the capture point
+   (translation law) does not cover it; loop 3 does, and a large offset can saturate it
+   (the limit case is the angular-momentum tripwire, design §5.7).
+
+Net: the P3-heavy budget (§7, CoM ≈ hip) and the whole-body CoM measurement (§1) are
+**complementary, not redundant** — the measurement makes the balance law exact; the
+budget keeps the two secondary couplings (reach margin, attitude load) small.
+
+### Why the capture point looks simpler — and where the desired velocity goes
+
+**The raw capture point is a balance law, not a speed law.** It answers one question:
+"where must the foot go so the CoM comes to rest above it?" That is *stopping the fall*.
+It deliberately has **no `v_desired`** because it isn't trying to move anywhere — speed
+control is a separate job layered on top.
+
+**It looks simpler because LIPM is linear.** The inverted pendulum at constant height
+`z` has one natural frequency `ω₀ = √(g/z)`, so the exact answer is a one-line closed
+form `x + v/ω₀`. Raibert's formula was doing **two jobs with two tuned gains** (the
+forward-coast offset `v·Ts/2` and the speed correction `kv·(v−v_des)`); the capture
+point does **one job exactly**.
+
+**Where `v_desired` enters (implicit speed regulation):** to cruise at `v_des` instead
+of stopping, you shift the placement target by the desired velocity:
+
+```
+x_foot = x_CoM + (v_CoM − v_des) / ω₀
+```
+
+Same shape as Raibert (`hip + (v·Ts)/2 + kv·(v−v_des)`), but the derivation shows the
+forward-coast constant is not the stance time — it is the **pendulum time constant
+`1/ω₀ = √(z/g)`**, and the same constant serves as the velocity gain. Two heuristics
+collapse into one measured quantity (`z_CoM`). That is why "desired CoM velocity enters
+via the target" (design §5.3) — it is a target shift, not a separate gain term.
