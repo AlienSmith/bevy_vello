@@ -136,20 +136,50 @@ stiffness by construction). We keep that verbatim. What loop 2 actually changes 
    of §1 remains the exact reference, but the divergence the old budget worried about is
    gone by construction.)
 
-## 5. Loop 3 — measured world-frame attitude, flight-gated, not replayed
+## 5. Loop 3 — measured world-frame attitude, **leg-delivered**, not replayed
 
 - **Current:** `tick_attitude` is the resolver's own inverted-pendulum PD replayed as a
   target (`pin.theta`), continuous, pelvis-referenced (`P1_P2_P3` pivot). Physics
-  delivery is already angular-only: `tick_loop3_angular` queues a
-  `CharacterAngularConstraintEvent` on the `P1_P2_P3` joint with `free_mask: 0b111`
-  (all three frame particles free to receive torque — **no particle pin**)
-  ([`hip_pin.rs:915`](../examples/game_lib/src/lower_body/hip_pin.rs:915)). But the angle
-  it commands is the resolver's own replayed model angle, not a measurement.
-- **Change:** PD on `(theta_cmd − theta)` and `omega` using the **measured** world-frame
-  torso angle (from hip→shoulder vector, filtered); absolute world-frame target (upright
-  + small scripted lean); keep the angular-constraint delivery (`P1_P2_P3`, `free_mask`
-  0b111 — nothing to change there); **gated mainly to flight** (in stance, foot placement
-  + leg already give attitude authority). `resolver.rs` + `hip_pin.rs`.
+  delivery was angular-only: `tick_loop3_angular` queued a
+  `CharacterAngularConstraintEvent` on the `P1_P2_P3` joint with `free_mask: 0b111`.
+  But the angle it commanded was the resolver's own replayed model angle, not a
+  measurement — and the joint is the wrong actuator.
+- **Why the actuator is wrong (the correction to this section):** the body above `P3` is a
+  straight, stiff stick (`PH–P0–P1–P2–P3` collinear), and the only external forces on it
+  are gravity, foot collision and ground friction. The stick's world verticality is
+  therefore decided at the **hip joints `P2–P3–P40` / `P2–P3–P41`**, not at the waist
+  `P1–P2–P3`. Raibert's loop 3 has no concept of `P1` at all. Two additional facts make
+  the waist the wrong lever: (a) the stick is rigid, so bending the waist *folds* the
+  torso rather than tilting it as a unit; (b) the two legs apply opposite torques to the
+  stick, so a leg-driven correction swings the legs forward/backward instead of folding
+  the upper body.
+- **Change (implemented):**
+  - **`P1–P2–P3` is posture only.** `tick_loop3_angular` now commands `theta = 0.0` — hold
+    `P1`/`P2`/`P3` collinear so the waist never folds. No model replay, no lean command.
+  - **Loop 3 rides the leg PD.** The measured world-frame attitude (hip→shoulder, EMA
+    filtered, §1) feeds [`attitude_lean_pd`](../examples/game_lib/src/lower_body/resolver.rs:736),
+    which returns a *lean of the world-upright reference axis* (radians, not torque):
+    `lean = bias + Kp·(bias − θ_meas) − Kd·ω_meas`, clamped to `±attitude_max_angle`.
+  - **Delivery point:** [`calculate_leg_pd`](../examples/game_lib/src/character/leg_pd.rs:108)
+    already aims the thigh at a world-upright axis when `upright_spine_reference` is on
+    (the angular-only walking mode). That axis is now rotated by
+    `LimbConfig::upright_reference_lean`, so a forward-leaning stick gets a backward leg
+    reference and the stance legs push it upright — delivered through
+    `P2–P3–P40`/`P2–P3–P41`, exactly where the physics says it belongs.
+  - **Gating:** `attitude_enabled && !external_pin && grounded && measured.n > 0`.
+    Grounded-only means **flight is ballistic** — no contact, no leg authority, so the
+    reference is held straight and the stick keeps its angular momentum. The external pin,
+    when active, already owns the frame pose (mid-air assist).
+  - **New knobs:** `HipPinParams::attitude_lean_kp` (0.5) / `attitude_lean_kd` (0.03),
+    env `ATT_LEAN_KP` / `ATT_LEAN_KD`. `attitude_compliance`/`attitude_zeta` now only
+    govern the waist posture hold and the pinned path.
+  - **What `tick_attitude` still does:** the resolver's internal model (whole-stick lean
+    about `P3`, no `P1`) is kept — it is the *model*, not the delivery. It still drives the
+    `P2`-centred rigid-frame path used by the external pin. Its output is no longer
+    replayed into the walking path.
+- **Verification:** acceptance is the relaxed bar — no weird behaviour, no physics
+  explosion, hip advancing in +x, and a readable walk (swing foot lifting clear of the
+  ground and travelling from behind the hip to ahead of it).
 
 ## 6. Gait clock — contact-gated authority (additive, not a replacement)
 

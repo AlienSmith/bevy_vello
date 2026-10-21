@@ -1080,10 +1080,11 @@ fn hip_pin_ui(
             ui.colored_label(egui::Color32::YELLOW, "live P1/P2/P3 unavailable");
         }
 
-        // Loop 3: angular-only P1_P2_P3 drive when the external pin is off.
+        // Loop 3: delivered through the leg PD's world-upright reference axis.
+        // `P1_P2_P3` is only held straight (posture), never used as the actuator.
         ui.checkbox(
             &mut params.attitude_enabled,
-            "loop 3: angular attitude (P1_P2_P3)",
+            "loop 3: leg-delivered attitude",
         );
         let rest_angle = rest_sin.atan2(rest_cos).to_degrees();
         ui.colored_label(
@@ -1100,11 +1101,13 @@ fn hip_pin_ui(
             ),
         );
         ui.add(
-            egui::Slider::new(&mut params.attitude_compliance, 1e-9..=1e-5)
-                .logarithmic(true)
-                .text("loop-3 compliance"),
+            egui::Slider::new(&mut params.attitude_lean_kp, 0.0..=2.0)
+                .text("loop-3 lean Kp (leg ref)"),
         );
-        ui.add(egui::Slider::new(&mut params.attitude_zeta, 0.0..=2.0).text("loop-3 zeta"));
+        ui.add(
+            egui::Slider::new(&mut params.attitude_lean_kd, 0.0..=0.2)
+                .text("loop-3 lean Kd (leg ref)"),
+        );
         ui.add(
             egui::Slider::new(&mut params.attitude_target_bias, -0.5..=0.5)
                 .text("loop-3 target bias (rad)"),
@@ -1113,6 +1116,13 @@ fn hip_pin_ui(
             egui::Slider::new(&mut params.attitude_max_angle, 0.0..=1.3)
                 .text("loop-3 max lean (rad)"),
         );
+        ui.label("P1_P2_P3 posture hold (external pin / waist stiffness)");
+        ui.add(
+            egui::Slider::new(&mut params.attitude_compliance, 1e-9..=1e-5)
+                .logarithmic(true)
+                .text("waist hold compliance"),
+        );
+        ui.add(egui::Slider::new(&mut params.attitude_zeta, 0.0..=2.0).text("waist hold zeta"));
         ui.separator();
         ui.label("Leg angular solver (world-upright reference when pin off)");
         ui.add(

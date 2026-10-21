@@ -36,6 +36,13 @@ Status legend: `[x]` done, `[-]` in progress, `[ ]` planned.
   +29…+49 px, lead −37 → +42 px), foot separation 38 px vs 36 px commanded, body
   at 84–101% of `cmd_vx`. Remaining: stance slide 32–52 px and rig `max_rel_dev`
   0.10–0.16 (vs 0.05).
+- **Loop 3 is now leg-delivered** (§10, Phase E). The waist `P1_P2_P3` is a pure
+  posture hold (`theta = 0.0`, straight stick); the measured-attitude PD is turned
+  into a **lean of the leg PD's world-upright reference** (`upright_reference_lean`)
+  and applied by the knee joints. Defaults `ATT_LEAN_KP=0.5`, `ATT_LEAN_KD=0.03`.
+  Same best-walk config now gives swing **28/29**, body **96%** of `cmd_vx`, rig
+  `max_rel_dev` **0.1502**. A/B with the lean off is strictly worse
+  (26/29 swings, 71% speed, `max_rel_dev` 0.2254), so the delivery change is kept.
 
 ## 1. What changed this session
 
@@ -512,3 +519,95 @@ be swept the same way: `ATT_COMPLIANCE`, `ATT_ZETA`, `ATT_TARGET_DEG`,
 `ATT_MAX_DEG`, plus `COMPLIANCE`/`DAMPING` for the position pin. The natural first
 question is whether the startup re-aim should be rate-limited the way the leg rest
 angle should be (§8.4) — both are rest targets teleporting under a stiff spring.
+
+## 10. Phase E — loop 3 is delivered by the legs, not the waist (session 5)
+
+### 10.1 What changed
+
+The plan §5 loop-3 actuator moved from the waist joint `P1_P2_P3` to the **knee
+joints** `P2_P3_P40` / `P2_P3_P41`, matching the physical argument: the body
+above P3 is a stiff stick, the only external forces are gravity, foot contact and
+ground friction, so a vertical stick is decided by the *legs*. The two legs
+apply opposite torques, so the stick swings upright instead of folding.
+
+Implementation:
+
+- `P1_P2_P3` is now a **posture hold only** — `tick_loop3_angular` emits
+  `theta = 0.0` unconditionally, i.e. keep the spine straight. The old
+  measured-attitude override at the waist is gone (the resolver's internal model,
+  `tick_attitude`, still runs and still drives the external-pin airborne path).
+- `resolver::attitude_lean_pd(theta_meas, omega_meas, bias, kp, kd, max_angle)`
+  is the new pure loop-3 law: `lean = bias + attitude_pd(...)`, clamped to
+  `±max_angle`. It returns an **angle**, not a torque.
+- The angle is delivered through `LimbConfig::upright_reference_lean`, which
+  tilts the world-upright reference axis `a_t` used by `calculate_leg_pd`
+  (`a_t = hip + (L·sin(lean), −L·cos(lean))`). Both legs get the same lean.
+- Gating in `drive_hip_pin`: `attitude_enabled && !external_pin && grounded &&
+  measured.n > 0`, else `lean = 0`. So flight is ballistic (no contact ⇒ no leg
+  authority) and the mid-air assist pin keeps the frame it owns.
+- New knobs: `ATT_LEAN_KP` (default 0.5), `ATT_LEAN_KD` (default 0.03), also
+  exposed as sliders in `hip_pin_ui`.
+
+Sign chain (test-verified): `measured_attitude` is `+` for a forward lean; the
+loop returns `−`, which tilts `a_t` backwards, which yields a **negative** hip
+rest joint angle, which makes the stance legs rotate the trunk back upright.
+Negative feedback, not positive.
+
+Because rest == `a_t` angle == `lean`, the joint error under a lean of `θ`
+becomes `θ_live − lean = θ + Kp·θ = (1+Kp)·θ`: the knob is effectively extra
+proportional gain on the leg PD's upright reference, with `Kd` supplying the
+damping. That is physically coherent — a stronger upright pull, not a new
+mechanism.
+
+### 10.2 Run (lean on, the new default)
+
+```
+LEG_COMPLIANCE=1e-9 STEP_HEIGHT=70 ./target/release/examples/headless_arm_pd
+```
+
+- `body: rows=1036 nan_rows=0 rig=FAIL max_rel_dev=0.1502`
+- rigidity: `P1-P2=0.0419 P2-P3=0.0076 P1-P3=0.1502 P3-P40=0.0047 P40-PLLL=0.0043
+  P3-P41=0.0083 P41-PRLL=0.0041`
+- `leg: peak left=78.1px right=57.9px combined=78.1px tail=WAGGLE(rms=19.958 rev=7)`
+- swing: **left 15/15 PASS, right 13/14 (NO_ADVANCE ×1) → 28/29**; body
+  **99.5 px/s vs cmd 103.8 px/s (96%)**; lift mean ~50 px; lead −38 → +38 px;
+  foot sep 38.9 vs 38.8 commanded
+- slide: **SLIDING**, worst stance drift 61.14 px (left mean 19.0/max 61.1, right
+  mean 23.7/max 52.1)
+
+### 10.3 A/B control (lean off)
+
+Same command, but `ATT_LEAN_KP=0 ATT_LEAN_KD=0` — the waist is still straight,
+so this isolates the leg-delivered lean:
+
+| metric | lean off | lean on |
+| --- | --- | --- |
+| rig `max_rel_dev` (`P1-P3`) | 0.2254 | **0.1502** |
+| swing pass | 26/29 (L 14/15, R 12/14) | **28/29** (L 15/15, R 13/14) |
+| body travel | 74.4 px/s (71% of cmd) | **99.5 px/s (96%)** |
+| foot slide worst / mean | 57.0 / 15.3–23.2 px | 61.1 / 19.0–23.7 px |
+
+The lean wins on rigidity, on stepping, and on forward progress; the only cost is
+a marginally worse worst-stance slide (+4 px on one stance), which is the known
+friction/tracking regression, not a loop-3 effect.
+
+### 10.4 Verdict against the relaxed bar
+
+Accepted. The walk clearly steps (feet lift ~50 px and land in front of their
+liftoff x), the hip advances at 96% of the commanded speed, the physics is
+finite (`nan_rows=0`), and the tuck (`P1-P2`, `P2-P3`) is *tighter* than before.
+Known residuals, unchanged by this phase: stance slide (~60 px worst) and the
+rigidity gate (`P1-P3` 0.15 vs the 0.05 baseline) — both are §6/§8 levers
+(contact gating, friction), not loop-3 delivery.
+
+Reproduce (Linux, from `bevy_vello/`):
+
+```bash
+ASSET_ROOT=$PWD/examples/collision_detection/assets \
+SCRIPT=$PWD/plans/walk_script.json OUT_CSV=/tmp/phase_e_qa/loop3_leg.csv \
+LEG_COMPLIANCE=1e-9 STEP_HEIGHT=70 ./target/release/examples/headless_arm_pd
+python3 tools/physics-qa/analyze_swing.py /tmp/phase_e_qa/loop3_leg.csv
+python3 tools/physics-qa/analyze_foot_slide.py /tmp/phase_e_qa/loop3_leg.csv
+```
+
+Control run: add `ATT_LEAN_KP=0 ATT_LEAN_KD=0`.

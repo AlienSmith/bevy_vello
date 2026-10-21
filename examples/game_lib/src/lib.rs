@@ -53,11 +53,12 @@ pub use crate::{
         InputPlugin,
     },
     lower_body::{
-        compute_forward_target, compute_support_velocity, compute_v_max, compute_x_max,
-        drive_hip_pin, measure_body, reset_hip_pin, solve_leg_ik, tick_loop3_angular,
-        update_ground_support, BodyMeasurements, DebugInfo, GaitLimits, GaitPhase, GroundSupport,
-        HipPin, HipPinParams, LegState, LowerBodyConfig, LowerBodyController, LowerBodyInput,
-        LowerBodyParams, LowerBodyPose, LowerBodySandboxPlugin, ResolverState, VerticalPhase,
+        attitude_lean_pd, compute_forward_target, compute_support_velocity, compute_v_max,
+        compute_x_max, drive_hip_pin, measure_body, reset_hip_pin, solve_leg_ik,
+        tick_loop3_angular, update_ground_support, BodyMeasurements, DebugInfo, GaitLimits,
+        GaitPhase, GroundSupport, HipPin, HipPinParams, LegState, LowerBodyConfig,
+        LowerBodyController, LowerBodyInput, LowerBodyParams, LowerBodyPose,
+        LowerBodySandboxPlugin, ResolverState, VerticalPhase,
     },
 };
 

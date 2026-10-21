@@ -709,6 +709,46 @@ pub fn attitude_pd(theta: f32, omega: f32, theta_desired: f32, kp: f32, kd: f32)
     kp * (theta_desired - theta) - kd * omega
 }
 
+/// Loop-3 in its **leg-delivery** form: the PD output is not a torque about a
+/// waist joint, but the *lean of the leg PD's world-upright reference axis*.
+///
+/// The body above `P3` is a straight, stiff stick; the only external forces are
+/// gravity, foot contact and friction, so the stick's verticality is decided by
+/// the hip joints `P2–P3–P40/P41` — not by `P1–P2–P3`. Raibert's loop 3 has no
+/// concept of `P1` either. So the measured world-frame attitude (`theta_meas`,
+/// `omega_meas`) is delivered by tilting the reference axis the leg PD aims the
+/// thigh at:
+///
+/// ```text
+/// lean = bias + Kp · (bias − θ_meas) − Kd · ω_meas
+/// ```
+///
+/// i.e. exactly [`attitude_pd`] toward `bias`, plus `bias` added so the
+/// reference axis itself carries the correction: if the stick leans forward
+/// (`θ_meas > 0`) the legs aim *backward* (`lean < bias`) and push the stick
+/// upright, and vice-versa. This is a **position** command (radians), not an
+/// acceleration — the leg sprints resolve it against the contacts.
+///
+/// `bias` is the desired torso lean (radians, `+` = forward / `+x`). The result
+/// is clamped to `±max_angle` so a bad measurement can never command the legs
+/// to an impossible reference. Non-finite inputs degrade to `0.0` (straight).
+#[inline]
+pub fn attitude_lean_pd(
+    theta_meas: f32,
+    omega_meas: f32,
+    bias: f32,
+    kp: f32,
+    kd: f32,
+    max_angle: f32,
+) -> f32 {
+    let lean = bias + attitude_pd(theta_meas, omega_meas, bias, kp, kd);
+    if lean.is_finite() {
+        lean.clamp(-max_angle.abs(), max_angle.abs())
+    } else {
+        0.0
+    }
+}
+
 /// One tick of the loop-3 (attitude) controller: the inverted-pendulum EOM at
 /// the hip plus the PD, integrated with semi-implicit (symplectic) Euler.
 ///
@@ -5360,6 +5400,88 @@ mod tests {
         assert!(u_spin < 0.0 && (u_spin - (-kd * 2.0)).abs() < 1e-3);
         // At the setpoint with no spin the PD output is exactly zero.
         assert!(attitude_pd(0.0, 0.0, 0.0, kp, kd).abs() < 1e-6);
+    }
+
+    /// The leg-delivered loop-3 output: upright stick at the setpoint ⇒ the
+    /// reference axis stays where the bias puts it (no correction); a forward
+    /// lean ⇒ the reference tilts BACKWARD (negative) so the stance legs push
+    /// the torso upright; a backward lean ⇒ the reference tilts forward.
+    #[test]
+    fn test_attitude_lean_pd_signs_and_setpoint() {
+        let (kp, kd, max) = (0.5, 0.03, 0.25);
+
+        // At the setpoint with no spin there is nothing to correct: the output
+        // is exactly the bias (the reference axis itself).
+        assert!((attitude_lean_pd(0.0, 0.0, 0.0, kp, kd, max)).abs() < 1e-6);
+        assert!((attitude_lean_pd(0.1, 0.0, 0.1, kp, kd, max) - 0.1).abs() < 1e-6);
+
+        // Forward lean (θ > 0) ⇒ negative reference lean (legs aim backward).
+        let forward = attitude_lean_pd(0.2, 0.0, 0.0, kp, kd, max);
+        assert!(
+            forward < 0.0,
+            "forward lean must command a backward reference, got {forward}"
+        );
+        // Kp = 0.5 ⇒ half the error, and it is added to the zero bias.
+        assert!((forward + kp * 0.2).abs() < 1e-6);
+
+        // Backward lean (θ < 0) ⇒ positive reference lean.
+        let backward = attitude_lean_pd(-0.2, 0.0, 0.0, kp, kd, max);
+        assert!(
+            backward > 0.0,
+            "backward lean must command a forward reference, got {backward}"
+        );
+
+        // A non-zero bias moves the setpoint: at `θ_meas == bias` the PD error is
+        // zero, so the output is exactly the bias (the reference axis the legs
+        // should hold). A measurement off the bias produces a correction around
+        // it, scaled by Kp.
+        for bias in [-0.1_f32, 0.0, 0.1] {
+            let at_setpoint = attitude_lean_pd(bias, 0.0, bias, kp, kd, max);
+            assert!(
+                (at_setpoint - bias).abs() < 1e-6,
+                "bias={bias} is the setpoint: got {at_setpoint}"
+            );
+            let off = attitude_lean_pd(bias + 0.2, 0.0, bias, kp, kd, max);
+            assert!(
+                (off - (bias - kp * 0.2)).abs() < 1e-6,
+                "bias={bias}: forward error must correct backward around it: {off}"
+            );
+        }
+
+        // Spinning further forward damps the reference even at zero error.
+        let spinning = attitude_lean_pd(0.0, 2.0, 0.0, kp, kd, max);
+        assert!(
+            spinning < 0.0 && (spinning + kd * 2.0).abs() < 1e-6,
+            "positive spin must subtract kd·ω from the reference: {spinning}"
+        );
+    }
+
+    /// The reference lean is a *position* command (radians) and must stay inside
+    /// the attitude wall, degrade to straight on garbage input, and be exactly
+    /// zero-gain-invariant when `kp = kd = 0` (bias only).
+    #[test]
+    fn test_attitude_lean_pd_clamps_and_degrades() {
+        let max = 0.25;
+        // A large error saturates instead of commanding an impossible reference.
+        assert!((attitude_lean_pd(10.0, 0.0, 0.0, 1.0, 0.0, max) + max).abs() < 1e-6);
+        assert!((attitude_lean_pd(-10.0, 0.0, 0.0, 1.0, 0.0, max) - max).abs() < 1e-6);
+        // The clamp is symmetric and magnitude-based (a negative cap still works).
+        assert!((attitude_lean_pd(-10.0, 0.0, 0.0, 1.0, 0.0, -max) - max).abs() < 1e-6);
+        // No gains ⇒ bias only, whatever the measurement.
+        for theta in [-1.0, 0.0, 1.0] {
+            let out = attitude_lean_pd(theta, 5.0, 0.05, 0.0, 0.0, max);
+            assert!(
+                (out - 0.05).abs() < 1e-6,
+                "kp=kd=0 must be bias-only: {out}"
+            );
+        }
+        // Non-finite measurement / gains ⇒ straight reference, never NaN.
+        assert_eq!(attitude_lean_pd(f32::NAN, 0.0, 0.0, 0.5, 0.03, max), 0.0);
+        assert_eq!(
+            attitude_lean_pd(0.0, f32::INFINITY, 0.0, 0.5, 0.03, max),
+            0.0
+        );
+        assert_eq!(attitude_lean_pd(0.0, 0.0, 0.0, f32::NAN, 0.0, max), 0.0);
     }
 
     #[test]

@@ -32,7 +32,8 @@ use crate::lower_body::measure::{
     update_measurements, BodyMeasureFilter, BodyMeasurements, ParticleSample,
 };
 use crate::lower_body::resolver::{
-    step_lower_body, CaptureMeasure, GaitPhase, LowerBodyConfig, ResolverState, VerticalPhase,
+    attitude_lean_pd, step_lower_body, CaptureMeasure, GaitPhase, LowerBodyConfig, ResolverState,
+    VerticalPhase,
 };
 
 /// Runtime knobs for the hip pin, editable from the tuning UI.
@@ -72,7 +73,10 @@ pub struct HipPinParams {
     pub leg_max_angle_rate: f32,
     /// Enable loop-3 attitude control.
     pub attitude_enabled: bool,
-    /// Compliance of the loop-3 actuator (frame pin or `P1_P2_P3` joint).
+    /// Compliance of the loop-3 actuator when the external pin is active. In
+    /// the default (angular-only) mode loop 3 rides the leg PD instead, so this
+    /// is only used for the mid-air pin assist and for the `P1_P2_P3`
+    /// posture hold.
     pub attitude_compliance: f32,
     /// Damping ratio of the angular-only loop-3 joint (`1.0` = critical).
     pub attitude_zeta: f32,
@@ -80,6 +84,19 @@ pub struct HipPinParams {
     pub attitude_target_bias: f32,
     /// Hard cap on the commanded torso lean, radians.
     pub attitude_max_angle: f32,
+    /// Loop-3 proportional gain, forwarded to
+    /// [`attitude_lean_pd`](crate::lower_body::resolver::attitude_lean_pd).
+    ///
+    /// Loop 3 is delivered by tilting the leg PD's world-upright reference axis,
+    /// so this gain is in "radians of leg-reference lean per radian of measured
+    /// torso error". `0.5` = half correction (gentle). Raise toward 1.0+ to
+    /// stiffen the torso, but watch for foot chatter — the legs are the only
+    /// actuator and the correction competes with the swing/foot-placement
+    /// targets.
+    pub attitude_lean_kp: f32,
+    /// Loop-3 derivative gain (radians of leg-reference lean per rad/s of
+    /// measured torso rate). Damps the reference tilt; `0.0` disables.
+    pub attitude_lean_kd: f32,
 }
 
 impl HipPinParams {
@@ -87,8 +104,9 @@ impl HipPinParams {
     /// `COMPLIANCE`, `DAMPING`, `HIP_DROP`, `SUPPORT_SHARE`, `FEEDBACK`,
     /// `EXTERNAL_PIN`, `AIR_CONTROL`, `LEG_COMPLIANCE`, `LEG_ZETA`,
     /// `LEG_ALPHA`, `LEG_MAX_ANG_RATE`, `ATTITUDE`, `ATT_COMPLIANCE`,
-    /// `ATT_ZETA`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`, and the gait timing /
-    /// swing-arc shape: `STANCE`, `SWING`, `STEP_HEIGHT`.
+    /// `ATT_ZETA`, `ATT_TARGET_DEG`, `ATT_MAX_DEG`, `ATT_LEAN_KP`,
+    /// `ATT_LEAN_KD`, and the gait timing / swing-arc shape: `STANCE`,
+    /// `SWING`, `STEP_HEIGHT`.
     pub fn from_env() -> Self {
         let mut p = Self::default();
         p.config.target_speed = env_f32("TARGET_SPEED", p.config.target_speed);
@@ -121,6 +139,8 @@ impl HipPinParams {
         p.attitude_max_angle = env_f32("ATT_MAX_DEG", p.attitude_max_angle.to_degrees())
             .to_radians()
             .max(0.0);
+        p.attitude_lean_kp = env_f32("ATT_LEAN_KP", p.attitude_lean_kp).max(0.0);
+        p.attitude_lean_kd = env_f32("ATT_LEAN_KD", p.attitude_lean_kd).max(0.0);
         p
     }
 }
@@ -241,6 +261,11 @@ impl Default for HipPinParams {
             attitude_zeta: 1.0,
             attitude_target_bias: 0.0,
             attitude_max_angle: 0.25, // ~14°, inside the 15° joint wall
+            // Loop 3 now rides the leg PD's world-upright reference axis, so
+            // these are *leg-reference* gains, not torques. `0.5` corrects half
+            // the measured lean in one tick; `0.03` damps the reference tilt.
+            attitude_lean_kp: 0.5,
+            attitude_lean_kd: 0.03,
         }
     }
 }
@@ -889,6 +914,40 @@ pub fn drive_hip_pin(
             left_leg.config.anchor_chain = ext_pin;
             right_leg.config.upright_spine_reference = !ext_pin;
             left_leg.config.upright_spine_reference = !ext_pin;
+
+            // Loop 3 (plan §5, corrected delivery): the body above P3 is a
+            // straight stiff stick, and the only external forces on it are
+            // gravity, foot contact and friction — so its world verticality is
+            // decided by the hip joints `P2–P3–P40/P41`, NOT by the waist
+            // `P1–P2–P3`. Deliver the measured-attitude PD by tilting the
+            // world-upright reference axis the leg PD aims the thigh at.
+            //
+            // Gating:
+            //   * `attitude_enabled` — master switch;
+            //   * `!ext_pin` — with the external pin active the pin itself owns
+            //     the frame attitude (mid-air assist), so the leg axis must
+            //     stay world-vertical;
+            //   * `grounded` — in Flight there is no contact and therefore no
+            //     leg authority; the stick must stay ballistic, so the
+            //     reference is held straight instead of trimming;
+            //   * `measured.n > 0` — no valid whole-body measurement yet
+            //     (startup / detached parts) means no error signal to act on.
+            let upright_lean =
+                if params.attitude_enabled && !ext_pin && grounded && pin.measured.n > 0 {
+                    attitude_lean_pd(
+                        pin.measured.theta,
+                        pin.measured.omega,
+                        params.attitude_target_bias,
+                        params.attitude_lean_kp,
+                        params.attitude_lean_kd,
+                        params.attitude_max_angle,
+                    )
+                } else {
+                    0.0
+                };
+            right_leg.config.upright_reference_lean = upright_lean;
+            left_leg.config.upright_reference_lean = upright_lean;
+
             right_leg.config.angular_compliance = params.leg_compliance.max(1e-12);
             left_leg.config.angular_compliance = params.leg_compliance.max(1e-12);
             right_leg.config.zeta = params.leg_zeta.max(0.0);
@@ -1026,12 +1085,17 @@ pub fn drive_hip_pin(
     }
 }
 
-/// Angular-only loop 3: drive the `P1_P2_P3` joint about P2 with no external
-/// position constraints.
+/// Posture hold for the `P1_P2_P3` waist joint: keep the spine **straight**.
 ///
-/// This is the normal floor-walking path once the hard pin is off. The torso
-/// attitude is corrected by the angular joint alone; the legs/contacts provide
-/// the support. Runs after [`drive_hip_pin`] (which updates `pin.theta` and
+/// This used to be the loop-3 actuator (the resolver's model `θ` was commanded
+/// here). It is not: the body above `P3` is a straight, stiff stick whose
+/// verticality is set by the hip joints `P2–P3–P40/P41`, and the measured
+/// attitude is now delivered through the leg PD's upright reference axis (see
+/// [`drive_hip_pin`]). What is left for this joint is posture — hold `P1`, `P2`
+/// and `P3` collinear (`theta = 0.0`) so the waist never folds while the legs
+/// do the balancing.
+///
+/// Runs after [`drive_hip_pin`] (which updates `pin.measured` and
 /// `last_external_pin`) and before the constraint world is stepped.
 pub fn tick_loop3_angular(
     params: Res<HipPinParams>,
@@ -1059,10 +1123,9 @@ pub fn tick_loop3_angular(
         let p2 = p2.particle.pos;
         let p3 = p3.particle.pos;
         pin.last_meas_theta = measured_attitude(p1, p2);
-        let theta = clamp_attitude(
-            pin.theta + params.attitude_target_bias,
-            params.attitude_max_angle,
-        );
+        // Straight stick: no model replay, no extra lean. The measured-attitude
+        // correction is delivered by the legs, not here.
+        let theta = 0.0;
         pin.last_att_target = theta;
         let Some((rest_cos, rest_sin)) = attitude_rest_basis(p1, p2, p3, theta) else {
             continue;

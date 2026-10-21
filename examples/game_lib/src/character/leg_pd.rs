@@ -153,9 +153,19 @@ fn calculate_leg_pd(
     // When no external pin holds the torso, reference the target hip angle to
     // the resolver's desired world-upright spine instead. This is the correct
     // control target; the XPBD angular solver resolves it against the contacts.
+    //
+    // That world-upright axis is ALSO loop 3's actuator: the body above P3 is a
+    // straight stiff stick whose verticality is set by these hip joints (the
+    // only external forces are gravity, contact and friction), so the loop-3
+    // measured-attitude PD arrives here as `upright_reference_lean`. A positive
+    // lean aims the axis forward (`+x` in the vello y-down frame, matching
+    // `measured_attitude`'s sign), so a forward-leaning stick gets a backward
+    // reference and the stance legs push it upright.
     let spine = p2 - p3;
     let a_t = if config.upright_spine_reference {
-        targets.hip + Vec2::new(0.0, -spine.length())
+        let len = spine.length();
+        let (sin_lean, cos_lean) = config.upright_reference_lean.sin_cos();
+        targets.hip + Vec2::new(len * sin_lean, -len * cos_lean)
     } else {
         targets.hip + spine
     };
@@ -181,8 +191,7 @@ fn calculate_leg_pd(
     let theta_knee_t = theta_knee_t_cs.y.atan2(theta_knee_t_cs.x);
     let target_rate = |cur: f32, prev: Option<f32>| -> Option<f32> {
         let prev = prev?;
-        let delta = (cur - prev + std::f32::consts::PI)
-            .rem_euclid(std::f32::consts::TAU)
+        let delta = (cur - prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI;
         if delta.abs() > MAX_REF_JUMP {
             return None;
@@ -347,7 +356,7 @@ mod tests {
 
     fn cfg() -> LimbConfig {
         LimbConfig {
-            zeta: 1.5, // distinct from the 1.0 default so tests can assert passthrough
+            zeta: 1.5,  // distinct from the 1.0 default so tests can assert passthrough
             sigma: 1.0, // arm the feed-forward in the unit tests
             ..Default::default()
         }
@@ -386,6 +395,99 @@ mod tests {
             "at rest with matching targets no constraints should be emitted: {} events",
             events.len()
         );
+    }
+
+    /// Loop-3 delivery (§5): `upright_reference_lean` tilts the world-upright
+    /// axis the thigh is aimed at, and that tilt lands in the emitted hip rest
+    /// angle with the SAME sign. With the axis rotated backward (negative lean,
+    /// the correction commanded for a forward-leaning torso) a vertical leg no
+    /// longer matches its vertical target, so the leg must emit a hip event that
+    /// pushes the torso upright.
+    #[test]
+    fn upright_reference_lean_tilts_hip_rest_angle() {
+        let leg = standing_leg(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO);
+        let targets = standing_targets();
+
+        // Baseline: lean 0 ⇒ the dead zone suppresses everything.
+        let mut c = cfg();
+        c.upright_spine_reference = true;
+        c.upright_reference_lean = 0.0;
+        let events = calculate_leg_pd(&targets, 1.0 / 90.0, &leg, &joints(), &c, &mut mem());
+        assert!(
+            events.is_empty(),
+            "lean 0 on a vertical leg must stay silent: {} events",
+            events.len()
+        );
+
+        // The pin runs the chase wide open (`LEG_ALPHA=1`, rate 1e6), so the
+        // emitted rest angle IS the target angle. Use the same settings here,
+        // otherwise the default 0.5 chase would halve the delta.
+        let chasing = || {
+            let mut c = cfg();
+            c.upright_spine_reference = true;
+            c.rest_chase_alpha = 1.0;
+            c.max_angle_rate = 1e6;
+            c
+        };
+        // A tiny off-neutral target so a rest angle is actually emitted (an
+        // exactly-vertical leg/target pair still hits the dead zone).
+        let off = LegPdTargets {
+            hip: Vec2::new(0.0, 0.0),
+            knee: Vec2::new(4.0, THIGH),
+            foot: Vec2::new(4.0, THIGH + CALF),
+            hip_vel: Vec2::ZERO,
+            knee_vel: Vec2::ZERO,
+            foot_vel: Vec2::ZERO,
+        };
+        let rest_angle = |lean: f32| {
+            let mut c = chasing();
+            c.upright_reference_lean = lean;
+            let e = calculate_leg_pd(&off, 1.0 / 90.0, &leg, &joints(), &c, &mut mem());
+            assert!(!e.is_empty(), "lean={lean}: must emit a hip event");
+            e[0].config.rest_sin.atan2(e[0].config.rest_cos)
+        };
+
+        let neutral_hip = rest_angle(0.0);
+        // Positive lean ⇒ rest hip angle rotates by +lean from the neutral pose.
+        for lean in [0.1_f32, -0.1, 0.3] {
+            let rest = rest_angle(lean);
+            assert!(
+                (rest - (neutral_hip + lean)).abs() < 1e-4,
+                "lean={lean}: rest hip angle {rest} must be neutral {neutral_hip} + lean"
+            );
+        }
+    }
+
+    /// The lean must be inert unless the upright reference is actually in use
+    /// (the live-spine branch has no world axis to tilt), and must follow the
+    /// config every tick rather than latching.
+    #[test]
+    fn upright_reference_lean_ignored_on_live_spine_branch() {
+        let leg = standing_leg(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO);
+        let off = LegPdTargets {
+            hip: Vec2::new(0.0, 0.0),
+            knee: Vec2::new(4.0, THIGH),
+            foot: Vec2::new(4.0, THIGH + CALF),
+            hip_vel: Vec2::ZERO,
+            knee_vel: Vec2::ZERO,
+            foot_vel: Vec2::ZERO,
+        };
+        let mut a = cfg();
+        a.upright_spine_reference = false;
+        a.upright_reference_lean = 0.0;
+        let mut b = cfg();
+        b.upright_spine_reference = false;
+        b.upright_reference_lean = 0.4;
+        let ea = calculate_leg_pd(&off, 1.0 / 90.0, &leg, &joints(), &a, &mut mem());
+        let eb = calculate_leg_pd(&off, 1.0 / 90.0, &leg, &joints(), &b, &mut mem());
+        assert_eq!(ea.len(), eb.len());
+        for (x, y) in ea.iter().zip(eb.iter()) {
+            assert!(
+                (x.config.rest_cos - y.config.rest_cos).abs() < 1e-6
+                    && (x.config.rest_sin - y.config.rest_sin).abs() < 1e-6,
+                "the lean must be inert on the live-spine branch"
+            );
+        }
     }
 
     /// A leg perfectly tracking a moving target has rest == current pose, so no
@@ -520,10 +622,22 @@ mod tests {
         };
         let fast_targets = rest_targets.clone();
 
-        let rest_events =
-            calculate_leg_pd(&rest_targets, 1.0 / 90.0, &rest_leg, &joints(), &c, &mut mem());
-        let fast_events =
-            calculate_leg_pd(&fast_targets, 1.0 / 90.0, &fast_leg, &joints(), &c, &mut mem());
+        let rest_events = calculate_leg_pd(
+            &rest_targets,
+            1.0 / 90.0,
+            &rest_leg,
+            &joints(),
+            &c,
+            &mut mem(),
+        );
+        let fast_events = calculate_leg_pd(
+            &fast_targets,
+            1.0 / 90.0,
+            &fast_leg,
+            &joints(),
+            &c,
+            &mut mem(),
+        );
         assert_eq!(rest_events.len(), 2, "rest leg must emit both joints");
         assert_eq!(fast_events.len(), 2, "fast leg must emit both joints");
         for i in 0..2 {

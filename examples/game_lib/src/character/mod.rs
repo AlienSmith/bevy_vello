@@ -219,6 +219,18 @@ pub struct LimbConfig {
     /// spine instead of the live spine. Use when no external pin holds the
     /// torso; the solver then resolves the desired pose against the contacts.
     pub upright_spine_reference: bool,
+    /// Lean (radians, `+` = forward toward `+x`) applied to the world-upright
+    /// reference axis when [`Self::upright_spine_reference`] is on.
+    ///
+    /// This is **loop 3's actuator**. The body above `P3` is a straight, stiff
+    /// stick; the only external forces on it are gravity, foot contact and
+    /// friction, so its world verticality is set by the hip joints
+    /// `P2–P3–P40/P41`, not by the waist `P1–P2–P3`. Tilting the axis the leg
+    /// PD aims the thigh at is therefore how a measured-attitude PD drives the
+    /// stick upright: leaning the reference backward makes the stance legs push
+    /// the trunk forward, and vice-versa. `0.0` = aim the thigh at true world
+    /// vertical (the historical behaviour).
+    pub upright_reference_lean: f32,
 }
 
 impl Default for LimbConfig {
@@ -239,6 +251,7 @@ impl Default for LimbConfig {
             ik_mode: IkMode::Disabled,
             anchor_chain: false,
             upright_spine_reference: false,
+            upright_reference_lean: 0.0,
         }
     }
 }
