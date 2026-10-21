@@ -28,6 +28,9 @@ use vello_physics::{AngularConstraintConfig, ExternalPositionConstraintConfig};
 
 use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
+use crate::lower_body::measure::{
+    update_measurements, BodyMeasureFilter, BodyMeasurements, ParticleSample,
+};
 use crate::lower_body::resolver::{step_lower_body, LowerBodyConfig, ResolverState, VerticalPhase};
 
 /// Runtime knobs for the hip pin, editable from the tuning UI.
@@ -90,8 +93,7 @@ impl HipPinParams {
         // Gait shape. `SWING` shorter = the foot must travel the step in less
         // time (a faster swing); `STEP_HEIGHT` is the swing arc apex above the
         // plant line, i.e. how high the foot lifts to clear the floor.
-        p.config.stance_duration_ts =
-            env_f32("STANCE", p.config.stance_duration_ts).max(1e-3);
+        p.config.stance_duration_ts = env_f32("STANCE", p.config.stance_duration_ts).max(1e-3);
         p.config.swing_duration_ts = env_f32("SWING", p.config.swing_duration_ts).max(1e-3);
         p.config.step_height = env_f32("STEP_HEIGHT", p.config.step_height).max(0.0);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
@@ -325,6 +327,12 @@ pub struct HipPin {
     pub last_att_target: f32,
     /// Whether the external `P1/P2/P3` pin was active this tick.
     pub last_external_pin: bool,
+    /// Whole-body CoM measurement (plan §1). Vello y-down frame: `com`,
+    /// EMA-filtered `v_com`, `z_com` (height above the floor), measured torso
+    /// `theta`/`omega`. Populated by [`measure_body`] each fixed tick.
+    pub measured: BodyMeasurements,
+    /// EMA + finite-difference filter state for the measured body.
+    pub measure_filter: BodyMeasureFilter,
 }
 
 impl HipPin {
@@ -354,6 +362,8 @@ impl HipPin {
             last_att_rest_sin: 0.0,
             last_att_target: 0.0,
             last_external_pin: false,
+            measured: BodyMeasurements::default(),
+            measure_filter: BodyMeasureFilter::default(),
         }
     }
 
@@ -521,6 +531,65 @@ fn try_seed(
     // Bias the first delta so the configured drop is applied exactly once.
     pin.prev_world_delta = Vec2::new(0.0, -hip_drop);
     pin.ready = true;
+}
+
+/// Measurement time constant for the EMA-filtered `v_CoM` and `omega` (plan §3:
+/// "EMA-filtered (2–4 frame time constant)"). At 90 Hz, 0.03 s ≈ 3 frames.
+pub const MEASURE_TAU: f32 = 0.03;
+
+/// Gather every particle owned by the character and update the whole-body CoM
+/// measurement (plan §1 / changes §1).
+///
+/// Scans all [`VelloParticle`]s whose `root_entity` is the character root (the
+/// `HipPin` entity), mass-weights position and velocity over **all** parts
+/// (including arms), EMA-filters `v_CoM` and `omega`, and stores the measured
+/// torso `theta` + `z_CoM` on the pin. Runs before [`drive_hip_pin`] so the
+/// resolver's loops can read the measurement this same fixed step.
+pub fn measure_body(
+    time: Res<Time<Fixed>>,
+    mut pin_q: Query<(Entity, &mut HipPin)>,
+    spine_q: Query<&SpineController>,
+    p_q: Query<&VelloParticle>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut pin) in pin_q.iter_mut() {
+        if !pin.enabled {
+            continue;
+        }
+        let Ok(spine) = spine_q.get(entity) else {
+            continue;
+        };
+        // Gather all particles of this character (root_entity == entity).
+        let mut samples: Vec<ParticleSample> = Vec::with_capacity(16);
+        for p in p_q.iter() {
+            if p.root_entity == entity {
+                samples.push(ParticleSample {
+                    pos: p.particle.pos,
+                    vel: p.particle.velocity,
+                    inv_mass: p.particle.inv_mass,
+                });
+            }
+        }
+        if samples.is_empty() {
+            continue;
+        }
+        // Torso axis: v10 spine = [PH, P0, P1, P2, P3]; hip = P3, shoulder = P1.
+        let (hip, shoulder) = match (p_q.get(spine.particles[4]), p_q.get(spine.particles[2])) {
+            (Ok(hip), Ok(shoulder)) => (hip.particle.pos, shoulder.particle.pos),
+            _ => continue,
+        };
+        // Floor line: the resolver's flat floor, Vello y = 0 (the character is
+        // assembled with the floor at world y≈0; see the tuning app / harness).
+        let floor_y = 0.0;
+        pin.measured = update_measurements(
+            &mut pin.measure_filter,
+            &samples,
+            (hip, shoulder),
+            floor_y,
+            dt,
+            MEASURE_TAU,
+        );
+    }
 }
 
 /// Step the resolver and queue the three stiff external position constraints

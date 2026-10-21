@@ -6,13 +6,18 @@
 //! registers the sandbox plugin.
 
 mod hip_pin;
+mod measure;
 mod plugin;
 mod resolver;
 mod systems;
 
 pub use hip_pin::{
-    drive_hip_pin, reset_hip_pin, tick_loop3_angular, update_ground_support, GroundSupport, HipPin,
-    HipPinParams,
+    drive_hip_pin, measure_body, reset_hip_pin, tick_loop3_angular, update_ground_support,
+    GroundSupport, HipPin, HipPinParams,
+};
+pub use measure::{
+    center_of_mass, com_velocity, ema_alpha, torso_pitch, update_measurements, BodyMeasureFilter,
+    BodyMeasurements, ParticleSample,
 };
 
 pub use plugin::LowerBodySandboxPlugin;

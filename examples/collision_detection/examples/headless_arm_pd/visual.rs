@@ -60,7 +60,7 @@ use bevy_vello::vello::{kurbo, peniko};
 use bevy_vello::{prelude::*, VelloCollisionResponsePlugin, VelloPlugin};
 
 use game_lib::{
-    capture_telemetry, drive_hip_pin, tick_loop3_angular, update_character_movement,
+    capture_telemetry, drive_hip_pin, measure_body, tick_loop3_angular, update_character_movement,
     update_ground_support, GroundSupport, HeadlessTelemetryPlugin, SpineDriveEnabled,
     VelloCharacterPlugin,
 };
@@ -210,6 +210,14 @@ fn main() {
         );
         app.insert_resource(params)
             .add_systems(FixedUpdate, update_ground_support.before(drive_hip_pin))
+            // Measurement layer: whole-body CoM / attitude gathered before the
+            // resolver so `drive_hip_pin` reads `pin.measured` this fixed step.
+            .add_systems(
+                FixedUpdate,
+                measure_body
+                    .after(update_ground_support)
+                    .before(drive_hip_pin),
+            )
             .add_systems(
                 FixedUpdate,
                 drive_hip_pin

@@ -136,7 +136,7 @@ use bevy_vello::integrations::physics::{
 };
 
 use game_lib::{
-    capture_telemetry, drive_hip_pin, tick_loop3_angular, update_character_movement,
+    capture_telemetry, drive_hip_pin, measure_body, tick_loop3_angular, update_character_movement,
     update_ground_support, GroundSupport, HeadlessTelemetryPlugin,
     ResetLimbControlConstraintsEvent, SpineDriveEnabled, VelloCharacterPlugin,
 };
@@ -310,6 +310,7 @@ fn main() {
             FixedUpdate,
             (
                 make_collision_constraints,
+                measure_body,
                 drive_hip_pin.before(update_character_movement),
                 tick_loop3_angular.after(drive_hip_pin),
                 update_constraint_world,

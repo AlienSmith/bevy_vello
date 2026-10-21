@@ -42,7 +42,7 @@ use game_lib::{
         BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
         SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
     },
-    default_input_map, drive_hip_pin, reset_hip_pin, tick_loop3_angular,
+    default_input_map, drive_hip_pin, measure_body, reset_hip_pin, tick_loop3_angular,
     update_character_movement, update_ground_support,
     weapons::{AttachPistolToCharacterEvent, PistolControl},
     CharacterController, CharacterRoot, ColliderRoot, ConnectivityRoot, GameLabSystems,
@@ -228,9 +228,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // position constraints, and (when `hip_drives_legs`) write the foot
         // targets for the legs — all *before* `update_character_movement` runs
         // the leg IK, and before the constraint world is stepped.
+        .add_systems(FixedUpdate, update_ground_support.before(drive_hip_pin))
+        // Measurement layer: whole-body CoM / attitude, EMA-filtered, gathered
+        // before the resolver runs so the loops read `pin.measured` this tick.
         .add_systems(
             FixedUpdate,
-            update_ground_support.before(drive_hip_pin),
+            measure_body
+                .after(update_ground_support)
+                .before(drive_hip_pin),
         )
         .add_systems(
             FixedUpdate,
@@ -488,12 +493,7 @@ fn make_static_scene(commands: &mut Commands) {
     const GROUND_HALF_THICKNESS: f32 = 20.0;
     make_static_collision_shape(
         commands,
-        Vec4::new(
-            0.0,
-            ground_surface_y - GROUND_HALF_THICKNESS,
-            0.0,
-            1.0,
-        ),
+        Vec4::new(0.0, ground_surface_y - GROUND_HALF_THICKNESS, 0.0, 1.0),
         make_long_rect,
         GlowColor {
             color: peniko::Color::rgb(1.0, 0.0, 0.0),
@@ -523,60 +523,60 @@ fn make_static_scene(commands: &mut Commands) {
         Some("1") | Some("true") | Some("yes")
     );
     if ramp_enabled {
-    const RAMP_RISE: f32 = 30.0;
-    const RAMP_X0: f32 = 120.0;
-    const RAMP_X1: f32 = 270.0;
-    const PLATFORM_X1: f32 = 470.0;
-    let ramp = {
-        let half_x = ((RAMP_X1 - RAMP_X0) * 0.5) as f64;
-        let half_y = (RAMP_RISE * 0.5) as f64;
-        let mut path = BezPath::new();
-        path.move_to((-half_x, -half_y));
-        path.line_to((half_x, half_y));
-        path.line_to((half_x, -half_y));
-        path.close_path();
-        (path, kurbo::Rect::new(-half_x, -half_y, half_x, half_y))
-    };
-    make_static_collision_shape(
-        commands,
-        Vec4::new(
-            (RAMP_X0 + RAMP_X1) * 0.5,
-            ground_surface_y + RAMP_RISE * 0.5,
+        const RAMP_RISE: f32 = 30.0;
+        const RAMP_X0: f32 = 120.0;
+        const RAMP_X1: f32 = 270.0;
+        const PLATFORM_X1: f32 = 470.0;
+        let ramp = {
+            let half_x = ((RAMP_X1 - RAMP_X0) * 0.5) as f64;
+            let half_y = (RAMP_RISE * 0.5) as f64;
+            let mut path = BezPath::new();
+            path.move_to((-half_x, -half_y));
+            path.line_to((half_x, half_y));
+            path.line_to((half_x, -half_y));
+            path.close_path();
+            (path, kurbo::Rect::new(-half_x, -half_y, half_x, half_y))
+        };
+        make_static_collision_shape(
+            commands,
+            Vec4::new(
+                (RAMP_X0 + RAMP_X1) * 0.5,
+                ground_surface_y + RAMP_RISE * 0.5,
+                0.0,
+                1.0,
+            ),
+            move || ramp.clone(),
+            GlowColor {
+                color: peniko::Color::rgb(0.1, 0.8, 1.0),
+                glow: 1.0,
+            },
+            Vec2::new(0.0, 0.0),
             0.0,
-            1.0,
-        ),
-        move || ramp.clone(),
-        GlowColor {
-            color: peniko::Color::rgb(0.1, 0.8, 1.0),
-            glow: 1.0,
-        },
-        Vec2::new(0.0, 0.0),
-        0.0,
-        false,
-    );
-    make_static_collision_shape(
-        commands,
-        Vec4::new(
-            (RAMP_X1 + PLATFORM_X1) * 0.5,
-            ground_surface_y + RAMP_RISE * 0.5,
+            false,
+        );
+        make_static_collision_shape(
+            commands,
+            Vec4::new(
+                (RAMP_X1 + PLATFORM_X1) * 0.5,
+                ground_surface_y + RAMP_RISE * 0.5,
+                0.0,
+                1.0,
+            ),
+            || {
+                let half_w = ((PLATFORM_X1 - RAMP_X1) * 0.5) as f64;
+                let half_h = (RAMP_RISE * 0.5) as f64;
+                let rect = kurbo::Rect::new(-half_w, -half_h, half_w, half_h);
+                (rect.to_path(0.1), rect)
+            },
+            GlowColor {
+                color: peniko::Color::rgb(0.1, 0.8, 1.0),
+                glow: 1.0,
+            },
+            Vec2::new(0.0, 0.0),
             0.0,
-            1.0,
-        ),
-        || {
-            let half_w = ((PLATFORM_X1 - RAMP_X1) * 0.5) as f64;
-            let half_h = (RAMP_RISE * 0.5) as f64;
-            let rect = kurbo::Rect::new(-half_w, -half_h, half_w, half_h);
-            (rect.to_path(0.1), rect)
-        },
-        GlowColor {
-            color: peniko::Color::rgb(0.1, 0.8, 1.0),
-            glow: 1.0,
-        },
-        Vec2::new(0.0, 0.0),
-        0.0,
-        false,
-    );
-    info!(
+            false,
+        );
+        info!(
         "tuning ramp: x={RAMP_X0:.0}..{RAMP_X1:.0} rise {RAMP_RISE:.0} px, platform x={RAMP_X1:.0}..{PLATFORM_X1:.0}"
     );
     }
@@ -1039,17 +1039,17 @@ fn hip_pin_ui(
         ui.separator();
 
         if ui
-            .checkbox(&mut enabled, "hip controller enabled (resolver + leg targets)")
+            .checkbox(
+                &mut enabled,
+                "hip controller enabled (resolver + leg targets)",
+            )
             .changed()
         {
             for (_, mut pin) in pin_q.iter_mut() {
                 pin.enabled = enabled;
             }
         }
-        ui.checkbox(
-            &mut params.external_pin,
-            "external pin (debug / hard pin)",
-        );
+        ui.checkbox(&mut params.external_pin, "external pin (debug / hard pin)");
         ui.checkbox(
             &mut params.air_control,
             "mid-air direction assist (external pin)",
