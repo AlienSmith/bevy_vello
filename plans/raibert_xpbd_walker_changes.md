@@ -5,6 +5,29 @@ Concrete changes needed to bring the current implementation up to the converged 
 
 > **Concepts reference** (capture point vs Raibert neutral point, hip vs CoM) — §0.
 
+## Status — where to pick up
+
+| phase | section | state | commit |
+| --- | --- | --- | --- |
+| A | §1 whole-body CoM measurement layer | **done** | `7031c6f` |
+| B | §2 loop 1 capture point | **done** | `aea3f96` |
+| C | §3 loop 1 scripted swing profile | **done** | `fb46b64` |
+| D | §4 loop 2 virtual-leg thrust | **done** | `a14b1f9` |
+| E | §5 loop 3 leg-delivered attitude | **done** | `6be7a63` |
+| **F** | **§6 contact-gated gait clock authority** | **not started — next** | — |
+
+Read §6 (note the Phase-E correction box inside it), then
+[`step_leg`](../examples/game_lib/src/lower_body/resolver.rs:1230) for the timer that
+needs gating and [`update_ground_support`](../examples/game_lib/src/lower_body/hip_pin.rs:189)
+/ [`GroundSupport`](../examples/game_lib/src/lower_body/hip_pin.rs:171) for the contact
+truth that already exists.
+
+Baseline to measure Phase F against (best-walk config `LEG_COMPLIANCE=1e-9
+STEP_HEIGHT=70`, from [`physics_tuning_progress.md`](../tools/physics-qa/physics_tuning_progress.md:517) §10):
+swing **28/29** pass, body **99.5 px/s vs 103.8 cmd (96%)**, rig `max_rel_dev`
+**0.1502**, stance slide **61.1 px worst**. Phase F's target is the slide — the swing
+gate and forward progress should not regress.
+
 ---
 
 ## 1. Balance reference — the CoM and the P3-heavy hip coincide
@@ -195,8 +218,17 @@ stiffness by construction). We keep that verbatim. What loop 2 actually changes 
   - **Loop 2 thrust only while the foot is genuinely in contact** (there must be a ground
     reaction to push against) — a timer that says Stance while the foot is airborne makes
     loop 2 extend a leg against nothing.
-  - **Loop 1 foot placement only during actual swing**; **loop 3 mainly during actual
-    flight** (ungated continuous loops interfere).
+  - **Loop 1 foot placement only during actual swing**; **loop 3 only during actual
+    contact** (ungated continuous loops interfere).
+    > **Corrected by Phase E (§5).** This line originally said loop 3 should run "mainly
+    > during actual flight". Phase E established the opposite: with the waist demoted to a
+    > posture hold, loop 3's only actuator is the leg PD's upright reference, and the legs
+    > have authority **only through ground contact**. In flight there is nothing to push
+    > against, so the default is `lean = 0` (ballistic) and the loop is gated on
+    > `grounded` — see
+    > [`drive_hip_pin`](../examples/game_lib/src/lower_body/hip_pin.rs:935). Phase F should
+    > keep that polarity: refine *which* contact (e.g. require both feet planted, or a
+    > minimum normal impulse) rather than moving loop 3 into flight.
   - **Correct the timer:** a leg whose foot is still sliding gets no thrust authority; a
     leg that left the ground early exits Stance on lift-off, not on `stance_duration_ts`;
     a long flight (from loop 2's vertical control) extends the swing until the foot really
