@@ -60,6 +60,8 @@ impl LowerBodyController {
             v_support: 0.0,
             capture_x: 0.0,
             capture_saturated: false,
+            clamp_saturated: false,
+            clamp_sat_count: 0,
             v_phase: VerticalPhase::Stand,
             hip_height: config.hip_height,
             hip_vel_y: 0.0,

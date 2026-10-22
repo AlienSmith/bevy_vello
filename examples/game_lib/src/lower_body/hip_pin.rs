@@ -137,6 +137,10 @@ impl HipPinParams {
         p.config.stance_duration_ts = env_f32("STANCE", p.config.stance_duration_ts).max(1e-3);
         p.config.swing_duration_ts = env_f32("SWING", p.config.swing_duration_ts).max(1e-3);
         p.config.step_height = env_f32("STEP_HEIGHT", p.config.step_height).max(0.0);
+        // MPC placement-law convergence horizon (`plans/swing-phase-timing.md`
+        // §4). Default ~1/ω₀ at standing height; shorter = more aggressive
+        // speed tracking (longer steps).
+        p.config.t_conv = env_f32("T_CONV", p.config.t_conv).max(1e-3);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);

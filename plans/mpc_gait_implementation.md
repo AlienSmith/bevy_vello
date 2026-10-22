@@ -57,9 +57,21 @@ else (FSM, profile) unchanged, so A is a pure-math swap that is easy to bisect.
    existing brake capture offset). Keep the `hip ± x_max` clamp but **count saturation
    events** (see logging below). The unmeasured fallback (Raibert neutral point) stays
    for the kinematic sandbox tests.
-5. Remove the interim §19.2.1 deadbeat `T_remain` pacing from `step_leg`'s Swing arm —
-   it is superseded (the profile keeps its timer timebase until Phase B retimes it).
+5. ~~Remove the interim §19.2.1 deadbeat `T_remain` pacing from `step_leg`'s Swing arm~~
+   **DEFERRED to Phase B (measured):** removing it collapsed the walk (sh50 body
+   107.2 → 0.1) because Phase B's progress-based retiming is its replacement and is
+   not implemented yet. Kept in capped form `t_target = min(dist/v, swing_duration_ts)`.
 6. Keep the `v_ref` ramp for now (it becomes `v_cmd` proper in Phase C).
+7. **ADDED (measured):** the fixed-point `T = dx/v` feedback is positive — no fixed
+   point exists when `(ξ₀−x_s)·ω₀/v > 1/e`, and the iteration ran away to the reach
+   clamp every step. `solve_touchdown_x` and the `plan_target_x` caller cap the
+   predicted horizon at `t_nominal` (`swing_duration_ts`). Cruise identity `dx = v·T`
+   is unaffected when a consistent fixed point exists.
+
+**Phase A status (2026-10-22).** Done and committed. 125/125 unit tests. Sweep
+regressed vs §20 baseline (sh28 −105.2 vs 69.6; sh50 25.6 vs 107.2) — accepted:
+the placement law is MPC but the FSM is still timer-driven; the mismatch is what
+Phase B removes (see progress.md §25).
 
 **Logging.** `DebugInfo`: add `clamp_saturated: bool` per tick + a cumulative
 `clamp_sat_count`; export as scalar telemetry columns (`clmp`, reuse `capture_saturated`

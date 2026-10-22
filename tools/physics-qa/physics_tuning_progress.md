@@ -1380,6 +1380,55 @@ LIPM with a one-step horizon the MPC solve is **closed-form arithmetic** — no 
 
 ### 24.3 Recommended phasing (not big-bang)
 
+(A–E phasing approved; work breakdown in `plans/mpc_gait_implementation.md`, branch `mpc_gait`.)
+
+## 25. MPC Phase A landed — placement law + fixed-point touchdown (regression accepted)
+
+### 25.1 What changed (all `resolver.rs` unless noted)
+
+- `LowerBodyConfig`: `t_conv` (0.3 s ≈ 1/ω₀ at standing height) and `v_min_plan`
+  (10 px/s). Env override `T_CONV` in `hip_pin.rs::from_env`.
+- New `placement_target()`: `x_foot = x_com + (v_com − v_cmd)/(t_conv·ω₀²)`;
+  identity with the LIPM capture point at `t_conv = 1/ω₀` (unit-tested).
+- New `solve_touchdown_x()`: fixed-point touchdown prediction (design §4) with
+  exponential DCM propagation away from the stance foot, `T = |dx|/max(|v|, v_min)`,
+  3 passes, clamped to `[dx_min, dx_reach_max]`, returns `(dx, saturated)`.
+- `plan_target_x` measured branch rewired: stance-anchored touchdown solve when a
+  foot is planted, instantaneous `placement_target` when airborne. Stopping case and
+  the unmeasured Raibert fallback unchanged. `StepPlan` gained `stance_x` +
+  `clamp_sats` (per-tick reach-clamp event counter).
+- `DebugInfo`: `clamp_saturated` (per tick) + `clamp_sat_count` (cumulative) —
+  design §4 primary health metric.
+- 125/125 unit tests pass (added: placement identity, degenerates, cruise
+  convergence `dx → v·T`, bounded zero-velocity).
+
+### 25.2 Two findings from the first verification pass
+
+1. **The raw fixed point diverges.** `dx_{n+1} = A·e^(ω₀·dx_n/v)` is positive
+   feedback: no fixed point exists when `A·ω₀/v > 1/e`, and the iteration runs to
+   the reach clamp every step (first run: sh28 body 16.9, left 1/15 — pure
+   overstride). Fixed by capping the predicted horizon `T ≤ t_nominal` inside the
+   solve (the old foot is only planted during the swing anyway). Bounded now;
+   cruise identity still exact when consistent.
+2. **The §19.2.1 deadbeat pacing cannot be deleted yet.** Phase A item 5 removed
+   it per plan; the walk collapsed worse (sh50 body 0.1). The pacing's slow-body
+   adaptation is load-bearing until Phase B's progress-based retiming replaces it.
+   Restored in capped form (`t_target = min(dist/v, swing_duration_ts)`).
+
+### 25.3 Verification (current state, accepted regression)
+
+| stepHt | body px/s (§20 baseline) | left pass/n | right pass/n |
+|---|---|---|---|
+| 28 | **−105.2** (was 69.6) | 0/15 | 0/16 |
+| 50 | **25.6** (was 107.2) | 5/15 | 8/16 |
+
+The new target law aims the foot via DCM prediction while the FSM is still
+timer-driven (§17 CoM-crossing lift + timer swing caps). The mismatch between
+placement law and trigger/pacing is exactly what Phase B removes (DCM-margin
+trigger + progress retiming + touchdown acceptance). User decision: regression
+accepted — "not afraid of regression … changes are good, it indicates the code is
+different." No further Phase A tuning; proceed to Phase B.
+
 - **A** placement law with `T_conv` + fixed-point touch-down prediction (swap
   `plan_target_x`). Low risk, pure math.
 - **B** DCM-support-margin trigger + progress-based (`tau`) retimed swing — delivers

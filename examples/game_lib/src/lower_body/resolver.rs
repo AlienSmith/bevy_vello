@@ -98,6 +98,17 @@ pub struct LowerBodyConfig {
     pub attitude_gravity_coupling: bool,
     /// Tilt clamp, rad (default 1.30 ≈ 75° — never spin past "fallen over").
     pub theta_max: f32,
+
+    // --- MPC gait knobs. See `plans/swing-phase-timing.md` §4. ---
+    /// Velocity-schedule convergence horizon `T_conv`, seconds. The placement
+    /// law assumes CoM velocity reaches `v_cmd` by the end of this horizon:
+    /// `x_foot = x_com + (v_com − v_cmd)/(T_conv·ω₀²)`. `1/ω₀` (~0.3 s at human
+    /// scale) makes it exactly the DCM law `ξ − v_cmd/ω₀`. Shorter = aggressive
+    /// speed tracking (longer steps); longer = softer convergence.
+    pub t_conv: f32,
+    /// Floor on the CoM speed used to derive swing time `T = dx/v`, px/s.
+    /// Prevents divide-by-zero / infinite swing time near standstill.
+    pub v_min_plan: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -130,6 +141,9 @@ impl Default for LowerBodyConfig {
             attitude_accel_coupling: 1.0,
             attitude_gravity_coupling: true,
             theta_max: 1.30,
+            // ~1/ω₀ at standing height: ω₀ = √(980/90) ≈ 3.3 rad/s → 0.3 s.
+            t_conv: 0.3,
+            v_min_plan: 10.0,
         }
     }
 }
@@ -425,6 +439,10 @@ pub struct ResolverState {
     /// gait's rhythm, and the counters make that visible without telemetry.
     pub early_lift_count: [u32; 2],
     pub swing_wait_count: [u32; 2],
+    /// Cumulative count of MPC placement clamp-saturation events (design §4
+    /// health metric). Incremented once per tick in which any per-leg
+    /// `plan_target_x` call was bound by the reach clamp.
+    pub clamp_sat_count: u32,
 }
 
 impl ResolverState {
@@ -493,6 +511,7 @@ impl ResolverState {
             max_swing_wait: 0.05,
             early_lift_count: [0; 2],
             swing_wait_count: [0; 2],
+            clamp_sat_count: 0,
         }
     }
 }
@@ -573,6 +592,12 @@ pub struct DebugInfo {
     /// "in trouble" signal. `false` when there is no measurement (pure
     /// kinematic fallback) or the capture point is within reach.
     pub capture_saturated: bool,
+    /// `true` when at least one `plan_target_x` result this tick was bound by
+    /// the `hip ± x_max` reach clamp (MPC placement law saturating — design
+    /// §4: clamp-saturation frequency is the primary health metric).
+    pub clamp_saturated: bool,
+    /// Cumulative count of clamp-saturation events since the state was built.
+    pub clamp_sat_count: u32,
 
     // --- Loop 1 (vertical) telemetry. See `plans/raibert_vertical_loop.md`. ---
     /// Current vertical-controller phase.
@@ -1211,8 +1236,105 @@ pub fn capture_point(
     Some(com_x + (v_com - v_desired) / omega0)
 }
 
+/// DCM placement law (`plans/swing-phase-timing.md` §4): the foot is aimed at
+/// the point where the DCM converges to the commanded velocity within
+/// `t_conv` seconds of touchdown:
+///
+/// `x_foot = x_com + (v_com − v_cmd) / (t_conv · ω₀²)`
+///
+/// With `t_conv = 1/ω₀` this reduces exactly to the LIPM capture point
+/// `x_com + (v_com − v_cmd)/ω₀` — i.e. [`capture_point`]. A larger `t_conv`
+/// allows a shorter convergence (foot closer to the CoM), which is what makes
+/// the demand clampable against the learned acceleration budget (Phase C).
+///
+/// Returns `None` on degenerate pendulum frequency (`z_com ≤ 0`, `gravity ≤ 0`,
+/// or non-positive `t_conv`).
+#[inline]
+pub fn placement_target(
+    com_x: f32,
+    v_com: f32,
+    v_cmd: f32,
+    z_com: f32,
+    gravity: f32,
+    t_conv: f32,
+) -> Option<f32> {
+    if z_com <= 0.0 || gravity <= 0.0 || t_conv <= 0.0 {
+        return None;
+    }
+    let omega0_sq = gravity / z_com;
+    Some(com_x + (v_com - v_cmd) / (t_conv * omega0_sq))
+}
+
+/// Predicted touchdown world-x, measured relative to the *current* stance
+/// foot, via a fixed-point loop (`plans/swing-phase-timing.md` §4):
+///
+/// 1. Seed `dx₀ = (v − v_cmd)/ω₀ + v·T_nominal` (capture distance + nominal
+///    step length).
+/// 2. Iterate: `T = |dx| / max(|v|, v_min_plan)`, propagate the DCM to
+///    touchdown — during stance the DCM *converges* exponentially toward the
+///    planted foot, `ξ(T) = x_stance + (ξ₀ − x_stance)·e^(−ω₀·T)` — and set
+///    `dx = ξ(T) − x_stance + (v − v_cmd)/ω₀` (the placement law evaluated at
+///    the predicted touchdown state).
+/// 3. Clamp `dx` into `[dx_min, dx_reach_max]` each pass (reach limits win).
+///
+/// Returns `(dx, saturated)` where `saturated` is true if the last clamp bound
+/// the result. The propagation sign is `exp(+ω₀·T)`: with the foot planted at
+/// `x_f`, the DCM *diverges* from the support (`ξ̇ = ω₀·(ξ − x_f)`), which is
+/// exactly the lead the CoM gains over the stance foot during the swing. At
+/// cruise (`v = v_cmd`) the fixed point reproduces the classical step-length
+/// identity `dx = v·T`.
+///
+/// Degenerate inputs (`omega0 ≤ 0`, non-finite state) return the unpropagated
+/// seed clamped to `[dx_min, dx_reach_max]`.
+pub fn solve_touchdown_x(
+    x_stance: f32,
+    xi0: f32,
+    v_com: f32,
+    v_cmd: f32,
+    omega0: f32,
+    t_nominal: f32,
+    v_min_plan: f32,
+    dx_min: f32,
+    dx_reach_max: f32,
+) -> (f32, bool) {
+    let capture = (v_com - v_cmd) / omega0.max(f32::EPSILON);
+    let mut dx = capture + v_com * t_nominal;
+    if !dx.is_finite() {
+        dx = 0.0;
+    }
+    if omega0 <= 0.0 || !xi0.is_finite() || !x_stance.is_finite() {
+        let clamped = dx.clamp(dx_min, dx_reach_max);
+        return (clamped, (clamped - dx).abs() > f32::EPSILON);
+    }
+    let mut saturated = false;
+    for _ in 0..3 {
+        // Predicted swing horizon from the current dx estimate, CAPPED at the
+        // nominal swing duration: the old foot is only planted during the
+        // swing, and the raw `T = dx/v` feedback is positive (bigger dx ⇒
+        // bigger T ⇒ exponentially bigger dx) — uncapped, the iteration has no
+        // fixed point whenever `(ξ₀−x_s)·ω₀/v > 1/e` and runs away to the
+        // reach clamp on every step (measured: total overstride, gait
+        // collapse). With the cap the map is bounded and, when a consistent
+        // fixed point exists (cruise, design §4), the iteration converges to
+        // `dx = v·T`.
+        let t = (dx.abs() / v_com.abs().max(v_min_plan.max(f32::EPSILON))).min(t_nominal.max(0.0));
+        // DCM at predicted touchdown: diverges exponentially away from the
+        // stance foot (LIPM stance dynamics, ξ̇ = ω₀·(ξ − x_f)).
+        let xi_t = x_stance + (xi0 - x_stance) * (omega0 * t).exp();
+        let raw = xi_t - x_stance + capture;
+        let clamped = if raw.is_finite() {
+            raw.clamp(dx_min, dx_reach_max)
+        } else {
+            dx.clamp(dx_min, dx_reach_max)
+        };
+        saturated = (clamped - raw).abs() > f32::EPSILON;
+        dx = clamped;
+    }
+    (dx, saturated)
+}
+
 /// Per-tick planning context shared by both legs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct StepPlan {
     /// Safety-margined reach; swing targets are clamped to `hip ± x_max` so a
     /// plant can never be aimed outside the workspace (which the IK would
@@ -1229,6 +1351,15 @@ struct StepPlan {
     /// kinematic sandbox; `plan_target_x` then falls back to the Raibert
     /// neutral point.
     measured: Option<CaptureMeasure>,
+    /// World-x of the current stance (support) foot — the DCM propagation
+    /// anchor for `solve_touchdown_x` (`swing-phase-timing.md` §4). `None` when
+    /// no leg is in stance (e.g. both feet airborne); the touchdown solve then
+    /// falls back to the instantaneous placement law.
+    stance_x: Option<f32>,
+    /// Count of `plan_target_x` calls this tick whose result was bound by the
+    /// `hip ± x_max` reach clamp. Design §4: clamp-saturation frequency is the
+    /// primary health metric of the balance system, so every event is counted.
+    clamp_sats: std::cell::Cell<u32>,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the
@@ -1248,22 +1379,71 @@ fn plan_target_x(
     let raw = if plan.stopping {
         hip_x + plan.capture_offset
     } else if let Some(m) = plan.measured {
-        // Loop 1 balance (plan §2): the LIPM capture point shifted by the
-        // desired CoM velocity, `x_foot = x_CoM + (v_CoM − v_des)/ω₀`. This is
-        // a WORLD-space target — `x_CoM` is the measured CoM position — so it
-        // needs no `v·t_flight` prediction (unlike the hip-relative Raibert
-        // neutral point, which must predict where the hip will be at
-        // touchdown). Re-planning every frame with the fresh measurement makes
-        // the target track CoM motion mid-swing. If the measurement is
-        // degenerate (`z_com ≤ 0` or `gravity ≤ 0`), fall back to the Raibert
-        // neutral point below.
-        match capture_point(m.com_x, m.v_com, v_desired, m.z_com, config.gravity) {
-            Some(x) => x,
-            None => {
-                let x_target =
-                    compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
-                hip_x + v * t_flight + x_target
+        // MPC placement (Phase A, `plans/swing-phase-timing.md` §4): predict
+        // where the DCM will be at touchdown by propagating it toward the
+        // current stance foot over the swing horizon `T = dx/v` (fixed point),
+        // then aim the foot at `ξ(T) − v_cmd/ω₀`. World-space like the capture
+        // point, so no hip-travel prediction is needed; re-planning every
+        // frame with the fresh measurement keeps the target tracking the CoM
+        // mid-swing. Degenerate measurement (`z_com ≤ 0`, `gravity ≤ 0`) falls
+        // back to the Raibert neutral point below.
+        let omega0 = if m.z_com > 0.0 && config.gravity > 0.0 {
+            (config.gravity / m.z_com).sqrt()
+        } else {
+            0.0
+        };
+        if omega0 > 0.0 {
+            match plan.stance_x {
+                Some(x_stance) => {
+                    let xi0 = m.com_x + m.v_com / omega0;
+                    let dx_reach_max = plan.x_max.max(0.0);
+                    let (dx, _sat) = solve_touchdown_x(
+                        x_stance,
+                        xi0,
+                        m.v_com,
+                        v_desired,
+                        omega0,
+                        config.swing_duration_ts,
+                        config.v_min_plan,
+                        0.0,
+                        dx_reach_max,
+                    );
+                    // Placement law at the predicted touchdown state:
+                    // x_foot = ξ(T) − v_cmd/ω₀, with ξ(T) = x_stance +
+                    // (ξ₀ − x_stance)·e^(−ω₀·T) and T = |dx|/max(|v|, v_min).
+                    // Same T-cap as inside `solve_touchdown_x` (see note
+                    // there): bounded prediction horizon, no runaway.
+                    let t = (dx.abs() / m.v_com.abs().max(config.v_min_plan.max(f32::EPSILON)))
+                        .min(config.swing_duration_ts.max(0.0));
+                    let xi_t = x_stance + (xi0 - x_stance) * (omega0 * t).exp();
+                    xi_t - v_desired / omega0
+                }
+                None => {
+                    // No stance anchor (both feet airborne): instantaneous
+                    // placement law with the T_conv knob.
+                    placement_target(
+                        m.com_x,
+                        m.v_com,
+                        v_desired,
+                        m.z_com,
+                        config.gravity,
+                        config.t_conv,
+                    )
+                    .unwrap_or_else(|| {
+                        let x_target = compute_forward_target(
+                            v,
+                            v_desired,
+                            config.kv,
+                            config.stance_duration_ts,
+                        );
+                        hip_x + v * t_flight + x_target
+                    })
+                }
             }
+        } else {
+            let x_target =
+                compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
+            hip_x + v * t_flight + x_target
         }
     } else {
         let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
@@ -1275,7 +1455,11 @@ fn plan_target_x(
         // the target track acceleration/braking transients mid-swing.
         hip_x + v * t_flight + x_target
     };
-    raw.clamp(hip_x - plan.x_max, hip_x + plan.x_max)
+    let clamped = raw.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
+    if (clamped - raw).abs() > f32::EPSILON {
+        plan.clamp_sats.set(plan.clamp_sats.get().saturating_add(1));
+    }
+    clamped
 }
 
 /// Three-phase swing profile (plan §3): maps normalized swing progress `s ∈
@@ -1480,32 +1664,25 @@ fn step_leg(
             // one side of the hip.
             leg.swing_to.x =
                 plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
-            // §19.2.1 deadbeat swing timing: traverse the spline so the foot
-            // reaches the capture point about when the CoM does, instead of on
-            // the fixed swing timer. `T_remain = |x_land − x_com| / v_com`
-            // (with a floor so near-zero speed doesn't divide by zero or swing
-            // forever); the swing timer remains only as a fallover cap.
-            let swing_frac = if plan.measured.is_some() {
-                // Pace the arrival over the time the hip/CoM takes to cross the
-                // residual distance to the plant, capped by the swing timer (the
-                // fallover bound). Slow body → longer effective swing; fast body
-                // → quicker swing.
-                let t_target = {
-                    let dist = (leg.swing_to.x - leg.plant_pos.x).abs();
-                    let speed = v.abs().max(1.0);
-                    (dist / speed)
-                        .min(config.swing_duration_ts)
-                        .max(f32::EPSILON)
-                };
-                // Fraction elapsed toward touchdown scaled by the paced time.
+            // Swing pacing (interim, until Phase B retimes from achieved foot
+            // progress): deadbeat arrival `T_remain = |x_land − x_plant| / v`
+            // so a slow body gets a longer effective swing, but CAPPED by the
+            // swing timer — the cap is what makes the physics-lag adaptation
+            // work (§20: removing it collapses the walk; uncapped timers are
+            // what §23 rejects). Phase B replaces this with progress-based
+            // retiming and deletes the timer entirely.
+            let t_pace = if plan.measured.is_some() {
+                let dist = (leg.swing_to.x - leg.plant_pos.x).abs();
+                let speed = v.abs().max(1.0);
+                let t_target = (dist / speed)
+                    .min(config.swing_duration_ts)
+                    .max(f32::EPSILON);
                 (1.0 - (leg.phase_timer / t_target).clamp(0.0, 1.0)).clamp(0.0, 1.0)
             } else {
-                // No measurement: fall back to the timer-paced profile exactly as
-                // the pre-§19 resolver.
                 let total = config.swing_duration_ts.max(f32::EPSILON);
                 (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0)
             };
-            let t = swing_frac;
+            let t = t_pace;
 
             // Three-phase swing profile (plan §3): lift → advance → extend,
             // C¹-continuous through the IK foot path. Replaces the old single
@@ -1729,11 +1906,23 @@ pub fn step_lower_body(
     } else {
         0.0
     };
+    // DCM propagation anchor: the foot currently in stance. When both are in
+    // stance (no swing in progress) either is valid — the prediction only runs
+    // while a leg is swinging — so take the left by convention.
+    let stance_x = if state.left.phase == GaitPhase::Stance {
+        Some(state.left.plant_pos.x)
+    } else if state.right.phase == GaitPhase::Stance {
+        Some(state.right.plant_pos.x)
+    } else {
+        None
+    };
     let plan = StepPlan {
         x_max,
         stopping,
         capture_offset,
         measured: state.measured,
+        stance_x,
+        clamp_sats: std::cell::Cell::new(0),
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -1825,6 +2014,11 @@ pub fn step_lower_body(
     state.early_lift_count[1] = state.early_lift_count[1].saturating_add(lift_count_r);
     state.swing_wait_count[0] = state.swing_wait_count[0].saturating_add(wait_count_l);
     state.swing_wait_count[1] = state.swing_wait_count[1].saturating_add(wait_count_r);
+    // Design §4 health metric: count this tick once if any placement call was
+    // bound by the reach clamp.
+    if plan.clamp_sats.get() > 0 {
+        state.clamp_sat_count = state.clamp_sat_count.saturating_add(1);
+    }
 
     // 6. --- Backward solve at touchdown (foot → hip) ---
     // Invert the *actual* plant offset to get the hip velocity whose next
@@ -2069,6 +2263,8 @@ pub fn step_lower_body(
         v_support,
         capture_x: capture_offset,
         capture_saturated,
+        clamp_saturated: plan.clamp_sats.get() > 0,
+        clamp_sat_count: state.clamp_sat_count,
         v_phase: state.vs.phase,
         hip_height: h,
         hip_vel_y: state.hip_vel.y,
@@ -2672,6 +2868,8 @@ mod tests {
             stopping: false,
             capture_offset: 0.0,
             measured: None,
+            stance_x: None,
+            clamp_sats: std::cell::Cell::new(0),
         }
     }
 
@@ -2828,16 +3026,95 @@ mod tests {
     }
 
     #[test]
+    fn test_placement_target_identity_with_capture_point() {
+        // Design §4: with t_conv = 1/ω₀ the placement law is exactly the
+        // velocity-shifted capture point x_foot = ξ − v_cmd/ω₀.
+        let (g, z) = (980.0_f32, 90.0_f32);
+        let omega0 = (g / z).sqrt();
+        let t_conv = 1.0 / omega0;
+        for (com_x, v_com, v_cmd) in [
+            (0.0, 0.0, 120.0),
+            (37.5, 80.0, 120.0),
+            (-200.0, -60.0, -120.0),
+            (1000.0, 120.0, 120.0),
+        ] {
+            let placed = placement_target(com_x, v_com, v_cmd, z, g, t_conv).unwrap();
+            let expected = capture_point(com_x, v_com, v_cmd, z, g).unwrap();
+            assert!(
+                (placed - expected).abs() < 1e-3,
+                "com={com_x} v={v_com} cmd={v_cmd}: {placed} vs {expected}"
+            );
+            // ξ − v_cmd/ω₀ form of the same identity.
+            let xi = com_x + v_com / omega0;
+            assert!((placed - (xi - v_cmd / omega0)).abs() < 1e-3);
+        }
+        // Longer t_conv ⇒ softer convergence ⇒ foot closer to the CoM.
+        let near = placement_target(0.0, 0.0, 120.0, z, g, 2.0 * t_conv).unwrap();
+        let base = placement_target(0.0, 0.0, 120.0, z, g, t_conv).unwrap();
+        assert!(near.abs() < base.abs(), "{near} vs {base}");
+    }
+
+    #[test]
+    fn test_placement_target_degenerate_returns_none() {
+        assert_eq!(placement_target(0.0, 0.0, 120.0, 0.0, 980.0, 0.3), None);
+        assert_eq!(placement_target(0.0, 0.0, 120.0, 90.0, 0.0, 0.3), None);
+        assert_eq!(placement_target(0.0, 0.0, 120.0, 90.0, 980.0, 0.0), None);
+        assert_eq!(placement_target(0.0, 0.0, 120.0, 90.0, 980.0, -0.1), None);
+    }
+
+    #[test]
+    fn test_solve_touchdown_x_cruise_converges_to_step_length() {
+        // At cruise (v = v_cmd) the fixed point must reproduce the classical
+        // step-length identity dx = v·T with the DCM supplying the lead
+        // (design §4 note). Seed the DCM consistently: stance foot at 0, CoM
+        // at the mid-stance neutral point, ξ₀ ahead of the foot by exactly
+        // what a cruise step demands.
+        let (g, z) = (980.0_f32, 90.0_f32);
+        let omega0 = (g / z).sqrt();
+        let v = 120.0_f32;
+        let t_nominal = 0.28_f32;
+        // Pick ξ₀ so the fixed point is self-consistent at dx = v·T_nominal:
+        // dx = (ξ₀ − x_s)·e^(ω₀·T) + 0 with T = dx/v ⇒ ξ₀ = dx·e^(−ω₀·T).
+        let dx_expected = v * t_nominal;
+        let xi0 = dx_expected * (-omega0 * t_nominal).exp();
+        let (dx, sat) = solve_touchdown_x(0.0, xi0, v, v, omega0, t_nominal, 10.0, 0.0, 500.0);
+        assert!(!sat);
+        assert!(
+            (dx - dx_expected).abs() < 1e-2,
+            "dx={dx} expected={dx_expected}"
+        );
+    }
+
+    #[test]
+    fn test_solve_touchdown_x_zero_velocity_is_bounded() {
+        // v = 0 with a v_min_plan floor: T = dx/v_min grows dx each pass, but
+        // the reach clamp bounds the result (never NaN/inf, never runaway).
+        let omega0 = (980.0_f32 / 90.0).sqrt();
+        let (dx, sat) = solve_touchdown_x(0.0, 5.0, 0.0, 120.0, omega0, 0.28, 10.0, 0.0, 60.0);
+        assert!(dx.is_finite());
+        assert!(dx <= 60.0 + 1e-3);
+        assert!(sat, "reach clamp must fire when the demand exceeds reach");
+        // Degenerate omega0 ⇒ clamped seed, no propagation.
+        let (dx2, _) = solve_touchdown_x(0.0, f32::NAN, 120.0, 120.0, 0.0, 0.28, 10.0, 0.0, 60.0);
+        assert!(dx2.is_finite() && dx2 <= 60.0 + 1e-3);
+    }
+
+    #[test]
     fn test_capture_point_worldspace_independent_of_hip() {
-        // The capture point is a world-space CoM target, so for identical
+        // The placement law is a world-space CoM target, so for identical
         // measured CoM the same target must come out regardless of where the
         // hip is (unlike the Raibert neutral point, which predicts hip travel).
+        // With `t_conv = 1/ω₀` the law is exactly the LIPM capture point
+        // (design §4 identity), which is what this test pins down.
         let g: f32 = 980.0;
         let z: f32 = 90.0;
+        let omega0 = (g / z).sqrt();
+        let mut cfg = default_config();
+        cfg.t_conv = 1.0 / omega0;
         for hip_x in [-500.0, 0.0, 1234.0] {
-            // CoM at the hip, so the capture point is always within a generous
-            // reach window and nothing clamps (x is world-space, independent of
-            // the hip position).
+            // CoM at the hip, so the target is always within a generous reach
+            // window and nothing clamps (x is world-space, independent of the
+            // hip position).
             let m = CaptureMeasure {
                 com_x: hip_x,
                 v_com: 40.0,
@@ -2848,8 +3125,10 @@ mod tests {
                 stopping: false,
                 capture_offset: 0.0,
                 measured: Some(m),
+                stance_x: None,
+                clamp_sats: std::cell::Cell::new(0),
             };
-            let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &default_config(), &plan);
+            let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &cfg, &plan);
             let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
             assert!(
                 (target - expected).abs() < 1e-2,
@@ -2860,13 +3139,14 @@ mod tests {
 
     #[test]
     fn test_capture_point_clamps_and_reports_saturation() {
-        // A capture point beyond the leg reach is clamped to hip ± x_max, and
-        // the "in trouble" saturation flag reports the clamp fired.
+        // A placement target beyond the leg reach is clamped to hip ± x_max,
+        // and the clamp-saturation counter records the event (design §4:
+        // clamp-saturation frequency is the primary health metric).
         let cfg = default_config();
         let limits = GaitLimits::from_config(&cfg, cfg.hip_height, cfg.target_speed);
         let x_max = limits.x_max;
-        // CoM far ahead of the hip with forward motion: capture point is way out
-        // of reach.
+        // CoM far ahead of the hip with forward motion: the placement law
+        // demands a foot way out of reach.
         let m = CaptureMeasure {
             com_x: 500.0,
             v_com: 300.0,
@@ -2877,6 +3157,8 @@ mod tests {
             stopping: false,
             capture_offset: 0.0,
             measured: Some(m),
+            stance_x: None,
+            clamp_sats: std::cell::Cell::new(0),
         };
         let hip_x = 0.0;
         let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);
@@ -2885,11 +3167,23 @@ mod tests {
             "clamped target={target} expected={}",
             hip_x + x_max
         );
-        // Direct saturation check on the unclamped capture point.
-        let raw = capture_point(m.com_x, m.v_com, 120.0, cfg.hip_height, cfg.gravity).unwrap();
+        assert!(
+            plan.clamp_sats.get() >= 1,
+            "clamp saturation must be counted"
+        );
+        // Direct saturation check on the unclamped placement target.
+        let raw = placement_target(
+            m.com_x,
+            m.v_com,
+            120.0,
+            cfg.hip_height,
+            cfg.gravity,
+            cfg.t_conv,
+        )
+        .unwrap();
         assert!(
             raw > hip_x + x_max,
-            "raw capture point {raw} should be out of reach"
+            "raw placement target {raw} should be out of reach"
         );
     }
 
