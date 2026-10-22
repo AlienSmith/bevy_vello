@@ -1213,3 +1213,182 @@ longer fanatics; the asymmetry that remains is **left-leg midair/lifted**, so th
 direction of the residual work is now unambiguous: **the left leg leaves the floor but
 does not re-contact / does not complete its advance.** The one-leg broad-hop is gone —
 the hop's signature (high midair on the non-stepping leg) is gone from the right side.
+
+## 21. Next: symmetric two-foot landing (how to finish)
+
+The walk now makes ~107 px/s (first >100). What's left is making **both** legs land
+properly, not just the right. The residual failure is left-leg `midair`/`lifted`.
+
+### 21.1 Why the left leg fails (corrected)
+
+Correction: the legs do **not** both converge on one forward capture point. Only one
+leg swings at a time — the anti-phase gate `!other_swinging` in `step_leg` plus the
+half-stance phase offset at `ResolverState::new` ([`resolver.rs:458`]) guarantee the
+two legs alternate. Each swing targets its **own** forward plant in `plan_target_x`.
+(If both legs did plant to the identical point it would be a hop — that is not what
+happens.)
+
+The left leg is the **trailing** leg each cycle because the right is *hard-wired* as
+the leading leg via that half-stance offset (§H1). The real asymmetry driver is
+**phasing, not geometry**: the right leg sets the stride pattern and the left follows
+it, so whatever phasing / reach / height bias exists is expressed on the trailing leg.
+Concretely the left swings from a *retracted, partially compressed* stance and has to
+reach farther to complete its advance — so it shows `midair` (over-reach past its
+reachable hinge) or `lifted` (touches but does not advance) where the lead leg doesn't.
+The fix is to *balance the two legs' phase and reach*, not to make them share a target.
+
+### 21.2 Candidates (in order of relevance)
+
+1. **Balance the phasing** — the root bias is the hard-wired right-leg-leading offset
+   (§H1: `ResolverState::new` gives the right leg a half-stance head start). Balance it
+   (take the phase offset out, or mirror the two legs so neither is permanently the
+   trailing one). This is the most direct fix for a phasing-driven asymmetry.
+2. **Per-leg swing reach clamp** — the trailing (left) leg swings from a compressed,
+   retracted stance; clamp its `swing_to` to what it can actually reach from its real
+   hinge, not the ground-reference `X_max`, so the 2-bone IK ray-clamp doesn't lift it
+   into `midair`.
+3. **Per-leg `T_remain`** — the trailing leg has a shorter remaining stride; base
+   deadbeat timing on its actual plant distance rather than one global
+   `swing_duration_ts` timebase.
+
+## 22. The skipped landing is because contact-gated touchdown was off (user insight)
+
+> "if we make sure the leg has to land to start another circle, there's no way for
+> the leg to skip a land problem, right?" — user
+
+**The user is right — and the verification never had the rule on.** The headless walk
+defaults to `GaitAuthority::Timer` (`HipPinParams::default` at
+[`hip_pin.rs:464`](examples/game_lib/src/lower_body/hip_pin.rs:464), and
+`ResolverState::new` at [`resolver.rs:480`]). The `run_walk` sweep env never sets
+`GAIT_AUTHORITY`. So at `Timer` authority:
+
+- The contact-gated touchdown (§6 `waiting` arm at
+  [`resolver.rs`](examples/game_lib/src/lower_body/resolver.rs:1489)) **is off** — it
+  only acts at `GaitAuthority::Full`.
+- **swing→stance fires on the timer alone**: [`resolver.rs:1505`](examples/game_lib/src/lower_body/resolver.rs:1505)
+  declares Stance when `phase_timer <= 0.0` whether or not the foot touched.
+
+This is exactly the hole that yields the left leg's `midair`: the swing ends on the
+clock, the leg is parked at its target while still airborne, and the next stance begins
+with no real support. My §17 only made **lift** event-driven (CoM-crossing), not
+**landing** — so the "must land before the next circle" rule is not enforced.
+
+### 22.1 Proposed fix
+
+Gate **swing→stance on real touchdown** — the `Full`-authority contact gate — so a leg
+cannot "skip a land." If touchdown is not observed, hold the swing at the plant point
+(no advance) rather than declaring stance on the timer. Caveat: §11 rejected
+contact-gated timing earlier, but that was the *pre*-event-driven resolver; with the
+CoM-crossing lift (§17) + deadbeat pacing now active, re-test with
+`GAIT_AUTHORITY=Full` is warranted.
+
+### 22.2 Result — Full authority makes it WORSE (the gate is not the missing piece)
+
+Ran the current event-driven walk at `GAIT_AUTHORITY=Full`
+
+(`LEG_COMPLIANCE=5e-9`, window 1.6–10.5 s). `Full` adds early-lost-contact stance cut +
+touchdown-hold swing→stance. Compare against the §20 `Timer` baseline:
+
+| stepHt | Timer body | Full body | Timer L/R pass | Full L/R pass |
+|-------:|-----------:|----------:|---------------:|--------------:|
+| 28     | 69.6       | **−48.0** | 6/15 / 7/16   | 2/15 / 1/16   |
+| 50     | 107.2      | 49.3      | 9/15 / 15/16  | 6/15 / 6/16   |
+
+At `Full` the walk **goes backward at 28 (−48.0)** and both legs' pass rates collapse
+(sh50: 9/15 and 15/16 → 6/15 and 6/16; `midair` dominates both). So making touchdown
+mandatory does **not** close the hole — the contact gate, on top of the event-driven
+gait, *degrades* the walk.
+
+Interpretation: the left leg's `midair` is **not** caused by "swing ends on the clock
+before touching." Under `Full` the leg still can't touch — it holds in the air waiting
+for a touchdown that never arrives until `max_swing_wait` forces it. So the contact
+gate is not the missing piece. The body is not *over*-forward (twice as much as needed,
+the user's first guess also being tested); it is instead failing to **bring the trailing
+leg back down to the floor** — a reach/height problem (the §21.2 #2 per-leg reach clamp
+is now the leading candidate), not a gating/timing problem. §22.1's proposed gate is
+**rejected by measurement**; revert to `Timer` for the haul.
+
+## 23. Pivot: status-based (state) gait, not time-based (user direction)
+
+> "lets not commit yet. time based logic won't fit physics well. I think we need to
+> improve on the status based solution." — user
+
+The user is right, and §22.2's measurement *proves* it: both `Timer` and `Full` are
+time-based under the hood, and neither closes the skipped-landing hole. `Full` holds
+the swing only until `max_swing_wait`, then forces a stance — still on a clock. That is
+exactly why a timing-gate cannot fix a physics-lagging walk: the soft body lags and
+drifts, so any wall-clock schedule (stance timer, swing timer, wait cap) will end the
+swing while the foot is airborne.
+
+### 23.1 The state-based gait (fully timer-free transitions)
+
+Make both gait transitions pure **state machines** on measured contact + position,
+with no wall-clock dependency:
+
+- **Stance → Swing** — already state-based (§17): fire on measured CoM passing the
+  stance foot in the direction of motion. *Timer removed, fallover-only.*
+- **Swing → Stance** — the missing half: fire on **measured contact (touchdown) only**.
+  The foot parks at the plant point and the swing holds until the physics reports the
+  foot is touching. **No `max_swing_wait` timeout** — without a planted contact signal
+  the swing simply does not close (this is what distinguishes a true status-based
+  landing from the §22 `Full` gate, which still timed out).
+- The only remaining uses of time are **safety** (a "stuck/no-contact" watch so a
+  genuinely fallen/unanchored leg can't hang forever), never scheduling. This matches
+  §17/§19's "timer as fallover cap" philosophy, now applied to landing too.
+
+The anti-phase gate (`!other_swinging`) + the half-stance phase offset stay; they decide
+*which* leg may lift, not *when* — timing is removed from the circle.
+
+### 21.3 Localized to one file, physics untouched
+
+All three are in `resolver.rs` (`step_leg` / `plan_target_x` / `swing_profile_foot`),
+gait-only, no physics model change. Cheap to A/B via `analyze_gesture` `pass/n` per
+leg.
+
+## 24. Feasibility: full DCM/MPC gait replacement (`plans/swing-phase-timing.md`)
+
+The user authored an event/state-based DCM-tracking gait plan (Kajita→Pratt→
+Englsberger lineage, specialized to the 2D XPBD character). Key claim (§12): for a 1D
+LIPM with a one-step horizon the MPC solve is **closed-form arithmetic** — no QP needed.
+
+### 24.1 Scaffold we already have
+
+- `omega_0 = sqrt(g/z_CoM)` + DCM `xi = x_CoM + v_CoM/omega_0` — [`capture_point`]
+  (resolver.rs:1191) already is the DCM.
+- Placement law `x_foot = x_CoM + (v_now − v_des)/(T_conv·omega_0²)` = our
+  `plan_target_x`, with `T_conv` (default 1/omega_0) as the new responsiveness knob.
+- DCM-support-margin trigger (§3) generalizes our §17 CoM-crossing lift.
+- Min-jerk + sine-arch swing (§5) generalizes `swing_profile_foot`; §5's mid-swing
+  alignment rule is the user's earlier §18.1 idea.
+- Touchdown acceptance (§7: contact + force + hysteresis) = §23/§22 status-based
+  landing, plus early/force plant guards we lack.
+- Learned acceleration budget (§4.1) directly cures the startup `a_des` spike that is
+  the one-leg-hop root cause — a *principled* replacement for our `approach()` ramp.
+- Verification checklist (§10) maps onto our `analyze_gesture`/sweep harness.
+
+### 24.2 Realistic risk
+
+1. **Gait-core rewrite.** Replaces the FSM/timing/placement/swing core of resolver.rs
+   (~1500 lines + ~2000 of legacy-gait tests). The 100 passing unit tests encode the
+   old timer-based phases; a full replacement means re-writing most of `tests`
+   (invariant tests — IK length, capture-point math, velocity continuity — survive).
+2. **Needs measurement we don't have yet.** The learned budget needs per-frame CoM
+   `a_achieved` and foot-slip detection (loaded-foot horizontal motion). We measure
+   CoM/vCoM/apex, not slip/a_achieved — a small measurement-layer extension.
+3. **Hysteresis/guard tuning** for XPBD contact flicker (~10 new knobs).
+4. **Loop-2 thrust/apex-height feedback re-wiring** for jump support inside the FSM.
+
+### 24.3 Recommended phasing (not big-bang)
+
+- **A** placement law with `T_conv` + fixed-point touch-down prediction (swap
+  `plan_target_x`). Low risk, pure math.
+- **B** DCM-support-margin trigger + progress-based (`tau`) retimed swing — delivers
+  §23's timer-free landing properly. Low-medium.
+- **C** learned acceleration budget + slip/a_achieved measurement (replaces `approach()`
+  ramp). Medium.
+- **D** early/force plant + FALL/LIE/get-up FSM. Medium-high.
+- **E** hysteresis/guard tuning + full §10 checklist. Iterative.
+
+**Verdict: implementable, right architecture, no optimizer dependency; but a
+multi-session gait-core rewrite — strongly recommend A→E phasing. §23 is subsumed by
+phase B.**
