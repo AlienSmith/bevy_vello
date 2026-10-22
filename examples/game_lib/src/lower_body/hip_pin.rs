@@ -556,6 +556,13 @@ pub struct HipPin {
     pub measured: BodyMeasurements,
     /// EMA + finite-difference filter state for the measured body.
     pub measure_filter: BodyMeasureFilter,
+    /// Realized standing hip height above the floor, px. Captured from the live
+    /// leg-bridge seed once the rig is ready (the character may stand taller or
+    /// shorter than `config.hip_height` — e.g. 106 px vs the 90 px model default).
+    /// The resolver's ground-referenced geometry (stand height, swing plant, reach
+    /// envelope `X_max`, LIPM) is computed against this per-pin value so the virtual
+    /// floor coincides with the real collision floor.
+    pub standing_height: f32,
 }
 
 impl HipPin {
@@ -587,6 +594,7 @@ impl HipPin {
             last_external_pin: false,
             measured: BodyMeasurements::default(),
             measure_filter: BodyMeasureFilter::default(),
+            standing_height: config.hip_height,
         }
     }
 
@@ -801,9 +809,13 @@ pub fn measure_body(
             (Ok(hip), Ok(shoulder)) => (hip.particle.pos, shoulder.particle.pos),
             _ => continue,
         };
-        // Floor line: the resolver's flat floor, Vello y = 0 (the character is
-        // assembled with the floor at world y≈0; see the tuning app / harness).
-        let floor_y = 0.0;
+        // Floor line in the Vello (y-down) world frame: the live foot line below
+        // the hip anchor by the realized standing height. Previously this was the
+        // hardcoded `floor_y = 0.0`, which pinned the CoM-height channel to zero
+        // (floor − com clamped negative) and starved loop-1/loop-2 apex feedback.
+        // Using the seeded anchor + standing_height ties the measurement to the
+        // same real floor the collision response enforces.
+        let floor_y = pin.anchor_p3.y + pin.standing_height;
         pin.measured = update_measurements(
             &mut pin.measure_filter,
             &samples,
@@ -895,7 +907,7 @@ pub fn drive_hip_pin(
                 // ballistic model. `z_com` is the CoM height above the floor;
                 // the resolver's `h_apex_prev` is an apex RISE above the
                 // standing height, so feed `z_com − standing_hip_height`.
-                pin.state.measured_apex = Some(pin.measured.z_com - params.config.hip_height);
+                pin.state.measured_apex = Some(pin.measured.z_com - pin.standing_height);
             }
         } else {
             pin.state.measured = None;
@@ -984,7 +996,14 @@ pub fn drive_hip_pin(
             pin.state.foot_contact = None;
         }
 
-        let (pose, debug) = step_lower_body(input_dir, &params.config, &mut pin.state, dt);
+        // Per-pin config: the resolver's ground-referenced geometry is computed
+        // against the realized standing height (latched from the live leg seed),
+        // not the shared model default, so the virtual floor coincides with the
+        // real collision floor. Everything downstream that reads `hip_height`
+        // (reach envelope, LIPM, stand regulator, plant) sees this override.
+        let mut cfg = params.config.clone();
+        cfg.hip_height = pin.standing_height;
+        let (pose, debug) = step_lower_body(input_dir, &cfg, &mut pin.state, dt);
         // Loop-3 telemetry latch: the torque/accel are per-tick `DebugInfo`
         // values (not persistent state), so keep the last tick's for the
         // headless harness's whole-body row.
@@ -1226,22 +1245,36 @@ pub fn drive_hip_pin(
                 right_leg.knee_target,
                 right_leg.target,
             );
-            let seed = *pin.leg_seed.get_or_insert(LegBridgeSeed {
-                live: [live_left, live_right],
-                resolver: [
-                    LegPoseSeed {
-                        hip: pose.hip,
-                        knee: pose.left_knee,
-                        foot: pose.left_foot,
-                    },
-                    LegPoseSeed {
-                        hip: pose.hip,
-                        knee: pose.right_knee,
-                        foot: pose.right_foot,
-                    },
-                ],
-            });
-
+            // Capture the seam seed and the realized standing height together,
+            // then attach them. `leg_seed` and `standing_height` are separate
+            // fields, so seeding one while writing the other must be done on a
+            // local to satisfy the borrow checker.
+            let seed = if let Some(seed) = pin.leg_seed.as_ref() {
+                *seed
+            } else {
+                // Latch the realized standing height from the live leg the first
+                // time the bridge is seeded. The character may stand taller than
+                // the resolver's model `hip_height` (e.g. 106 px vs 90 px); the
+                // ground-referenced resolver geometry is computed against this
+                // per-pin value so the virtual floor lines up with the real one.
+                pin.standing_height = (live_left.hip.y - live_left.foot.y).max(1.0);
+                LegBridgeSeed {
+                    live: [live_left, live_right],
+                    resolver: [
+                        LegPoseSeed {
+                            hip: pose.hip,
+                            knee: pose.left_knee,
+                            foot: pose.left_foot,
+                        },
+                        LegPoseSeed {
+                            hip: pose.hip,
+                            knee: pose.right_knee,
+                            foot: pose.right_foot,
+                        },
+                    ],
+                }
+            };
+            pin.leg_seed = Some(seed);
             // Hip target: x follows the live P3 (so impulses move the body),
             // but y follows the resolver's vertical command relative to the
             // seed. Without the external pin, using live y here makes the foot
@@ -1434,6 +1467,8 @@ pub fn reset_hip_pin(
         pin.state = ResolverState::new(&params.config);
         pin.ready = false;
         pin.leg_seed = None;
+        // Re-seed will re-latch the realized height from the live leg.
+        pin.standing_height = params.config.hip_height;
         pin.prev_world_delta = Vec2::ZERO;
     }
 }

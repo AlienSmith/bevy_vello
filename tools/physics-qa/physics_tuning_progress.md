@@ -719,3 +719,71 @@ for LVL in timer observe contact full; do
   python3 tools/physics-qa/analyze_foot_slide.py /tmp/phase_f_ab/$LVL.csv
 done
 ```
+
+## 12. Floor fix + gesture tool → the asymmetry is a left-side advance defect (session 7)
+
+### 12.1 Floor/standing-height fix landed
+
+The resolver previously assumed a virtual floor at `floor_y = 0` with `hip_height
+= 90` px, while the collision response places the real floor a live stance
+(~106 px) below the hip — a ~16 px divergence. `hip_pin` now latches the realized
+standing height from the live leg seed each time it is (re)seeded
+(`standing_height = hip.y - foot.y`) and overrides the resolver config with it,
+so the resolver's ground-referenced geometry (stand height, swing plant, reach
+`X_max`, LIPM, stand regulator) computes against the real floor. `measure_body`
+also anchors its floor at `anchor_p3.y + standing_height` instead of the
+hardcoded `y = 0`, un-starving CoM-height / apex feedback.
+
+### 12.2 New gesture tool: `analyze_gesture.py`
+
+Reads the whole-body walk CSV and describes the walking gesture per gait cycle
+from hip `P3`, knees `P40`/`P41`, feet `PLLL`/`PRLL`, head `PH`. Per swing it scores
+the three acts that make a real step — **lift** (max foot clearance), **advance**
+(gain of foot − body x), **overtake** (swing-over-stance foot lead gain) — plus
+knee flexion, head bob, hip drop, and body speed. Prints a left/right summary, an
+optional `--per-cycle` table, and an overlaid 3-panel `--plot` (forward x /
+vertical lift+bob / knee flexion).
+
+Usage:
+
+```bash
+python3 tools/physics-qa/analyze_gesture.py tmp/headless/walk3/w_5e-9_sh70.csv --per-cycle
+python3 tools/physics-qa/analyze_gesture.py tmp/headless/walk3/w_8e-9_sh50.csv --plot /tmp/g.png
+```
+
+### 12.3 Finding — the walk is now real, but one-leg asymmetric
+
+With the floor fixed, the body travels 28–85 px/s (real forward motion, up from
+"hardly scratches"). The swing gate (analyze_swing) already showed right-leg
+steps cleanly while the left is flagged `NO_ADVANCE`. The gesture tool pinpoints
+*why*: the two legs step with near-identical knee flexion (~45–63°), but the
+**left leg fails specifically on the advance metric** while the right is a
+consistent stepper.
+
+| run | body px/s | left (pass/total) | right (pass/total) |
+|-----|-----------|-------------------|--------------------|
+| w_5e-9_sh70  | 60 | 8/15  | 13/16 |
+| w_5e-9_sh110 | 84 | 9/15  | 11/16 |
+| w_8e-9_sh90  | 85 | 9/15  | 12/16 |
+| w_5e-9_sh50  | 67 | 6/15  | 14/16 |
+| w_8e-9_sh50  | 41 | 3/15  | 14/16 |
+| w_1e-8_sh70  |  1 | 4/15  | 10/16 |
+| w_5e-9_sh28 |  <1 | 0/15  |  3/16 |
+
+Per-cycle detail (w_8e-9_sh50): left `adv` swings −26.5 … +38.8 (mean −5.7) so
+most left swings end NO; right `adv` stays +13…+46 (mean +25.6) so nearly all
+right swings STEP. Two spatial clues corroborate a left-side placement defect:
+the left floor (max planted foot y) sits consistently higher than the right
+(e.g. 292.3 vs 288.7, 284.8 vs 283.8 — the left foot does not plant as low), and
+the left stance holds slightly higher.
+
+### 12.4 Verdict / next lever
+
+This is **not** a compliance or lift problem — the left leg flexes the same and
+lifts fine; it repeatedly finishes its swing **without having gained ground on
+the body** (the body overlaps/outruns the short left stride), so the left foot is
+"creeping forward with the body" instead of being placed ahead of it. The lever
+that now matters is **per-leg stride length / foot-placement x** (loop-2 foot
+placement and how far the swing leg leads before planting), lengthened on the
+left to match the right. Best walk on the fixed floor so far: `LEG_COMPLIANCE=5e-9
+STEP_HEIGHT=70..110`.
