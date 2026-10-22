@@ -239,6 +239,57 @@ stiffness by construction). We keep that verbatim. What loop 2 actually changes 
     foot placement), never a particle pin. `hip_pin.rs` (or a contact system) +
     `resolver.rs`.
 
+### 6.1 What ground truth already exists (so Phase F does not rebuild it)
+
+**Contact events already reach the controller.** `GroundSupport` is refreshed every
+FixedUpdate tick from the previous tick's `CollisionEventBatch`
+([`update_ground_support`](../examples/game_lib/src/lower_body/hip_pin.rs:189)), and
+that batch is real GPU narrow-phase output containing, per colliding pair:
+
+- `entity_a` / `entity_b` — so a contact can be attributed to a **specific foot**
+  collider (`PRLL` left / `RLL` right), not just to "the character";
+- `collision_point_a` / `collision_point_b` — the physical contact point;
+- `collision_normal_a` / `collision_normal_b` — the contact normal;
+- `velocity_a` / `velocity_b`, `inv_mass_a` / `inv_mass_b` — a physics snapshot that
+  allows a normal-impulse estimate.
+
+Source: [`VelloCollisionEvent`](../src/collision/mod.rs:324) and
+[`CollisionEventBatch`](../src/collision/mod.rs:176). Reference consumer:
+[`make_collision_constraints`](../src/integrations/physics/systems.rs:155). Ordering is
+already correct in every app that runs the pin:
+`update_ground_support.before(drive_hip_pin)` and
+`measure_body.after(update_ground_support).before(drive_hip_pin)`.
+
+**So Phase F is not "add contact detection" — it is "raise the resolution from a global
+bool to per-foot, per-tick ground truth".** What `GroundSupport` currently loses:
+
+| lost | why it hurts Phase F |
+| --- | --- |
+| **which** collider touched | It counts *any* soft-body vs non-soft-body pair with `\|normal.y\| > 0.5`. A foot, a shin, a hand or the head pressing on the floor all count. Loop 2 could be granted thrust authority from a knee contact. |
+| **contact age / persistence** | `grounded = contacts > 0` with no hysteresis, so it chatters at lift-off and touchdown. A single-tick flicker is enough to arm or disarm the gait authority. |
+| **penetration / impulse magnitude** | Contact without load still counts as grounded, so "touching but weightless" (about to lift off) is indistinguishable from "loaded and pushing". Loop 2 wants the latter. "Still sliding" (the §6 slide problem) genuinely needs this. |
+| **foot-specific anchor position** | `collision_point_a/b` is discarded, yet it is the natural anchor for judging whether a stance foot has drifted, and it is what makes a contact-gated clock possible without a particle pin. |
+
+Known caveats to respect in Phase F:
+
+- **The flag is one tick stale.** The batch is written by `run_gpu_collision` at the end
+  of FixedUpdate and read at the start of the next tick as the *previous* tick's truth.
+  That is fine for gating a clock, but any per-tick contact age counter must be advanced
+  with that offset in mind.
+- **`CollisionEventBatch::default()` is empty, and `GroundSupport` treats a missing batch
+  as `grounded = true`.** Any new per-foot layer must keep that soft fallback, or the
+  headless pure-kinematic harnesses and the Raibert sandbox will silently report
+  "airborne" and gate every loop off.
+- `\|normal.y\| > 0.5` is ~60° from horizontal. It admits steeply-angled wall contacts
+  that are not support; a per-foot version should require the normal to point *up*
+  (sign, not just magnitude) and probably tighten the cone.
+
+Suggested shape (Phase F decision, not yet implemented): replace the `grounded: bool` /
+`contacts: usize` pair with a per-foot struct keyed by the `PRLL`/`RLL` collider entity —
+`{ touching: bool, ticks_in_contact: u32, normal: Vec2, point: Vec2, normal_speed: f32 }`
+— and keep `grounded` as a derived convenience field so the Phase-E loop-3 gate and the
+existing `support_share` gravity logic keep working unchanged.
+
 ## 7. Body design — P3-heavy hip, light upper body, modest waist (asset)
 
 **Design rule: make P3 (the hip) the heavy particle and keep the rest light.** The
