@@ -922,10 +922,294 @@ This is the change that will keep the stance foot planted (no midair/drag), let
 the swing foot reach the floor, and give a symmetric, ground-contact walk.
 `sweep_step_height.py` + the `vphase`/hip-height checks are kept as the regression
 harness (hip stays within ±2 px of stand, `midair` → 0, both legs pass).
-too hot or the swing arc apex being too high for the plant. The first thing to
-test is **lowering STEP_HEIGHT toward ~50 while keeping compliance 5e-9** (which
-removes the midair hops), then **lengthening the left stride** to fix the
-remaining lifted-but-no-advance. If confirming the hop hypothesis: log per-tick
-`hip clearance = floor − hip.y` across the walk and diff STEP_HEIGHT 50 vs 90 at
-the same compliance — hop amplitude should scale with step height, and the
-midair:pixel count should fall correspondingly.
+
+## 15. Startup/velocity mismatch + loop-2 coupling → the one-leg "hop" (session 10)
+
+### 15.1 The user's mechanism (confirmed by telemetry + code)
+
+The persistent "one leg hopping all the time" is not a deliberate jump. Three
+combined causes:
+
+1. **Startup velocity mismatch.** At the walk start `cmd_vx` jumps toward 120 px/s
+   almost instantly (I measured it ramping 3.5 → 14 → 28 → 42… within ~0.1 s)
+   while the body's realized `hip_vx` is ~0–35 px/s and even slips **negative**
+   at the first push (t≈0.57–0.60 s `hip_vx ≈ −24…−33`). Loop 1/loop 2 read that
+   gap as a huge balancing error.
+
+2. **Fixed stance/swing timers.** `stance_ts` / `swing_ts` are constant, so the
+   gait advances to the next step on schedule **whether or not the previous foot
+   planted** and **whether the hip is mid-bounce**. A bad (airborne, early) state
+   is not waited out; it is stepped forward from.
+
+3. **Loop-2 foot placement runs ahead (Raibert coupling).** With the measured
+   loop active, [`plan_target_x`](examples/game_lib/src/lower_body/resolver.rs:1251)
+   targets the LIPM capture point `x_CoM + (v_CoM − v_des)/ω₀`. While `v_CoM`
+   lags `v_des`, the demanded plant is far ahead of the hip (clamped to
+   `hip ± x_max`). Then
+   [`compute_support_velocity`](examples/game_lib/src/lower_body/resolver.rs:1009)
+   (the generalized backward solve) converts that plant offset into a **hip
+   velocity** `(delta_x + kv·v_des)/(Ts/2+kv)` that keeps *demanding* the body
+   leap forward. Loop 2 therefore converges toward a one-leg-hop: the leg plants
+   far ahead and the feedback demands the hip bound forward to reach it.
+
+Measured signature that matches: the hip rides above `stand+2px` for 92.9% of
+the walk (peak ~62 px over stand), peaking in the ~0.1 s after each step; and at
+sh50 the left leg is airborne-but-lifted while the right is the consistent
+stepper → the "leading right" leg is the one doing the leaping.
+
+### 15.2 What to change (all gait code, physics settled)
+
+Working on top of the settled physics, the fix addresses the startup/timer/coupling:
+
+- **A. Cap / ramp `v_desired` to the body's grasp** — don't command 120 while the
+  realized speed is ~0. Ramp `cmd_vx → v_des` over a few cycles (or clamp the
+  capture-point `v_des` contribution) so the plant target does not leap ahead of
+  reach at startup.
+- **B. Let the gait wait for contact** — gate the stance→swing advance on the
+  planted foot actually holding (contact / vertical settled), i.e. a **contact-
+  or ground-gated timer**, instead of a pure fixed timer, so an airborne/bouncing
+  state is not stepped forward from.
+- **C. Re-tune loop-2's `kv` and/or how `compute_support_velocity` feeds the hip**
+  so a single overly-forward plant is not converted into an ever-escalating hip
+  velocity demand (break the "plant far ahead → demand hop" loop).
+
+These are the levers to discuss next. The regression harness from §14
+(hip within ±2 px of stand, `midair` → 0, both legs pass) verifies whichever
+combination we pick.
+
+## 16. How the feedback loop is wired, and how this class of problem is usually fixed
+
+### 16.1 The architecture (measured-state feedback, not open-loop)
+
+The resolver closes on **measured** state, never on its own commanded pose:
+
+1. **Measurement** — [`measure.rs`](examples/game_lib/src/lower_body/measure.rs)
+   produces `CaptureMeasure { com_x, v_com, z_com }` + a measured CoM apex, fed
+   into the resolver as `state.measured` / `state.measured_apex`
+   ([`resolver.rs`](examples/game_lib/src/lower_body/resolver.rs:393)).
+2. **Loop 1 (height)** — `tick_vertical` closes on the measured resulting state;
+   `regulate_height` integrates the hip against the measured gap; the apex latch
+   prefers the measured CoM apex over the internal ballistic model.
+3. **Loop 2 (foot placement)** — [`plan_target_x`](examples/game_lib/src/lower_body/resolver.rs:1251)
+   computes the swing plant from the measured capture point `x_CoM + (v_CoM − v_des)/ω₀`
+   (falls back to the Raibert neutral point only when no measurement). This is the
+   live feedback: **where the foot plants is a function of the measured velocity
+   error.**
+4. **Plant re-anchor (`Contact`)** — `step_leg` re-anchors a stance plant to the
+   measured foot x, but only **once per stance** (`plant_anchored`). The comment
+   at [`resolver.rs:248`](examples/game_lib/src/lower_body/resolver.rs:248) states
+   the trap explicitly: *"Re-anchoring every tick is a positive feedback loop:
+   target → PD → measured → target."* They already guard against self-feeding.
+
+### 16.2 Why loop 2 turns into a one-leg hop
+
+Loop 2 is a **velocity-error feedback**: `plant_target = x_CoM + (v_CoM − v_des)/ω₀`.
+At startup `v_CoM≈0` while `v_des=120`, so the plant demands land far ahead; the
+backward solve [`compute_support_velocity`](examples/game_lib/src/lower_body/resolver.rs:1009)
+`(delta_x + kv·v_des)/(Ts/2+kv)` then feeds that same over-forward error back into
+a hip-velocity demand every stride. With fixed stance/swing timers (§15.1-2) the
+loop cannot "wait it out" — it compounds until it converges to the hop.
+
+### 16.3 The usual ways this is resolved (all control-structure, physics untouched)
+
+- **Slew / rate-limit the reference.** Don't feed the loop a step change it can't
+  track 1:1. Ramp/`approach()` `cmd_vx → v_des` (the code already has
+  [`approach()`](examples/game_lib/src/lower_body/resolver.rs:604)) so the
+  bootstrap transient does not feed a huge plant error. *This is the canonical
+  fix for a loop that oscillates/steps wildly at startup.*
+- **Gate on "good" feedback only.** Only act on a plant the physics actually
+  delivered — the `plant_anchored` once-per-stance guard and the
+  `GaitAuthority::Observe/Contact` ladder are the shells of this. Extending it to
+  *wait for contact before advancing the gait* (§15.2 B) is the same principle.
+- **Bound the loop gain.** Cap the speed ramp and the support-velocity feed so one
+  bad plant cannot escalate into an ever-larger hip demand; the capture point is
+  already clamped to `hip ± x_max`, the missing piece is bounding the *rate* and
+  the *velocity feed*.
+
+**Bottom line:** the textbook resolution is slew the velocity reference (A) so the
+bootstrap doesn't overreach, **and** gate the gait on measured contact (B) so an
+airborne/bouncing state is never stepped forward from. Together they break the
+self-amplifying hop loop without touching the settled physics.
+
+## 17. Design pivot — event-driven gait (user direction)
+
+> "maybe it is wrong to set an exact swing time and step time... maybe it should be
+> about if the COM_x is moved across the ahead feet we should start the swing of the
+> behind feet. swing and stance is only for character to fall over. we can have a
+> fixed time for the sand body cause it is kinematic and responds instantly. physics
+> world is lagging, we should have the walking cycle adapt to it instead of having
+> the physics world adapt to a fixed walk cycle." — user
+
+The user's proposal: advance the gait **off measured state**, not off a fixed clock.
+The timer becomes a *fallover bound* (how long a leg can stay planted/swinging before
+the soft body would tip), not the scheduler itself.
+
+### 17.1 Current gating (what actually triggers phase changes)
+
+- **Swing → Stance: already contact-gated (`Full`).** [`resolver.rs:1480`](examples/game_lib/src/lower_body/resolver.rs:1480)
+  holds the final swing point and waits for a measured touchdown before declaring
+  Stance (bounded by `max_swing_wait`). The foot does not plant on the timer alone.
+- **Stance → Swing: pure timer.** [`resolver.rs:1399`](examples/game_lib/src/lower_body/resolver.rs:1399)
+  counts down `stance_duration_ts`; [`resolver.rs:1429`](examples/game_lib/src/lower_body/resolver.rs:1429)
+  ends stance on `phase_timer <= 0.0` (or early lost-contact). The advance condition
+  at [`resolver.rs:1430`](examples/game_lib/src/lower_body/resolver.rs:1430) only
+  requires move intent (`v_desired > SWING_TRIGGER_SPEED`) + not-other-swinging. It
+  **never checks whether the CoM has actually advanced past the planted foot.**
+
+So the exact gap is **liftoff is timer-scheduled, not state-triggered** — the leg is
+picked up because a clock expired, even while the CoM is still over/behind the foot.
+That is the mechanical source of the one-leg hop: the cycle is forced forward into a
+state the physics has not delivered.
+
+### 17.2 Proposed change
+
+- Make the stance→swing event **"CoM has advanced past the stance foot."** Direction
+  aware (v_desired sign). Roughly the Raibert neutral-point test:
+  `sign(v_des)*((coM_x - plant_x) - lead_fraction*stride) > 0` → want_step.
+  If v_des ≈ 0, keep the stop-settle behavior (no advance).
+- Demote `stance_duration_ts` / `swing_duration_ts` to **safety clocks only**: a max
+  stance (don't let the leg stay planted forever / soft body tips) and a max swing
+  (don't let the foot dangle). They cap runaway, they do not schedule.
+- Keep the existing contact gates (`lost_contact_early`, touchdown wait) — they are
+  already the correct side of this design; the missing half is the liftoff trigger.
+
+Net: the walk circle adapts to the physics (steps when the body has really crossed the
+plant), the kinematic resolver stops commanding a cycle faster than the soft body can
+respond, and the timers remain purely as fallover safety. This is the implementation
+direction we take next.
+
+## 18. "How fast to swing" and "when to land" — what the algorithm already gives us
+
+The algorithm already determines **where** to land and **what** the foot does at every
+instant; what it does **not** derive is **how fast** to traverse the swing. The gap:
+
+- **Land *where* — live, already closed on measured state.**
+  [`capture_point`](examples/game_lib/src/lower_body/resolver.rs:1191)
+  `x_land = com_x + (v_com − v_desired)/ω₀`, `ω₀ = √(gravity/z_com)` (LIPM capture
+  point). [`plan_target_x`](examples/game_lib/src/lower_body/resolver.rs:1251) clamps
+  to `hip ± x_max` and falls back to the Raibert neutral point only when unmeasured.
+  So the landing spot is a function of `v_com` + `v_desired` — not a timer.
+- **Foot *path* — fully specified.**
+  [`swing_profile_foot`](examples/game_lib/src/lower_body/resolver.rs:1290) is a C¹
+  lift→advance→extend Hermite spline from lift-off `from` to the continuously
+  re-planned target `to` ([`resolver.rs:1455`](examples/game_lib/src/lower_body/resolver.rs:1455)).
+  Clearance, forward advance, and a shallow touchdown approach are baked into the
+  control points.
+- **Land *when* / swing *speed* — fixed clock, NOT state-derived.**
+  The spline parameter `s` is advanced linearly `1→0` over `swing_duration_ts`
+  ([`resolver.rs:1458`](examples/game_lib/src/lower_body/resolver.rs:1458)). So today
+  swing speed ≡ `distance / swing_duration_ts`, a constant, even though the *target* is
+  re-planned live each tick. The missing piece is a state-derived rate.
+
+### 18.1 The event-driven rule that completes the design
+
+Traverse the spline so the foot reaches the capture point exactly when the CoM does:
+
+```
+T  = |x_land − current_hip_x| / v_desired   (with a floor ≈ 0 + small epsilon)
+ṡ  = 1 / T
+```
+
+Slow body → slower swing to match; fast body → quicker swing. The `Full` contact gate
+([`resolver.rs:1480`](examples/game_lib/src/lower_body/resolver.rs:1480)) already holds
+the touchdown point until measured contact. Combined with §17 (lift on CoM crossing),
+this closes the loop:
+
+- lift when the CoM has passed the stance foot (§17, event-driven) — **when to lift**;
+- swing at `ṡ = 1/T` so the foot arrives as the CoM does — **how fast**;
+- land at the capture point + contact-gated touchdown — **where + when to land**.
+
+Timer demoted to a fallover safety cap only. Physics untouched.
+
+### 18.1 Refinement (user) — anchor the swing midpoint to the measured CoM
+
+> "we know how fast coM is moving. we just make sure the feet is right beneath the
+> com for half of the swing time." — user
+
+Simpler and more robust than the `ṡ = 1/T` arrival rule in §18. Keep the swing **timer
+only as the timebase for the midpoint** ("half the swing time") and anchor the foot's
+horizontal position so it sits directly under the CoM at `s = 0.5`:
+
+```
+com_mid = com_x0 + v_com · (swing_time / 2)   // v_com measured live
+foot_x(s = 0.5) = com_mid
+```
+
+Split the swing at the midpoint: the first half carries the foot from the old plant to
+`com_x0 + v_com·(swing/2)`, the second half from under the CoM to the capture point.
+Maps onto [`swing_profile_foot`](examples/game_lib/src/lower_body/resolver.rs:1290):
+today the horizontal control points are shape constants (`0→1.0dx`, midpoint ≈ `0.49dx`)
+independent of the body ([`resolver.rs:1301`](examples/game_lib/src/lower_body/resolver.rs:1301));
+we make the midpoint `= com_mid`, a measured anchor.
+
+Same pacing benefit as §18 (slow body → the foot lingers near the plant mid-swing and
+does not overreach; fast body → it crosses under the CoM toward the capture point), but
+no `T`-floor and no divide — just a measured clamp. The timer stays as the midpoint
+timebase (the user's "half the swing time"); horizontal position becomes state-driven.
+Physics untouched.
+
+## 19. How established legged locomotion actually solves this (canonical precedents)
+
+The user asked what established practice does for this exact problem — it is old and
+well-solved. Our design maps onto it well, with two upgrades to borrow.
+
+### 19.1 What our design already matches (confirming §17/§18)
+
+- **Lift on "CoM passes the stance foot" (§17)** is the *neutral point* / *leg-crossing*
+  footstep trigger from Raibert (1986) through modern machines (MIT Cheetah, Cassie,
+  ANYmal). Deployed systems don't step on a wall clock; they output an online footstep
+  *plan* and spline the swing leg to it. → standard, keep.
+- **Timer as a fallover safety cap** is the *stance deadline / max-swing timeout* that
+  every legged controller keeps as a failsafe. → standard, keep.
+
+### 19.2 Two things mainstream practice adds that we should adopt
+
+1. **Deadbeat timing — use *time-to-touchdown*, not half the (constant) timer.**
+   The capture-point camp (Pratt 2006) and modern quadrupeds explicitly compute the
+   remaining swing time from `v_com`: `T_remain = (x_land − x_com)/v_com`, then re-derive
+   the swing spline over `T_remain` each step. This is strictly more correct than
+   "half the swing timer" (§18.1) because it re-schedules instantly when `v_com` changes
+   mid-swing. → upgrade §18.1's midpoint rule into a deadbeat time-to-touchdown schedule.
+2. **Rate-limit the reference `v_des` (reference generation).** Every real controller
+   ramps desired velocity instead of stepping it 0→120. This is the single most canonical
+   fix in the field, and it removes the overreach feedback (§15.1/§16.3 option A) at the
+   source. We already have [`approach()`](examples/game_lib/src/lower_body/resolver.rs:604).
+
+### 19.3 Net recommendation (all gait/resolver code, physics untouched)
+
+- Lift: CoM-passes-foot (§17) — keep.
+- Swing: schedule over remaining time to the capture point: `T_remain = (x_land − x_com)/v_com`
+  (§18.1 upgraded to deadbeat).
+- Reference: rate-limit `cmd_vx → v_des` via `approach()` (§19.2.2, the canonical hop fix).
+- Timer: fallover cap only — keep.
+
+## 20. Implementation + verification (event-driven gait landed)
+
+Implemented all three changes in `resolver.rs` (pure gait code, physics untouched):
+
+1. **Reference ramp** (§19.2.2): new `ResolverState::v_ref`, ramped each tick via
+   `approach(v_ref, v_cmd, accel·dt)` — the capture point & backward solve now see a
+   smoothly rising reference instead of a `0 → 120` step.
+2. **Event-driven lift** (§17): `stance_over` also fires when the measured CoM has
+   advanced past the stance foot in the direction of `v_desired`. The stance timer is
+   demoted to a fallover cap.
+3. **Deadbeat swing pacing** (§19.2.1): the swing spline advances by
+   `T_remain = |x_land − x_com| / v_com` (capped by `swing_duration_ts`, floored), so
+   the foot arrives when the body does instead of on the fixed swing clock.
+
+Verification (headless walk, `LEG_COMPLIANCE=5e-9`, window 1.6–10.5 s, gesture
+classifier pass/`n` = swings passing lift+advance+overtake):
+
+| stepHt | body px/s | left pass/n (`stck/air/lift`) | right pass/n (`stck/air/lift`) |
+|-------:|----------:|------------------------------:|-------------------------------:|
+| 28     | 69.6      | 6/15 (`0/13/2`)              | 7/16 (`0/14/2`)               |
+| 50     | 107.2     | 9/15 (`0/9/6`)               | 15/16 (`0/11/5`)              |
+
+**Reading.** Compared with §14.3 (pre-change: sh28 → **backward −60.8**, sh50 → 67):
+the walk now moves **forward** at every height, including the previously-backward 28.
+`stuck = 0` everywhere (friction/contact fine). The right leg is now a consistently
+stepping leg (15/16 at sh50, 0 midair), confirming the right-leg hard-wire (§H1) no
+longer fanatics; the asymmetry that remains is **left-leg midair/lifted**, so the
+direction of the residual work is now unambiguous: **the left leg leaves the floor but
+does not re-contact / does not complete its advance.** The one-leg broad-hop is gone —
+the hop's signature (high midair on the non-stepping leg) is gone from the right side.

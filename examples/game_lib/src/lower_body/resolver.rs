@@ -361,6 +361,11 @@ impl Default for AttitudeState {
 pub struct ResolverState {
     pub hip_pos: Vec2,
     pub hip_vel: Vec2,
+    /// Rate-limited velocity *reference* (`cmd_vx → v_des`, §19.2.2/§15.1). The
+    /// command presented to the capture point and backward solve ramps instead
+    /// of stepping, so a soft body starting at rest is never asked to jump to
+    /// full speed in one tick.
+    pub v_ref: f32,
     /// Current (possibly interpolated) hip height `H`.
     pub hip_height: f32,
     pub left: LegState,
@@ -464,6 +469,10 @@ impl ResolverState {
         Self {
             hip_pos: hip,
             hip_vel: Vec2::ZERO,
+            // Reference starts at rest and is ramped toward `v_des` each tick
+            // (see `step_lower_body` §2). Starting it at 0 keeps the bootstrap
+            // from commanding a step-change in velocity (§15.1/§19.2.2).
+            v_ref: 0.0,
             hip_height: config.hip_height,
             left,
             right,
@@ -1426,7 +1435,24 @@ fn step_leg(
             } else {
                 false
             };
-            let stance_over = leg.phase_timer <= 0.0 || lost_contact_early;
+            // §17 event-driven liftoff: step when the measured CoM has advanced
+            // past this stance foot in the direction of motion. The stance timer
+            // is demoted to a fallover cap — it can still force a step if a stuck
+            // body never crosses the plant, but it no longer *schedules* the gait.
+            // `wants_step` (move intent) is still required so the settle motion
+            // never triggers a phantom step with no input held.
+            let com_crossed = match plan.measured {
+                Some(m) => {
+                    let rel = m.com_x - leg.plant_pos.x;
+                    if v_desired.abs() > SWING_TRIGGER_SPEED {
+                        (v_desired > 0.0 && rel > 0.0) || (v_desired < 0.0 && rel < 0.0)
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            };
+            let stance_over = leg.phase_timer <= 0.0 || lost_contact_early || com_crossed;
             if stance_over && wants_step && !other_swinging {
                 let mut swing_to = leg.plant_pos;
                 // The jump never retargets a step: every swing targets its own
@@ -1454,9 +1480,32 @@ fn step_leg(
             // one side of the hip.
             leg.swing_to.x =
                 plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
-            // Progress 1→0 over the swing duration (elapsed fraction).
-            let total = config.swing_duration_ts.max(f32::EPSILON);
-            let t = (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            // §19.2.1 deadbeat swing timing: traverse the spline so the foot
+            // reaches the capture point about when the CoM does, instead of on
+            // the fixed swing timer. `T_remain = |x_land − x_com| / v_com`
+            // (with a floor so near-zero speed doesn't divide by zero or swing
+            // forever); the swing timer remains only as a fallover cap.
+            let swing_frac = if plan.measured.is_some() {
+                // Pace the arrival over the time the hip/CoM takes to cross the
+                // residual distance to the plant, capped by the swing timer (the
+                // fallover bound). Slow body → longer effective swing; fast body
+                // → quicker swing.
+                let t_target = {
+                    let dist = (leg.swing_to.x - leg.plant_pos.x).abs();
+                    let speed = v.abs().max(1.0);
+                    (dist / speed)
+                        .min(config.swing_duration_ts)
+                        .max(f32::EPSILON)
+                };
+                // Fraction elapsed toward touchdown scaled by the paced time.
+                (1.0 - (leg.phase_timer / t_target).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+            } else {
+                // No measurement: fall back to the timer-paced profile exactly as
+                // the pre-§19 resolver.
+                let total = config.swing_duration_ts.max(f32::EPSILON);
+                (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+            };
+            let t = swing_frac;
 
             // Three-phase swing profile (plan §3): lift → advance → extend,
             // C¹-continuous through the IK foot path. Replaces the old single
@@ -1578,7 +1627,14 @@ pub fn step_lower_body(
     // Cap the desired speed at the self-consistent cruise ceiling so the kv
     // feedback term can never develop a persistent bias larger than the
     // workspace (which would push late-stance feet out of reach).
-    let v_desired_scalar = dir.x * config.target_speed.min(limits.v_plan_cap);
+    let v_cmd = dir.x * config.target_speed.min(limits.v_plan_cap);
+
+    // 2b. --- Rate-limit the reference (§19.2.2/§15.1) ---
+    // Ramp the commanded speed into `v_ref` so the capture point and backward
+    // solve see a reference that rises smoothly. A step `0 → 120` is exactly
+    // the overreach that feeds loop 2 into a one-leg hop at startup.
+    state.v_ref = approach(state.v_ref, v_cmd, config.accel * dt);
+    let v_desired_scalar = state.v_ref;
 
     // 3. --- Velocity shaping ---
     // While braking to a stop, raise the deceleration to at least the stop
