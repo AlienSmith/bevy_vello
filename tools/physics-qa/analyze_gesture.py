@@ -23,9 +23,15 @@ Telemetry columns (v10, position+velocity):
 
 Usage:
   analyze_gesture.py <walk.csv> [--gate-lift px] [--gate-gain px]
-                     [--skip-start s] [--skip-end s] [--min-frames N]
-                     [--window s] [--json] [--plot out.png]
-                     [--ymax px] [--per-cycle]
+                     [--floor-tol px] [--skip-start s] [--skip-end s]
+                     [--min-frames N] [--json] [--plot out.png] [--per-cycle]
+
+Foot physics per swing (why the step missed):
+  stuck   the foot never left the floor (floor too sticky / leg too weak to lift)
+  midair  the foot left but stayed off the floor (body hopped so it can't reach down)
+  lifted  the foot rose and landed, failed only on advance (stride/timing) — the
+          normal-looking non-step
+  airFr   fraction of the swing the foot spends above the floor (vello y-down)
 
 Exit codes: 0 = gesture described (gait recognised); 1 = no usable gait found;
 2 = bad input / missing columns.
@@ -192,6 +198,35 @@ def analyze_swing(seg, leg, other, floor, args):
     hps = [r["hip"]["y"] for r in seg if not math.isnan(r["hip"]["y"])]
     hip_drop = (max(hps) - min(hps)) if len(hps) >= 2 else math.nan
 
+    # -- FOOT PHYSICS: physical state of the foot during the swing --.
+    # vello y-down: clear = floor - foot.y => >0 means foot is above the floor.
+    # `floor_tol` px of the floor counts as "grounded"; above that is airborne.
+    clears = [floor - r[leg]["foot"]["y"] for r in seg
+              if not math.isnan(r[leg]["foot"]["y"])]
+    nticks = len(clears)
+    air_ticks = sum(1 for c in clears if c > args.floor_tol)
+    air_frac = (air_ticks / nticks) if nticks else math.nan
+    min_clear = min(clears) if clears else math.nan   # deepest the foot reaches (near-land)
+    end_clear = clears[-1] if clears else math.nan    # clearance at the swing's last tick
+    # Hip height above the floor (vello: floor is a big y, hip a small y).
+    hy = [floor - r["hip"]["y"] for r in seg
+          if not math.isnan(r["hip"]["y"])]
+    hip_gap = mean(hy)                                # how high the hip rides this swing
+
+    # Classify the PHYSICAL cause of this swing (what the foot actually did),
+    # regardless of whether it passed:
+    #   "stuck"   never left the floor (floor too sticky / leg too weak to lift)
+    #   "midair"  left the floor but never came back to it (min_clear still above
+    #             tolerance) — body hopped up so the foot can't reach the floor
+    #   "lifted"  rose AND touched the floor again; if it failed it was purely on
+    #             advance (stride/timing), not on reaching the floor
+    if max_lift < args.gate_lift:
+        phys = "stuck"
+    elif min_clear > args.floor_tol:
+        phys = "midair"   # foot airborne the whole swing, never touches floor
+    else:
+        phys = "lifted"   # foot lifted and re-contacted the floor
+
     passed = (
         max_lift >= args.gate_lift and advance > 0.0 and gain >= args.gate_gain
     )
@@ -202,6 +237,9 @@ def analyze_swing(seg, leg, other, floor, args):
         "max_lift": max_lift, "advance": advance, "lead_gain": gain,
         "max_flex": max_flex, "mean_flex": mean_flex,
         "head_bob": bob, "hip_drop": hip_drop,
+        "air_frac": air_frac, "min_clear": min_clear,
+        "end_clear": end_clear, "hip_gap": hip_gap,
+        "phys": phys,
         "passed": bool(passed),
     }
 
@@ -236,12 +274,16 @@ def summarize_runs(runs):
             "n": 0, "passed": 0,
             "max_lift": [], "advance": [], "lead_gain": [],
             "max_flex": [], "mean_flex": [], "head_bob": [], "hip_drop": [], "dur": [],
+            "air_frac": [], "hip_gap": [], "phys_counts": {"stuck": 0,
+                                                            "midair": 0,
+                                                            "lifted": 0},
         })
         s["n"] += 1
         s["passed"] += int(seg["passed"])
         for k in ("max_lift", "advance", "lead_gain", "max_flex", "mean_flex",
-                  "head_bob", "hip_drop", "dur"):
+                  "head_bob", "hip_drop", "dur", "air_frac", "hip_gap"):
             s[k].append(seg[k])
+        s["phys_counts"][seg["phys"]] += 1
 
     return per_leg
 
@@ -262,26 +304,31 @@ def render_text(per_leg, meta):
                  f"floor_l={meta['floor_l']:.1f}  floor_r={meta['floor_r']:.1f}")
     lines.append("")
     hdr = (f"{'leg':<5}{'n':>3}{'pass':>5} | {'maxLift':>8}{'adv':>8}{'gain':>8}"
-           f" | {'maxFlex':>8}{'meanFlex':>9}{'bob':>7}{'hipDrop':>8}")
+           f" | {'airFr':>6}{'stck':>5}{'air':>4}{'lift':>6} | "
+           f"{'maxFlex':>8}{'bob':>7}")
     lines.append(hdr)
     lines.append("-" * len(hdr))
     for leg in ("left", "right"):
         if leg not in per_leg:
             continue
         s = per_leg[leg]
+        pc = s["phys_counts"]
         lines.append(
             f"{leg:<5}{s['n']:>3}{s['passed']:>5} | {mean(s['max_lift']):>8.1f}"
             f"{mean(s['advance']):>8.1f}{mean(s['lead_gain']):>8.1f}"
-            f" | {mean(s['max_flex']):>8.1f}{mean(s['mean_flex']):>9.1f}"
-            f"{mean(s['head_bob']):>7.1f}{mean(s['hip_drop']):>8.1f}"
+            f" | {mean(s['air_frac']):>6.2f}{pc['stuck']:>5}{pc['midair']:>4}"
+            f"{pc['lifted']:>6} | "
+            f"{mean(s['max_flex']):>8.1f}{mean(s['head_bob']):>7.1f}"
         )
     lines.append("")
     lines.append("Columns: n=swings; pass=swings that lift & advance & overtake; "
                  "maxLift=max foot clearance (px);")
     lines.append("adv=gain of foot-before-body across swing (px); "
                  "gain=swing-over-stance foot lead gain (px);")
-    lines.append("maxFlex/maxMean=peak/mean knee flexion deg (0=leg straight); "
-                 "bob=head vertical range (px); hipDrop=hip vertical range (px).")
+    lines.append("airFr=fraction of the swing the foot spends off the floor; "
+                 "stck/air/lift = swings classified stuck-on-floor / airborne-whole /")
+    lines.append("lifted-and-advanced (the last is the 'fails only on advance' case); "
+                 "maxFlex=peak knee flexion deg; bob=head vertical range (px).")
     lines.append("")
     return "\n".join(lines)
 
@@ -293,6 +340,9 @@ def main():
     ap.add_argument("--gate-lift", type=float, default=GATE_LIFT)
     ap.add_argument("--gate-gain", type=float, default=GATE_GAIN)
     ap.add_argument("--min-frames", type=int, default=DEFAULT_MIN_FRAMES)
+    ap.add_argument("--floor-tol", type=float, default=2.0,
+                    help="clearance (px) above the floor that still counts as "
+                         "'grounded' when classifying foot physics")
     ap.add_argument("--skip-start", type=float, default=DEFAULT_SKIP_START)
     ap.add_argument("--skip-end", type=float, default=DEFAULT_SKIP_END)
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -348,10 +398,12 @@ def main():
             print("\n--- per-cycle detail ---")
             for s in scored:
                 print(
-                    f"{s['leg']:<6} t=[{s['t0']:7.2f},{s['t1']:7.2f}] dur={s['dur']:.2f}s "
-                    f"lift={s['max_lift']:.1f} adv={s['advance']:+.1f} gain={s['lead_gain']:+.1f} "
+                    f"{s['leg']:<6} t=[{s['t0']:7.2f},{s['t1']:7.2f}] "
+                    f"air={s['air_frac']:.2f} lift={s['max_lift']:5.1f} "
+                    f"adv={s['advance']:+.1f} gain={s['lead_gain']:+.1f} "
                     f"flex={s['max_flex']:.0f}deg bob={s['head_bob']:.1f} "
-                    f"hipDrop={s['hip_drop']:.1f} -> {'STEP' if s['passed'] else 'NO'}"
+                    f"hipDrop={s['hip_drop']:.1f} phys={s['phys']:<6} "
+                    f"-> {'STEP' if s['passed'] else 'NO'}"
                 )
 
     if args.plot:

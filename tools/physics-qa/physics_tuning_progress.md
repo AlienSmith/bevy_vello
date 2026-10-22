@@ -787,3 +787,145 @@ that now matters is **per-leg stride length / foot-placement x** (loop-2 foot
 placement and how far the swing leg leads before planting), lengthened on the
 left to match the right. Best walk on the fixed floor so far: `LEG_COMPLIANCE=5e-9
 STEP_HEIGHT=70..110`.
+
+## 13. Foot-physics diagnosis — the missed cycles are airborne, not stuck (session 8)
+
+### 13.1 Why this matters
+
+Before changing stride/step-code we must know *what the foot physically did* on
+the swings that failed (→ NO). "Stuck on the floor" and "can't reach the floor"
+demand opposite fixes. The gesture tool now classifies every swing by the foot's
+actual vertical state, independently of the pass gate:
+
+- **stuck** — the foot never left the floor: `max_lift < gate`. (floor too sticky
+  / leg too weak to lift)
+- **midair** — the foot left the floor but never came back to it: `min_clear`
+  (deepest the foot reaches) is still above tolerance. The body is riding high
+  enough that the foot simply cannot touch down in that window.
+- **lifted** — the foot rose *and* re-contacted the floor; it only failed on
+  advance (stride/timing), not on reaching the floor.
+
+`airFr` (fraction of the swing with clearance > tolerance) complements this.
+
+### 13.2 Result (per-cycle, only failed → NO swings listed)
+
+**w_5e-9_sh70** (body 60 px/s) — all 11 failed swings are `phys=midair`, `air=1.00`:</br>
+`left: 1.73,2.32,3.50,4.68,5.27,7.03,8.21` (adv −40..−10, gains 1..54) — left NOs are airborne-whole
+`right: 6.14,9.09,9.68` — same, midair.
+
+**w_8e-9_sh50** (body 41 px/s) — the slow walk is the one where failures are mostly `lifted`:</br>
+`left` NO cycles: `1.73 midair`, then `2.32,2.91,3.50,4.09,5.27,6.44,7.62,8.21,9.39,9.98` all `lifted`
+(air=0.88–0.96, i.e. the foot *does* touch the floor), `4.68 midair`. For the left, 11/12 misses are
+lifted — foot reaches the floor but gains no ground.
+
+**w_5e-9_sh110** (body 84 px/s) — the high-arc walk: `lift=143`(`!`), `maxFlex` 66–98°, all 16 NOs `midair`,
+air=1.00 with bob 51–63 px and hipDrop 38–58 px. The body `bounces` up and the foot never lands.
+
+**w_8e-9_sh90** (body 85 px/s) — 9/10 NOs midair (air=1.00, bob 21–37 px); only 1 lifted.
+
+### 13.3 What this proves
+
+Across the band **stuck = 0 for every run** — no foot was gluey enough to fail
+the lift in this compliance range. The dominant cause of a missed cycle depends
+on it: at high step height / high speed (sh70+, sh90, sh110) the failures become
+**midair** — the body is *bouncing* (hipDrop 38–66 px, head bob up to 71 px) so the
+swinging foot is airborne for the entire swing and never reaches the floor; those
+are the "right leg too strong ⇒ body hops ⇒ left foot can't reach the floor"
+swings the user suspected. At the slow sh50 the failures are mostly **lifted** —
+the foot does touch down but still fails on advance.
+
+So there are **two** distinct physical failures, not one: (a) *vertical hop /
+body bounce* starving the foot of contact (dominant at high step height), and
+(b) *insufficient stride advance* even when the foot lands (dominant at low step
+height). The gait is oscillating between "too bouncy" and "not advancing."
+
+### 13.4 Targeted next lever
+
+too hot or the swing arc apex being too high for the plant. The first thing to
+test is **lowering STEP_HEIGHT toward ~50 while keeping compliance 5e-9** (which
+removes the midair hops), then **lengthening the left stride** to fix the
+remaining lifted-but-no-advance. If confirming the hop hypothesis: log per-tick
+`hip clearance = floor − hip.y` across the walk and diff STEP_HEIGHT 50 vs 90 at
+the same compliance — hop amplitude should scale with step height, and the
+midair:pixel count should fall correspondingly.
+
+## 14. Root cause — the "walker" is running a hopping engine, not walking (session 9)
+
+### 14.1 The user's question changed everything
+
+While deciding whether to tune physics-world knobs (friction, collision scale)
+vs character/gait knobs, the user asked the decisive question: "**why are we
+running a jumping loop for walking?**" The answer is the root cause of *all* the
+weird behaviour we chased in §12/§13.
+
+Physics knobs are already settled and were never the problem:
+- collision scale is fine — the character stands with <1 px wobble (§ stand sweep);
+- friction is fine — the `SLIDING` verdict from `analyze_foot_slide.py` (55–67 px
+  stance, peak 415–450 px/s) is an **artifact of the hop**: the feet are airborne
+  ~100% of the run (only 3 of 1036 ticks within 3 px of the "floor"), so the
+  "slide" is the feet being *dragged forward mid-air* by the hopping body, not a
+  loss of ground grip.
+
+### 14.2 Correcting the mechanism — the walk is NOT a hopping loop
+
+The vertical phase is exported as `vphase` in every telemetry row. Across the
+whole 11.5 s walk it is **`0` (Stand) for all 1036 ticks** — the ballistic
+`Load → Launch → Flight → Land` path **never runs on a pure walk**. The user's
+instinct ("don't over-rotate to a jump loop") was right; the resolver's
+[`tick_vertical`](examples/game_lib/src/lower_body/resolver.rs:686) correctly
+holds the hip on the floor line via `regulate_height` the whole time.
+
+What the telemetry *does* show is a real, large vertical bounce of the heavy hip:
+
+| hip height above floor (stand=106 px) | value |
+|---|---|
+| range | 84.4 … 168.4 px |
+| mean | 122.0 px |
+| % above stand+2px | **92.9%** |
+| peak overshoot over stand | ~62 px |
+
+So the hip is pushed up to ~1.6× its standing height and oscillates 84→168 px
+every cycle, driven by **loop-2 / `step_leg` ground reaction**. At each
+stance→swing swap the stance leg's thrust delivers an upward impulse into the
+heavy hip (`P3vy` peaks ≈ +23 px/s), the hip rises, the leg's foot leaves the
+floor, and the vertical regulator pulls it back down. That is the *bounce*
+behind §13's `midair` (foot airborne ~100%) and the left `NO_ADVANCE`. It is a
+**leg-driven vertical impulse into a hip too heavy / a vertical regulator too
+stiff to absorb it** — not a hop engine.
+
+### 14.3 STEP_HEIGHT sweep (physics fixed, only gait knob swept)
+
+| STEP_HEIGHT | body px/s | left stck/air/lift | right stck/air/lift |
+|---|---|---|---|
+| 28 | **-60.8** (backward!) | 0/15: 0/6/9  | 3/16: 0/11/5 |
+| 50 | 67 | 6/15: 0/8/7  | 14/16: 0/14/2 |
+| 70 | 60 | 8/15: 0/13/2 | 13/16: 0/14/2 |
+| 90 | 35 | 8/15: 0/11/4 | 10/16: 0/13/3 |
+| 110 | 84 | 9/15: 0/15/0 | 11/16: 0/14/2 |
+
+`stuck=0` everywhere (friction is fine). At low STEP_HEIGHT (28) the thrust surplus
+is so small the walk collapses to backward; raising it inflates the bounce until
+the left foot is midair 15/15 (sh110). No STEP_HEIGHT fixes the bounce because the
+surplus vertical impulse is intrinsic to the stance-push.
+
+### 14.4 Verdict and the gait-code change
+
+**The forward step's stance thrust over-shoots vertically** — it lifts the heavy
+hip off the floor instead of keeping the feet planted, so the foot can't stay
+down to grip/advance. The fix is to keep the legs' step **flat on the floor**:
+- soften / clamp the vertical component of the stance thrust so the hip does not
+  rise above the stand line (or lower `VERTICAL_K_S/K_D`, or add hip vertical
+  damping that resists the upward push),
+- keep the swing as the only vertical lift, and only for the swing foot.
+
+This is the change that will keep the stance foot planted (no midair/drag), let
+the swing foot reach the floor, and give a symmetric, ground-contact walk.
+`sweep_step_height.py` + the `vphase`/hip-height checks are kept as the regression
+harness (hip stays within ±2 px of stand, `midair` → 0, both legs pass).
+too hot or the swing arc apex being too high for the plant. The first thing to
+test is **lowering STEP_HEIGHT toward ~50 while keeping compliance 5e-9** (which
+removes the midair hops), then **lengthening the left stride** to fix the
+remaining lifted-but-no-advance. If confirming the hop hypothesis: log per-tick
+`hip clearance = floor − hip.y` across the walk and diff STEP_HEIGHT 50 vs 90 at
+the same compliance — hop amplitude should scale with step height, and the
+midair:pixel count should fall correspondingly.
