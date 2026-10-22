@@ -12,8 +12,8 @@ mod resolver;
 mod systems;
 
 pub use hip_pin::{
-    drive_hip_pin, measure_body, reset_hip_pin, tick_loop3_angular, update_ground_support,
-    GroundSupport, HipPin, HipPinParams,
+    drive_hip_pin, measure_body, parse_gait_authority, reset_hip_pin, tick_loop3_angular,
+    update_ground_support, FootContact, GroundSupport, HipPin, HipPinParams,
 };
 pub use measure::{
     center_of_mass, com_velocity, ema_alpha, torso_pitch, update_measurements, BodyMeasureFilter,
@@ -25,8 +25,8 @@ pub use resolver::{
     apex_to_launch_speed, attitude_lean_pd, attitude_pd, capture_point, compute_forward_target,
     compute_support_velocity, compute_v_max, compute_x_max, landing_speed, predict_apex_rise,
     solve_leg_ik, tick_attitude, update_delta_l, AttitudeState, CaptureMeasure, DebugInfo,
-    GaitLimits, GaitPhase, LegState, LegThrust, LowerBodyConfig, LowerBodyPose, ResolverState,
-    VerticalPhase, VerticalState,
+    GaitAuthority, GaitLimits, GaitPhase, LegContactInput, LegState, LegThrust, LowerBodyConfig,
+    LowerBodyPose, ResolverState, VerticalPhase, VerticalState,
 };
 pub use systems::{
     drive_lower_body, reset_lower_body, LowerBodyController, LowerBodyInput, LowerBodyParams,

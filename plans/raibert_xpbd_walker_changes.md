@@ -14,19 +14,42 @@ Concrete changes needed to bring the current implementation up to the converged 
 | C | §3 loop 1 scripted swing profile | **done** | `fb46b64` |
 | D | §4 loop 2 virtual-leg thrust | **done** | `a14b1f9` |
 | E | §5 loop 3 leg-delivered attitude | **done** | `6be7a63` |
-| **F** | **§6 contact-gated gait clock authority** | **not started — next** | — |
+| **F** | **§6 contact-gated gait clock authority** | **built, measured, rejected — default off** | — |
 
-Read §6 (note the Phase-E correction box inside it), then
-[`step_leg`](../examples/game_lib/src/lower_body/resolver.rs:1230) for the timer that
-needs gating and [`update_ground_support`](../examples/game_lib/src/lower_body/hip_pin.rs:189)
-/ [`GroundSupport`](../examples/game_lib/src/lower_body/hip_pin.rs:171) for the contact
-truth that already exists.
+**Phase F outcome: the feature works correctly and makes the walk worse at every
+authority level, so it ships behind a default-off switch.** Full numbers and the
+three root causes are in
+[`physics_tuning_progress.md`](../tools/physics-qa/physics_tuning_progress.md:660) §11.
 
-Baseline to measure Phase F against (best-walk config `LEG_COMPLIANCE=1e-9
-STEP_HEIGHT=70`, from [`physics_tuning_progress.md`](../tools/physics-qa/physics_tuning_progress.md:517) §10):
-swing **28/29** pass, body **99.5 px/s vs 103.8 cmd (96%)**, rig `max_rel_dev`
-**0.1502**, stance slide **61.1 px worst**. Phase F's target is the slide — the swing
-gate and forward progress should not regress.
+The contact layer itself is proven: at `GAIT_AUTHORITY=observe` the telemetry is
+byte-identical to the timer-only control (`md5 d6c97f8a…`), so reading per-foot
+contact perturbs nothing. Acting on it does:
+
+| metric | `Timer` / `Observe` | `Contact` | `Full` |
+| --- | --- | --- | --- |
+| swing pass | **28/29** | 17/29 | 14/27 |
+| rig `max_rel_dev` | **0.1502** | 0.1874 | 0.3144 |
+| stance drift worst | **61.1 px** | 157.3 px | 235.6 px |
+
+Mechanisms, each individually A/B-able via
+[`GaitAuthority`](../examples/game_lib/src/lower_body/resolver.rs:150):
+
+- `Observe` — read + record, decide nothing (proves the wiring).
+- `Contact` — re-anchor the stance plant to the measured foot **once per stance**
+  (`LegState::plant_anchored`) + gate loop-2 thrust on per-foot debounced contact.
+- `Full` — `Contact` + early lift-off on lost contact + swing extension until real
+  touchdown. Gated on `!LegState::hovered_in` so a landing that never touches does
+  not degenerate into a rapid-cycle oscillator.
+
+The decisive finding: the residual ~61 px stance slide is **not** a gait-clock
+authority problem. Clock and physics already agree about *when*; they disagree
+about *where the foot is*. That is the foot's contact/friction response (plan
+§8), not the resolver's timing. §6 would become a no-op only once the foot stops
+slipping — at which point the measured plant and the planned plant coincide.
+
+**Do not re-enable §6 expecting a slide win.** The next lever is §8 (foot
+friction/contact response), tracked from
+[`physics_tuning_progress.md`](../tools/physics-qa/physics_tuning_progress.md:254) §6.5.
 
 ---
 

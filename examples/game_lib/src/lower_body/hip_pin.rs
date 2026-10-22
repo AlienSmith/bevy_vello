@@ -32,8 +32,8 @@ use crate::lower_body::measure::{
     update_measurements, BodyMeasureFilter, BodyMeasurements, ParticleSample,
 };
 use crate::lower_body::resolver::{
-    attitude_lean_pd, step_lower_body, CaptureMeasure, GaitPhase, LowerBodyConfig, ResolverState,
-    VerticalPhase,
+    attitude_lean_pd, step_lower_body, CaptureMeasure, GaitAuthority, GaitPhase, LowerBodyConfig,
+    ResolverState, VerticalPhase,
 };
 
 /// Runtime knobs for the hip pin, editable from the tuning UI.
@@ -97,6 +97,27 @@ pub struct HipPinParams {
     /// Loop-3 derivative gain (radians of leg-reference lean per rad/s of
     /// measured torso rate). Damps the reference tilt; `0.0` disables.
     pub attitude_lean_kd: f32,
+    /// How much authority the plan §6 contact layer has over the gait clock.
+    /// `GAIT_AUTHORITY=timer|observe|contact|full` (default `timer`).
+    ///
+    /// Written into [`ResolverState::gait_authority`] every tick, so it is
+    /// switchable at runtime exactly like the other tuning knobs. Kept here
+    /// rather than in `LowerBodyConfig` because the config is shared by every
+    /// character and is copied by value; the authority is per-pin state.
+    pub gait_authority: GaitAuthority,
+}
+
+/// Parse a `GAIT_AUTHORITY` value. Accepts the enum name or a single-letter /
+/// numeric prefix, so `c`, `contact`, `Contact`, and `2` all mean
+/// [`GaitAuthority::Contact`]. Anything unrecognised falls back to `Timer`,
+/// which is the safe control arm.
+pub fn parse_gait_authority(raw: &str) -> GaitAuthority {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "full" | "f" | "3" => GaitAuthority::Full,
+        "contact" | "c" | "2" => GaitAuthority::Contact,
+        "observe" | "o" | "1" => GaitAuthority::Observe,
+        _ => GaitAuthority::Timer,
+    }
 }
 
 impl HipPinParams {
@@ -141,6 +162,9 @@ impl HipPinParams {
             .max(0.0);
         p.attitude_lean_kp = env_f32("ATT_LEAN_KP", p.attitude_lean_kp).max(0.0);
         p.attitude_lean_kd = env_f32("ATT_LEAN_KD", p.attitude_lean_kd).max(0.0);
+        if let Ok(raw) = std::env::var("GAIT_AUTHORITY") {
+            p.gait_authority = parse_gait_authority(&raw);
+        }
         p
     }
 }
@@ -164,62 +188,232 @@ fn env_bool(key: &str, default: bool) -> bool {
 
 /// Ground-contact state gating the pin's vertical authority.
 ///
+/// Per-foot ground truth (plan §6).
+///
+/// The collision batch gives per-pair entity ids, contact points and normals;
+/// a global bool throws all of that away. Loop 2 needs "**this** foot is loaded
+/// and pushing", not "something on the character is touching something".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FootContact {
+    /// Debounced: in contact for at least `CONTACT_ON_TICKS` consecutive ticks.
+    pub grounded: bool,
+    /// Raw contact this tick (before the debounce).
+    pub touching: bool,
+    /// Consecutive ticks in contact (saturating).
+    pub on_ticks: u32,
+    /// Consecutive ticks *out* of contact (saturating).
+    pub off_ticks: u32,
+    /// Upward-pointing contact normal (vello y-down), zero when not touching.
+    pub normal: Vec2,
+    /// Contact point in vello world space, or zero when not touching.
+    pub point: Vec2,
+    /// Closing speed along the contact normal, px/s (positive = approaching).
+    pub normal_speed: f32,
+}
+
 /// The pin may cancel gravity and command y only while supported; in flight
 /// gravity is ballistic. Register [`update_ground_support`] before
 /// [`drive_hip_pin`].
 #[derive(Resource, Debug, Clone)]
 pub struct GroundSupport {
-    /// True when a character collider touches non-character geometry.
+    /// True when **any** character collider touches non-character geometry.
+    /// Derived from the per-foot layer plus body contacts, so it is strictly
+    /// more accurate than the old global count.
     pub grounded: bool,
     /// Number of near-vertical mixed contacts seen this frame.
     pub contacts: usize,
+    /// `[left, right]` foot colliders (`PLLL`, `RLL`), when known.
+    pub feet: [FootContact; 2],
+    /// True when at least one foot collider was identified in the character.
+    /// `false` ⇒ the per-foot data is meaningless and callers must fall back to
+    /// the global flags (this happens for characters without foot colliders).
+    pub feet_valid: bool,
+    /// A body part *other than a foot* is in contact (knee, hand, head…).
+    pub body_contact: bool,
 }
 
 impl Default for GroundSupport {
     fn default() -> Self {
-        // No collision pipeline ⇒ keep the kinematic behaviour.
+        // No collision pipeline ⇒ keep the kinematic behaviour. `feet_valid`
+        // stays false so the resolver's §6 gating is skipped entirely and the
+        // pre-§6 timer behaviour is preserved exactly.
         Self {
             grounded: true,
             contacts: 0,
+            feet: [FootContact::default(); 2],
+            feet_valid: false,
+            body_contact: false,
         }
     }
 }
 
+/// Ticks of continuous contact before a foot counts as `grounded`. Two ticks at
+/// 90 Hz ≈ 22 ms: enough to reject the single-frame flicker at lift-off and
+/// touchdown, short enough not to delay the stance→swing decision noticeably.
+const CONTACT_ON_TICKS: u32 = 2;
+/// Ticks of continuous *no* contact before a foot stops being `grounded`. One
+/// tick, because losing contact matters more urgently than gaining it (loop 2
+/// must stop pushing immediately) — and the `on` debounce already prevents the
+/// symmetric chatter case.
+const CONTACT_OFF_TICKS: u32 = 1;
+/// A contact counts as support when its normal is within this of vertical
+/// (`|n.y| >= COS(60°) = 0.5`). Kept as a magnitude test for backwards
+/// compatibility with the old global flag.
+const CONTACT_NORMAL_Y_MIN: f32 = 0.5;
+
+/// Returns true if `name` identifies the left foot collider.
+fn is_left_foot(name: &str) -> bool {
+    name == "PLLL" || name == "LLL"
+}
+
+/// Returns true if `name` identifies the right foot collider.
+fn is_right_foot(name: &str) -> bool {
+    name == "PRLL" || name == "RLL"
+}
+
+/// Advance one foot's contact state by one tick.
+///
+/// The asymmetry is deliberate and is the whole point of the debounce:
+/// * gaining contact needs [`CONTACT_ON_TICKS`] consecutive ticks, so a
+///   single-frame flicker at touchdown cannot arm loop 2;
+/// * losing contact is immediate ([`CONTACT_OFF_TICKS`]), because a foot that
+///   has left the ground must not be granted thrust authority for even one more
+///   tick — that is exactly the "pushing against nothing" case.
+///
+/// Pure so it can be unit-tested without an ECS.
+fn debounce_contact(prev: FootContact, touching: bool, raw: FootContact) -> FootContact {
+    let on_ticks = if touching {
+        prev.on_ticks.saturating_add(1)
+    } else {
+        0
+    };
+    let off_ticks = if touching {
+        0
+    } else {
+        prev.off_ticks.saturating_add(1)
+    };
+    let grounded = if touching {
+        on_ticks >= CONTACT_ON_TICKS
+    } else if prev.grounded {
+        off_ticks < CONTACT_OFF_TICKS
+    } else {
+        false
+    };
+    FootContact {
+        grounded,
+        touching,
+        on_ticks,
+        off_ticks,
+        normal: raw.normal,
+        point: raw.point,
+        normal_speed: raw.normal_speed,
+    }
+}
+
 /// Refresh [`GroundSupport`] from the previous tick's [`CollisionEventBatch`].
+///
+/// This is the §6 contact layer. It resolves *which* collider touched, keeps a
+/// debounce per foot, and records the contact normal/point so the loops can be
+/// gated on real ground truth instead of the resolver's timers.
+///
+/// Ordering note: the batch is written by `run_gpu_collision` at the end of
+/// FixedUpdate and read here at the start of the next tick, so this is *last
+/// tick's* contact. That is the intended semantics — the pin acts on the most
+/// recent measurement it can have.
 pub fn update_ground_support(
     batch: Option<Res<CollisionEventBatch>>,
     colliders: Query<&VelloCollider>,
+    connectivity: Query<&crate::character::Connectivity>,
     mut support: ResMut<GroundSupport>,
 ) {
     let Some(batch) = batch else {
+        // No collision pipeline (pure kinematic sandbox): keep the pre-§6
+        // behaviour alive and make sure the per-foot layer reports "unknown".
         support.grounded = true;
         support.contacts = 0;
+        support.feet = [FootContact::default(); 2];
+        support.feet_valid = false;
+        support.body_contact = false;
         return;
     };
+
+    // Accumulate this tick's raw contacts.
+    let mut raw = [FootContact::default(); 2];
+    let mut raw_touching = [false; 2];
     let mut contacts = 0usize;
+    let mut body_contact = false;
+    let mut saw_foot_collider = false;
+
     for entry in &batch.entries {
+        let ev = &entry.event;
         let a_soft = colliders
-            .get(entry.event.entity_a)
+            .get(ev.entity_a)
             .map(|c| c.is_soft_body())
             .unwrap_or(false);
         let b_soft = colliders
-            .get(entry.event.entity_b)
+            .get(ev.entity_b)
             .map(|c| c.is_soft_body())
             .unwrap_or(false);
         if a_soft == b_soft {
-            continue;
+            continue; // character vs character (or static vs static)
         }
-        let normal = if a_soft {
-            entry.event.collision_normal_a
+        // Take the normal/point from the soft-body side.
+        let (normal, point, vel) = if a_soft {
+            (ev.collision_normal_a, ev.collision_point_a, ev.velocity_a)
         } else {
-            entry.event.collision_normal_b
+            (ev.collision_normal_b, ev.collision_point_b, ev.velocity_b)
         };
-        if normal.y.abs() > 0.5 {
-            contacts += 1;
+        if normal.y.abs() < CONTACT_NORMAL_Y_MIN {
+            continue; // not a near-horizontal floor contact
+        }
+        contacts += 1;
+
+        // Attribute to a foot when the soft body is a foot collider.
+        let soft_entity = if a_soft { ev.entity_a } else { ev.entity_b };
+        let name = connectivity.get(soft_entity).ok().map(|c| c.name);
+        let slot = match name.as_deref() {
+            Some(n) if is_left_foot(n) => Some(0),
+            Some(n) if is_right_foot(n) => Some(1),
+            Some(_) => {
+                body_contact = true;
+                None
+            }
+            None => {
+                // Names can legitimately be unavailable (e.g. a bare collider
+                // without `Connectivity`); treat it as a body contact rather
+                // than silently crediting a foot.
+                body_contact = true;
+                None
+            }
+        };
+        if name.is_some() {
+            saw_foot_collider = true;
+        }
+        if let Some(i) = slot {
+            raw_touching[i] = true;
+            raw[i].touching = true;
+            raw[i].normal = normal;
+            raw[i].point = point;
+            // Closing speed along the normal (positive = moving into the floor).
+            raw[i].normal_speed = vel.dot(normal);
+            saw_foot_collider = true;
         }
     }
+
+    // Debounce each foot against its previous state.
+    let mut feet = support.feet;
+    for i in 0..2 {
+        feet[i] = debounce_contact(support.feet[i], raw_touching[i], raw[i]);
+    }
+
+    support.feet = feet;
+    // Footer colliders are identified once ANY foot collider has ever been seen
+    // in the batch. If a character genuinely has none, the per-foot layer must
+    // not be trusted, so the resolver keeps its timer behaviour.
+    support.feet_valid = saw_foot_collider || support.feet_valid;
     support.contacts = contacts;
-    support.grounded = contacts > 0;
+    support.body_contact = body_contact;
+    support.grounded = contacts > 0 || feet[0].grounded || feet[1].grounded;
 }
 
 impl Default for HipPinParams {
@@ -266,6 +460,8 @@ impl Default for HipPinParams {
             // the measured lean in one tick; `0.03` damps the reference tilt.
             attitude_lean_kp: 0.5,
             attitude_lean_kd: 0.03,
+            // §6 is opt-in and off by default: see `GaitAuthority`.
+            gait_authority: GaitAuthority::Timer,
         }
     }
 }
@@ -741,6 +937,53 @@ pub fn drive_hip_pin(
         );
         pin.last_external_pin = ext_pin;
 
+        // Plan §6: hand the resolver real per-foot ground truth. `None` when
+        // the contact layer has never seen a foot collider (pure kinematic
+        // sandbox, or a character without feet), which makes the gait clock fall
+        // back to the pre-§6 timer exactly.
+        //
+        // The measured foot x is mapped into the resolver's seed-relative frame
+        // exactly like the P3 feedback above (`seed_hip.x + (world − anchor)`),
+        // so re-anchoring a stance plant is in the same units the foot targets
+        // are planned in.
+        // §6 authority is pushed every tick so the tuning UI can switch levels
+        // without a respawn.
+        pin.state.gait_authority = params.gait_authority;
+        if let Some(support) = ground_support.as_deref() {
+            if support.feet_valid {
+                // Foot particles: `[P2, P3, knee, foot]` → index 3 is the foot.
+                let foot_world_x = |leg_particles: Option<[Entity; 4]>| -> Option<f32> {
+                    let e = leg_particles?[3];
+                    p_q.get(e).ok().map(|p| p.particle.pos.x)
+                };
+                let left_parts = left_leg_q.get(entity).ok().map(|l| l.particles);
+                let right_parts = right_leg_q.get(entity).ok().map(|r| r.particles);
+                let anchor_x = pin.anchor_p3.x;
+                let seed_x = pin.seed_hip.x;
+                let to_resolver = |wx: Option<f32>| wx.map(|x| seed_x + (x - anchor_x));
+                let lx = to_resolver(foot_world_x(left_parts));
+                let rx = to_resolver(foot_world_x(right_parts));
+                // Raw (`touching`), not debounced: the resolver compares
+                // contact against phase boundaries, where one tick matters. The
+                // hysteretic `grounded` flag stays in `GroundSupport` for the
+                // thrust gate below.
+                pin.state.foot_contact = Some([
+                    crate::lower_body::resolver::LegContactInput {
+                        touching: support.feet[0].touching,
+                        foot_x: if support.feet[0].touching { lx } else { None },
+                    },
+                    crate::lower_body::resolver::LegContactInput {
+                        touching: support.feet[1].touching,
+                        foot_x: if support.feet[1].touching { rx } else { None },
+                    },
+                ]);
+            } else {
+                pin.state.foot_contact = None;
+            }
+        } else {
+            pin.state.foot_contact = None;
+        }
+
         let (pose, debug) = step_lower_body(input_dir, &params.config, &mut pin.state, dt);
         // Loop-3 telemetry latch: the torque/accel are per-tick `DebugInfo`
         // values (not persistent state), so keep the last tick's for the
@@ -1046,15 +1289,42 @@ pub fn drive_hip_pin(
             // in the matching gait phase, so a swing leg is never extended into
             // the ground and a stance leg is never retracted.
             let thrust = debug.thrust;
+            // Plan §6: stance authority requires REAL contact. A timer that
+            // says Stance while the foot is airborne makes loop 2 extend a leg
+            // against nothing — which is how a "stance" foot that has already
+            // left the ground turns into slide instead of push. When the
+            // contact layer has no foot data (pure kinematic sandbox), fall back
+            // to the phase test so the offline animation still runs.
+            //
+            // Gated at `Contact` and above for the same reason the gait clock
+            // is: this is the "is there ground under this leg" question, and
+            // below `Contact` the resolver is not yet trusted with the answer.
+            // It uses the DEBOUNCED flag, not raw contact, because losing thrust
+            // authority for a single flicker tick is what makes the leg PD
+            // chatter.
+            let contact_authority = params.gait_authority >= GaitAuthority::Contact;
+            let (left_stance_loaded, right_stance_loaded) = match ground_support.as_deref() {
+                Some(s) if s.feet_valid && contact_authority => {
+                    (s.feet[0].grounded, s.feet[1].grounded)
+                }
+                _ => (
+                    debug.left_phase != GaitPhase::Swing,
+                    debug.right_phase != GaitPhase::Swing,
+                ),
+            };
             if debug.left_phase == GaitPhase::Swing {
                 knee_l.y = knee_l.y + thrust.flight_retract; // tuck knee up
-            } else {
-                // stance (or flight-sync stance): extend/absorb as commanded
+            } else if left_stance_loaded {
+                // stance with ground under it: extend/absorb as commanded
                 foot_l.y = foot_l.y - thrust.stance_extend.max(thrust.land_absorb);
             }
+            // else: the clock says Stance but the foot is not on the ground.
+            // Grant no thrust authority — pushing against air only adds target
+            // error for the leg PD to fight, and it is not producing ground
+            // reaction anyway.
             if debug.right_phase == GaitPhase::Swing {
                 knee_r.y = knee_r.y + thrust.flight_retract;
-            } else {
+            } else if right_stance_loaded {
                 foot_r.y = foot_r.y - thrust.stance_extend.max(thrust.land_absorb);
             }
 
@@ -1241,6 +1511,78 @@ mod tests {
         assert!(!use_external_pin(false, true, false, 0.0));
         // Air assist disabled.
         assert!(!use_external_pin(false, false, false, 1.0));
+    }
+
+    #[test]
+    fn foot_names_are_recognised() {
+        assert!(is_left_foot("PLLL"));
+        assert!(is_left_foot("LLL"));
+        assert!(is_right_foot("PRLL"));
+        assert!(is_right_foot("RLL"));
+        // A shin/knee/arm must never be credited as a foot.
+        assert!(!is_left_foot("LLLA"));
+        assert!(!is_right_foot("RULA"));
+        assert!(!is_left_foot("S0"));
+        assert!(!is_right_foot("P3"));
+    }
+
+    #[test]
+    fn contact_needs_two_ticks_to_arm_but_one_to_release() {
+        // Tick 1: first touch must NOT arm loop 2 yet.
+        let f = debounce_contact(FootContact::default(), true, FootContact::default());
+        assert!(f.touching);
+        assert!(!f.grounded, "a single touching tick must not arm thrust");
+        assert_eq!(f.on_ticks, 1);
+
+        // Tick 2: now it arms.
+        let f = debounce_contact(f, true, FootContact::default());
+        assert!(f.grounded);
+        assert_eq!(f.on_ticks, 2);
+
+        // Release is immediate (CONTACT_OFF_TICKS == 1).
+        let f = debounce_contact(f, false, FootContact::default());
+        assert!(!f.touching);
+        assert!(!f.grounded, "losing contact must disarm thrust at once");
+        assert_eq!(f.off_ticks, 1);
+    }
+
+    #[test]
+    fn contact_flicker_does_not_arm_thrust() {
+        // Alternating touch/no-touch (the chatter case at touchdown) must never
+        // accumulate `on_ticks`, so `grounded` stays false throughout.
+        let mut f = FootContact::default();
+        for tick in 0..6 {
+            let touching = tick % 2 == 0;
+            f = debounce_contact(f, touching, FootContact::default());
+            assert!(!f.grounded, "flicker armed thrust on tick {tick}");
+        }
+    }
+
+    #[test]
+    fn contact_normal_and_point_are_retained() {
+        let raw = FootContact {
+            normal: Vec2::new(0.0, -1.0),
+            point: Vec2::new(12.5, 280.0),
+            normal_speed: 34.0,
+            ..Default::default()
+        };
+        let f = debounce_contact(FootContact::default(), true, raw);
+        assert_eq!(f.normal, raw.normal);
+        assert_eq!(f.point, raw.point);
+        // The closing speed must survive the debounce: loop 2 needs it to tell
+        // "loaded and pushing" from "touching but weightless".
+        assert!((f.normal_speed - 34.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn default_support_preserves_kinematic_fallback() {
+        // No collision pipeline ⇒ no per-foot truth, so the resolver must fall
+        // back to its pre-§6 timer rather than reporting "airborne".
+        let s = GroundSupport::default();
+        assert!(s.grounded);
+        assert!(!s.feet_valid);
+        assert!(!s.feet[0].grounded);
+        assert!(!s.feet[1].grounded);
     }
 
     #[test]

@@ -147,9 +147,63 @@ pub enum GaitPhase {
     Swing,
 }
 
+/// How much authority the physics contact layer has over the gait clock.
+///
+/// Plan §6 is a spectrum, not a switch, and the levels are **additive**: each
+/// one includes everything below it. They exist because the three mechanisms
+/// have very different failure modes, and enabling all three at once made the
+/// walk measurably worse than the pre-§6 timer (`physics_tuning_progress.md`
+/// §11). Having them separable is what makes that A/B possible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GaitAuthority {
+    /// Pre-§6: the timers own the gait clock outright. Physics contact is
+    /// ignored entirely. This is the control arm.
+    Timer,
+    /// **Observation only.** Read and record contact, decide nothing. Proves
+    /// the contact layer is wired without perturbing the walk.
+    Observe,
+    /// **Plant correction.** The stance plant re-anchors to the measured foot
+    /// x, so the resolver draws the foot where it actually is instead of where
+    /// it asked. Fixes the stance-slide feedback error; touches no timing.
+    Contact,
+    /// **Full authority** (`Contact` + the two timing mechanisms). A stance
+    /// ends early if its loaded foot has left the ground, and a swing extends
+    /// until its foot really lands.
+    ///
+    /// This is the level that regressed, and the reason is documented in
+    /// `physics_tuning_progress.md` §11: the mechanisms are individually
+    /// sound but the *timing* ones fight each other through the anti-phase
+    /// interlock, which only lets one foot swing at a time.
+    Full,
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+/// Ground truth for one leg, fed in by the ECS contact layer (plan §6).
+///
+/// `None` in [`ResolverState::foot_contact`] means *no physics contact
+/// information at all* (the pure kinematic sandbox), and the resolver then
+/// keeps its old timer-only behaviour exactly. This is deliberately an input
+/// rather than something the resolver measures: `resolver.rs` stays pure math
+/// and all collision knowledge lives in `hip_pin.rs`.
+///
+/// Note what is **not** here: a debounced `grounded` flag. The resolver wants
+/// the instantaneous truth — "did the foot collide with the floor on this
+/// tick?" — because every §6 decision is a comparison against a phase boundary.
+/// The ECS layer keeps its own hysteretic flag for the *thrust* gate, where a
+/// stable signal matters more than a one-tick-late one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LegContactInput {
+    /// The foot collider reported a ground contact on the most recent physics
+    /// tick. No hysteresis: see the type docs.
+    pub touching: bool,
+    /// Realized foot x (resolver space) to re-anchor the stance plant to, or
+    /// `None` to leave `plant_pos` alone. Only used under
+    /// [`GaitAuthority::Contact`].
+    pub foot_x: Option<f32>,
+}
 
 /// Per-leg persistent state.
 ///
@@ -170,6 +224,35 @@ pub struct LegState {
     pub swing_from: Vec2,
     /// Swing plant target.
     pub swing_to: Vec2,
+    /// Seconds spent in Swing *after* `phase_timer` ran out while waiting for
+    /// real contact (plan §6, swing extension). Reset on every phase change.
+    pub swing_wait: f32,
+    /// True when this leg's last Stance was cut short by measured lift-off
+    /// (contact lost before the timer expired) rather than by the timer.
+    /// Telemetry only; lets the UI/HUD tell a "gated" step from a clocked one.
+    pub early_lift: bool,
+    /// True when the swing that *entered* the current stance never received a
+    /// contact report, i.e. the foot arrived (per the pose) without ever
+    /// touching. Contact absence is then uninformative — the foot was already
+    /// not touching when the stance began — so [`GaitAuthority::Full`] must not
+    /// read it as "the foot just left" and veto the stance on its first tick.
+    ///
+    /// Without this guard that is exactly what happens: a swing that lands high
+    /// produces a stance with no support, `Full` cuts it immediately, the leg
+    /// swings again, lands high again — an unbounded rapid-cycle oscillator.
+    pub hovered_in: bool,
+    /// Set once the stance plant has been re-anchored to the measured foot.
+    /// Cleared on lift-off, so the plant is corrected **at most once per
+    /// stance**.
+    ///
+    /// The "once" is the whole point. Re-anchoring every tick while contact
+    /// holds is a positive feedback loop: `plant_pos` sets the resolver's foot
+    /// target, the leg PD drives the foot there, the next tick measures the
+    /// (drifting) foot and moves the plant to it — so the plan is dragged along
+    /// by the very slip it was supposed to correct. Measured cost of the
+    /// per-tick version: stance drift 61 px → 130 px
+    /// (`physics_tuning_progress.md` §11).
+    pub plant_anchored: bool,
 }
 
 /// Discrete phase of the vertical (loop 1) controller.
@@ -315,6 +398,28 @@ pub struct ResolverState {
     /// `Δl` integrator closes on the real ground reaction. `None` in the pure
     /// kinematic sandbox (internal model only).
     pub measured_apex: Option<f32>,
+
+    // --- Plan §6: contact-gated gait clock authority ---
+    /// Per-leg ground truth from the ECS contact layer, `[left, right]`.
+    /// `None` = no physics contact information at all (pure kinematic
+    /// sandbox), and the gait clock then behaves exactly like the pre-§6
+    /// timer. This is an *input* so `resolver.rs` stays pure math; all
+    /// collision knowledge lives in `hip_pin.rs`.
+    pub foot_contact: Option<[LegContactInput; 2]>,
+    /// How much authority the contact layer above is granted. Defaults to
+    /// [`GaitAuthority::Timer`] so the pre-§6 walk is the default and every
+    /// step up is an explicit, measurable decision.
+    pub gait_authority: GaitAuthority,
+    /// Maximum seconds a swing may overrun its timer while waiting for real
+    /// contact before landing anyway (§6 swing extension). Without a cap, a
+    /// foot that never touches would swing forever.
+    pub max_swing_wait: f32,
+    /// Diagnostic: per-leg count of stances that `GaitAuthority::Full` ended
+    /// before their timer expired, and swings that overran waiting for
+    /// contact. Exposed because these are the two mechanisms that changed the
+    /// gait's rhythm, and the counters make that visible without telemetry.
+    pub early_lift_count: [u32; 2],
+    pub swing_wait_count: [u32; 2],
 }
 
 impl ResolverState {
@@ -335,6 +440,10 @@ impl ResolverState {
             plant_pos: left_plant,
             swing_from: left_plant,
             swing_to: left_plant,
+            swing_wait: 0.0,
+            early_lift: false,
+            hovered_in: false,
+            plant_anchored: false,
         };
         // Right leg starts half a stance out of phase with the left, so the two
         // legs alternate once the gait begins; both stay planted while standing
@@ -346,6 +455,10 @@ impl ResolverState {
             plant_pos: right_plant,
             swing_from: right_plant,
             swing_to: right_plant,
+            swing_wait: 0.0,
+            early_lift: false,
+            hovered_in: false,
+            plant_anchored: false,
         };
 
         Self {
@@ -362,6 +475,15 @@ impl ResolverState {
             prev_positions: None,
             measured: None,
             measured_apex: None,
+            foot_contact: None,
+            // The pre-§6 timer is the default. Each §6 mechanism is opt-in.
+            gait_authority: GaitAuthority::Timer,
+            // ~4 ticks at 90 Hz. Long enough to ride out a single missed
+            // collision frame, short enough that a genuinely stuck foot lands
+            // instead of hanging the gait.
+            max_swing_wait: 0.05,
+            early_lift_count: [0; 2],
+            swing_wait_count: [0; 2],
         }
     }
 }
@@ -1236,9 +1358,41 @@ fn step_leg(
     config: &LowerBodyConfig,
     plan: &StepPlan,
     dt: f32,
+    contact: Option<LegContactInput>,
+    authority: GaitAuthority,
+    max_swing_wait: f32,
+    early_lift_count: &mut u32,
+    swing_wait_count: &mut u32,
 ) -> Option<f32> {
+    // `Contact` and above may trust the measured foot position. `Observe` and
+    // `Timer` must not — that is what separates them from `Contact`.
+    let plant_correction = authority >= GaitAuthority::Contact;
     match leg.phase {
         GaitPhase::Stance => {
+            // Plan §6 stance correction (`Contact` and above): re-anchor the
+            // kinematic plant to where the foot ACTUALLY landed. Without this the
+            // resolver keeps drawing the foot from `plant_pos` — from where it
+            // *asked* the foot to be — so a landing error silently invalidates
+            // every downstream angle, and the stretch measured here is never what
+            // the physics delivered.
+            //
+            // Corrected **once per stance**, on the first tick contact confirms
+            // the foot is down. Not every tick: see `LegState::plant_anchored`
+            // for the feedback loop that creates. One correction removes the
+            // landing error; repeated correction transfers the stride to the
+            // foot's slip.
+            if plant_correction && !leg.plant_anchored {
+                if let Some(c) = contact {
+                    if c.touching {
+                        if let Some(x) = c.foot_x {
+                            if x.is_finite() {
+                                leg.plant_pos.x = x;
+                                leg.plant_anchored = true;
+                            }
+                        }
+                    }
+                }
+            }
             // The stance foot is pinned in world space; the hip moves away and
             // the leg stretches through the IK solve.
             leg.foot_pos = leg.plant_pos;
@@ -1250,7 +1404,30 @@ fn step_leg(
             // the opposite foot to be planted (anti-phase swap).
             let wants_step = v_desired.abs() > SWING_TRIGGER_SPEED
                 || (plan.stopping && v.abs() > SWING_TRIGGER_SPEED);
-            if leg.phase_timer <= 0.0 && wants_step && !other_swinging {
+            // Plan §6 early lift-off (`Full` only): a timer that says Stance
+            // while the foot is airborne makes loop 2 extend a leg against
+            // nothing, and makes loop 1 believe it has support it does not have.
+            //
+            // Requires ALL THREE of: contact truth exists, the foot is not
+            // `hovered_in` (i.e. this stance began with a genuine touchdown), and
+            // the foot is not touching right now. Omit `hovered_in` and a swing
+            // that lands high never produces a contact report, so its stance is
+            // cut immediately, forever — that is the degenerate rapid-cycle
+            // oscillator described in `physics_tuning_progress.md` §11.
+            //
+            // The `lost_contact_early` guard is also what keeps a foot that
+            // legitimately leaves the floor just before its timer expires from
+            // being double-counted.
+            let lost_contact_early = if authority == GaitAuthority::Full && !leg.hovered_in {
+                match contact {
+                    Some(c) => !c.touching && leg.phase_timer > 0.0,
+                    None => false,
+                }
+            } else {
+                false
+            };
+            let stance_over = leg.phase_timer <= 0.0 || lost_contact_early;
+            if stance_over && wants_step && !other_swinging {
                 let mut swing_to = leg.plant_pos;
                 // The jump never retargets a step: every swing targets its own
                 // forward Raibert landing point, exactly as in a normal walk, so a
@@ -1262,6 +1439,10 @@ fn step_leg(
                 leg.phase_timer = config.swing_duration_ts;
                 leg.swing_from = leg.plant_pos;
                 leg.swing_to = swing_to;
+                leg.early_lift = lost_contact_early;
+                leg.swing_wait = 0.0;
+                // New stance will get its own single chance to anchor.
+                leg.plant_anchored = false;
             }
             None
         }
@@ -1283,11 +1464,49 @@ fn step_leg(
             // arrived at the plant at full swing speed.
             leg.foot_pos = swing_profile_foot(t, leg.swing_from, leg.swing_to, config.step_height);
 
+            // Plan §6 swing extension (`Full` only): the swing is over when the
+            // timer expires AND the foot has actually touched down (or the wait
+            // cap is hit). A long flight from loop 2's vertical control
+            // otherwise lands the pose while the foot is still in the air, and
+            // the next stance begins with no support at all. Holding the final
+            // profile point while waiting is deliberate: it parks the foot
+            // exactly on the plant target and lets the leg PD close the last
+            // millimetres.
+            //
+            // The cap must be generous relative to the report latency: the
+            // contact batch is one physics tick stale, so a foot that lands on
+            // the last frame of the window has not been reported yet. A cap near
+            // zero cancels the mechanism instead of applying it.
+            let waiting = if authority == GaitAuthority::Full {
+                match contact {
+                    Some(c) => leg.phase_timer <= 0.0 && !c.touching,
+                    None => false,
+                }
+            } else {
+                false
+            };
+            if waiting {
+                leg.swing_wait += dt;
+                leg.foot_pos = leg.swing_to;
+                if leg.swing_wait < max_swing_wait.max(0.0) {
+                    return None;
+                }
+                *swing_wait_count = swing_wait_count.saturating_add(1);
+            }
             if leg.phase_timer <= 0.0 {
                 leg.foot_pos = leg.swing_to;
                 leg.plant_pos = leg.swing_to;
                 leg.phase = GaitPhase::Stance;
                 leg.phase_timer = config.stance_duration_ts;
+                // Remember whether this stance can trust contact truth: a
+                // touchdown that never got a contact report is a hover, and
+                // `Full` must not then veto the whole stance on the very next
+                // tick for the same absence of contact.
+                leg.hovered_in = match contact {
+                    Some(c) => !c.touching,
+                    None => false,
+                };
+                leg.swing_wait = 0.0;
                 // Touchdown event: signed hip→foot offset for the backward solve.
                 return Some(leg.plant_pos.x - hip_x);
             }
@@ -1500,6 +1719,22 @@ pub fn step_lower_body(
     // straight on. (The old two-foot-sync retarget forced BOTH feet onto one
     // shared, stale plant point, which is what made both feet lag behind — or,
     // over-corrected, both lunge ahead. Neither is a normal gait.)
+    let mut lift_count_l = 0u32;
+    let mut lift_count_r = 0u32;
+    let mut wait_count_l = 0u32;
+    let mut wait_count_r = 0u32;
+    // Plan §6: per-leg ground truth, when the ECS contact layer supplies it and
+    // the authority level actually wants it. `Timer` gets `None` so the pre-§6
+    // behaviour is bit-identical rather than merely "equivalent".
+    let authority = state.gait_authority;
+    let contact_pair = if authority == GaitAuthority::Timer {
+        None
+    } else {
+        state.foot_contact
+    };
+    let contact_left = contact_pair.map(|c| c[0]);
+    let contact_right = contact_pair.map(|c| c[1]);
+    let max_wait = state.max_swing_wait;
     let left_td = step_leg(
         &mut state.left,
         state.hip_pos.x,
@@ -1509,6 +1744,11 @@ pub fn step_lower_body(
         config,
         &plan,
         dt,
+        contact_left,
+        authority,
+        max_wait,
+        &mut lift_count_l,
+        &mut wait_count_l,
     );
     let right_td = step_leg(
         &mut state.right,
@@ -1519,7 +1759,16 @@ pub fn step_lower_body(
         config,
         &plan,
         dt,
+        contact_right,
+        authority,
+        max_wait,
+        &mut lift_count_r,
+        &mut wait_count_r,
     );
+    state.early_lift_count[0] = state.early_lift_count[0].saturating_add(lift_count_l);
+    state.early_lift_count[1] = state.early_lift_count[1].saturating_add(lift_count_r);
+    state.swing_wait_count[0] = state.swing_wait_count[0].saturating_add(wait_count_l);
+    state.swing_wait_count[1] = state.swing_wait_count[1].saturating_add(wait_count_r);
 
     // 6. --- Backward solve at touchdown (foot → hip) ---
     // Invert the *actual* plant offset to get the hip velocity whose next
@@ -1788,8 +2037,554 @@ pub fn step_lower_body(
 mod tests {
     use super::*;
 
+    /// Timer-only [`step_leg`] — no physics contact information, i.e. exactly
+    /// the pre-§6 behaviour. The legacy gait tests are written against this, so
+    /// they keep asserting the open-loop clock while §6 is tested separately.
+    #[allow(clippy::too_many_arguments)]
+    fn step_leg_kinematic(
+        leg: &mut LegState,
+        hip_x: f32,
+        v: f32,
+        v_desired: f32,
+        other_swinging: bool,
+        config: &LowerBodyConfig,
+        plan: &StepPlan,
+        dt: f32,
+    ) -> Option<f32> {
+        let mut a = 0u32;
+        let mut b = 0u32;
+        step_leg(
+            leg,
+            hip_x,
+            v,
+            v_desired,
+            other_swinging,
+            config,
+            plan,
+            dt,
+            None,
+            GaitAuthority::Timer,
+            0.05,
+            &mut a,
+            &mut b,
+        )
+    }
+
+    /// §6 [`step_leg`] with explicit contact input and authority, hiding the
+    /// diagnostic counters.
+    #[allow(clippy::too_many_arguments)]
+    fn step_leg_contact(
+        leg: &mut LegState,
+        hip_x: f32,
+        v: f32,
+        v_desired: f32,
+        other_swinging: bool,
+        config: &LowerBodyConfig,
+        plan: &StepPlan,
+        dt: f32,
+        contact: Option<LegContactInput>,
+        authority: GaitAuthority,
+    ) -> Option<f32> {
+        let mut a = 0u32;
+        let mut b = 0u32;
+        step_leg(
+            leg,
+            hip_x,
+            v,
+            v_desired,
+            other_swinging,
+            config,
+            plan,
+            dt,
+            contact,
+            authority,
+            0.05,
+            &mut a,
+            &mut b,
+        )
+    }
+
+    /// A leg in Stance with the full timer, at a given plant.
+    fn stance_leg(cfg: &LowerBodyConfig, plant_x: f32) -> LegState {
+        LegState {
+            phase: GaitPhase::Stance,
+            phase_timer: cfg.stance_duration_ts,
+            foot_pos: Vec2::new(plant_x, cfg.floor_y),
+            plant_pos: Vec2::new(plant_x, cfg.floor_y),
+            swing_from: Vec2::ZERO,
+            swing_to: Vec2::ZERO,
+            swing_wait: 0.0,
+            early_lift: false,
+            hovered_in: false,
+            plant_anchored: false,
+        }
+    }
+
     fn default_config() -> LowerBodyConfig {
         LowerBodyConfig::default()
+    }
+
+    // -----------------------------------------------------------------
+    // Plan §6 — contact-gated gait clock
+    // -----------------------------------------------------------------
+
+    /// A leg in Stance with almost no timer left, plus a cruise plan, ready to
+    /// lift off on the next tick.
+    fn stance_about_to_step(cfg: &LowerBodyConfig) -> (LegState, StepPlan) {
+        let mut leg = stance_leg(cfg, 0.0);
+        leg.phase_timer = 0.0;
+        (leg, cruise_plan(cfg))
+    }
+
+    #[test]
+    fn test_contact_early_liftoff_ends_stance_before_timer() {
+        // Plan §6 (`Full`): a foot that has genuinely left the ground must end
+        // its stance now, not at `stance_duration_ts`. Otherwise loop 2 keeps
+        // commanding extension against nothing for the rest of the timer.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        let airborne = Some(LegContactInput {
+            touching: false,
+            foot_x: None,
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            v,
+            v,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            airborne,
+            GaitAuthority::Full,
+        );
+        assert_eq!(
+            leg.phase,
+            GaitPhase::Swing,
+            "contact lost early must lift the foot off"
+        );
+        assert!(leg.early_lift, "the clock was overruled; flag it");
+    }
+
+    #[test]
+    fn test_contact_early_liftoff_is_off_below_full_authority() {
+        // `Contact` must NOT touch timing. This is the A/B boundary that makes
+        // the authority ladder meaningful: the same "airborne" input leaves the
+        // stance running under `Contact`, `Observe`, and `Timer`.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        for authority in [
+            GaitAuthority::Timer,
+            GaitAuthority::Observe,
+            GaitAuthority::Contact,
+        ] {
+            let mut leg = stance_leg(&cfg, 0.0);
+            let airborne = Some(LegContactInput {
+                touching: false,
+                foot_x: Some(3.0),
+            });
+            let _ = step_leg_contact(
+                &mut leg, 0.0, v, v, false, &cfg, &plan, 1e-3, airborne, authority,
+            );
+            assert_eq!(
+                leg.phase,
+                GaitPhase::Stance,
+                "{authority:?} must not end the stance on contact loss"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contact_hovered_in_stance_is_not_vetoed() {
+        // The rapid-cycle trap: a swing that never reported contact starts a
+        // stance that is already "not touching". `Full` must not read that as
+        // "the foot just left" — otherwise every stance is cut on tick 1 and the
+        // leg oscillates at the tick rate forever.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        leg.hovered_in = true;
+        let still_airborne = Some(LegContactInput {
+            touching: false,
+            foot_x: None,
+        });
+        for _ in 0..30 {
+            let _ = step_leg_contact(
+                &mut leg,
+                0.0,
+                v,
+                v,
+                false,
+                &cfg,
+                &plan,
+                1e-3,
+                still_airborne,
+                GaitAuthority::Full,
+            );
+            assert_eq!(
+                leg.phase,
+                GaitPhase::Stance,
+                "a hover-entered stance must run its timer instead of thrashing"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contact_stance_holds_while_grounded() {
+        // The same timer with real contact must NOT lift off: the clock is still
+        // authoritative while the foot is genuinely planted.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        let loaded = Some(LegContactInput {
+            touching: true,
+            foot_x: None,
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            v,
+            v,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            loaded,
+            GaitAuthority::Full,
+        );
+        assert_eq!(leg.phase, GaitPhase::Stance);
+        assert!(!leg.early_lift);
+    }
+
+    #[test]
+    fn test_contact_swing_extends_until_real_touchdown() {
+        // Plan §6 (`Full`): the swing must not land the pose while the foot is
+        // still in the air. Hold the final profile point until contact (or the
+        // wait cap).
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        let (mut leg, _) = stance_about_to_step(&cfg);
+        let dt = 1e-3;
+        let loaded = Some(LegContactInput {
+            touching: true,
+            foot_x: None,
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            v,
+            v,
+            false,
+            &cfg,
+            &plan,
+            dt,
+            loaded,
+            GaitAuthority::Full,
+        );
+        assert_eq!(leg.phase, GaitPhase::Swing);
+
+        // Force the timer to expire, then feed "airborne" repeatedly.
+        leg.phase_timer = 0.0;
+        let airborne = Some(LegContactInput {
+            touching: false,
+            foot_x: None,
+        });
+        let mut landed_early = false;
+        for _ in 0..20 {
+            let _ = step_leg_contact(
+                &mut leg,
+                0.0,
+                v,
+                v,
+                false,
+                &cfg,
+                &plan,
+                dt,
+                airborne,
+                GaitAuthority::Full,
+            );
+            if leg.phase == GaitPhase::Stance {
+                landed_early = true;
+                break;
+            }
+        }
+        assert!(
+            !landed_early,
+            "swing landed while the foot was still airborne"
+        );
+        assert!(leg.swing_wait > 0.0, "the wait must be accumulated");
+    }
+
+    #[test]
+    fn test_contact_swing_wait_is_capped() {
+        // A foot that never reports contact must eventually land anyway, or the
+        // gait hangs forever.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        let (mut leg, _) = stance_about_to_step(&cfg);
+        let loaded = Some(LegContactInput {
+            touching: true,
+            foot_x: None,
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            v,
+            v,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            loaded,
+            GaitAuthority::Full,
+        );
+        leg.phase_timer = 0.0;
+        let airborne = Some(LegContactInput {
+            touching: false,
+            foot_x: None,
+        });
+        let dt = 1e-2;
+        let mut landed = false;
+        for _ in 0..20 {
+            let _ = step_leg_contact(
+                &mut leg,
+                0.0,
+                v,
+                v,
+                false,
+                &cfg,
+                &plan,
+                dt,
+                airborne,
+                GaitAuthority::Full,
+            );
+            if leg.phase == GaitPhase::Stance {
+                landed = true;
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "an unreachable foot must still land on the wait cap"
+        );
+    }
+
+    #[test]
+    fn test_contact_reanchors_stance_plant_to_measured_x() {
+        // Plan §6 stance-slide correction: while in contact the plant follows
+        // where the foot ACTUALLY is, so a drifting foot stops poisoning every
+        // downstream angle.
+        let cfg = default_config();
+        let v = 0.0; // no stepping intent: stay in stance
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        let measured = Some(LegContactInput {
+            touching: true,
+            foot_x: Some(7.5),
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            v,
+            v,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            measured,
+            GaitAuthority::Contact,
+        );
+        assert!(
+            (leg.plant_pos.x - 7.5).abs() < 1e-5,
+            "plant x {} must follow the measured foot 7.5",
+            leg.plant_pos.x
+        );
+        assert!(
+            (leg.foot_pos.x - 7.5).abs() < 1e-5,
+            "foot_pos must be the corrected plant"
+        );
+        assert!(leg.plant_anchored, "the stance spends its one anchor");
+    }
+
+    #[test]
+    fn test_contact_reanchor_happens_at_most_once_per_stance() {
+        // The anti-feedback-loop guard. Re-anchoring every tick makes the plan
+        // chase the slip it is meant to resist: target → PD → measured →
+        // target. One correction per stance removes the landing error without
+        // turning the stride into a follower of the foot.
+        let cfg = default_config();
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        // First tick: foot reported at 7.5, plant follows.
+        let first = Some(LegContactInput {
+            touching: true,
+            foot_x: Some(7.5),
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            first,
+            GaitAuthority::Contact,
+        );
+        assert!((leg.plant_pos.x - 7.5).abs() < 1e-5);
+        // Second tick: the foot has drifted further to 20.0. The plant must
+        // NOT follow — that is the loop this test exists to prevent.
+        let second = Some(LegContactInput {
+            touching: true,
+            foot_x: Some(20.0),
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            second,
+            GaitAuthority::Contact,
+        );
+        assert!(
+            (leg.plant_pos.x - 7.5).abs() < 1e-5,
+            "plant x {} must stay at the first confirmed anchor 7.5",
+            leg.plant_pos.x
+        );
+    }
+
+    #[test]
+    fn test_contact_reanchor_is_rearmed_by_the_next_stance() {
+        // The "once" is per stance, not for the leg's lifetime: after the next
+        // lift-off the new stance gets its own single correction.
+        let cfg = default_config();
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        let loaded = Some(LegContactInput {
+            touching: true,
+            foot_x: Some(7.5),
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            cfg.target_speed,
+            cfg.target_speed,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            loaded,
+            GaitAuthority::Contact,
+        );
+        assert!(leg.plant_anchored);
+        // Force a lift-off by draining the stance timer.
+        leg.phase_timer = 0.0;
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            cfg.target_speed,
+            cfg.target_speed,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            loaded,
+            GaitAuthority::Contact,
+        );
+        assert_eq!(leg.phase, GaitPhase::Swing);
+        assert!(
+            !leg.plant_anchored,
+            "lift-off must re-arm the anchor for the next stance"
+        );
+    }
+
+    #[test]
+    fn test_contact_reanchor_requires_touching() {
+        // The plant must only follow the foot while the physics solver is
+        // actually holding it down. A foot that is airborne keeps its plant:
+        // otherwise the plant walks away with the foot and the whole stride
+        // is dragged along by the slide it was supposed to resist.
+        let cfg = default_config();
+        let plan = cruise_plan(&cfg);
+        let mut leg = stance_leg(&cfg, 0.0);
+        let airborne = Some(LegContactInput {
+            touching: false,
+            foot_x: Some(7.5),
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            airborne,
+            GaitAuthority::Contact,
+        );
+        assert!(
+            leg.plant_pos.x.abs() < 1e-6,
+            "plant must not follow an airborne foot"
+        );
+    }
+
+    #[test]
+    fn test_contact_below_contact_authority_never_moves_the_plant() {
+        // `Observe` and `Timer` must leave `plant_pos` untouched even with a
+        // perfect measured foot x. This is the control arm of the A/B.
+        let cfg = default_config();
+        let plan = cruise_plan(&cfg);
+        for authority in [GaitAuthority::Timer, GaitAuthority::Observe] {
+            let mut leg = stance_leg(&cfg, 0.0);
+            let measured = Some(LegContactInput {
+                touching: true,
+                foot_x: Some(7.5),
+            });
+            let _ = step_leg_contact(
+                &mut leg, 0.0, 0.0, 0.0, false, &cfg, &plan, 1e-3, measured, authority,
+            );
+            assert!(
+                leg.plant_pos.x.abs() < 1e-6,
+                "{authority:?} must not re-anchor the plant"
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_contact_input_is_identical_to_pre_s6_timer() {
+        // The kinematic fallback must be bit-identical to the old behaviour: same
+        // phase transitions at the same ticks, for a full swing.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let plan = cruise_plan(&cfg);
+        let dt = 1e-2;
+
+        let (mut a, _) = stance_about_to_step(&cfg);
+        let (mut b, _) = stance_about_to_step(&cfg);
+        let mut hip_x = 0.0;
+        for _ in 0..200 {
+            hip_x += v * dt;
+            let ra = step_leg_kinematic(&mut a, hip_x, v, v, false, &cfg, &plan, dt);
+            let rb = step_leg_kinematic(&mut b, hip_x, v, v, false, &cfg, &plan, dt);
+            assert_eq!(a.phase, b.phase, "phase diverged with no contact input");
+            assert!((a.phase_timer - b.phase_timer).abs() < 1e-6);
+            assert!((a.foot_pos - b.foot_pos).length() < 1e-5);
+            assert_eq!(ra.is_some(), rb.is_some());
+        }
     }
 
     #[test]
@@ -2182,18 +2977,12 @@ mod tests {
         // requires predicting the hip's travel during the swing phase.
         let cfg = default_config();
         let v = cfg.target_speed; // cruise: kv term vanishes
-        let mut leg = LegState {
-            phase: GaitPhase::Stance,
-            phase_timer: 0.0,
-            foot_pos: Vec2::ZERO,
-            plant_pos: Vec2::ZERO,
-            swing_from: Vec2::ZERO,
-            swing_to: Vec2::ZERO,
-        };
+        let mut leg = stance_leg(&cfg, 0.0);
+        leg.phase_timer = 0.0;
 
         // Lift off with the hip at x = 0.
         let plan = cruise_plan(&cfg);
-        let _ = step_leg(&mut leg, 0.0, v, v, false, &cfg, &plan, 0.001);
+        let _ = step_leg_kinematic(&mut leg, 0.0, v, v, false, &cfg, &plan, 0.001);
         assert_eq!(leg.phase, GaitPhase::Swing);
 
         // Fly through the swing while the hip keeps moving.
@@ -2202,7 +2991,7 @@ mod tests {
         let mut touchdown = None;
         for _ in 0..((cfg.swing_duration_ts / dt).ceil() as usize + 2) {
             hip_x += v * dt;
-            touchdown = step_leg(&mut leg, hip_x, v, v, false, &cfg, &plan, dt);
+            touchdown = step_leg_kinematic(&mut leg, hip_x, v, v, false, &cfg, &plan, dt);
             if leg.phase == GaitPhase::Stance {
                 break;
             }
@@ -2238,7 +3027,7 @@ mod tests {
         // forward motion it swings while the left is still in stance.
         let dt = cfg.stance_duration_ts * 0.5;
         let plan = cruise_plan(&cfg);
-        let _ = step_leg(
+        let _ = step_leg_kinematic(
             &mut state.left,
             state.hip_pos.x,
             40.0,
@@ -2248,7 +3037,7 @@ mod tests {
             &plan,
             dt,
         );
-        let _ = step_leg(
+        let _ = step_leg_kinematic(
             &mut state.right,
             state.hip_pos.x,
             40.0,
@@ -2269,7 +3058,7 @@ mod tests {
         // At standstill (v = 0, v_desired = 0) the stance never opens a swing.
         let dt = cfg.stance_duration_ts + cfg.swing_duration_ts + 0.1;
         let plan = cruise_plan(&cfg);
-        let _ = step_leg(
+        let _ = step_leg_kinematic(
             &mut state.left,
             state.hip_pos.x,
             0.0,
@@ -2279,7 +3068,7 @@ mod tests {
             &plan,
             dt,
         );
-        let _ = step_leg(
+        let _ = step_leg_kinematic(
             &mut state.right,
             state.hip_pos.x,
             0.0,
@@ -2306,7 +3095,7 @@ mod tests {
         let mut hip_x = state.hip_pos.x;
         for _ in 0..3 {
             hip_x += 40.0 * dt;
-            let _ = step_leg(
+            let _ = step_leg_kinematic(
                 &mut state.left,
                 hip_x,
                 40.0,

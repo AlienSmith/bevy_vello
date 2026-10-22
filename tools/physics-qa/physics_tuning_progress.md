@@ -43,6 +43,15 @@ Status legend: `[x]` done, `[-]` in progress, `[ ]` planned.
   Same best-walk config now gives swing **28/29**, body **96%** of `cmd_vx`, rig
   `max_rel_dev` **0.1502**. A/B with the lean off is strictly worse
   (26/29 swings, 71% speed, `max_rel_dev` 0.2254), so the delivery change is kept.
+- **Contact-gated gait clock (§6 / Phase F) was built and REJECTED** (§11). The
+  per-foot contact layer is real and correct — at `GAIT_AUTHORITY=observe` the
+  telemetry is byte-identical to the timer-only control (`md5 d6c97f8a…`) — but
+  every mechanism that *acts* on it degrades the walk monotonically: swing
+  **28/29 → 17/29 → 14/27**, rig `max_rel_dev` **0.1502 → 0.1874 → 0.3144**,
+  stance drift **61 → 157 → 236 px** for `Contact` / `Full`. Default is therefore
+  `GAIT_AUTHORITY=timer` (pre-§6, unchanged). See §11.3 for the three causes; the
+  key finding is that the residual ~61 px slide is a **foot contact/friction**
+  problem, not a gait-clock timing problem.
 
 ## 1. What changed this session
 
@@ -611,3 +620,102 @@ python3 tools/physics-qa/analyze_foot_slide.py /tmp/phase_e_qa/loop3_leg.csv
 ```
 
 Control run: add `ATT_LEAN_KP=0 ATT_LEAN_KD=0`.
+
+## 11. Phase F — contact-gated gait clock: measured, and **rejected** (session 6)
+
+Plan §6 asked for the gait clock to take its authority from real contact rather
+than from timers. The contact layer already existed (`update_ground_support`
+reads the previous tick's `CollisionEventBatch`); what was missing was *per-foot
+resolution*. That was built, measured, and it makes the walk worse at every
+level. The mechanism stays behind a default-off switch.
+
+### 11.1 What was built
+
+Per-foot ground truth in [`GroundSupport`]: each foot collider (`LLL`/`RLL`,
+matched via `Connectivity.name`, which is the asset's `path_id`) gets its own
+`FootContact { touching, on_ticks, off_ticks, normal, point, normal_speed }`,
+debounced with `CONTACT_ON_TICKS = 2` / `CONTACT_OFF_TICKS = 1`. The resolver
+receives raw `touching` (not the debounced flag) plus the measured foot x mapped
+into resolver space; the hysteretic flag is used only for the loop-2 thrust gate,
+where a stable signal matters more than a one-tick-late one.
+
+Three mechanisms sit behind `GaitAuthority`, **additive** so each can be A/B'd:
+
+| level | plant re-anchor | early lift-off | swing extension | thrust gate |
+|---|---|---|---|---|
+| `Timer` (default) | — | — | — | phase |
+| `Observe` | — | — | — | phase |
+| `Contact` | once per stance | — | — | per-foot contact |
+| `Full` | once per stance | yes | yes | per-foot contact |
+
+`GAIT_AUTHORITY=timer|observe|contact|full` switches it at runtime; 154 unit
+tests cover the ladder, including one asserting `Timer` is bit-identical to the
+pre-§6 clock.
+
+### 11.2 Result — every level is worse than the control
+
+All runs `LEG_COMPLIANCE=1e-9 STEP_HEIGHT=70`, `walk_script`, 1036 rows,
+`nan_rows=0`.
+
+| metric | `Timer` / `Observe` | `Contact` | `Full` |
+|---|---|---|---|
+| swing pass | **28/29** | 17/29 | 14/27 |
+| rig `max_rel_dev` | **0.1502** | 0.1874 | 0.3144 |
+| `P1-P2` tuck | **0.0419** | 0.0599 | 0.1824 |
+| `P2-P3` tuck | **0.0076** | 0.0128 | 0.0689 |
+| stance drift worst | **61.1 px** | 157.3 px | 235.6 px |
+| leg peak | **78.1 / 57.9 px** | 105.5 / 79.6 px | 108.1 / 104.4 px |
+| tail | WAGGLE rms 19.958 rev 7 | WAGGLE rms 34.829 rev 7 | WAGGLE rms 13.567 rev 12 |
+
+`Timer` and `Observe` are **byte-identical** (`md5 d6c97f8a…`), which is the
+proof that the contact layer is correctly wired and non-perturbing. Every
+measurement-based correction then *degrades* the walk monotonically with
+authority.
+
+### 11.3 Why — three distinct causes, all confirmed
+
+1. **The plant re-anchor as originally written was a positive feedback loop.**
+   The first version re-anchored every tick contact held: `plant_pos` sets the
+   foot target → leg PD drives the foot there → next tick measures the drifting
+   foot → moves the plant to it. That drags the gait plan along with the slip it
+   was supposed to resist. Measured cost: 61 px → 130 px of drift. Restricting
+   it to **once per stance** (`plant_anchored`) fixed the loop but still landed
+   at 157 px, which leads to cause 2.
+2. **Fixing the plant to the *measured* foot removes the only absolute
+   reference in the loop.** The stride was implicitly anchored by
+   `plant_pos` being a *plan* value that the leg PD chased and lost against by a
+   consistent, bounded amount. Following the measurement instead makes each step
+   inherit the previous step's slip, so error accumulates: 61 → 157 px.
+3. **The two timing mechanisms fight the anti-phase interlock.** `step_leg` only
+   lets a leg lift off when the *other* foot is planted. Early lift-off fires on
+   a one-tick-stale contact report (the batch is written at the end of
+   `FixedUpdate` and read at the start of the next tick), so it can launch a
+   swing against a foot that is one tick from landing. The still-airborne
+   opposite leg then blocks the swap, the swing extends waiting for contact that
+   arrives late, and the stance geometry collapses: `P1-P2` 0.042 → 0.182,
+   `P2-P3` 0.008 → 0.069, swing pass 28/29 → 14/27.
+
+### 11.4 Verdict
+
+Do **not** enable §6 for this character as it stands. `GaitAuthority::Timer`
+remains the default and reproduces the Phase E numbers exactly.
+
+The negative result is worth more than the feature: it shows the ~61 px residual
+slide is **not** a gait-clock authority problem. The clock and the physics agree
+about *when* things happen; they disagree about *where the foot is*. That is the
+foot's own contact/friction response (plan §8), not the resolver's timing. §6
+would only pay off after the foot stops slipping, at which point the measured
+plant and the planned plant coincide and the correction becomes a no-op.
+
+Reproduce (from `bevy_vello/`):
+
+```bash
+for LVL in timer observe contact full; do
+  ASSET_ROOT=$PWD/examples/collision_detection/assets \
+  SCRIPT=$PWD/plans/walk_script.json OUT_CSV=/tmp/phase_f_ab/$LVL.csv \
+  LEG_COMPLIANCE=1e-9 STEP_HEIGHT=70 GAIT_AUTHORITY=$LVL \
+  ./target/release/examples/headless_arm_pd
+  python3 tools/physics-qa/analyze_swing.py /tmp/phase_f_ab/$LVL.csv
+  python3 tools/physics-qa/analyze_foot_slide.py /tmp/phase_f_ab/$LVL.csv
+done
+```
