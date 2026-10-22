@@ -1,5 +1,25 @@
 # MPC Gait — Implementation Doc (branch `mpc_gait`)
 
+> **RESUME HERE (state @ 2026-10-22, commit `09e2d59`).**
+> - **Phase A is DONE and committed** (placement law + fixed-point touchdown,
+>   125/125 tests). Its measured deviations + the accepted sweep regression are
+>   recorded in §25 of `tools/physics-qa/physics_tuning_progress.md` and in the
+>   "Phase A status" note below in this doc.
+> - **Next up: Phase B** (DCM-margin trigger, min-jerk + sine-arch profile,
+>   progress retiming, touchdown acceptance, legacy deletion) — see the Phase B
+>   section below. Phase B item 5 must also delete the interim deadbeat pacing
+>   that Phase A kept (deferred item 5).
+> - Reading order for a fresh session: (1) this doc, (2) the design spec
+>   `plans/swing-phase-timing.md`, (3) progress.md §22–§25 for the measured
+>   history that led here (esp. §25.2: the two physics-lag findings).
+> - Verify loop: `cargo test -p game_lib lower_body` →
+>   `cargo build --release -p collision_detection --example headless_arm_pd` →
+>   `python3 tools/physics-qa/sweep_step_height.py --heights 28,50`
+>   (run from `bevy_vello/`; baseline for comparison is §20 of progress.md:
+>   69.6/107.2 px/s — currently regressed to −105.2/25.6, accepted).
+> - Per-phase convention: implement → test → sweep → record findings as a new
+>   §N in progress.md → short code-only commit message.
+
 Working plan for implementing `plans/swing-phase-timing.md` (event-triggered stepping
 with DCM targeting) on top of the current resolver. Phases are ordered so each one is
 independently buildable, unit-testable, and verifiable with the existing headless
