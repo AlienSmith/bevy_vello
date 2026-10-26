@@ -174,6 +174,12 @@ impl HipPinParams {
         if let Ok(raw) = std::env::var("GAIT_AUTHORITY") {
             p.gait_authority = parse_gait_authority(&raw);
         }
+        // Facing direction for the knee winding pin (+1 = facing +x/right, the
+        // default; -1 = facing -x/left). `FACING=left`/`-1` mirrors the bend side.
+        p.config.facing = match std::env::var("FACING").ok().as_deref().map(str::trim) {
+            Some("left") | Some("-1") | Some("-") => -1.0,
+            _ => 1.0,
+        };
         p
     }
 }
@@ -1321,6 +1327,28 @@ pub fn drive_hip_pin(
             // (Bevy y-up, so the floor is the seed foot y.)
             foot_l.y = foot_l.y.max(seed.live[0].foot.y);
             foot_r.y = foot_r.y.max(seed.live[1].foot.y);
+
+            // Pick the anatomical knee (facing right ⇒ the more anterior of the
+            // IK's two mirror solutions). `transfer_segment` rotates the live seed
+            // segment by the resolver's angle *change*, so a leg near full extension
+            // (the `acos` singularity, reach ≈ L1+L2) lets the knee drift to
+            // whichever side float noise lands on — the "sometimes bends left,
+            // sometimes right" failure. The test uses only the x axis, identical in
+            // the Bevy y-up frame here and the vello y-down resolver frame, so no
+            // handedness flip is needed (the earlier cross-product winding rule was
+            // wrong exactly because the two frames mirror the y axis).
+            knee_l = crate::lower_body::select_anterior_knee(
+                hip_t,
+                foot_l,
+                knee_l,
+                params.config.facing,
+            );
+            knee_r = crate::lower_body::select_anterior_knee(
+                hip_t,
+                foot_r,
+                knee_r,
+                params.config.facing,
+            );
 
             // Loop 2 delivery (plan §4): the resolver's virtual-leg thrust
             // command biases the leg-PD targets. In Bevy y-up, `stance_extend`

@@ -185,6 +185,60 @@ per-leg touchdown lead `tP3x − foot_x` at `gait` 1→0 transitions.
 
 ---
 
+## 5b. Knee bend-side fix (2026-10-26, post-Phase-A handoff)
+
+A regression surfaced during the Windows port: while walking right the leg
+**sometimes bent left, sometimes right**. Root-caused and fixed; unrelated to
+the §3/§4 gait law but blocks clean reading of the walk, so done first.
+
+### Diagnosis (telemetry, not speculation)
+- `bend_sign` is a **constant +1** on the walk path (only the GUI `raibert_sandbox`
+  ever flips it). The flip is kinematic, not a wrong branch.
+- The 2-bone IK puts the knee at a **chord-relative** side: `rotate(dir, a·bend_sign)`
+  in `solve_leg_ik`. The *world* side of that offset flips whenever the hip→foot
+  chord swings past vertical, and the knee collapses onto the chord (`a→0`) at
+  saturated reach (`hip→foot ≈ L1+L2 = 110px`, measured up to 111px). Stance chord
+  is always down (one side); the swing chord passes up — 70 world-side flips, all
+  in swing. Confirmed in the resolver's **commanded targets** (`tP40/tP41`), not
+  just live particles ⇒ the bug is the solver convention, not the hip-pin wiring.
+- **y-handedness gotcha (the user's call):** in vello's **y-down** frame
+  `rotate(+angle)` winds the opposite visual way than the math convention
+  `bend_sign`'s doc assumes, so `+1` produced a **goat leg** (knee behind the
+  ankle: 556/594 stance frames). A first fix using a cross-product *winding vs.
+  the chord* inherited that mirrored side and was itself y-ambiguous (an
+  enforce-`cross≥0` rule is even geometrically impossible at full-extension
+  heel-strike — the test proved it).
+
+### Fix — `select_anterior_knee` (resolver.rs)
+State the anatomical rule on the **x axis only** (identical in y-down and y-up,
+so it cannot mis-map). The IK has exactly two valid knees, mirrors across the
+hip→foot chord; **pick the one with maximal `knee.x·facing`** (facing right ⇒
+the more anterior one). Selection (not enforcement) holds at every chord angle
+and reach; mirroring preserves both bone lengths exactly.
+- New `LowerBodyConfig.facing` (+1 right default, −1 left); `FACING=left|right`
+  env in `hip_pin::from_env`.
+- Applied at BOTH flip sources: `step_lower_body` IK output and the `hip_pin`
+  composed knee targets (after the thrust/retract biases, before assignment).
+- `enforce_knee_winding` kept as the chord-relative primitive; `mirror_knee_across_chord`
+  factored out; `select_anterior_knee` is the shipped anatomical rule.
+
+### Verification
+- 155/155 `game_lib` tests green; new `test_knee_anterior_selection_body_frame`
+  asserts anteriority on trailing-stance poses + length preservation + facing mirror.
+- Headless walk `anterior_v2`: knee leads ankle **568/579 stance frames** (was
+  12/0 goat), **0 side flips** on targets, first swing segments now PASS.
+- Windows port `tools/physics-qa/run_walk.ps1` is the PowerShell twin of
+  `run_walk.sh` (same pipeline; env-var scoping + `Select-String`/`Select-Object`
+  substitutes; needs `pip install numpy matplotlib pillow`).
+
+### New open items (visual, this run)
+The fixed walk looks good in `visual.rs` but shows two behaviours to chase next:
+1. **Forward torso tilt** while walking (attitude loop-3 lean; tune `ATT_LEAN_KP/KD`
+   or the gravity-coupling term).
+2. **Mid-walk pause** — the gait stalls, stands taller, then resumes (likely a
+   stance/swing handoff or DCM-margin trigger timing issue, ties into the §3/§4
+   matched-pair work in §6).
+
 ## 6. Concrete next steps (ordered)
 
 1. Decide law: implement **§4 A+B** (`foot = hip + clamp(gain·v·T_stance,±x_max)`)

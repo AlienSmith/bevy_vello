@@ -80,6 +80,15 @@ pub struct LowerBodyConfig {
     pub floor_y: f32,
     /// Knee bend direction: +1 = knee in front of the hip→foot line, -1 = behind.
     pub bend_sign: f32,
+    /// Which way the body faces: +1 = facing +x (right, default), -1 = facing -x.
+    /// The knee's **world winding order** is pinned to this, not to the hip→foot
+    /// chord: facing right the knee must always sit clockwise (in screen terms)
+    /// around the hip→foot chord, facing left counter-clockwise. The chord-relative
+    /// `bend_sign` alone cannot express that — when the chord swings past vertical
+    /// (deep swing tuck, saturated reach near the `acos` singularity) the same
+    /// `bend_sign` produces the opposite world side, which is what made the leg
+    /// "sometimes bend left, sometimes right" while walking right.
+    pub facing: f32,
     /// `true` while crouching (squash height).
     pub crouch: bool,
 
@@ -135,6 +144,7 @@ impl Default for LowerBodyConfig {
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
+            facing: 1.0,
             crouch: false,
             gravity: 980.0,
             jump_apex: 60.0,
@@ -1185,6 +1195,75 @@ pub fn solve_leg_ik(
     (knee, foot)
 }
 
+/// The facing sign, clamped to ±1 (0 or NaN input means "right" = +1).
+#[inline]
+pub fn facing_sign(facing: f32) -> f32 {
+    if facing < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+/// Pick the anatomical knee from the 2-bone IK's two mirror solutions. The IK
+/// has exactly two valid knees for any reachable target, mirror images across
+/// the hip→foot chord. Facing right, the human bend is the one whose knee is
+/// more ANTERIOR along the facing axis — `knee.x · facing` maximal. Return that
+/// one, mirroring only when `knee` came out the other solution.
+///
+/// Why *selection* and not enforcement: the strict "knee ahead of the ankle"
+/// test is geometrically impossible at full-extension heel-strike (a foot far
+/// ahead of the hip leaves no solution with `knee.x > foot.x`), but one of the
+/// two mirrors is ALWAYS at least as anterior as the other, so the rule holds
+/// at every chord angle and every reach. The comparison uses only the x axis,
+/// which is identical in the vello y-down and Bevy y-up frames — immune to the
+/// y-handedness that made the chord-relative `bend_sign` (and any cross-product
+/// winding test) ambiguous between the two.
+#[inline]
+pub fn select_anterior_knee(hip: Vec2, foot: Vec2, knee: Vec2, facing: f32) -> Vec2 {
+    let f = facing_sign(facing);
+    let mirrored = mirror_knee_across_chord(hip, foot, knee);
+    if mirrored.x * f > knee.x * f {
+        mirrored
+    } else {
+        knee
+    }
+}
+
+/// Mirror `knee` across the hip→foot chord if its winding around the chord
+/// contradicts `want` (+1: `cross(chord, knee−hip) ≥ 0` in the vello frame,
+/// i.e. clockwise on the y-down screen; −1: counter-clockwise). Reflection
+/// preserves `|knee − hip|` and `|knee − foot|` exactly.
+#[inline]
+pub fn enforce_knee_winding(hip: Vec2, foot: Vec2, knee: Vec2, want: f32) -> Vec2 {
+    let chord = foot - hip;
+    if chord.length_squared() < 1e-6 {
+        return knee; // degenerate chord: nothing to mirror about
+    }
+    let to_knee = knee - hip;
+    let cross = chord.x * to_knee.y - chord.y * to_knee.x;
+    if cross * want >= 0.0 {
+        return knee;
+    }
+    mirror_knee_across_chord(hip, foot, knee)
+}
+
+/// Reflect `knee` across the line through `hip` and `foot`. Bone lengths are
+/// preserved exactly; returns `knee` unchanged for a degenerate chord.
+#[inline]
+fn mirror_knee_across_chord(hip: Vec2, foot: Vec2, knee: Vec2) -> Vec2 {
+    let chord = foot - hip;
+    let c2 = chord.length_squared();
+    if c2 < 1e-6 {
+        return knee;
+    }
+    let to_knee = knee - hip;
+    // knee' = hip + tangent − normal (tangent = chord projection).
+    let proj = chord * (to_knee.dot(chord) / c2);
+    let normal = to_knee - proj;
+    hip + proj - normal
+}
+
 // ---------------------------------------------------------------------------
 // Step
 // ---------------------------------------------------------------------------
@@ -2100,20 +2179,27 @@ pub fn step_lower_body(
     // IK returns the *effective* foot (clamped to the reachable annulus), so the
     // rendered bones always satisfy thigh/calf length even when the hip briefly
     // outruns a pinned stance foot.
-    let (left_knee, left_foot) = solve_leg_ik(
+    let (left_knee_raw, left_foot) = solve_leg_ik(
         state.hip_pos,
         state.left.foot_pos,
         config.thigh_len,
         config.calf_len,
         config.bend_sign,
     );
-    let (right_knee, right_foot) = solve_leg_ik(
+    let (right_knee_raw, right_foot) = solve_leg_ik(
         state.hip_pos,
         state.right.foot_pos,
         config.thigh_len,
         config.calf_len,
         config.bend_sign,
     );
+    // Pick the anatomical knee from the IK's two mirror solutions (facing right
+    // ⇒ the more anterior one). The raw chord-relative `bend_sign` winds the
+    // opposite way in vello's y-down frame (goat leg), and its world side flips
+    // whenever the chord swings past vertical; selection on the facing x axis is
+    // unambiguous in both y conventions and preserves both bone lengths exactly.
+    let left_knee = select_anterior_knee(state.hip_pos, left_foot, left_knee_raw, config.facing);
+    let right_knee = select_anterior_knee(state.hip_pos, right_foot, right_knee_raw, config.facing);
 
     // Finite-difference the pose into joint velocities for the leg PD's
     // velocity-error (kd) term. The hip reuses the exact integrated `hip_vel`
@@ -3335,6 +3421,64 @@ mod tests {
                 planted
             );
         }
+    }
+
+    #[test]
+    fn test_knee_anterior_selection_body_frame() {
+        // The 2-bone IK has exactly two valid knees, mirror images across the
+        // hip->foot chord. The anatomical rule is a SELECTION between them:
+        // facing right take the more ANTERIOR one (max knee.x along facing),
+        // facing left the mirror. Stated on the x axis only, it is identical in
+        // the y-down (vello) and y-up (Bevy) frames — a cross-product winding
+        // rule is not, it mirrors with y (the bug that bent the knee goat-style).
+        // Sweep the target a full circle and assert: the choice is the more
+        // anterior solution in the facing frame, and bone lengths hold.
+        let cfg = default_config();
+        let hip = Vec2::ZERO;
+        let r = cfg.thigh_len * 1.2; // comfortably inside reach (L1+L2 = 110)
+        for facing in [1.0, -1.0] {
+            for i in 0..64 {
+                let th = std::f32::consts::TAU * (i as f32) / 64.0;
+                let target = Vec2::new(th.cos(), th.sin()) * r;
+                let (knee_raw, foot) =
+                    solve_leg_ik(hip, target, cfg.thigh_len, cfg.calf_len, cfg.bend_sign);
+                let knee = select_anterior_knee(hip, foot, knee_raw, facing);
+                // The selected knee must be at least as anterior as the raw IK
+                // knee in the facing frame (selection only ever improves anterior).
+                assert!(
+                    (knee.x - knee_raw.x) * facing_sign(facing) >= -1e-4,
+                    "facing={facing} angle={:.1}: selection moved the knee posterior ({:.2} vs {:.2})",
+                    th.to_degrees(),
+                    knee.x,
+                    knee_raw.x
+                );
+                assert!((knee.length() - cfg.thigh_len).abs() < 1e-3, "thigh broke");
+                assert!(
+                    ((foot - knee).length() - cfg.calf_len).abs() < 1e-3,
+                    "calf broke"
+                );
+            }
+        }
+
+        // The pose we actually care about: a trailing stance leg (foot behind the
+        // hip, walking right) must end up HUMAN — knee ahead of the ankle.
+        let cfg = default_config();
+        let hip = Vec2::ZERO;
+        for facing in [1.0, -1.0] {
+            for foot_x in [-50.0_f32, -30.0, -10.0, 0.0, 10.0] {
+                let target = Vec2::new(foot_x * facing_sign(facing), cfg.hip_height);
+                let (knee_raw, foot) =
+                    solve_leg_ik(hip, target, cfg.thigh_len, cfg.calf_len, cfg.bend_sign);
+                let knee = select_anterior_knee(hip, foot, knee_raw, facing);
+                assert!(
+                    (knee.x - foot.x) * facing_sign(facing) > 0.0,
+                    "facing={facing} foot_x={foot_x}: knee should lead the ankle (knee.x={:.2}, foot.x={:.2})",
+                    knee.x,
+                    foot.x
+                );
+            }
+        }
+        assert!(facing_sign(1.0) > 0.0 && facing_sign(-1.0) < 0.0);
     }
 
     #[test]
