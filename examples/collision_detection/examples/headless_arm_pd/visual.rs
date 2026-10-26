@@ -44,12 +44,9 @@ mod sample;
 #[path = "../../src/edge_pan_camera.rs"]
 mod edge_pan_camera;
 
-use std::time::Duration;
-
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::input::InputSystem;
 use bevy::prelude::*;
-use bevy::time::TimeUpdateStrategy;
 use bevy::window::PresentMode;
 
 use leafwing_input_manager::plugin::InputManagerSystem;
@@ -149,19 +146,7 @@ fn main() {
     // is suppressed. Default stays visible so you can watch the character walk.
     let win_hidden = env_flag("WIN_HIDDEN");
 
-    // Clock determinism. `CLOCK_WALL=1` keeps Bevy's default wall-clock Update
-    // cadence (render fps free-running). Otherwise we pin `Update` to a manual
-    // 1/90 s step — the exact trick the headless bin uses
-    // (`main.rs: TimeUpdateStrategy::ManualDuration(1/FIXED_HZ)`) — so the
-    // visual run advances one fixed step per Update and replays deterministically
-    // instead of jitting with frame rate. `CLOCK_WALL=1` is the A/B control.
-    let clock_wall = env_flag("CLOCK_WALL");
     let mut app = App::default();
-    if !clock_wall {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-            1.0 / FIXED_HZ,
-        )));
-    }
     app.insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
