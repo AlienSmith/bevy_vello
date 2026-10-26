@@ -49,12 +49,12 @@ CSV=$OUTDIR/$TAG.csv
 cp "$REPO/examples/collision_detection/assets/character/v10.character.json" \
    "$OUTDIR/$TAG.character.json"
 
-echo "== run $TAG: ${ENVARGS[*]:-<defaults: LEG_COMPLIANCE=5e-9 STEP_HEIGHT=50>} (asset snapshot: $OUTDIR/$TAG.character.json)"
+echo "== run $TAG: ${ENVARGS[*]:-<defaults: LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70>} (asset snapshot: $OUTDIR/$TAG.character.json)"
 env ASSET_ROOT="$REPO/examples/collision_detection/assets" \
     SCRIPT="$REPO/plans/walk_script.json" \
     OUT_CSV="$CSV" \
-    LEG_COMPLIANCE="${LEG_COMPLIANCE:-5e-9}" \
-    STEP_HEIGHT="${STEP_HEIGHT:-50}" \
+    LEG_COMPLIANCE="${LEG_COMPLIANCE:-1e-8}" \
+    STEP_HEIGHT="${STEP_HEIGHT:-70}" \
     "${ENVARGS[@]}" \
     "$BIN" 2>&1 | grep -E "body: rows|rigidity:|leg:|walk params" || true
 
