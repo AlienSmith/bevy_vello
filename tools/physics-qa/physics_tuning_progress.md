@@ -1392,3 +1392,22 @@ LIPM with a one-step horizon the MPC solve is **closed-form arithmetic** — no 
 **Verdict: implementable, right architecture, no optimizer dependency; but a
 multi-session gait-core rewrite — strongly recommend A→E phasing. §23 is subsumed by
 phase B.**
+
+## 25. Phase A landed + the exponential tried and set aside (2026-10-26)
+
+Phase A infra is **committed behind a default-OFF flag** (`MPC_TRIGGER`):
+`omega0`, `capture_point_with_horizon` (`t_conv`), per-tick DCM `xi`, the §3
+DCM-margin liftoff trigger, and `trigger_reason` telemetry. Flag-off is
+bit-identical to the smooth_start baseline; 121/121 lower_body tests green.
+Env wiring (`MPC_TRIGGER`/`T_CONV`/`TOE_LEN`) verified effective.
+
+The §4 **exponential touchdown prediction** was implemented, A/B-tested, and
+then **reverted by the user** in favour of continuing from the simpler stale-state
+placement. The exponential did kill the speed ratchet (hip vₓ pinned at ~120,
+was →0 on the baseline) but introduced a slow backward start, a per-leg 2-cycle,
+and a §3/§4 constant mismatch. All findings, the A/B numbers, and two simpler
+reactive directions the user proposed — **(A) speed-scaled lead, no model** and
+**(B) hip-relative instead of world-absolute target** (reachability-safe) — are
+recorded in **`plans/event-gait-phaseA-handoff.md`**, which is the live resume
+point. The recommended next step is the combined
+`foot = hip + clamp(gain·v·T_stance, ±x_max)` law behind a new flag.
