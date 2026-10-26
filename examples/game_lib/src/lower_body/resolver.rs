@@ -61,6 +61,19 @@ pub struct LowerBodyConfig {
     /// keeps `½·a·T_swing² ≤ prediction_margin·X_max`, which bounds the hip
     /// acceleration at `a_max` (see [`GaitLimits`]).
     pub prediction_margin: f32,
+    /// Fixed-point touchdown prediction (`plans/swing-phase-timing.md` §4):
+    /// velocity-schedule convergence horizon `T_conv` (seconds). The swing
+    /// target is aimed at where the CoM *will* be at touchdown, not where it
+    /// is at lift-off; shorter = aggressive speed tracking, longer = softer
+    /// convergence. `1.0` ≈ the plan's human-scale default (`T_conv = 1/ω₀`).
+    pub t_conv: f32,
+    /// Foot half-length ahead of the plant anchor, px (support-edge proxy for
+    /// the §3 DCM-margin trigger; there are no heel/toe particles yet).
+    pub toe_len: f32,
+    /// Enable the §3 DCM-margin liftoff trigger. Off (default) keeps the
+    /// committed `com_crossed`-only gait. See [`StepPlan::mpc_trigger`] for why
+    /// this is gated until the §4 exponential placement lands.
+    pub mpc_trigger: bool,
     /// Swing arc apex height above the plant/floor line, px.
     pub step_height: f32,
     /// World y of the flat floor line.
@@ -116,6 +129,9 @@ impl Default for LowerBodyConfig {
             beta: 1.0,
             safety_margin: 0.85,
             prediction_margin: 0.5,
+            t_conv: 1.0,
+            toe_len: 8.0,
+            mpc_trigger: false,
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
@@ -253,6 +269,22 @@ pub struct LegState {
     /// per-tick version: stance drift 61 px → 130 px
     /// (`physics_tuning_progress.md` §11).
     pub plant_anchored: bool,
+    /// Monotone swing-profile progress achieved so far (`s` of the current
+    /// flight, `0` in stance). Re-timing (§6.2) may stretch the schedule, but
+    /// the reference foot never rewinds — this clamp makes that structural.
+    pub swing_prog: f32,
+    /// Code of the condition that ended the most recent stance for this leg
+    /// (`plans/swing-phase-timing.md` §9 "log every transition with its
+    /// triggering condition"): `0` = none yet, `1` = timer expiry (the nominal
+    /// gait clock), `2` = the §3 DCM-margin liftoff trigger (`dcm_crossed`),
+    /// `3` = the §3 emergency trigger (measured CoM past the plant,
+    /// `com_crossed`). Telemetry only; decides nothing.
+    pub trigger_reason: u8,
+    /// Full scheduled swing duration (seconds) latched at lift-off and stretched
+    /// by continuous re-timing during swing — the denominator that converts
+    /// `phase_timer` into profile progress. This is the schedule's time base,
+    /// never the landing trigger itself.
+    pub flight_span: f32,
 }
 
 /// Discrete phase of the vertical (loop 1) controller.
@@ -449,6 +481,9 @@ impl ResolverState {
             early_lift: false,
             hovered_in: false,
             plant_anchored: false,
+            swing_prog: 0.0,
+            trigger_reason: 0,
+            flight_span: config.stance_duration_ts,
         };
         // Right leg starts half a stance out of phase with the left, so the two
         // legs alternate once the gait begins; both stay planted while standing
@@ -464,6 +499,9 @@ impl ResolverState {
             early_lift: false,
             hovered_in: false,
             plant_anchored: false,
+            swing_prog: 0.0,
+            trigger_reason: 0,
+            flight_span: config.stance_duration_ts,
         };
 
         Self {
@@ -568,6 +606,11 @@ pub struct DebugInfo {
     /// Signed capture-point offset from the hip while braking to a stop
     /// (0 when not stopping).
     pub capture_x: f32,
+    /// Per-leg code of the condition that ended the most recent stance:
+    /// `0` = none yet, `1` = timer, `2` = `dcm_crossed` (the §3 primary
+    /// trigger), `3` = `com_crossed` (the §3 emergency). Telemetry only.
+    pub left_trigger_reason: u8,
+    pub right_trigger_reason: u8,
     /// `true` when the unclamped §2 capture point fell outside the reachable
     /// `hip ± x_max` window this tick — the leg-geometry clamp fired, i.e. the
     /// "in trouble" signal. `false` when there is no measurement (pure
@@ -1191,6 +1234,17 @@ pub struct CaptureMeasure {
     pub z_com: f32,
 }
 
+/// LIPM pendulum frequency `ω₀ = √(g / z_CoM)` (rad/s), or `None` when
+/// undefined (`z_com ≤ 0` or `gravity ≤ 0`).
+#[inline]
+pub fn omega0(z_com: f32, gravity: f32) -> Option<f32> {
+    if z_com > 0.0 && gravity > 0.0 {
+        Some((gravity / z_com).sqrt())
+    } else {
+        None
+    }
+}
+
 /// LIPM capture point shifted by the desired CoM velocity (plan §2):
 /// `x_foot = x_CoM + (v_CoM − v_des) / ω₀`, with `ω₀ = √(g / z_CoM)`.
 ///
@@ -1229,6 +1283,22 @@ struct StepPlan {
     /// kinematic sandbox; `plan_target_x` then falls back to the Raibert
     /// neutral point.
     measured: Option<CaptureMeasure>,
+    /// Signed DCM/capture-point state `xi = x_CoM + v_CoM/ω₀` for this tick,
+    /// with `ω₀ = √(g / z_CoM)`. `Some` only when a measurement exists and the
+    /// pendulum frequency is defined; drives both the §3 DCM-margin liftoff
+    /// trigger (`dcm_crossed`) and the §4 fixed-point touchdown prediction.
+    xi: Option<f32>,
+    /// Pendulum frequency `ω₀` (rad/s) matching `xi` (defined exactly when
+    /// `xi` is `Some`). Used by the §4 prediction's exponential lead.
+    omega0: f32,
+    /// Enable the §3 DCM-margin liftoff trigger (`dcm_crossed`). Off = the
+    /// committed baseline (`com_crossed` only). The margin trigger is a
+    /// **matched pair** with the §4 exponential touchdown lead: firing the
+    /// trigger early while the placement still evaluates the law at the
+    /// *current* state lets the foot chase a target it cannot reach in the
+    /// capped flight — measured to worsen the touchdown lead (−18/−32 px vs
+    /// the baseline −7/+21). Stays off until §4 lands.
+    mpc_trigger: bool,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the
@@ -1245,37 +1315,56 @@ fn plan_target_x(
     config: &LowerBodyConfig,
     plan: &StepPlan,
 ) -> f32 {
-    let raw = if plan.stopping {
-        hip_x + plan.capture_offset
-    } else if let Some(m) = plan.measured {
-        // Loop 1 balance (plan §2): the LIPM capture point shifted by the
-        // desired CoM velocity, `x_foot = x_CoM + (v_CoM − v_des)/ω₀`. This is
-        // a WORLD-space target — `x_CoM` is the measured CoM position — so it
-        // needs no `v·t_flight` prediction (unlike the hip-relative Raibert
-        // neutral point, which must predict where the hip will be at
-        // touchdown). Re-planning every frame with the fresh measurement makes
-        // the target track CoM motion mid-swing. If the measurement is
-        // degenerate (`z_com ≤ 0` or `gravity ≤ 0`), fall back to the Raibert
-        // neutral point below.
-        match capture_point(m.com_x, m.v_com, v_desired, m.z_com, config.gravity) {
-            Some(x) => x,
-            None => {
-                let x_target =
-                    compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
-                hip_x + v * t_flight + x_target
-            }
-        }
+    if plan.stopping {
+        // Braking-to-stop keeps the kinematic capture-point form: `hip + the
+        // point where the hip comes to rest under `a_eff`. (v_des → 0 makes the
+        // general law a capture-point target too, but `stopping` covers the
+        // no-measurement and settle paths, so the branch stays.)
+        return (hip_x + plan.capture_offset).clamp(hip_x - plan.x_max, hip_x + plan.x_max);
+    }
+    // Loop 1 balance (plan §2, §4): the LIPM capture point shifted by the
+    // desired CoM velocity, `x_foot = x_CoM + (v_CoM − v_des)/(T_conv·ω₀)`.
+    // This is a WORLD-space target — `x_CoM` is the measured CoM position — so
+    // it needs no `v·t_flight` prediction (unlike the hip-relative Raibert
+    // neutral point, which must predict where the hip will be at touchdown).
+    // Re-planning every frame with the fresh measurement makes the target track
+    // CoM motion mid-swing. If the measurement is degenerate (`z_com ≤ 0` or
+    // `gravity ≤ 0`), fall back to the Raibert neutral point below.
+    if let Some(x) = capture_point_with_horizon(plan.xi, plan.omega0, v_desired, config) {
+        return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
+    }
+    let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
+    // Raibert's `x_target` is the offset from the hip **at touchdown**, not at
+    // lift-off: the hip keeps travelling while the foot is airborne, so predict
+    // that motion. Re-planning every frame with the shrinking `t_flight` keeps
+    // the world-space target stationary at constant velocity (hip advance `v·dt`
+    // cancels the prediction shrink) and makes the target track
+    // acceleration/braking transients mid-swing.
+    (hip_x + v * t_flight + x_target).clamp(hip_x - plan.x_max, hip_x + plan.x_max)
+}
+
+/// LIPM capture point with an explicit velocity-tracking convergence horizon
+/// (`plans/swing-phase-timing.md` §4/§5): `x_foot = x_CoM + (v_CoM − v_des) /
+/// (T_conv·ω₀)`, with `ω₀ = √(g / z_CoM)`. `T_conv = 1.0` is the plan's
+/// principled default (`T_conv = 1/ω₀`, human scale); a smaller `T_conv` tracks
+/// speed more aggressively.
+///
+/// `xi`/`omega0` come from [`StepPlan`] (`None`/`0` when the pendulum frequency
+/// is undefined, `z_com ≤ 0` or `gravity ≤ 0`), so callers fall back to the
+/// Raibert neutral point.
+#[inline]
+pub fn capture_point_with_horizon(
+    xi: Option<f32>,
+    omega0: f32,
+    v_desired: f32,
+    config: &LowerBodyConfig,
+) -> Option<f32> {
+    let x = xi?;
+    if omega0 > f32::EPSILON {
+        Some(x - v_desired / (config.t_conv.max(f32::EPSILON) * omega0))
     } else {
-        let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
-        // Raibert's `x_target` is the offset from the hip **at touchdown**, not
-        // at lift-off: the hip keeps travelling while the foot is airborne, so
-        // predict that motion. Re-planning every frame with the shrinking
-        // `t_flight` keeps the world-space target stationary at constant
-        // velocity (hip advance `v·dt` cancels the prediction shrink) and makes
-        // the target track acceleration/braking transients mid-swing.
-        hip_x + v * t_flight + x_target
-    };
-    raw.clamp(hip_x - plan.x_max, hip_x + plan.x_max)
+        None
+    }
 }
 
 /// Three-phase swing profile (plan §3): maps normalized swing progress `s ∈
@@ -1435,12 +1524,39 @@ fn step_leg(
             } else {
                 false
             };
-            // §17 event-driven liftoff: step when the measured CoM has advanced
-            // past this stance foot in the direction of motion. The stance timer
-            // is demoted to a fallover cap — it can still force a step if a stuck
-            // body never crosses the plant, but it no longer *schedules* the gait.
-            // `wants_step` (move intent) is still required so the settle motion
+            // Event-driven liftoff — two triggers, primary then emergency
+            // (`plans/swing-phase-timing.md` §3):
+            //
+            // - `dcm_crossed` (PRIMARY): step when the DCM `xi` crosses this
+            //   stance foot's forward support edge **minus one swing's travel**
+            //   (`v·T_nominal`). The swing leg needs that much lead time: if we
+            //   only lift off when `xi` reaches the toe edge, the flight takes
+            //   another `v·T` before the new foot can plant, and the CoM has
+            //   passed the plant before it arrives — the "feet never lead the
+            //   hip" failure. `margin` is exactly that lead payment.
+            // - `com_crossed` (EMERGENCY): the measured CoM has already
+            //   advanced past the plant in the direction of motion. Late, but
+            //   the right call at very low speed where the margin is tiny;
+            //   logged as `trigger_reason == 3` so tuning can count how often
+            //   it fires during normal walking (it should be ~never).
+            //
+            // The stance timer is a *nominal* scheduler and a fallover cap: it
+            // still steps a stuck body whose `xi` never crosses, but it no
+            // longer schedules the gait whenever a measurement is present.
+            // `wants_step` (move intent) is required so the settle motion
             // never triggers a phantom step with no input held.
+            let dir_sign = if v_desired > 0.0 { 1.0 } else { -1.0 };
+            let dcm_crossed = if plan.mpc_trigger {
+                match (plan.xi, plan.measured) {
+                    (Some(xi), Some(m)) if v_desired.abs() > SWING_TRIGGER_SPEED => {
+                        let margin = m.v_com * config.swing_duration_ts;
+                        (xi - leg.plant_pos.x) * dir_sign >= config.toe_len - margin
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
             let com_crossed = match plan.measured {
                 Some(m) => {
                     let rel = m.com_x - leg.plant_pos.x;
@@ -1452,8 +1568,17 @@ fn step_leg(
                 }
                 None => false,
             };
-            let stance_over = leg.phase_timer <= 0.0 || lost_contact_early || com_crossed;
+            let stance_over =
+                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed;
             if stance_over && wants_step && !other_swinging {
+                // Log which condition ended the stance (telemetry only).
+                leg.trigger_reason = if dcm_crossed {
+                    2
+                } else if com_crossed {
+                    3
+                } else {
+                    1
+                };
                 let mut swing_to = leg.plant_pos;
                 // The jump never retargets a step: every swing targets its own
                 // forward Raibert landing point, exactly as in a normal walk, so a
@@ -1467,6 +1592,8 @@ fn step_leg(
                 leg.swing_to = swing_to;
                 leg.early_lift = lost_contact_early;
                 leg.swing_wait = 0.0;
+                leg.flight_span = config.swing_duration_ts.max(f32::EPSILON);
+                leg.swing_prog = 0.0;
                 // New stance will get its own single chance to anchor.
                 leg.plant_anchored = false;
             }
@@ -1474,10 +1601,10 @@ fn step_leg(
         }
         GaitPhase::Swing => {
             leg.phase_timer -= dt;
-            // Continuous re-planning: refresh the target from the current hip
-            // position, velocity and remaining flight time. Open-loop targets
-            // frozen at lift-off are what made sudden stops land both feet on
-            // one side of the hip.
+            // Continuous re-planning (§6 schedule tracking): refresh the target
+            // from the current hip position, velocity and remaining flight
+            // time. Open-loop targets frozen at lift-off are what made sudden
+            // stops land both feet on one side of the hip.
             leg.swing_to.x =
                 plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
             // §19.2.1 deadbeat swing timing: traverse the spline so the foot
@@ -1506,7 +1633,7 @@ fn step_leg(
                 (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0)
             };
             let t = swing_frac;
-
+            leg.swing_prog = swing_frac;
             // Three-phase swing profile (plan §3): lift → advance → extend,
             // C¹-continuous through the IK foot path. Replaces the old single
             // symmetric parabola, which cleared no toe before advancing and
@@ -1547,6 +1674,7 @@ fn step_leg(
                 leg.plant_pos = leg.swing_to;
                 leg.phase = GaitPhase::Stance;
                 leg.phase_timer = config.stance_duration_ts;
+                leg.swing_prog = 0.0;
                 // Remember whether this stance can trust contact truth: a
                 // touchdown that never got a contact report is a hover, and
                 // `Full` must not then veto the whole stance on the very next
@@ -1734,6 +1862,14 @@ pub fn step_lower_body(
         stopping,
         capture_offset,
         measured: state.measured,
+        xi: state
+            .measured
+            .and_then(|m| omega0(m.z_com, config.gravity).map(|w| m.com_x + m.v_com / w)),
+        omega0: state
+            .measured
+            .and_then(|m| omega0(m.z_com, config.gravity))
+            .unwrap_or(0.0),
+        mpc_trigger: config.mpc_trigger,
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -1743,7 +1879,21 @@ pub fn step_lower_body(
     let capture_saturated = match state.measured {
         Some(m) => match capture_point(m.com_x, m.v_com, v_desired_scalar, m.z_com, config.gravity)
         {
-            Some(raw) => raw < state.hip_pos.x - x_max || raw > state.hip_pos.x + x_max,
+            Some(raw) => {
+                let sat_a = raw < state.hip_pos.x - x_max || raw > state.hip_pos.x + x_max;
+                let sat_b = match capture_point_with_horizon(
+                    plan.xi,
+                    plan.omega0,
+                    v_desired_scalar,
+                    config,
+                ) {
+                    Some(raw_b) => {
+                        raw_b < state.hip_pos.x - x_max || raw_b > state.hip_pos.x + x_max
+                    }
+                    None => false,
+                };
+                sat_a || sat_b
+            }
             None => false,
         },
         None => false,
@@ -2068,6 +2218,8 @@ pub fn step_lower_body(
         v_abs: limits.v_abs,
         v_support,
         capture_x: capture_offset,
+        left_trigger_reason: state.left.trigger_reason,
+        right_trigger_reason: state.right.trigger_reason,
         capture_saturated,
         v_phase: state.vs.phase,
         hip_height: h,
@@ -2173,6 +2325,9 @@ mod tests {
             early_lift: false,
             hovered_in: false,
             plant_anchored: false,
+            swing_prog: 0.0,
+            trigger_reason: 0,
+            flight_span: cfg.stance_duration_ts,
         }
     }
 
@@ -2672,6 +2827,9 @@ mod tests {
             stopping: false,
             capture_offset: 0.0,
             measured: None,
+            xi: None,
+            omega0: 0.0,
+            mpc_trigger: false,
         }
     }
 
@@ -2843,11 +3001,17 @@ mod tests {
                 v_com: 40.0,
                 z_com: z,
             };
+            // Build the plan the way `step_lower_body` does: the DCM state is
+            // derived from the measurement once per tick.
+            let w = omega0(m.z_com, g).unwrap();
             let plan = StepPlan {
                 x_max: 1000.0,
                 stopping: false,
                 capture_offset: 0.0,
                 measured: Some(m),
+                xi: Some(m.com_x + m.v_com / w),
+                omega0: w,
+                mpc_trigger: false,
             };
             let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &default_config(), &plan);
             let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
@@ -2877,6 +3041,9 @@ mod tests {
             stopping: false,
             capture_offset: 0.0,
             measured: Some(m),
+            xi: Some(m.com_x + m.v_com / omega0(m.z_com, cfg.gravity).unwrap()),
+            omega0: omega0(m.z_com, cfg.gravity).unwrap(),
+            mpc_trigger: false,
         };
         let hip_x = 0.0;
         let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);

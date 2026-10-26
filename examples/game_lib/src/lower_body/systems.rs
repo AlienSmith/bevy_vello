@@ -59,6 +59,8 @@ impl LowerBodyController {
             v_abs: 0.0,
             v_support: 0.0,
             capture_x: 0.0,
+            left_trigger_reason: 0,
+            right_trigger_reason: 0,
             capture_saturated: false,
             v_phase: VerticalPhase::Stand,
             hip_height: config.hip_height,

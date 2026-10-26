@@ -137,6 +137,15 @@ impl HipPinParams {
         p.config.stance_duration_ts = env_f32("STANCE", p.config.stance_duration_ts).max(1e-3);
         p.config.swing_duration_ts = env_f32("SWING", p.config.swing_duration_ts).max(1e-3);
         p.config.step_height = env_f32("STEP_HEIGHT", p.config.step_height).max(0.0);
+        // Event-driven gait (`plans/swing-phase-timing.md` §3/§4): the
+        // velocity-schedule convergence horizon and the support-edge proxy for
+        // the DCM-margin liftoff trigger.
+        p.config.t_conv = env_f32("T_CONV", p.config.t_conv).max(0.25);
+        p.config.toe_len = env_f32("TOE_LEN", p.config.toe_len).max(0.0);
+        // §3 DCM-margin liftoff trigger. Off by default (the committed gait);
+        // see `LowerBodyConfig::mpc_trigger` for why it stays experimental
+        // until the §4 exponential placement lands.
+        p.config.mpc_trigger = env_bool("MPC_TRIGGER", p.config.mpc_trigger);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);
