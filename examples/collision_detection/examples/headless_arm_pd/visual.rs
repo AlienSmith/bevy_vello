@@ -79,7 +79,7 @@ use crate::report::drive_body_keys;
 use crate::sample::{limb_finalize, limb_sample, telemetry_active};
 
 // ---------------------------------------------------------------------------
-// cd D:\bender\bevy_vello; $env:ASSET_ROOT="assets"; $env:SCRIPT="plans/jump_script.json"; $env:OUT_CSV="tmp/headless/visual_step70_run2.csv"; $env:COLLISION="1"; $env:LEG_COMPLIANCE="1e-9"; $env:STEP_HEIGHT="70"; cargo run -p collision_detection --example visual_arm_pd --release
+// cd D:\bender\bevy_vello; $env:ASSET_ROOT="assets"; $env:SCRIPT="plans/walk_script.json"; $env:OUT_CSV="tmp/headless/visual_step70_run2.csv"; $env:COLLISION="1"; $env:LEG_COMPLIANCE="1e-9"; $env:STEP_HEIGHT="70"; cargo run -p collision_detection --example visual_arm_pd --release
 // ---------------------------------------------------------------------------
 
 fn main() {
