@@ -139,6 +139,12 @@ fn main() {
         .unwrap_or(2)
         .max(1);
 
+    // `WIN_HIDDEN=1` runs the FULL visual pipeline (VelloPlugin + the real
+    // VelloCollisionResponsePlugin GPU collision chain) with no OS window — the
+    // rendered twin of the headless bin, for headless↔visual divergence diffs.
+    // The vello renderer + GPU narrow phase still run; only the surface/window
+    // is suppressed. Default stays visible so you can watch the character walk.
+    let win_hidden = env_flag("WIN_HIDDEN");
     let mut app = App::default();
     app.insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
@@ -148,6 +154,7 @@ fn main() {
                         title: "Vello Character Harness (Visual)".into(),
                         // Best for Linux/NVIDIA (same as the tuning app).
                         present_mode: PresentMode::AutoNoVsync,
+                        visible: !win_hidden,
                         ..default()
                     }),
                     ..default()
