@@ -10,6 +10,27 @@ Branch `world_scale_t`. HEAD = `34c4eb2 update`.
 
 ---
 
+## 0. Headless ↔ visual divergence (2026-10-26, measured)
+
+Both harnesses share the same `crate::` modules and 1036-row telemetry. At
+matched params (`LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70`) they still differ
+(headless peak ~89px / dev 0.080 vs visual peak 134px / dev 0.271), so the
+cause is engine wiring, not script defaults.
+
+**Clock ruled out (this experiment):** pinning the visual `Update` clock to a
+manual `1/90 s` step (`TimeUpdateStrategy::ManualDuration`, the headless
+determinism trick) yields a **byte-identical CSV** (MD5 match) to the
+free-running wall clock ⇒ render/Update cadence has zero effect; all physics
+runs in `FixedUpdate @ 90 Hz`. Toggled by `CLOCK_WALL=1` (default = manual).
+
+**Remaining cause:** the collision-response ordering — headless hand-wires the
+chain (`main.rs` "VelloCollisionResponsePlugin minus the GPU tail") while the
+visual bin uses the real `VelloCollisionResponsePlugin`, which adds PostUpdate
+collision-event redistribution. That is what moves the realized feet. Not a bug
+to fix here: the plugin *is* the thing the repo exists to exercise.
+
+---
+
 ## 1. What is committed and working (the baseline to build on)
 
 ### Committed control (smooth_start lineage)
