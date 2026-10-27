@@ -135,6 +135,70 @@ the body sails back. That is **Stage 4's gas guard**, promoted to the next
 priority; the floor can't reach it because it gates *velocity*, not *placement*.
 122/122 tests green; flag-off bit-identical.
 
+### Stage 4a RESULTS (2026-10-27, shipped as `V_BOOT`, default-off, kept)
+
+Implemented exactly as §2b describes, under one flag: config `v_boot`, env
+`V_BOOT`, default `-1` = off. Two pure pieces plus one call-site each:
+
+- `bootstrap_gate_active(v_boot, measured_vx)` — `v_boot >= 0 && |measured_vx| <
+  v_boot`. Reads **measured** velocity (`CaptureMeasure::v_com`, falling back to
+  the resolver hip velocity only in the kinematic sandbox). This matters: the
+  resolver's own `v_ref` is ramped by `config.accel` at stand-to-walk whether or
+  not the body has moved, so gating on it would latch open on a reference that
+  no longer commands motion.
+- `apply_bootstrap_floor(target_x, pivot_x, v_desired, toe_len)` — the gas guard.
+  The swing target may never go behind the lift-off pivot, applied in
+  `plan_target_x` to both the lift-off aim and every mid-swing re-plan, using
+  `leg.plant_pos.x` as the pivot.
+- Suppression in `step_leg`'s Stance branch: while gated, `stance_over = false`
+  unless `lost_contact_early`. The timer is pinned at `max(0)` so a released
+  stance steps on the next tick instead of dumping several steps of debt at once.
+
+`V_BOOT` sweep, `diag` settings, physical Δx velocity, single run each (`b_boot5`
+was re-run and is bit-identical, so these settings are deterministic):
+
+| run | onset | phys-forward | phys-BACKWARD | net Δx | v range | max\|θ\| |
+|---|---|---|---|---|---|---|
+| off | 1.78 s | 5.0 s | **5.0 s** | 0 | −188…+200 | 0.62 rad |
+| `V_BOOT=1` | 1.78 s | 6.0 s | 3.5 s | +85 | −212…+229 | 0.66 rad |
+| **`V_BOOT=5`** | **1.28 s** | **10.0 s** | **0** | **+945** | −68…+291 | **0.41 rad** |
+| `V_BOOT=12` | 1.78 s | 7.5 s | 1.0 s | +1101 | −101…+314 | 0.56 rad |
+| `V_BOOT=30` | — | 0 | 0 | −0.7 | −29…+22 | — |
+| `TD_FLOOR=0.2` alone | — | 0 | 4.0 s | −214 | −201…+93 | 0.45 rad |
+| `V_BOOT=5` + `TD_FLOOR=0.2` | 1.28 s | 4.5 s | 4.0 s | +124 | −175…+199 | 0.57 rad |
+
+**Verdict: `V_BOOT=5` is the first configuration that meets the §3 baseline**
+— zero backward windows, 10.0 s of sustained forward travel (then the script's
+1 s wait), net +945 px, and the lowest tilt of any run (0.41 rad vs 0.62
+baseline). It fixes exactly the defect §2b predicted, and the mechanism is
+confirmed: 1 and 12 are *worse* on both backward time and tilt, so this is not a
+monotone "more gating = better" effect but a usable window.
+
+Three findings to carry forward:
+
+1. **`V_BOOT=30` (≈0.25·v_des) is a DEADLOCK, not a conservative choice.** With
+   both feet planted and loop 2 thrusting, measured speed peaks at **22 px/s** —
+   below the gate — so it never releases and the character stands still for the
+   whole script. The gate is a one-way trap above the push-off ceiling. The
+   usable band is ~2–20 px/s; §2b's "0.25·v_des ≈ 30" estimate is refuted.
+   **Rule: `v_boot` must sit below the achievable push-off speed.**
+2. **Surplus speed is the remaining defect, not stalling.** `V_BOOT=5` reaches
+   +291 px/s against a 120 command: the gate releases at a moment when the body
+   is already fast, so the placement law inherits a large velocity error.
+   `V_BOOT=12` overshoots harder (+314). This is Stage 3's territory (the
+   landing-state lead), not a bootstrap fault.
+3. **Do NOT stack Stage 1 with Stage 4a.** `V_BOOT=5`+`TD_FLOOR=0.2` is much
+   worse than either gate alone on the walk-backward metric (+124 net, 4.0 s
+   backward). The floor clamps the direction of the touchdown inversion while
+   the bootstrap is deliberately running without the DCM; combined they fight.
+   Use them as alternatives in the A/B, not as a stack.
+
+160/160 tests green; default-off verified bit-identical (`b_off`,
+`b_off2`, `b_pre2`, `b_pre3` all `bf9ecbb2`, including one build from the
+stashed pre-change tree). Note `b_pre` diverged: **the first walk run after a
+rebuild is an outlier** (same binary as `b_pre2`/`b_pre3`, different md5) —
+always warm up once and discard.
+
 ### Stage 1 — stop the bleeding: touchdown-solve fulfillment gate
 *(attacks pause/walk-backward + fall; one function, one flag)*
 The inversion trusts `delta_x` even when physics badly missed the plan.
@@ -215,9 +279,19 @@ insensitive. Log clamp-saturation count as the health metric (plan §10).
 - Every stage lands with: unit test for the new pure function + telemetry
   counter + one-line entry in the handoff doc.
 
-## 5. Immediate next action
+## 5. Status + immediate next action
 
-Stage 1 first (`TD_SOLVE_TOL` gate on `compute_support_velocity` application
-in `step_lower_body` §6 + sign-flip clamp): it is ~15 lines, it converts the
-worst symptom (walk-backward oscillation) into a benign one (lag), and it
-makes every later stage measurable without the oscillator corrupting A/Bs.
+Stage 1 (`TD_FLOOR`) and Stage 4a (`V_BOOT`) are both implemented, tested
+(160/160), default-off, and measured — see their RESULTS sections. Stage 4a
+alone already satisfies the §3 baseline; Stage 1 alone does not.
+
+Next: **Stage 3 (landing-state lead)**, because it now owns the last remaining
+defect. `V_BOOT=5` walks forward for the whole move window with no backward
+interval, but reaches +291 px/s against a 120 command — the gate releases while
+the body is already fast, so the placement law starts from a large velocity
+error. Give the plan the real lead (exponential `x_t` vs reactive
+`hip + clamp(gain·v·T_stance, ±x_max)`), A/B on top of `V_BOOT=5`, and target:
+cruise pinned near 120 with the walk-backward count still 0.
+
+Do not stack `TD_FLOOR` and `V_BOOT` (measured: they fight — see Stage 4a
+finding 3). Treat them as alternative configurations.

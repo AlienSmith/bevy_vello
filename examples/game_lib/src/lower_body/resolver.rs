@@ -86,6 +86,28 @@ pub struct LowerBodyConfig {
     /// because `hip_pos` is anchored to the real P3 — the floor is the
     /// mechanism that reads it.)
     pub td_solve_floor: f32,
+    /// Bootstrap gates (Stage 4a, `plans/walk-improvement-plan.md` §2b):
+    /// gas guard + timer-liftoff suppression while the body is still below
+    /// `v_boot` (px/s). At `v ≈ 0` the placement law is blind and commands
+    /// `xi − v_des/(T_conv·ω₀)`, i.e. a foot **behind** the hip — it throws
+    /// away the rear-foot gas stance, which is the only thing that can create
+    /// forward velocity from rest (there is no position/velocity write to the
+    /// solver during walking; the leg PD's stance thrust against the floor is
+    /// the actuator). Two gates, both released once measured `|v| >= v_boot`:
+    ///
+    /// 1. **Gas guard** ([`apply_bootstrap_floor`]): a swing target may never
+    ///    be placed behind its own lift-off pivot, so the rear foot keeps its
+    ///    push-off geometry instead of stepping further back.
+    /// 2. **Suppression**: no timer / `com_crossed` / `dcm_crossed` liftoff; a
+    ///    leg leaves `Stance` only on real contact loss, so both feet stay
+    ///    planted while the body accelerates.
+    ///
+    /// The gate reads **measured** velocity (`CaptureMeasure::v_com`, falling
+    /// back to the resolver hip velocity when no measurement exists), because
+    /// the resolver's own reference is exactly what must not bootstrap itself.
+    ///
+    /// Negative (default) = disabled ⇒ committed behavior stays bit-identical.
+    pub v_boot: f32,
     /// Swing arc apex height above the plant/floor line, px.
     pub step_height: f32,
     /// World y of the flat floor line.
@@ -154,6 +176,7 @@ impl Default for LowerBodyConfig {
             toe_len: 8.0,
             mpc_trigger: false,
             td_solve_floor: -1.0,
+            v_boot: -1.0,
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
@@ -1109,6 +1132,38 @@ pub fn apply_support_floor(v_support: f32, v_desired: f32, floor: f32) -> f32 {
     }
 }
 
+/// Bootstrap **gas guard** (`plans/walk-improvement-plan.md` §2b): while
+/// bootstrapping, a swing foot may never be aimed at or behind its own lift-off
+/// pivot. At `v ≈ 0` the placement law is blind — `xi = x_CoM` — so it emits
+/// `x_CoM − v_desired/(T_conv·ω₀)`, a target *behind* the hip. Stepping there
+/// throws away the rear-foot push-off stance that is the only actuator able to
+/// create forward velocity from rest. Flooring the target at `pivot + toe_len`
+/// keeps the step forward of the pivot (never a backward step), while a `v = 0`
+/// command leaves the target untouched (no phantom step intent).
+///
+/// `toe_len` is the support-edge proxy already used by the §3 trigger, so the
+/// floored target sits exactly at the stance foot's forward edge — the smallest
+/// forward step the gait can ask for. Direction follows the *signed* command.
+#[inline]
+pub fn apply_bootstrap_floor(target_x: f32, pivot_x: f32, v_desired: f32, toe_len: f32) -> f32 {
+    if v_desired > 0.0 {
+        target_x.max(pivot_x + toe_len.max(0.0))
+    } else if v_desired < 0.0 {
+        target_x.min(pivot_x - toe_len.max(0.0))
+    } else {
+        target_x
+    }
+}
+
+/// Whether the bootstrap gates are active this tick: `v_boot >= 0` (the flag is
+/// enabled) **and** the measured speed is still below it. Reads the measured
+/// velocity on purpose — the resolver's own reference is what must not
+/// bootstrap itself (see the `v_boot` doc comment).
+#[inline]
+pub fn bootstrap_gate_active(v_boot: f32, measured_vx: f32) -> bool {
+    v_boot >= 0.0 && measured_vx.abs() < v_boot
+}
+
 /// Precomputed feasibility envelope for the gait at a given hip height.
 ///
 /// All four limits are closed-form in the config, so the sandbox can clamp the
@@ -1411,6 +1466,14 @@ struct StepPlan {
     /// capped flight — measured to worsen the touchdown lead (−18/−32 px vs
     /// the baseline −7/+21). Stays off until §4 lands.
     mpc_trigger: bool,
+    /// Bootstrap gas guard ([`apply_bootstrap_floor`]): `true` while the
+    /// **measured** speed is still below `config.v_boot`, i.e. while the DCM has
+    /// no usable velocity and the placement law would command a backward step.
+    /// Always `false` when `v_boot < 0` (disabled) or the body has booted, which
+    /// keeps the committed behavior bit-identical.
+    bootstrap_gate: bool,
+    /// Forward support-edge proxy (`config.toe_len`) used by the gas guard.
+    toe_len: f32,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the
@@ -1419,7 +1482,32 @@ struct StepPlan {
 ///
 /// While stopping, targets the capture point instead of the forward plan.
 /// The result is always clamped to `hip ± x_max`.
+///
+/// `pivot_x` is the swing foot's lift-off plant (`LegState::plant_pos.x`).
+/// While `plan.bootstrap_gate` is set, the result passes through
+/// [`apply_bootstrap_floor`] so a bootstrapping step can never be placed behind
+/// its own pivot, then through the usual reach clamp.
 fn plan_target_x(
+    hip_x: f32,
+    v: f32,
+    v_desired: f32,
+    t_flight: f32,
+    pivot_x: f32,
+    config: &LowerBodyConfig,
+    plan: &StepPlan,
+) -> f32 {
+    let target = plan_target_x_raw(hip_x, v, v_desired, t_flight, config, plan);
+    let target = if plan.bootstrap_gate {
+        apply_bootstrap_floor(target, pivot_x, v_desired, plan.toe_len)
+    } else {
+        target
+    };
+    target.clamp(hip_x - plan.x_max, hip_x + plan.x_max)
+}
+
+/// The placement law itself, without the bootstrap gas guard or the reach
+/// clamp ([`plan_target_x`] applies both).
+fn plan_target_x_raw(
     hip_x: f32,
     v: f32,
     v_desired: f32,
@@ -1680,8 +1768,27 @@ fn step_leg(
                 }
                 None => false,
             };
-            let stance_over =
-                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed;
+            // Bootstrap **suppression** (plan §2b): below `v_boot` a leg may not
+            // leave `Stance` on a *schedule* — not the nominal timer, not the DCM
+            // margin, not the CoM-crossed emergency — because every one of those
+            // is derived from a velocity that does not exist yet. Only a real
+            // contact loss ends the stance, so both feet stay loaded and the leg
+            // PD's stance thrust has a floor to push against. Without this the
+            // timer fires within one stance period of the command arriving, lifts
+            // the rear (push-off) foot, and the body never gains speed.
+            //
+            // The timer is pinned at zero while held: on release the leg steps on
+            // the very next tick instead of carrying a large negative debt that
+            // would fire several steps' worth of schedule at once.
+            let bootstrap_held = plan.bootstrap_gate && !lost_contact_early;
+            let stance_over = if bootstrap_held {
+                false
+            } else {
+                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed
+            };
+            if bootstrap_held {
+                leg.phase_timer = leg.phase_timer.max(0.0);
+            }
             if stance_over && wants_step && !other_swinging {
                 // Log which condition ended the stance (telemetry only).
                 leg.trigger_reason = if dcm_crossed {
@@ -1695,8 +1802,16 @@ fn step_leg(
                 // The jump never retargets a step: every swing targets its own
                 // forward Raibert landing point, exactly as in a normal walk, so a
                 // foot always leads ahead of the hip for the next step.
-                swing_to.x =
-                    plan_target_x(hip_x, v, v_desired, config.swing_duration_ts, config, plan);
+                // `leg.plant_pos` is this swing's lift-off pivot for the gas guard.
+                swing_to.x = plan_target_x(
+                    hip_x,
+                    v,
+                    v_desired,
+                    config.swing_duration_ts,
+                    leg.plant_pos.x,
+                    config,
+                    plan,
+                );
                 swing_to.y = config.floor_y;
                 leg.phase = GaitPhase::Swing;
                 leg.phase_timer = config.swing_duration_ts;
@@ -1717,8 +1832,17 @@ fn step_leg(
             // from the current hip position, velocity and remaining flight
             // time. Open-loop targets frozen at lift-off are what made sudden
             // stops land both feet on one side of the hip.
-            leg.swing_to.x =
-                plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
+            // Re-planned against the same lift-off pivot, so the gas guard keeps
+            // the whole swing forward of where the foot left the ground.
+            leg.swing_to.x = plan_target_x(
+                hip_x,
+                v,
+                v_desired,
+                leg.phase_timer.max(0.0),
+                leg.plant_pos.x,
+                config,
+                plan,
+            );
             // §19.2.1 deadbeat swing timing: traverse the spline so the foot
             // reaches the capture point about when the CoM does, instead of on
             // the fixed swing timer. `T_remain = |x_land − x_com| / v_com`
@@ -1969,6 +2093,19 @@ pub fn step_lower_body(
     } else {
         0.0
     };
+    // Bootstrap gate (Stage 4a, plan §2b): hold both feet planted until the body
+    // is really moving. The gate must read a **measured** velocity or nothing
+    // changes: `v` here is the resolver's own reference, and at stand-to-walk it
+    // is ramped by `config.accel` regardless of what the physics delivered —
+    // gating on it would latch open on a reference that no longer commands
+    // motion. So use the fed-back whole-body CoM velocity when the measurement
+    // layer is active, and the resolver hip velocity only in the pure kinematic
+    // sandbox (where the hip velocity *is* the physics).
+    let boot_v = match state.measured {
+        Some(m) => m.v_com,
+        None => state.hip_vel.x,
+    };
+    let bootstrap_gate = bootstrap_gate_active(config.v_boot, boot_v);
     let plan = StepPlan {
         x_max,
         stopping,
@@ -1982,6 +2119,8 @@ pub fn step_lower_body(
             .and_then(|m| omega0(m.z_com, config.gravity))
             .unwrap_or(0.0),
         mpc_trigger: config.mpc_trigger,
+        bootstrap_gate,
+        toe_len: config.toe_len,
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -2145,7 +2284,17 @@ pub fn step_lower_body(
         // for a running (walking) lift-off, or straight down onto the lift-off
         // footprint for a stand-still jump. Capped at `FLIGHT_SWING_REACH_FRACTION
         // ·x_max` so the landing pose stays well inside the safe bend zone.
-        let t_step = plan_target_x(state.hip_pos.x, v, v_desired_scalar, 0.0, config, &plan);
+        // Pivot is the hip here: the flight swing is a jump landing, not a step
+        // out of a stance, so the gas guard has no lift-off plant to protect.
+        let t_step = plan_target_x(
+            state.hip_pos.x,
+            v,
+            v_desired_scalar,
+            0.0,
+            state.hip_pos.x,
+            config,
+            &plan,
+        );
         let max_reach = x_max * FLIGHT_SWING_REACH_FRACTION;
         let land_x = (if state.jump_arm_lead_leg {
             t_step
@@ -2962,6 +3111,10 @@ mod tests {
             xi: None,
             omega0: 0.0,
             mpc_trigger: false,
+            // Committed behavior: the bootstrap gates stay off in the direct
+            // `step_leg` tests unless a test turns them on explicitly.
+            bootstrap_gate: false,
+            toe_len: cfg.toe_len,
         }
     }
 
@@ -3066,6 +3219,137 @@ mod tests {
     }
 
     #[test]
+    fn test_bootstrap_floor_forbids_backward_step() {
+        // Stage 4a gas guard (`walk-improvement-plan.md` §2b): while
+        // bootstrapping, a swing foot may never be placed behind its lift-off
+        // pivot — at v≈0 the placement law emits `x_CoM − v_des/ω₀`, which is
+        // what threw away the rear-foot push-off stance.
+        let toe = 8.0;
+        // The zero-velocity failure: law wants 30px *behind* a pivot at 0.
+        assert_eq!(apply_bootstrap_floor(-36.4, 0.0, 120.0, toe), toe);
+        assert_eq!(apply_bootstrap_floor(-36.4, 50.0, 120.0, toe), 58.0);
+        // Already forward of the pivot: untouched.
+        assert_eq!(apply_bootstrap_floor(70.0, 50.0, 120.0, toe), 70.0);
+        // Exactly on the edge: unchanged (floor, not offset).
+        assert_eq!(apply_bootstrap_floor(58.0, 50.0, 120.0, toe), 58.0);
+        // Backward command mirrors: never ahead of the pivot.
+        assert_eq!(apply_bootstrap_floor(36.4, 0.0, -120.0, toe), -toe);
+        assert_eq!(apply_bootstrap_floor(90.0, 50.0, -120.0, toe), 42.0);
+        assert_eq!(apply_bootstrap_floor(-70.0, -50.0, -120.0, toe), -70.0);
+        // No command: no phantom step intent, target untouched.
+        assert_eq!(apply_bootstrap_floor(-36.4, 0.0, 0.0, toe), -36.4);
+    }
+
+    #[test]
+    fn test_bootstrap_suppression_holds_stance_until_geometry() {
+        // Stage 4a suppression: with the gate set, a drained stance timer, an
+        // expired timer AND the measured CoM past the plant must all leave the
+        // leg in Stance (feet planted == push-off). Clearing the gate steps.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let mut plan = cruise_plan(&cfg);
+        // A measured CoM well past the plant would normally fire `com_crossed`.
+        plan.measured = Some(CaptureMeasure {
+            com_x: 200.0,
+            v_com: 40.0,
+            z_com: cfg.hip_height,
+        });
+        plan.bootstrap_gate = true;
+        let mut leg = stance_leg(&cfg, 0.0);
+        leg.phase_timer = 0.0;
+        for _ in 0..5 {
+            let _ = step_leg_kinematic(&mut leg, 100.0, v, v, false, &cfg, &plan, 1e-3);
+            assert_eq!(
+                leg.phase,
+                GaitPhase::Stance,
+                "bootstrap gate must suppress every scheduled liftoff"
+            );
+            // The timer is pinned at zero, not allowed to go negative, so the
+            // hold can never accumulate a multi-step debt.
+            assert!(leg.phase_timer >= 0.0, "timer debt: {}", leg.phase_timer);
+        }
+        // Release the gate: the held stance steps on the next tick.
+        plan.bootstrap_gate = false;
+        let _ = step_leg_kinematic(&mut leg, 100.0, v, v, false, &cfg, &plan, 1e-3);
+        assert_eq!(
+            leg.phase,
+            GaitPhase::Swing,
+            "the held stance must step the moment the gate clears"
+        );
+        // And the released step is forward of its pivot (gas guard composes).
+        assert!(
+            leg.swing_to.x > leg.plant_pos.x,
+            "released step landed behind its pivot: to={} from={}",
+            leg.swing_to.x,
+            leg.plant_pos.x
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_held_stance_never_lifts_on_contact_loss_alone() {
+        // The escape hatch must survive the gate: a foot that has genuinely left
+        // the ground still ends its stance, otherwise loop 2 thrusts against air
+        // and the gait hangs on a foot that is not there.
+        //
+        // The timer is left live: `lost_contact_early` is deliberately gated on
+        // `phase_timer > 0` so a foot that legitimately leaves just before
+        // expiry is not double counted, and the suppression must not change that.
+        let cfg = default_config();
+        let v = cfg.target_speed;
+        let mut plan = cruise_plan(&cfg);
+        plan.bootstrap_gate = true;
+        let mut leg = stance_leg(&cfg, 0.0);
+        leg.phase_timer = cfg.stance_duration_ts * 0.5;
+        let airborne = Some(LegContactInput {
+            touching: false,
+            foot_x: None,
+        });
+        let _ = step_leg_contact(
+            &mut leg,
+            0.0,
+            v,
+            v,
+            false,
+            &cfg,
+            &plan,
+            1e-3,
+            airborne,
+            GaitAuthority::Full,
+        );
+        assert_eq!(
+            leg.phase,
+            GaitPhase::Swing,
+            "real contact loss must still lift the foot during bootstrap"
+        );
+        assert!(leg.early_lift, "flag the contact-driven liftoff");
+    }
+
+    #[test]
+    fn test_bootstrap_gate_never_engages_when_disabled() {
+        // Default-off invariant: `v_boot < 0` must keep the gate inert at any
+        // measured speed, so the committed gait stays bit-identical.
+        let cfg = default_config();
+        assert!(cfg.v_boot < 0.0, "the default must be disabled");
+        for v in [-500.0, -30.0, 0.0, 30.0, 500.0] {
+            assert!(
+                !bootstrap_gate_active(cfg.v_boot, v),
+                "disabled flag engaged at measured v={v}"
+            );
+        }
+        // Enabled: active only strictly below the boot speed, symmetric in
+        // direction (walking backwards boots the same way).
+        assert!(bootstrap_gate_active(30.0, 0.0));
+        assert!(bootstrap_gate_active(30.0, 29.9));
+        assert!(bootstrap_gate_active(30.0, -29.9));
+        assert!(!bootstrap_gate_active(30.0, 30.0));
+        assert!(!bootstrap_gate_active(30.0, 120.0));
+        assert!(!bootstrap_gate_active(30.0, -120.0));
+        // A zero threshold is the documented "enabled but never active" value:
+        // no speed is strictly below zero.
+        assert!(!bootstrap_gate_active(0.0, 0.0));
+    }
+
+    #[test]
     fn test_support_velocity_corrects_plant_error() {
         // A plant error `e` at touchdown maps to the velocity correction
         // `e / (Ts/2 + kv)`, annihilated in one stride (deadbeat).
@@ -3143,6 +3427,7 @@ mod tests {
         // hip is (unlike the Raibert neutral point, which predicts hip travel).
         let g: f32 = 980.0;
         let z: f32 = 90.0;
+        let cfg_test = default_config();
         for hip_x in [-500.0, 0.0, 1234.0] {
             // CoM at the hip, so the capture point is always within a generous
             // reach window and nothing clamps (x is world-space, independent of
@@ -3163,8 +3448,10 @@ mod tests {
                 xi: Some(m.com_x + m.v_com / w),
                 omega0: w,
                 mpc_trigger: false,
+                bootstrap_gate: false,
+                toe_len: cfg_test.toe_len,
             };
-            let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &default_config(), &plan);
+            let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, hip_x, &cfg_test, &plan);
             let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
             assert!(
                 (target - expected).abs() < 1e-2,
@@ -3195,9 +3482,11 @@ mod tests {
             xi: Some(m.com_x + m.v_com / omega0(m.z_com, cfg.gravity).unwrap()),
             omega0: omega0(m.z_com, cfg.gravity).unwrap(),
             mpc_trigger: false,
+            bootstrap_gate: false,
+            toe_len: cfg.toe_len,
         };
         let hip_x = 0.0;
-        let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);
+        let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, hip_x, &cfg, &plan);
         assert!(
             (target - (hip_x + x_max)).abs() < 1e-2,
             "clamped target={target} expected={}",
