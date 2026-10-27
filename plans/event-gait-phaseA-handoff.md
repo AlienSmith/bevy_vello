@@ -29,6 +29,38 @@ visual bin uses the real `VelloCollisionResponsePlugin`, which adds PostUpdate
 collision-event redistribution. That is what moves the realized feet. Not a bug
 to fix here: the plugin *is* the thing the repo exists to exercise.
 
+## 0b. Pipeline switch: the QA walk IS the visual app (2026-10-27)
+
+`run_walk.sh` now drives **`visual_arm_pd`** (`WIN_HIDDEN=1`) instead of the
+hand-wired `headless_arm_pd`, mirroring `run_visual.ps1`. New defaults:
+`LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70 COLLISION=1 WIN_HIDDEN=1`. Build with
+`cargo build --release -p collision_detection --example visual_arm_pd`. The
+point: the plotted graph and the on-screen graph are now the SAME run, so the
+collision-chain divergence of §0 disappears from QA by construction. `WIN_HIDDEN=0`
+watches it walk; the run self-exits either way.
+
+Also landed: `8fae952` **knee bend-side fix** (facing-anchored anterior
+selection via `LowerBodyConfig.facing` + `select_anterior_knee`; `FACING=left|right`
+env) — knees can no longer fold backwards when the hip→foot chord swings past
+vertical. 155/155 lower_body tests green. `22d6d66` stiffened the foot colliders.
+
+**Determinism caveat (measured, IMPORTANT for A/B):** the visual twin is NOT
+byte-deterministic run-to-run — 5 back-to-back identical-param runs produced 3
+distinct CSV md5s. Diffing two runs: identical through row ~947 (`t ≈ 10.5 s`),
+then the **feet** diverge (left-foot max Δ ≈ 24 px; hip ≈ 1 px, hip-y = 0).
+So the physics is reproducible for the first ~10.5 s and a late swing/contact
+ordering event (the GPU narrow phase) picks different realizations after that.
+Consequence: a swing/slide verdict that lands near the tail can flip between
+runs — use 2–3 repeats and take the worst (the gates already read `--skip-end 10.5`,
+which mostly excludes the divergent tail; the slide number does not).
+
+**New visual baseline (knee fixed, defaults, tag `vis_smoke`):** rig FAIL
+`max_rel_dev=0.2146`; foot-slide worst `85.66 px` (gate 2.0); swing gate FAIL
+(`NO_ADVANCE, NO_OVERTAKE, NO_LEAD_GAIN` on the ~9 s swings); leg peak
+`L=131.5 R=141.8 px`, tail `WAGGLE rms 30.4`. This is the bar the event gait
+must beat — it is the same ratchet/lag failure as §2, now measured on the real
+collision chain.
+
 ---
 
 ## 1. What is committed and working (the baseline to build on)
