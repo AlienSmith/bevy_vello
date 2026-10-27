@@ -74,6 +74,18 @@ pub struct LowerBodyConfig {
     /// committed `com_crossed`-only gait. See [`StepPlan::mpc_trigger`] for why
     /// this is gated until the §4 exponential placement lands.
     pub mpc_trigger: bool,
+    /// Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`), as a
+    /// fraction of `v_desired`: the touchdown backward solve may brake the
+    /// hip toward this floor but never past it — a lagged plant (the zero-lead
+    /// law's systematic landing error) otherwise gets *inverted* into a
+    /// reversed velocity command, the measured walk-backwards oscillator.
+    /// Negative (default) = disabled, committed behavior. (A plan-vs-achieved
+    /// *tolerance* gate was considered and removed: at the landing tick the
+    /// kinematic plant equals the same-tick plan by construction, so such a
+    /// check is vacuous; the physical lag enters through `delta` itself,
+    /// because `hip_pos` is anchored to the real P3 — the floor is the
+    /// mechanism that reads it.)
+    pub td_solve_floor: f32,
     /// Swing arc apex height above the plant/floor line, px.
     pub step_height: f32,
     /// World y of the flat floor line.
@@ -141,6 +153,7 @@ impl Default for LowerBodyConfig {
             t_conv: 1.0,
             toe_len: 8.0,
             mpc_trigger: false,
+            td_solve_floor: -1.0,
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
@@ -1074,6 +1087,26 @@ pub fn compute_support_velocity(delta_x: f32, kv: f32, stance_ts: f32, v_desired
         return 0.0;
     }
     (delta_x + kv * v_desired) / denom
+}
+
+/// Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`). Given a solved
+/// support velocity `v_support` and the signed command `v_desired`, allow the
+/// hip to brake toward `floor · v_desired` but never past it, so a lagged
+/// plant can never invert the travel direction against intent. `floor < 0`
+/// disables the clamp (committed behavior). Forward/backward symmetric.
+#[inline]
+pub fn apply_support_floor(v_support: f32, v_desired: f32, floor: f32) -> f32 {
+    if floor < 0.0 {
+        return v_support;
+    }
+    let bound = floor * v_desired;
+    if v_desired > 0.0 {
+        v_support.max(bound)
+    } else if v_desired < 0.0 {
+        v_support.min(bound)
+    } else {
+        v_support
+    }
 }
 
 /// Precomputed feasibility envelope for the gait at a given hip height.
@@ -2060,6 +2093,18 @@ pub fn step_lower_body(
     // forward plan lands exactly on it, then blend with gain `beta` (1 =
     // deadbeat). Skipped while stopping: capture plants encode "brake to rest
     // here", which the cruise inversion would misread as a velocity command.
+    //
+    // Stage 1 fulfillment gate (`plans/walk-improvement-plan.md`): the deadbeat
+    // inversion is correct control only while the landing error is noise. Under
+    // the zero-lead cruise law the error is *systematic* (feet land behind the
+    // hip), and inverting a systematic lag through `beta = 1` writes a reversed
+    // hip velocity — the measured walk-backwards oscillation. `td_solve_floor`
+    // forbids that sign flip: the inversion may brake the hip down to
+    // `floor·v_desired` but never past it, so direction changes go through
+    // the *command*, not through landing error. (`hip_pos.x` is anchored to
+    // the physical P3 by the ECS layer, so a real lag shows up in `delta`
+    // directly; a plan-vs-achieved tolerance at the landing tick would be
+    // vacuous because the kinematic plant equals the same-tick plan.)
     let mut v_support = 0.0;
     // Skipped in Flight: no touchdown can fire, and `v_x` must carry unchanged.
     if !airborne && v_desired_scalar != 0.0 {
@@ -2070,8 +2115,9 @@ pub fn step_lower_body(
                 config.stance_duration_ts,
                 v_desired_scalar,
             );
+            let v_sup_eff = apply_support_floor(v_support, v_desired_scalar, config.td_solve_floor);
             let beta = config.beta.clamp(0.0, 1.0);
-            v = (v + beta * (v_support - v)).clamp(-v_ceil, v_ceil);
+            v = (v + beta * (v_sup_eff - v)).clamp(-v_ceil, v_ceil);
             state.hip_vel.x = v;
         }
     }
@@ -2998,6 +3044,25 @@ mod tests {
         }
         // Degenerate denominator guard.
         assert_eq!(compute_support_velocity(10.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_support_floor_blocks_reversal_but_allows_brake() {
+        // Stage 1 (`walk-improvement-plan.md`): the floor lets a lagged plant
+        // brake the hip toward `floor·v_des` but never flip its direction
+        // against the command; floor < 0 is the committed no-op.
+        // Forward command.
+        assert_eq!(apply_support_floor(200.0, 120.0, -1.0), 200.0); // disabled
+        assert_eq!(apply_support_floor(-50.0, 120.0, -1.0), -50.0); // disabled
+        assert_eq!(apply_support_floor(90.0, 120.0, 0.2), 90.0); // above bound: keep
+        assert_eq!(apply_support_floor(20.0, 120.0, 0.2), 24.0); // brake to bound
+        assert_eq!(apply_support_floor(-40.0, 120.0, 0.2), 24.0); // reversal blocked
+        assert_eq!(apply_support_floor(-40.0, 120.0, 0.0), 0.0); // full stop allowed
+                                                                 // Backward command mirrors exactly.
+        assert_eq!(apply_support_floor(-20.0, -120.0, 0.2), -24.0);
+        assert_eq!(apply_support_floor(40.0, -120.0, 0.2), -24.0);
+        // Zero command: no bound to apply.
+        assert_eq!(apply_support_floor(-40.0, 0.0, 0.2), -40.0);
     }
 
     #[test]

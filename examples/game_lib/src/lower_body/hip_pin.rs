@@ -146,6 +146,11 @@ impl HipPinParams {
         // see `LowerBodyConfig::mpc_trigger` for why it stays experimental
         // until the §4 exponential placement lands.
         p.config.mpc_trigger = env_bool("MPC_TRIGGER", p.config.mpc_trigger);
+        // Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`): the
+        // touchdown backward solve may brake only down to TD_FLOOR·v_des,
+        // never past it (no reversal against the command). Negative = off
+        // (committed gait). Try TD_FLOOR=0.2.
+        p.config.td_solve_floor = env_f32("TD_FLOOR", p.config.td_solve_floor);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);
