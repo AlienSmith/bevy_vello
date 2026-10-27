@@ -95,6 +95,7 @@ pub(crate) fn step_leg(
     max_swing_wait: f32,
     early_lift_count: &mut u32,
     swing_wait_count: &mut u32,
+    other_plant_x: f32,
 ) -> Option<f32> {
     // `Contact` and above may trust the measured foot position. `Observe` and
     // `Timer` must not — that is what separates them from `Contact`.
@@ -215,12 +216,35 @@ pub(crate) fn step_leg(
             // the very next tick instead of carrying a large negative debt that
             // would fire several steps' worth of schedule at once.
             let bootstrap_held = plan.bootstrap_gate && !lost_contact_early;
-            let stance_over = if bootstrap_held {
+            // Push-off startup (Stage 4b, `plans/walk-improvement-plan.md` §2b):
+            // two position-based holds, together = "start with stance":
+            //
+            // - `plan.push_off_hold` (global, computed in `step_lower_body`):
+            //   the DCM has not committed past the leading stance foot's toe
+            //   edge, so NO scheduled liftoff fires on either leg. The hip
+            //   carries the CoM over the front pivot while both feet stay
+            //   planted; the trailing foot is still the loaded push-off leg
+            //   when `xi` finally commits. Holding only the trailing leg was
+            //   measured to collapse the start (net −53 px): the LEADING foot
+            //   then stepped on its expired timer and, at `v ≈ 0`, the
+            //   placement law aimed that swing BACKWARD, removing the pivot.
+            // - pivot hold: while both feet are planted, the leg whose plant is
+            //   AHEAD of the other's may not lift at all — it is the vaulting
+            //   pivot. At cruise this is a no-op: the crossing leg that steps
+            //   is always the trailing one (`other_swinging` or a fresh timer
+            //   covers every normal liftoff), so the alternating gait is inert.
+            //
+            // A real contact loss releases both.
+            let s = if v_desired >= 0.0 { 1.0 } else { -1.0 };
+            let pivot_hold =
+                config.push_off && !other_swinging && s * (leg.plant_pos.x - other_plant_x) > 0.0;
+            let push_off_held = (plan.push_off_hold || pivot_hold) && !lost_contact_early;
+            let stance_over = if bootstrap_held || push_off_held {
                 false
             } else {
                 leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed
             };
-            if bootstrap_held {
+            if bootstrap_held || push_off_held {
                 leg.phase_timer = leg.phase_timer.max(0.0);
             }
             if stance_over && wants_step && !other_swinging {

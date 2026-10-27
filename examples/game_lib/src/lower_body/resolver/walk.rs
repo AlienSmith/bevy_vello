@@ -1,4 +1,3 @@
-use bevy::math::Vec2;
 use super::attitude::*;
 use super::ik::*;
 use super::laws::*;
@@ -6,6 +5,7 @@ use super::placement::*;
 use super::stepping::*;
 use super::types::*;
 use super::vertical::*;
+use bevy::math::Vec2;
 /// Run one full resolver tick.
 ///
 /// # Pipeline (mirrors `plans/raibert_redesign.md`)
@@ -184,21 +184,45 @@ pub fn step_lower_body(
         None => state.hip_vel.x,
     };
     let bootstrap_gate = bootstrap_gate_active(config.v_boot, boot_v);
+    let xi = state
+        .measured
+        .and_then(|m| omega0(m.z_com, config.gravity).map(|w| m.com_x + m.v_com / w));
+    let omega0 = state
+        .measured
+        .and_then(|m| omega0(m.z_com, config.gravity))
+        .unwrap_or(0.0);
+    // Push-off startup (Stage 4b): the GLOBAL hold — while both feet are planted
+    // and the DCM `xi` has not committed past the leading foot's toe edge, no
+    // scheduled liftoff fires anywhere. The hip carries the CoM over the front
+    // pivot (stance-first) until the forward fall commits, then the trailing
+    // foot releases into the forward swing the placement law wants at that
+    // state. Inert at cruise (there `xi = com + v/ω₀` is already past the
+    // leading toe on every step, and double-stance barely occurs), and never
+    // armed while stopping — a braking body must keep stepping to catch itself.
+    let push_off_hold = config.push_off
+        && !stopping
+        && v_desired_scalar != 0.0
+        && state.left.phase == GaitPhase::Stance
+        && state.right.phase == GaitPhase::Stance
+        && match (xi, state.measured) {
+            (Some(xi), _) => {
+                let s = if v_desired_scalar > 0.0 { 1.0 } else { -1.0 };
+                let lead = (s * state.left.plant_pos.x).max(s * state.right.plant_pos.x);
+                s * xi - lead < config.toe_len
+            }
+            _ => false,
+        };
     let plan = StepPlan {
         x_max,
         stopping,
         capture_offset,
         measured: state.measured,
-        xi: state
-            .measured
-            .and_then(|m| omega0(m.z_com, config.gravity).map(|w| m.com_x + m.v_com / w)),
-        omega0: state
-            .measured
-            .and_then(|m| omega0(m.z_com, config.gravity))
-            .unwrap_or(0.0),
+        xi,
+        omega0,
         mpc_trigger: config.mpc_trigger,
         bootstrap_gate,
         toe_len: config.toe_len,
+        push_off_hold,
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -295,6 +319,7 @@ pub fn step_lower_body(
         max_wait,
         &mut lift_count_l,
         &mut wait_count_l,
+        state.right.plant_pos.x,
     );
     let right_td = step_leg(
         &mut state.right,
@@ -310,6 +335,9 @@ pub fn step_lower_body(
         max_wait,
         &mut lift_count_r,
         &mut wait_count_r,
+        // Fresh value: if the left leg touched down in its own call above, the
+        // push-off rule tests the CURRENT leading plant, not last tick's.
+        state.left.plant_pos.x,
     );
     state.early_lift_count[0] = state.early_lift_count[0].saturating_add(lift_count_l);
     state.early_lift_count[1] = state.early_lift_count[1].saturating_add(lift_count_r);

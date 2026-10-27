@@ -1,9 +1,6 @@
 use bevy::prelude::*;
 
-use crate::lower_body::resolver::{
-    GaitAuthority, LowerBodyConfig,
-};
-
+use crate::lower_body::resolver::{GaitAuthority, LowerBodyConfig};
 
 #[derive(Resource)]
 pub struct HipPinParams {
@@ -128,6 +125,11 @@ impl HipPinParams {
         // see `LowerBodyConfig::mpc_trigger` for why it stays experimental
         // until the §4 exponential placement lands.
         p.config.mpc_trigger = env_bool("MPC_TRIGGER", p.config.mpc_trigger);
+        // Push-off startup (Stage 4b): hold the TRAILING foot in stance until the
+        // DCM crosses the LEADING foot's toe edge, so the body commits over the
+        // front pivot before the rear foot swings (stance-first, no backward
+        // kick). The position-based replacement for the noisy V_BOOT gate.
+        p.config.push_off = env_bool("PUSH_OFF", p.config.push_off);
         // Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`): the
         // touchdown backward solve may brake only down to TD_FLOOR·v_des,
         // never past it (no reversal against the command). Negative = off

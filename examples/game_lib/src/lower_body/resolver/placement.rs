@@ -136,6 +136,16 @@ pub(crate) struct StepPlan {
     pub(crate) bootstrap_gate: bool,
     /// Forward support-edge proxy (`config.toe_len`) used by the gas guard.
     pub(crate) toe_len: f32,
+    /// Push-off startup hold (Stage 4b, `config.push_off`): `true` while the DCM
+    /// `xi` has NOT yet committed past the leading stance foot's toe edge.
+    /// Computed globally by [`step_lower_body`](super::walk::step_lower_body):
+    /// while set, NO leg may leave stance on a schedule (timer, `com_crossed`,
+    /// or `dcm_crossed`) — both feet stay planted and the hip carries the CoM
+    /// over the front pivot until the forward fall is committed. Inert at
+    /// cruise: `xi` leads the CoM by `v/ω₀`, already past the leading toe on
+    /// every normal step, so this is `false` throughout the walking gait.
+    /// `false` = committed behavior (bit-identical when `push_off` is off).
+    pub(crate) push_off_hold: bool,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the

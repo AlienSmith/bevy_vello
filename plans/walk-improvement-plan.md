@@ -337,6 +337,56 @@ it is the matched half (trigger early enough to plant the longer lead).
 - Measure: first sustained forward motion < 1.2 s; no fall in the post-move
   wait; settle in ≤ 1.5 s.
 
+### Stage 4b RESULTS (2026-10-27, shipped as `PUSH_OFF`, default-off) — push-off startup, **measured deadlocked** (kept off)
+
+The user's design instinct: start a walk the way people do — **stance-first**, not
+swing-first. Both feet stay planted and the rear foot *pushes off* while the hip
+carries the CoM forward; the rear foot only swings once the DCM has committed past
+the **leading** foot's toe edge (`xi ≥ leading_plant + toe_len`). This replaces the
+Stage 4a `V_BOOT` gate (which held on noisy measured *velocity*). Implemented behind
+`PUSH_OFF=1` (default-off; flag-off is bit-identical to `bf9ecbb2`).
+
+Two hold signals (position-based, in `step_lower_body` → `StepPlan::push_off_hold` +
+a pivot hold in `step_leg`):
+- global: while both feet are planted and `xi` is short of the leading toe, no
+  scheduled liftoff fires on either leg;
+- pivot: while a second foot is planted behind it, the leading foot (the vaulting
+  pivot) may not lift.
+
+**A/B (fresh release build, warmup discarded, diag settings):**
+
+| run | onset(>80) | net Δx | vmax | vmin |
+|-----|-----------|--------|------|------|
+| `po_tc0` (PUSH_OFF=0) | 2.28 s | +1330 | 251 | −51 |
+| `PUSH_OFF=1 DCM_TC=0` | — | −0.3 | 7.2 | −15 |
+| `PUSH_OFF=1 DCM_TC=0.15` | — | −0.3 | 7.2 | −15 |
+
+**Result: hard deadlock.** With `PUSH_OFF=1` the character never steps — it stays
+pinned the whole script (the two push runs are byte-identical to each other because
+the placement law is never exercised: no swing is ever launched). The earlier
+trailing-only variant (hold only the rear leg) was also bad — net −53 px, vmax 38 —
+because the *leading* foot then stepped on its expired timer and at `v≈0` the law
+aimed that swing **backward** (β·v_des with no `α·v` to offset), lifting the pivot
+itself. Both failures share one cause.
+
+**Why it deadlocks (chicken-and-egg):** commitment (`xi ≥ leading_plant + toe`)
+requires the body to already be moving, but the hold forbids the very step that
+would create that motion. With both feet pinned, hip-PD transport advances the CoM
+only a few px per tick (the §4c stance clamp holds the hip inside the pinned feet's
+reach window), and `xi = com + v/ω₀` never reaches the leading toe. This is the same
+failure class as `V_BOOT=30` (measured push-off ceiling ≈ 22 px/s ⇒ the gate can
+never release) — proven here for **position** triggers too, not just velocity.
+
+**Conclusion / lineage:** the pure "start with stance, then push off" idea cannot be
+a *hard* gate on this plant, because the actuator that would break the deadlock
+(forceful push-off thrust) is physically too weak (~22 px/s). The startup must be
+broken by a step, and any hold must **release on its own after a dwell**, not wait
+for a commitment that only a released step can create. Next iteration direction
+(untouched): a dwell-*then*-release timer on the rear foot (bounded hold, e.g. one
+stance period, then force the forward swing the law wants at the small velocity the
+hip-transport did build) — i.e. V_BOOT's "hold" without V_BOOT's "never release"
+failure. Keeping `PUSH_OFF` in the tree default-off as the scaffold for that.
+
 ### Stage 5 — hold the line: slide + parameter robustness
 With 1–4 in, the character walks the full script; then attack the standing
 failure sources: stance drift 46 px (friction/compliance interplay, plant

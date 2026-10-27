@@ -101,6 +101,16 @@ pub struct LowerBodyConfig {
     /// committed `com_crossed`-only gait. See [`StepPlan::mpc_trigger`] for why
     /// this is gated until the §4 exponential placement lands.
     pub mpc_trigger: bool,
+    /// Push-off startup (Stage 4b, `plans/walk-improvement-plan.md` §2b): when
+    /// on, a **trailing** foot (its plant behind the CoM) may not leave stance
+    /// until the DCM `xi` crosses the **leading** foot's toe edge. Both feet
+    /// stay planted while the hip carries the CoM over the front pivot
+    /// (stance-first), then the trailing foot releases into the forward swing
+    /// the placement law already wants at that speed. This replaces the
+    /// measured-velocity `v_boot` gate, which suppressed liftoff on a noisy
+    /// signal and contradicted the placement law at `v ≈ 0`. Off (default)
+    /// keeps the committed behavior bit-identical.
+    pub push_off: bool,
     /// Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`), as a
     /// fraction of `v_desired`: the touchdown backward solve may brake the
     /// hip toward this floor but never past it — a lagged plant (the zero-lead
@@ -202,6 +212,7 @@ impl Default for LowerBodyConfig {
             t_conv: 1.0,
             toe_len: 8.0,
             mpc_trigger: false,
+            push_off: false,
             td_solve_floor: -1.0,
             v_boot: -1.0,
             dcm_kp: -1.0,
