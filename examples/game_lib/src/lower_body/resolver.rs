@@ -67,6 +67,45 @@ pub struct LowerBodyConfig {
     /// is at lift-off; shorter = aggressive speed tracking, longer = softer
     /// convergence. `1.0` ≈ the plan's human-scale default (`T_conv = 1/ω₀`).
     pub t_conv: f32,
+    /// Analytic (deadbeat) convergence window for foot placement, seconds.
+    ///
+    /// The exact LIPM solution of "with the foot planted, reach `v_desired`
+    /// after `t_c` seconds" is
+    ///
+    /// ```text
+    /// p = xi + (v·e^(−ω₀·t_c) − v_desired) / (ω₀·sinh(ω₀·t_c))
+    /// ```
+    ///
+    /// i.e. `p = x + α·v − β·v_desired` with `α = 1/(ω₀·tanh(ω₀t_c))` and
+    /// `β = 1/(ω₀·sinh(ω₀t_c))`. Two coefficients from ONE physical parameter.
+    /// The [`capture_point_with_horizon`] law in use today keeps only `β`
+    /// (with a hand-picked `t_conv` and no `α` term beyond `1/ω₀`), and the
+    /// `ξ − Kp·(v_des − v)` gain family has a single dof, so neither can express
+    /// this: they can get the velocity gain right or the lead right, not both.
+    ///
+    /// `t_c` is a **deadline**, so the physical choice is the stance duration
+    /// `t_c = T_s` (`DCM_TC=0` → auto). `t_c → ∞` recovers the plain capture
+    /// point `p = ξ` (asymptotic stop); `t_c → 0` recovers the stiff
+    /// velocity-error spring `p = x + (v − v_des)/(ω₀²·t_c)`.
+    ///
+    /// Env: `DCM_TC=<seconds>` tunes the window directly; `DCM_TC=0` auto-picks
+    /// the stance duration; negative (the default) disables this law so the
+    /// committed horizon law runs unchanged.
+    pub dcm_tc: f32,
+    /// Proportional velocity-error foot-placement gain (Stage 3 candidate,
+    /// `plans/walk-improvement-plan.md`), the control form
+    /// `Step Placement = DCM − Kp·(v_target − v_current)`.
+    ///
+    /// Not a redundant copy of `t_conv`: it selects **which** velocity the gain
+    /// multiplies. The horizon law subtracts the absolute `v_desired`, which at
+    /// cruise cancels against the `v/ω₀` term and lands the foot *under* the CoM
+    /// — zero lead, the "feet never ahead of the hip" pathology. This form
+    /// subtracts only the *error*, so at cruise it targets the raw DCM
+    /// (`x + v_des/ω₀ ≈ 36 px` ahead) and the lead scales with speed.
+    ///
+    /// Units: seconds (a gain on a velocity, producing a length). Negative
+    /// (default) = disabled ⇒ the committed horizon law runs unchanged.
+    pub dcm_kp: f32,
     /// Foot half-length ahead of the plant anchor, px (support-edge proxy for
     /// the §3 DCM-margin trigger; there are no heel/toe particles yet).
     pub toe_len: f32,
@@ -177,6 +216,9 @@ impl Default for LowerBodyConfig {
             mpc_trigger: false,
             td_solve_floor: -1.0,
             v_boot: -1.0,
+            dcm_kp: -1.0,
+            // Analytic deadbeat placement off; the committed horizon law runs.
+            dcm_tc: -1.0,
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
@@ -1387,6 +1429,20 @@ const FLIGHT_SWING_REACH_FRACTION: f32 = 0.5;
 /// stride rather than a knee-to-chest tuck.
 const FLIGHT_SWING_LIFT_FRACTION: f32 = 0.8;
 
+/// Resolve the deadbeat convergence deadline `t_c` from the config.
+///
+/// `dcm_tc > 0` is the window in seconds (`DCM_TC=<seconds>`); `dcm_tc == 0`
+/// auto-selects the stance duration (the physical deadline, since a foot can
+/// only act while planted); negative disables the law (`t_c = 0`, which makes
+/// [`capture_point_deadbeat`] return `None`).
+pub fn resolve_deadbeat_tc(dcm_tc: f32, stance_ts: f32) -> f32 {
+    match dcm_tc {
+        t if t > 0.0 => t,
+        0.0 => stance_ts,
+        _ => 0.0,
+    }
+}
+
 /// Measured whole-body CoM capture state (loop 1 balance, plan §2), fed into
 /// the resolver each tick by the ECS layer. `com_x` / `v_com` are already in
 /// the resolver's y-up frame (horizontal x is unaffected by the Vello y-down
@@ -1530,6 +1586,23 @@ fn plan_target_x_raw(
     // Re-planning every frame with the fresh measurement makes the target track
     // CoM motion mid-swing. If the measurement is degenerate (`z_com ≤ 0` or
     // `gravity ≤ 0`), fall back to the Raibert neutral point below.
+    // Placement-law precedence: analytic deadbeat → velocity-error gain →
+    // committed horizon form → Raibert neutral point. Each is a strict
+    // superset/alternative of the one below, and each is off by default, so the
+    // bottom of the chain is the bit-identical committed behavior.
+    //
+    // (`DCM_TC`) is the exact two-coefficient solution; (`DCM_KP`) is the
+    // one-dof velocity-error form; the horizon law is the zero-lead truncation
+    // the walk currently inherits. `DCM_TC > 0` is the window in seconds;
+    // `DCM_TC == 0` auto-selects the stance duration (see
+    // [`resolve_deadbeat_tc`]).
+    let t_c = resolve_deadbeat_tc(config.dcm_tc, config.stance_duration_ts);
+    if let Some(x) = capture_point_deadbeat(plan.xi, v, v_desired, plan.omega0, t_c) {
+        return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
+    }
+    if let Some(x) = capture_point_with_gain(plan.xi, v, v_desired, config.dcm_kp) {
+        return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
+    }
     if let Some(x) = capture_point_with_horizon(plan.xi, plan.omega0, v_desired, config) {
         return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
     }
@@ -1565,6 +1638,84 @@ pub fn capture_point_with_horizon(
     } else {
         None
     }
+}
+
+/// Capture-point placement with a **proportional velocity-error gain**, the
+/// control form from the user's derivation (`plans/walk-improvement-plan.md`):
+///
+/// ```text
+/// Step Placement = DCM − Kp·(v_target − v_current)
+/// ```
+///
+/// Algebraically this is the same family as
+/// [`capture_point_with_horizon`] — substituting `DCM = x + v/ω₀` gives
+/// `x + v/ω₀ − Kp·v_des + Kp·v`, i.e. the horizon form with
+/// `1/(T_conv·ω₀) = Kp` when the gain multiplies the **absolute** desired
+/// speed. The difference is what the gain multiplies:
+///
+/// * horizon form: `−v_des/(T_conv·ω₀)` — at cruise (`v = v_des`) the two terms
+///   cancel exactly and the foot lands **under the CoM** (zero lead), which is
+///   why the walk never puts a foot ahead of the hip.
+/// * gain form: `−Kp·(v_des − v)` — at cruise the error is zero and the target
+///   is the raw DCM itself, `x + v_des/ω₀` ≈ 36 px **ahead** of the CoM. The
+///   lead appears automatically and scales with speed.
+///
+/// So `Kp` is not a redundant gain: it picks which quantity is being regulated
+/// (absolute speed vs. speed *error*). `Kp < 0` disables the form.
+#[inline]
+pub fn capture_point_with_gain(xi: Option<f32>, v: f32, v_desired: f32, kp: f32) -> Option<f32> {
+    if kp < 0.0 {
+        return None;
+    }
+    let x = xi?;
+    Some(x - kp * (v_desired - v))
+}
+
+/// Analytic (deadbeat) foot placement — the **exact** solution, not a hand-tuned
+/// form of it.
+///
+/// Ask: with the foot planted at `p` and the body at `(x, v)`, at what `p` does
+/// the LIPM deliver `v(T_c) = v_desired` exactly `T_c` seconds from now? The
+/// stance solution is `x(T) = p + (x−p)·cosh(ω₀T) + (v/ω₀)·sinh(ω₀T)` with
+/// `v(T) = ω₀(x−p)·sinh(ω₀T) + v·cosh(ω₀T)`; eliminating `(x−p)` and using
+/// `xi = x + v/ω₀` gives
+///
+/// ```text
+/// p = xi + (v·e^(−ω₀·t_c) − v_desired) / (ω₀·sinh(ω₀·t_c))
+///   = x + α·v − β·v_desired,   α = 1/(ω₀·tanh(ω₀t_c)),  β = 1/(ω₀·sinh(ω₀t_c))
+/// ```
+///
+/// Two coefficients from one physical parameter. The horizon law
+/// ([`capture_point_with_horizon`]) keeps only `β` (plus the implicit `1/ω₀`
+/// inside `xi`), and the `ξ − Kp·(v_des − v)` family ([`capture_point_with_gain`])
+/// has a single dof so it forces `(α, β) = (1/ω₀ + Kp, Kp)`. **Both are
+/// truncations of this expression** — that is why neither can make the foot
+/// lead *and* regulate speed correctly at once.
+///
+/// Limits: `t_c → ∞` ⇒ `p → xi` (plain capture point, asymptotic stop);
+/// `t_c → 0` ⇒ `p → x + (v − v_des)/(ω₀²·t_c)`, the stiff velocity-error spring
+/// — i.e. the `Kp` family with `Kp = 1/(ω₀²·t_c)`.
+///
+/// `t_c` is a **deadline**, so it must cover the flight it is planned through
+/// (`t_c ≥ T_swing`), otherwise the foot is asked for a velocity during its own
+/// swing. `t_c <= 0` disables it (the caller falls back to the horizon law).
+#[inline]
+pub fn capture_point_deadbeat(
+    xi: Option<f32>,
+    v: f32,
+    v_desired: f32,
+    omega0: f32,
+    t_c: f32,
+) -> Option<f32> {
+    let x = xi?;
+    if omega0 <= f32::EPSILON || t_c <= 0.0 {
+        return None;
+    }
+    let s = omega0 * (omega0 * t_c).sinh();
+    if s.abs() <= f32::EPSILON {
+        return None;
+    }
+    Some(x + (v * (-omega0 * t_c).exp() - v_desired) / s)
 }
 
 /// Three-phase swing profile (plan §3): maps normalized swing progress `s ∈
@@ -2132,17 +2283,28 @@ pub fn step_lower_body(
         {
             Some(raw) => {
                 let sat_a = raw < state.hip_pos.x - x_max || raw > state.hip_pos.x + x_max;
-                let sat_b = match capture_point_with_horizon(
-                    plan.xi,
-                    plan.omega0,
-                    v_desired_scalar,
-                    config,
-                ) {
-                    Some(raw_b) => {
-                        raw_b < state.hip_pos.x - x_max || raw_b > state.hip_pos.x + x_max
-                    }
-                    None => false,
-                };
+                // Report saturation for whichever placement law is active, so
+                // the "in trouble" signal never describes a law that is not
+                // running. Same precedence as `plan_target_x`.
+                let t_c = resolve_deadbeat_tc(config.dcm_tc, config.stance_duration_ts);
+                let sat_b =
+                    match capture_point_deadbeat(plan.xi, v, v_desired_scalar, plan.omega0, t_c)
+                        .or_else(|| {
+                            capture_point_with_gain(plan.xi, v, v_desired_scalar, config.dcm_kp)
+                        })
+                        .or_else(|| {
+                            capture_point_with_horizon(
+                                plan.xi,
+                                plan.omega0,
+                                v_desired_scalar,
+                                config,
+                            )
+                        }) {
+                        Some(raw_b) => {
+                            raw_b < state.hip_pos.x - x_max || raw_b > state.hip_pos.x + x_max
+                        }
+                        None => false,
+                    };
                 sat_a || sat_b
             }
             None => false,
@@ -3133,6 +3295,171 @@ mod tests {
         assert!((geo - 2.0 * 66.33 / 0.28).abs() < 1e-3, "geo={geo}");
         // Guard against degenerate denominator.
         assert_eq!(compute_v_max(50.0, 0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_deadbeat_placement_is_the_exact_solution() {
+        // `capture_point_deadbeat` must be the algebra, not a fit: forward-
+        // simulate the LIPM stance from the target and check the velocity
+        // arrives at `v_desired` exactly at the deadline.
+        let cfg = default_config();
+        let z = 90.0;
+        let g = 980.0;
+        let w = omega0(z, g).unwrap();
+        let t_c = cfg.stance_duration_ts;
+        let v_des = 120.0;
+
+        let lipm_v = |x0: f32, v0: f32, p: f32, t: f32| -> f32 {
+            w * (x0 - p) * (w * t).sinh() + v0 * (w * t).cosh()
+        };
+
+        for (x0, v0) in [
+            (0.0, 120.0),  // cruise
+            (0.0, 0.0),    // from rest
+            (0.0, 60.0),   // below command
+            (30.0, 150.0), // too fast
+            (-40.0, -20.0),
+        ] {
+            let xi = x0 + v0 / w;
+            let p = capture_point_deadbeat(Some(xi), v0, v_des, w, t_c).unwrap();
+            let v_at_tc = lipm_v(x0, v0, p, t_c);
+            assert!(
+                (v_at_tc - v_des).abs() < 1e-2,
+                "deadbeat missed: x0={x0} v0={v0} → p={p}, v(T_c)={v_at_tc}"
+            );
+        }
+
+        // Cruise lead, and its two-coefficient form. The horizon law cancels to
+        // zero here and the gain family has only one dof; this one has both
+        // coefficients, which is the missing term.
+        let xi = v_des / w;
+        let p = capture_point_deadbeat(Some(xi), v_des, v_des, w, t_c).unwrap();
+        let alpha = 1.0 / (w * (w * t_c).tanh());
+        let beta = 1.0 / (w * (w * t_c).sinh());
+        let expected = alpha * v_des - beta * v_des;
+        assert!(
+            (p - expected).abs() < 1e-3,
+            "coefficient form mismatch: p={p} expected={expected}"
+        );
+        assert!(alpha > 1.0 / w, "alpha must exceed the implicit 1/ω₀ lead");
+
+        // A real lead, and — the useful identity — `alpha − beta =
+        // tanh(ω₀t_c/2)/ω₀`, so the cruise lead is `v·tanh(ω₀t_c/2)/ω₀`, which
+        // tends to `v·t_c/2` for small `ω₀t_c`: this law *contains Raibert's
+        // neutral point* as its small-angle limit. `t_c = T_s` lands within ~1 px
+        // of `v·T_s/2 = 16.8 px` at the default parameters.
+        // Lead is measured from the CoM (`x = 0`), not from the DCM: the DCM
+        // sits `v/ω₀` ahead of the CoM by construction.
+        let x_com = 0.0;
+        let lead = p - x_com;
+        assert!(lead > 5.0, "cruise target should lead the CoM: {lead:.1}px");
+        let identity = v_des * (w * t_c * 0.5).tanh() / w;
+        assert!(
+            (lead - identity).abs() < 1e-3,
+            "alpha−beta identity mismatch: {lead} vs {identity}"
+        );
+        let neutral = v_des * t_c * 0.5;
+        assert!(
+            (lead - neutral).abs() / neutral < 0.1,
+            "t_c = T_s should recover the neutral point {neutral:.1}px, got {lead:.1}px"
+        );
+
+        // Limits: long deadline → plain capture point; short → stiff spring.
+        let p_long = capture_point_deadbeat(Some(xi), v_des, v_des, w, 50.0).unwrap();
+        assert!(
+            (p_long - xi).abs() < 0.5,
+            "t_c→∞ must approach xi: {p_long}"
+        );
+        let p_short = capture_point_deadbeat(Some(0.0), 0.0, v_des, w, 1e-3).unwrap();
+        let spring = -v_des / (w * w * 1e-3);
+        assert!(
+            (p_short - spring).abs() / spring.abs() < 1e-2,
+            "t_c→0 must approach the Kp spring: {p_short} vs {spring}"
+        );
+        // Disabled / degenerate guards.
+        assert_eq!(capture_point_deadbeat(Some(0.0), 0.0, v_des, w, 0.0), None);
+        assert_eq!(
+            capture_point_deadbeat(Some(0.0), 0.0, v_des, 0.0, t_c),
+            None
+        );
+        assert_eq!(capture_point_deadbeat(None, 0.0, v_des, w, t_c), None);
+    }
+
+    #[test]
+    fn test_dcm_tc_env_semantics() {
+        // `DCM_TC` is a tunable window, not a switch: 0 means "auto = stance
+        // duration", positive is taken literally in seconds, negative is off.
+        let ts = 0.28;
+        assert_eq!(resolve_deadbeat_tc(-1.0, ts), 0.0, "negative must disable");
+        assert_eq!(resolve_deadbeat_tc(0.0, ts), ts, "0 must auto-pick T_s");
+        assert_eq!(
+            resolve_deadbeat_tc(0.5, ts),
+            0.5,
+            "positive must pass through"
+        );
+        // Disabled resolves to 0.0, which the placement helper rejects — that is
+        // what keeps the flag-off path on the committed horizon law.
+        assert_eq!(
+            capture_point_deadbeat(Some(0.0), 0.0, 120.0, 3.3, resolve_deadbeat_tc(-1.0, ts)),
+            None
+        );
+        assert!(
+            capture_point_deadbeat(Some(0.0), 0.0, 120.0, 3.3, resolve_deadbeat_tc(0.0, ts))
+                .is_some(),
+            "auto window must enable the law"
+        );
+    }
+
+    #[test]
+    fn test_dcm_kp_gain_form_keeps_cruise_lead() {
+        // The user's control form `Placement = DCM − Kp·(v_des − v)` vs the
+        // committed horizon form. The distinguishing property is the LEAD at
+        // cruise, which is what this test pins down:
+        //
+        //   horizon: subtract the absolute v_des ⇒ at v = v_des the v/ω₀ term
+        //            exactly cancels it ⇒ foot lands UNDER the CoM (zero lead).
+        //   gain:    subtract only the error ⇒ error is 0 at cruise ⇒ target is
+        //            the raw DCM, x + v/ω₀, i.e. ~36 px AHEAD.
+        let cfg = default_config();
+        let z = 90.0;
+        let g = 980.0;
+        let w = omega0(z, g).unwrap(); // ≈ 3.3 rad/s
+        let x_com = 0.0;
+        let v_des = 120.0;
+        let xi = x_com + v_des / w; // cruising exactly at the command
+
+        // Committed law: zero lead is the pathology being fixed.
+        let horizon = capture_point_with_horizon(Some(xi), w, v_des, &cfg).unwrap();
+        assert!(
+            horizon.abs() < 1e-3,
+            "the horizon law should cancel to zero lead at cruise, got {horizon}"
+        );
+
+        // Gain form at cruise reduces to the raw DCM regardless of Kp.
+        for kp in [0.05, 0.3, 1.0] {
+            let p = capture_point_with_gain(Some(xi), v_des, v_des, kp).unwrap();
+            assert!(
+                (p - xi).abs() < 1e-4,
+                "kp={kp} should reduce to the raw DCM at cruise: {p} vs {xi}"
+            );
+        }
+        assert!(xi > 30.0, "cruise lead should be a real stride: {xi:.1}px");
+
+        // Below the command the error is positive, so the foot moves back by
+        // Kp·(v_des − v) from the DCM — monotone in Kp.
+        let slow = 60.0;
+        let xi_slow = x_com + slow / w;
+        let p1 = capture_point_with_gain(Some(xi_slow), slow, v_des, 0.1).unwrap();
+        let p2 = capture_point_with_gain(Some(xi_slow), slow, v_des, 0.3).unwrap();
+        assert!(p2 < p1, "larger Kp must pull the foot further back");
+        assert!(
+            (p2 - (xi_slow - 0.3 * (v_des - slow))).abs() < 1e-4,
+            "gain-form formula mismatch: {p2}"
+        );
+
+        // Disabled ⇒ None, so the caller keeps the horizon law; no DCM ⇒ None.
+        assert_eq!(capture_point_with_gain(Some(xi), 0.0, v_des, -1.0), None);
+        assert_eq!(capture_point_with_gain(None, 0.0, v_des, 0.3), None);
     }
 
     #[test]

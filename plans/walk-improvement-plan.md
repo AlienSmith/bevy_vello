@@ -226,7 +226,86 @@ instead of chasing a laser pointer at the moment it cannot still move.
   realized landings stop overshooting into the slide.
 - Measure: swing gate verdicts; touchdown lead variance drops.
 
-### Stage 3 — the missing lead: landing-state placement law
+### Stage 3 RESULTS (2026-10-27) — the analytic law supersedes the staged variants
+
+**Shipped:** `DCM_TC` (`LowerBodyConfig::dcm_tc`) and the one-dof `DCM_KP`,
+both default-off, precedence `deadbeat → gain → horizon → neutral point`.
+163/163 tests green; flag-off baseline still `bf9ecbb2`.
+
+**The Kp question, answered by algebra.** The committed horizon law *is* the
+`Step Placement = DCM − Kp(v_des − v)` control law with `Kp = 1/(T_conv·ω₀)`
+— but with `v_des` subtracted absolutely instead of as an error, so at cruise
+it cancels to zero lead (the "feet never ahead of the hip" bug). The exact
+LIPM deadbeat solution is
+
+```text
+p = x + α·v − β·v_des
+α = 1/(ω₀·tanh(ω₀t_c))      β = 1/(ω₀·sinh(ω₀t_c))
+```
+
+so the horizon law is this with `α → 1/ω₀` and `β → Kp`: **two truncations of
+the same series**. The link is exact and was used to build the sweep:
+
+```text
+β(t_c) = Kp   ⟺   sinh(ω₀·t_c) = T_conv   ⟺   t_c = asinh(T_conv)/ω₀
+```
+
+| `T_conv` | `Kp` | equivalent `t_c` |
+|---|---|---|
+| 0.5 | 0.6061 | 0.1458 s |
+| 1.0 | 0.3030 | 0.2671 s |
+| 2.0 | 0.1515 | 0.4375 s |
+
+Consequence: tuning `T_CONV` is tuning `Kp`, and every `Kp` has an exact `t_c`
+that comes with a **free correct `α`**. Never tune `Kp` directly — one dof
+cannot satisfy both coefficients.
+
+**Measured (3 repeats, `DCM_TC` the only variable; physical Δx velocity):**
+
+| config | v@2 | v@4 | v@6 | v@8 | v@10 | steady \|v−120\|<40 | net Δx | tilt |
+|---|---|---|---|---|---|---|---|---|
+| off (committed) | 50 | 109 | 40 | −161 | −26 | 0.0 s | 25 | 0.10 |
+| `V_BOOT=5` | 80 | 49 | 61 | 34 | 90 | 3.0 s | 899 | 0.11 |
+| **`DCM_TC=0.15`** | −31 | 136 | 121 | 103 | 105 | **6.0 s** | 1040 | 0.10 |
+| `DCM_TC=0.15`+`V_BOOT=5` | 75 | 40 | 98 | 130 | 132 | 4.0 s | 1018 | 0.10 |
+| `T_CONV=0.5` (naive `Kp`) | −22 | −24 | −136 | 33 | 303 | 1.0 s | 59 | 0.11 |
+| `DCM_TC=0.12` | −23 | 118 | 244 | 204 | −8 | 0.5 s | 1048 | 0.13 |
+| `DCM_TC=0.2` | −20 | 120 | 190 | −23 | 207 | 2.0 s | 999 | 0.12 |
+| `DCM_TC=0.25` | 17 | 91 | 141 | 125 | 140 | 6.5 s | 1266 | 0.10 |
+| `DCM_TC=0.28` (auto `T_s`) | 0 | 107 | 135 | 132 | 138 | 6.5 s | 1266 | 0.13 |
+
+**Findings:**
+
+1. **The naive `Kp` path is the worst row.** `T_CONV=0.5` — the analytically
+   correct `Kp` for that horizon — gives `net +59 px` and every metric worse
+   than flag-off. Correcting the gain without the matching `α` does not work;
+   this is the empirical proof that the horizon form is a truncation.
+2. **`DCM_TC=0.15` is the winner** and reproduces bit-exactly (3/3). It is a
+   *crash-type* law: `β = 0.588 < Kp = 0.606`, `α = 0.661` — stiffer velocity
+   gain plus double the lead of the horizon law.
+3. **`t_c = 0.28` (auto) is the calm-brake type**: dead for a full second
+   (`v@2 = 0`), then settles at 138 px/s. Smoother, but slower to converge and
+   it still overshoots the command by ~15%.
+4. **`0.12` overshoots to 244 px/s, `0.2` is non-monotone** — too stiff on this
+   soft body. Do not go below `t_c ≈ 0.15`.
+5. **Do not stack `V_BOOT` on the deadbeat law** (`4.0 s` vs `6.0 s`, onset
+   75 px/s vs −31): the gas floor forbids exactly the backward placement the
+   analytic law wants at startup. Same verdict as stacking `TD_FLOOR`.
+
+**Determinism caveat (important for judging):** `DCM_TC ∈ {0.12, 0.15, 0.2}`
+and `0.15+V_BOOT` are **bit-exactly repeatable** (3/3 md5-equal). But `off_*`,
+`DCM_TC=0.25` and `DCM_TC=0.5` are **bimodal** — `off_2` diverges from
+`off_1`/`off_3` with *identical flags*. So repeatability is a property of the
+merged closed loop at those `t_c`, not of any one patch; the chaotic band is
+`t_c ≈ 0.2–0.5`, which is where the analytic optimum (`asinh(T_s/T_conv*)/ω₀
+≈ 0.22–0.24`) happens to sit. Any sweep there needs ≥5 repeats, not 3.
+
+**Open:** `DCM_TC=0.15` still ends at 105 px/s against a 120 command (the
+diagnosed defect was *surplus* speed, now it is a small deficit), and the
+start `v@2 = −31` shows the first swing still lands behind. Those are the
+Stage 2 (terminal freeze) and Stage 3-lead-Q targets, not new law work.
+
+### Stage 3 (original staging, superseded — kept for lineage)
 *(attacks the root plan bias; the matched pair, re-landed on top of 1–2)*
 Now that fulfillment is gated and targets are frozen, evaluate the placement
 law at the **predicted touchdown state** so the plan *requests* a leading
@@ -281,17 +360,27 @@ insensitive. Log clamp-saturation count as the health metric (plan §10).
 
 ## 5. Status + immediate next action
 
-Stage 1 (`TD_FLOOR`) and Stage 4a (`V_BOOT`) are both implemented, tested
-(160/160), default-off, and measured — see their RESULTS sections. Stage 4a
-alone already satisfies the §3 baseline; Stage 1 alone does not.
+Stage 1 (`TD_FLOOR`), Stage 4a (`V_BOOT`) and Stage 3 (`DCM_TC` / `DCM_KP`)
+are all implemented, tested (163/163), default-off, and measured — see their
+RESULTS sections.
 
-Next: **Stage 3 (landing-state lead)**, because it now owns the last remaining
-defect. `V_BOOT=5` walks forward for the whole move window with no backward
-interval, but reaches +291 px/s against a 120 command — the gate releases while
-the body is already fast, so the placement law starts from a large velocity
-error. Give the plan the real lead (exponential `x_t` vs reactive
-`hip + clamp(gain·v·T_stance, ±x_max)`), A/B on top of `V_BOOT=5`, and target:
-cruise pinned near 120 with the walk-backward count still 0.
+**The placement law is now solved, not tuned.** `DCM_TC` is the exact LIPM
+deadbeat solution and it contains both earlier candidates as limits (the
+horizon law is its `β`-only truncation; the gain family is its one-dof
+restriction; Raibert's neutral point `v·T_s/2` is its small-`ω₀t_c` limit).
+`DCM_TC=0.15` is the recommended configuration: 6.0 s steady near 120,
+net +1040 px, tilt 0.10, bit-exactly reproducible.
 
-Do not stack `TD_FLOOR` and `V_BOOT` (measured: they fight — see Stage 4a
-finding 3). Treat them as alternative configurations.
+Next, in order:
+1. **Stage 2 — terminal freeze** (`SWING_FREEZE=0.15`): kill the residual
+   mid-swing target oscillation. `DCM_TC=0.15` held steady but `t_c = 0.2/0.25`
+   were non-monotone, which is the same symptom Stage 2 attacks.
+2. **Close the −31 px/s startup**: the first swing still lands behind. Test
+   `DCM_TC=0.15` with a *smaller* `V_BOOT` (`1`–`3`) rather than `5` — stacking
+   at `5` was measured harmful, but the failure mode is the floor being too
+   aggressive early, not the gate being wrong.
+3. **Stage 5 — slide**: stance drift is still 45.7 px against a 2.0 px gate.
+   That is now the top remaining physical defect.
+
+Do not tune `Kp`/`T_CONV` — use `t_c`. Do not stack `TD_FLOOR` with `V_BOOT`
+(measured: they fight). Do not stack `V_BOOT` with `DCM_TC` at `5`.

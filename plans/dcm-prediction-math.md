@@ -29,6 +29,59 @@ directly. You choose `x_foot` (by where the *swing* foot lands), and physics
 turns that choice into hip acceleration. Foot behind CoM ⇒ `v_dot > 0`
 (gas). Foot ahead ⇒ brake. Foot under ⇒ coast.
 
+## 1b. The exact foot-placement law (shipped 2026-10-27 as `DCM_TC`)
+
+Ask the LIPM for the constant `x_foot` that puts the CoM velocity at `v_des`
+after `t_c` seconds. With `x(0) = x`, `v(0) = v`, the LIPM solution is
+
+```
+x(t) = x_foot + (x − x_foot)·cosh(ω₀t) + (v/ω₀)·sinh(ω₀t)
+```
+
+and imposing `x'(t_c) = v_des` gives the closed form
+
+```
+p = ξ + (v·e^(−ω₀t_c) − v_des) / (ω₀·sinh(ω₀t_c))
+  = x + α·v − β·v_des
+      α = 1/(ω₀·tanh(ω₀t_c))         β = 1/(ω₀·sinh(ω₀t_c))
+```
+
+Two coefficients from **one** physical parameter `t_c` — a deadline, since a
+foot can only act while planted, so `t_c ≈ T_stance`.
+
+Why this matters: the horizon law in use (`p = ξ − v_des/(T_conv·ω₀)`) is
+exactly this with `α → 1/ω₀` and `β → 1/(T_conv·ω₀)`. That is not an
+approximation with a tuning knob — it is a **truncation**, and the two halves
+are linked exactly by
+
+```
+β(t_c) = Kp   ⟺   sinh(ω₀·t_c) = T_conv   ⟺   t_c = asinh(T_conv)/ω₀
+```
+
+So every `Kp = 1/(T_conv·ω₀)` has an exact `t_c` that comes with a *free
+correct `α`*; tuning `Kp` alone throws that away. Likewise the control form
+`p = ξ − Kp(v_des − v)` has a single dof and cannot hit both coefficients.
+**Do not tune `Kp` — pick `t_c`.**
+
+Limits: `t_c → ∞` ⇒ `p = ξ` (plain capture point, asymptotic stop);
+`t_c → 0` ⇒ `p = x + (v − v_des)/(ω₀²t_c)` (stiff velocity-error spring).
+And the identity `α − β = tanh(ω₀t_c/2)/ω₀` makes the cruise lead
+`v·tanh(ω₀t_c/2)/ω₀ → v·t_c/2`, i.e. this law **contains Raibert's neutral
+point** as its small-`ω₀t_c` limit: at `t_c = T_s = 0.28` it gives a 15.7 px
+lead against the neutral point's 16.8 px.
+
+`t_c` at 120 px/s (`ω₀ = 3.2998`, `z = 90`):
+
+| `t_c` | `α` | `β` | cruise lead `v(α−β)` | character |
+|---|---|---|---|---|
+| 0.12 | 0.805 | 0.746 | 7.1 px | too stiff (overshoots to 244 px/s) |
+| 0.15 | 0.661 | 0.588 | 8.8 px | measured best (6.0 s steady) |
+| 0.200 | 0.524 | 0.428 | 11.6 px | non-monotone |
+| 0.28 | 0.416 | 0.286 | 15.7 px | calm brake, ≈ neutral point |
+| 0.50 | 0.326 | 0.121 | 24.7 px | near-capture-point, slow |
+
+---
+
 ## 2. The prediction: the capture point (DCM)
 
 The law above is a runaway exponential, so "where the body **is**" is not the

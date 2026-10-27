@@ -35,3 +35,7 @@ dist/
 /examples/tankgame_bin/assets/scenes/*.scene
 
 captures/
+
+# physics-QA run artifacts (telemetry CSVs, asset snapshots, plots). These are
+# per-run output from tools/physics-qa/run_walk.sh — reproducible, not source.
+/tmp/

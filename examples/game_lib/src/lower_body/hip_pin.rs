@@ -141,6 +141,17 @@ impl HipPinParams {
         // velocity-schedule convergence horizon and the support-edge proxy for
         // the DCM-margin liftoff trigger.
         p.config.t_conv = env_f32("T_CONV", p.config.t_conv).max(0.25);
+        // Stage 3 proportional velocity-error placement gain (`DCM_KP`):
+        // `x_foot = DCM − Kp·(v_des − v)`. Enabled it REPLACES the T_CONV
+        // horizon form, because at cruise it keeps a real forward lead instead
+        // of cancelling to zero. Units are seconds. Negative = off (committed).
+        p.config.dcm_kp = env_f32("DCM_KP", p.config.dcm_kp);
+        // Analytic deadbeat placement (`DCM_TC`): the exact two-coefficient law
+        // `p = xi + (v·e^(−ω₀·t_c) − v_des)/(ω₀·sinh(ω₀·t_c))`. `t_c` is the
+        // convergence deadline in seconds (`DCM_TC=0` auto-picks the stance
+        // duration). Enabled it takes precedence over DCM_KP and the horizon law;
+        // negative (default) leaves the committed law untouched.
+        p.config.dcm_tc = env_f32("DCM_TC", p.config.dcm_tc);
         p.config.toe_len = env_f32("TOE_LEN", p.config.toe_len).max(0.0);
         // §3 DCM-margin liftoff trigger. Off by default (the committed gait);
         // see `LowerBodyConfig::mpc_trigger` for why it stays experimental
