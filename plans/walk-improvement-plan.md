@@ -346,9 +346,18 @@ insensitive. Log clamp-saturation count as the health metric (plan §10).
 
 ## 4. Standing caveats
 
-- **Cross-platform nondeterminism**: visual twin gives 3 distinct md5s over
-  5 Linux runs, diverging at t≈10.5 s (GPU narrow phase). All verdicts are
-  worst-of-3; do not read tail differences as signal.
+- **Nondeterminism = attractor persistence, not coin-flips** (refined
+  2026-10-27, `DCM_TC=0` 13-run experiment): the solver lands in one of a
+  *small discrete set of attractors* (4 md5s seen: `3b14f1f9`/`bf7817c0`
+  "nice family", `11b15a1d` "ugly-stable", `7bef3224` post-rebuild outlier)
+  and **consecutive runs in one session reproduce the same attractor
+  bit-exactly** — verified 5/5 with the user's exact command form. The
+  basin *switches across rebuilds/sessions* (GPU/process state), not within a
+  session. So repeats measure noise *within* a basin only; a config's real
+  risk is basin-switching, which needs a fresh binary/session to expose.
+  All verdicts stay worst-of-N across at least one rebuild; do not read tail
+  byte-differences between the two nice-family md5s as signal (identical
+  metrics).
 - The **backward solve is load-bearing** for `test_hip_stays_between_feet…`
   and related tests — stage 1 changes need the invariant tests re-derived
   against the gated version (a landed-with-error plant is *allowed* now, so
