@@ -138,9 +138,12 @@ impl HipPinParams {
         p.config.swing_duration_ts = env_f32("SWING", p.config.swing_duration_ts).max(1e-3);
         p.config.step_height = env_f32("STEP_HEIGHT", p.config.step_height).max(0.0);
         // Event-driven gait (`plans/swing-phase-timing.md` §3/§4): the
-        // velocity-schedule convergence horizon and the support-edge proxy for
-        // the DCM-margin liftoff trigger.
-        p.config.t_conv = env_f32("T_CONV", p.config.t_conv).max(0.25);
+        // support-edge proxy for the DCM-margin liftoff trigger.
+        // `T_CONV` is no longer env-tunable: it is the ONE coefficient (`β`) of
+        // the analytic deadbeat law, so tuning it alone was proven harmful
+        // (see Stage 3 results — `T_CONV=0.5` net +59px, worst in the sweep).
+        // The field is fixed at its default `1.0` (= 1/ω₀) to keep the
+        // committed flag-off baseline bit-identical; use `DCM_TC` instead.
         // Stage 3 proportional velocity-error placement gain (`DCM_KP`):
         // `x_foot = DCM − Kp·(v_des − v)`. Enabled it REPLACES the T_CONV
         // horizon form, because at cruise it keeps a real forward lead instead

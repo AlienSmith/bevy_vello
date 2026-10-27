@@ -8,7 +8,9 @@
 #                       the harness itself reads: LEG_COMPLIANCE, STEP_HEIGHT,
 #                       STANCE, SWING, GAIT_AUTHORITY, ATT_LEAN_KP, ATT_LEAN_KD,
 #                       SUBSTEPS, TARGET_SPEED, WIN_HIDDEN, COLLISION, FACING,
-#                       MPC_TRIGGER, T_CONV, TOE_LEN, ...
+#                       MPC_TRIGGER, TOE_LEN, V_BOOT, DCM_TC, ...
+#                       (T_CONV was removed: it is the derived beta coefficient
+#                       of the analytic deadbeat law — tune DCM_TC instead.)
 #
 # The binary is `visual_arm_pd` — the rendered twin of the old headless bin:
 # same script driver, same 90 Hz XPBD physics, same telemetry CSV, but booted

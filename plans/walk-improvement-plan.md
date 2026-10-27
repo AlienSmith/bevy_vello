@@ -268,7 +268,7 @@ cannot satisfy both coefficients.
 | `V_BOOT=5` | 80 | 49 | 61 | 34 | 90 | 3.0 s | 899 | 0.11 |
 | **`DCM_TC=0.15`** | −31 | 136 | 121 | 103 | 105 | **6.0 s** | 1040 | 0.10 |
 | `DCM_TC=0.15`+`V_BOOT=5` | 75 | 40 | 98 | 130 | 132 | 4.0 s | 1018 | 0.10 |
-| `T_CONV=0.5` (naive `Kp`) | −22 | −24 | −136 | 33 | 303 | 1.0 s | 59 | 0.11 |
+| `T_CONV=0.5` (naive `Kp`, before removal) | −22 | −24 | −136 | 33 | 303 | 1.0 s | 59 | 0.11 |
 | `DCM_TC=0.12` | −23 | 118 | 244 | 204 | −8 | 0.5 s | 1048 | 0.13 |
 | `DCM_TC=0.2` | −20 | 120 | 190 | −23 | 207 | 2.0 s | 999 | 0.12 |
 | `DCM_TC=0.25` | 17 | 91 | 141 | 125 | 140 | 6.5 s | 1266 | 0.10 |
@@ -382,5 +382,8 @@ Next, in order:
 3. **Stage 5 — slide**: stance drift is still 45.7 px against a 2.0 px gate.
    That is now the top remaining physical defect.
 
-Do not tune `Kp`/`T_CONV` — use `t_c`. Do not stack `TD_FLOOR` with `V_BOOT`
+`T_CONV` env support was REMOVED 2026-10-27 for exactly this reason: it is the
+derived `β` coefficient (`T_conv = sinh(ω₀·t_c)`), so the field stays pinned at
+its default `1.0` (flag-off baseline bit-identical) and only `DCM_TC` tunes.
+Do not re-add a `Kp`/`T_CONV` knob — use `t_c`. Do not stack `TD_FLOOR` with `V_BOOT`
 (measured: they fight). Do not stack `V_BOOT` with `DCM_TC` at `5`.

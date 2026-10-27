@@ -61,11 +61,13 @@ pub struct LowerBodyConfig {
     /// keeps `½·a·T_swing² ≤ prediction_margin·X_max`, which bounds the hip
     /// acceleration at `a_max` (see [`GaitLimits`]).
     pub prediction_margin: f32,
-    /// Fixed-point touchdown prediction (`plans/swing-phase-timing.md` §4):
-    /// velocity-schedule convergence horizon `T_conv` (seconds). The swing
-    /// target is aimed at where the CoM *will* be at touchdown, not where it
-    /// is at lift-off; shorter = aggressive speed tracking, longer = softer
-    /// convergence. `1.0` ≈ the plan's human-scale default (`T_conv = 1/ω₀`).
+    /// Velocity-schedule convergence horizon of the committed horizon law
+    /// (`plans/swing-phase-timing.md` §4), in units of `1/ω₀`. **Not
+    /// env-tunable** (no `T_CONV`): it is the single coefficient `β` of the
+    /// analytic deadbeat law — `β(t_c) = 1/(T_conv·ω₀) ⟺ sinh(ω₀·t_c) = T_conv`
+    /// — and tuning it alone (without the matching `α`) was measured to be the
+    /// worst placement configuration (Stage 3 results). It stays fixed at
+    /// `1.0` for the flag-off baseline; tune `dcm_tc` (`DCM_TC`) instead.
     pub t_conv: f32,
     /// Analytic (deadbeat) convergence window for foot placement, seconds.
     ///

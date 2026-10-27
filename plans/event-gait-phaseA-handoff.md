@@ -85,8 +85,10 @@ collision chain.
   `com_crossed` (CoM past plant) remains unconditional.
 - `trigger_reason` telemetry on `LegState` (`1`=timer, `2`=dcm, `3`=emergency),
   surfaced in `DebugInfo.left/right_trigger_reason`.
-- Env knobs in `hip_pin.rs from_env`: `T_CONV` (min 0.25), `TOE_LEN`,
-  `MPC_TRIGGER` (bool). **Verified the env path works** — `MPC_TRIGGER=1`
+- Env knobs in `hip_pin.rs from_env`: `T_CONV` (min 0.25) **(removed
+  2026-10-27 — it is the derived `β` coefficient of the deadbeat law; tune
+  `DCM_TC`)**, `TOE_LEN`, `MPC_TRIGGER` (bool). **Verified the env path
+  works** — `MPC_TRIGGER=1`
   changes the output CSV md5. (The earlier "no measurable effect" reading was
   a stale binary, not a wiring bug.)
 
@@ -209,7 +211,8 @@ reachable by construction (bounded to `±x_max`), self-scaling with speed.
 ## 5. The pipeline (how to run / measure / decide)
 
 All from repo root. `run_walk.sh [TAG] [KEY=VALUE ...]` — any `KEY=VALUE` is
-forwarded as env to the harness (`MPC_TRIGGER`, `T_CONV`, `TOE_LEN`,
+forwarded as env to the harness (`MPC_TRIGGER`, `TOE_LEN`, `V_BOOT`,
+`DCM_TC`, `DCM_KP`,
 `TARGET_SPEED`, `STEP_HEIGHT`, `STANCE`, `SWING`, `GAIT_AUTHORITY`,
 `LEG_COMPLIANCE`, …). Defaults `LEG_COMPLIANCE=5e-9 STEP_HEIGHT=50`.
 Rust change ⇒ rebuild first:

@@ -201,7 +201,7 @@ absorbed as a velocity correction instead of poisoning the next prediction.
 | `g` | — | 980 | gravity at 100 px = 1 m |
 | `ω₀` | derived | 3.3 | fall rate [1/s]; one step ≈ its time scale |
 | `v_des` | TARGET_SPEED | 120 | the only command; signed cruise velocity |
-| `T_conv` | T_CONV | 1.0 | how fast the plan promises to fix speed error (in 1/ω₀ units) |
+| `T_conv` | — (removed) | 1.0 | derived: `T_conv = sinh(ω₀·t_c)`. Not env-tunable; the horizon law is the deadbeat law truncated to this one coefficient. Tune `t_c` (`DCM_TC`) instead. |
 | `T_swing` | SWING | 0.28 | flight time = horizon of the prediction = margin budget |
 | `T_stance` | STANCE | 0.28 | the step clock; the DCM advances `e^{ω₀T}` per stance |
 | `toe_len` | TOE_LEN | 8 | how far xi may go past plant before forced liftoff |
