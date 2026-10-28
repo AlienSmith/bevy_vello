@@ -101,16 +101,6 @@ pub struct LowerBodyConfig {
     /// committed `com_crossed`-only gait. See [`StepPlan::mpc_trigger`] for why
     /// this is gated until the §4 exponential placement lands.
     pub mpc_trigger: bool,
-    /// Push-off startup (Stage 4b, `plans/walk-improvement-plan.md` §2b): when
-    /// on, a **trailing** foot (its plant behind the CoM) may not leave stance
-    /// until the DCM `xi` crosses the **leading** foot's toe edge. Both feet
-    /// stay planted while the hip carries the CoM over the front pivot
-    /// (stance-first), then the trailing foot releases into the forward swing
-    /// the placement law already wants at that speed. This replaces the
-    /// measured-velocity `v_boot` gate, which suppressed liftoff on a noisy
-    /// signal and contradicted the placement law at `v ≈ 0`. Off (default)
-    /// keeps the committed behavior bit-identical.
-    pub push_off: bool,
     /// Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`), as a
     /// fraction of `v_desired`: the touchdown backward solve may brake the
     /// hip toward this floor but never past it — a lagged plant (the zero-lead
@@ -123,28 +113,6 @@ pub struct LowerBodyConfig {
     /// because `hip_pos` is anchored to the real P3 — the floor is the
     /// mechanism that reads it.)
     pub td_solve_floor: f32,
-    /// Bootstrap gates (Stage 4a, `plans/walk-improvement-plan.md` §2b):
-    /// gas guard + timer-liftoff suppression while the body is still below
-    /// `v_boot` (px/s). At `v ≈ 0` the placement law is blind and commands
-    /// `xi − v_des/(T_conv·ω₀)`, i.e. a foot **behind** the hip — it throws
-    /// away the rear-foot gas stance, which is the only thing that can create
-    /// forward velocity from rest (there is no position/velocity write to the
-    /// solver during walking; the leg PD's stance thrust against the floor is
-    /// the actuator). Two gates, both released once measured `|v| >= v_boot`:
-    ///
-    /// 1. **Gas guard** ([`apply_bootstrap_floor`]): a swing target may never
-    ///    be placed behind its own lift-off pivot, so the rear foot keeps its
-    ///    push-off geometry instead of stepping further back.
-    /// 2. **Suppression**: no timer / `com_crossed` / `dcm_crossed` liftoff; a
-    ///    leg leaves `Stance` only on real contact loss, so both feet stay
-    ///    planted while the body accelerates.
-    ///
-    /// The gate reads **measured** velocity (`CaptureMeasure::v_com`, falling
-    /// back to the resolver hip velocity when no measurement exists), because
-    /// the resolver's own reference is exactly what must not bootstrap itself.
-    ///
-    /// Negative (default) = disabled ⇒ committed behavior stays bit-identical.
-    pub v_boot: f32,
     /// Swing arc apex height above the plant/floor line, px.
     pub step_height: f32,
     /// World y of the flat floor line.
@@ -212,9 +180,7 @@ impl Default for LowerBodyConfig {
             t_conv: 1.0,
             toe_len: 8.0,
             mpc_trigger: false,
-            push_off: false,
             td_solve_floor: -1.0,
-            v_boot: -1.0,
             dcm_kp: -1.0,
             // Analytic deadbeat placement off; the committed horizon law runs.
             dcm_tc: -1.0,

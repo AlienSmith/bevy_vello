@@ -96,38 +96,6 @@ pub fn apply_support_floor(v_support: f32, v_desired: f32, floor: f32) -> f32 {
     }
 }
 
-/// Bootstrap **gas guard** (`plans/walk-improvement-plan.md` §2b): while
-/// bootstrapping, a swing foot may never be aimed at or behind its own lift-off
-/// pivot. At `v ≈ 0` the placement law is blind — `xi = x_CoM` — so it emits
-/// `x_CoM − v_desired/(T_conv·ω₀)`, a target *behind* the hip. Stepping there
-/// throws away the rear-foot push-off stance that is the only actuator able to
-/// create forward velocity from rest. Flooring the target at `pivot + toe_len`
-/// keeps the step forward of the pivot (never a backward step), while a `v = 0`
-/// command leaves the target untouched (no phantom step intent).
-///
-/// `toe_len` is the support-edge proxy already used by the §3 trigger, so the
-/// floored target sits exactly at the stance foot's forward edge — the smallest
-/// forward step the gait can ask for. Direction follows the *signed* command.
-#[inline]
-pub fn apply_bootstrap_floor(target_x: f32, pivot_x: f32, v_desired: f32, toe_len: f32) -> f32 {
-    if v_desired > 0.0 {
-        target_x.max(pivot_x + toe_len.max(0.0))
-    } else if v_desired < 0.0 {
-        target_x.min(pivot_x - toe_len.max(0.0))
-    } else {
-        target_x
-    }
-}
-
-/// Whether the bootstrap gates are active this tick: `v_boot >= 0` (the flag is
-/// enabled) **and** the measured speed is still below it. Reads the measured
-/// velocity on purpose — the resolver's own reference is what must not
-/// bootstrap itself (see the `v_boot` doc comment).
-#[inline]
-pub fn bootstrap_gate_active(v_boot: f32, measured_vx: f32) -> bool {
-    v_boot >= 0.0 && measured_vx.abs() < v_boot
-}
-
 /// Precomputed feasibility envelope for the gait at a given hip height.
 ///
 /// All four limits are closed-form in the config, so the sandbox can clamp the

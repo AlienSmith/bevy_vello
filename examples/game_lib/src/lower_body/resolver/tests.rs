@@ -34,9 +34,6 @@ fn step_leg_kinematic(
         0.05,
         &mut a,
         &mut b,
-        // Push-off is off in the wrapper configs, so this is never read; the
-        // neutral value keeps the legacy tests bit-identical.
-        0.0,
     )
 }
 
@@ -71,9 +68,6 @@ fn step_leg_contact(
         0.05,
         &mut a,
         &mut b,
-        // Push-off is off in the wrapper configs, so this is never read; the
-        // neutral value keeps the §6 tests bit-identical.
-        0.0,
     )
 }
 
@@ -595,13 +589,6 @@ fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
         xi: None,
         omega0: 0.0,
         mpc_trigger: false,
-        // Committed behavior: the bootstrap gates stay off in the direct
-        // `step_leg` tests unless a test turns them on explicitly.
-        bootstrap_gate: false,
-        toe_len: cfg.toe_len,
-        // Global push-off hold is driven from walk.rs; direct-StepPlan
-        // tests exercise the committed path here.
-        push_off_hold: false,
     }
 }
 
@@ -870,137 +857,6 @@ fn test_support_floor_blocks_reversal_but_allows_brake() {
 }
 
 #[test]
-fn test_bootstrap_floor_forbids_backward_step() {
-    // Stage 4a gas guard (`walk-improvement-plan.md` §2b): while
-    // bootstrapping, a swing foot may never be placed behind its lift-off
-    // pivot — at v≈0 the placement law emits `x_CoM − v_des/ω₀`, which is
-    // what threw away the rear-foot push-off stance.
-    let toe = 8.0;
-    // The zero-velocity failure: law wants 30px *behind* a pivot at 0.
-    assert_eq!(apply_bootstrap_floor(-36.4, 0.0, 120.0, toe), toe);
-    assert_eq!(apply_bootstrap_floor(-36.4, 50.0, 120.0, toe), 58.0);
-    // Already forward of the pivot: untouched.
-    assert_eq!(apply_bootstrap_floor(70.0, 50.0, 120.0, toe), 70.0);
-    // Exactly on the edge: unchanged (floor, not offset).
-    assert_eq!(apply_bootstrap_floor(58.0, 50.0, 120.0, toe), 58.0);
-    // Backward command mirrors: never ahead of the pivot.
-    assert_eq!(apply_bootstrap_floor(36.4, 0.0, -120.0, toe), -toe);
-    assert_eq!(apply_bootstrap_floor(90.0, 50.0, -120.0, toe), 42.0);
-    assert_eq!(apply_bootstrap_floor(-70.0, -50.0, -120.0, toe), -70.0);
-    // No command: no phantom step intent, target untouched.
-    assert_eq!(apply_bootstrap_floor(-36.4, 0.0, 0.0, toe), -36.4);
-}
-
-#[test]
-fn test_bootstrap_suppression_holds_stance_until_geometry() {
-    // Stage 4a suppression: with the gate set, a drained stance timer, an
-    // expired timer AND the measured CoM past the plant must all leave the
-    // leg in Stance (feet planted == push-off). Clearing the gate steps.
-    let cfg = default_config();
-    let v = cfg.target_speed;
-    let mut plan = cruise_plan(&cfg);
-    // A measured CoM well past the plant would normally fire `com_crossed`.
-    plan.measured = Some(CaptureMeasure {
-        com_x: 200.0,
-        v_com: 40.0,
-        z_com: cfg.hip_height,
-    });
-    plan.bootstrap_gate = true;
-    let mut leg = stance_leg(&cfg, 0.0);
-    leg.phase_timer = 0.0;
-    for _ in 0..5 {
-        let _ = step_leg_kinematic(&mut leg, 100.0, v, v, false, &cfg, &plan, 1e-3);
-        assert_eq!(
-            leg.phase,
-            GaitPhase::Stance,
-            "bootstrap gate must suppress every scheduled liftoff"
-        );
-        // The timer is pinned at zero, not allowed to go negative, so the
-        // hold can never accumulate a multi-step debt.
-        assert!(leg.phase_timer >= 0.0, "timer debt: {}", leg.phase_timer);
-    }
-    // Release the gate: the held stance steps on the next tick.
-    plan.bootstrap_gate = false;
-    let _ = step_leg_kinematic(&mut leg, 100.0, v, v, false, &cfg, &plan, 1e-3);
-    assert_eq!(
-        leg.phase,
-        GaitPhase::Swing,
-        "the held stance must step the moment the gate clears"
-    );
-    // And the released step is forward of its pivot (gas guard composes).
-    assert!(
-        leg.swing_to.x > leg.plant_pos.x,
-        "released step landed behind its pivot: to={} from={}",
-        leg.swing_to.x,
-        leg.plant_pos.x
-    );
-}
-
-#[test]
-fn test_bootstrap_held_stance_never_lifts_on_contact_loss_alone() {
-    // The escape hatch must survive the gate: a foot that has genuinely left
-    // the ground still ends its stance, otherwise loop 2 thrusts against air
-    // and the gait hangs on a foot that is not there.
-    //
-    // The timer is left live: `lost_contact_early` is deliberately gated on
-    // `phase_timer > 0` so a foot that legitimately leaves just before
-    // expiry is not double counted, and the suppression must not change that.
-    let cfg = default_config();
-    let v = cfg.target_speed;
-    let mut plan = cruise_plan(&cfg);
-    plan.bootstrap_gate = true;
-    let mut leg = stance_leg(&cfg, 0.0);
-    leg.phase_timer = cfg.stance_duration_ts * 0.5;
-    let airborne = Some(LegContactInput {
-        touching: false,
-        foot_x: None,
-    });
-    let _ = step_leg_contact(
-        &mut leg,
-        0.0,
-        v,
-        v,
-        false,
-        &cfg,
-        &plan,
-        1e-3,
-        airborne,
-        GaitAuthority::Full,
-    );
-    assert_eq!(
-        leg.phase,
-        GaitPhase::Swing,
-        "real contact loss must still lift the foot during bootstrap"
-    );
-    assert!(leg.early_lift, "flag the contact-driven liftoff");
-}
-
-#[test]
-fn test_bootstrap_gate_never_engages_when_disabled() {
-    // Default-off invariant: `v_boot < 0` must keep the gate inert at any
-    // measured speed, so the committed gait stays bit-identical.
-    let cfg = default_config();
-    assert!(cfg.v_boot < 0.0, "the default must be disabled");
-    for v in [-500.0, -30.0, 0.0, 30.0, 500.0] {
-        assert!(
-            !bootstrap_gate_active(cfg.v_boot, v),
-            "disabled flag engaged at measured v={v}"
-        );
-    }
-    // Enabled: active only strictly below the boot speed, symmetric in
-    // direction (walking backwards boots the same way).
-    assert!(bootstrap_gate_active(30.0, 0.0));
-    assert!(bootstrap_gate_active(30.0, 29.9));
-    assert!(bootstrap_gate_active(30.0, -29.9));
-    assert!(!bootstrap_gate_active(30.0, 30.0));
-    assert!(!bootstrap_gate_active(30.0, 120.0));
-    assert!(!bootstrap_gate_active(30.0, -120.0));
-    // A zero threshold is the documented "enabled but never active" value:
-    // no speed is strictly below zero.
-    assert!(!bootstrap_gate_active(0.0, 0.0));
-}
-
-#[test]
 fn test_support_velocity_corrects_plant_error() {
     // A plant error `e` at touchdown maps to the velocity correction
     // `e / (Ts/2 + kv)`, annihilated in one stride (deadbeat).
@@ -1099,13 +955,8 @@ fn test_capture_point_worldspace_independent_of_hip() {
             xi: Some(m.com_x + m.v_com / w),
             omega0: w,
             mpc_trigger: false,
-            bootstrap_gate: false,
-            toe_len: cfg_test.toe_len,
-            // Global push-off hold is driven from walk.rs; direct-StepPlan
-            // tests exercise the committed path here.
-            push_off_hold: false,
         };
-        let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, hip_x, &cfg_test, &plan);
+        let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &cfg_test, &plan);
         let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
         assert!(
             (target - expected).abs() < 1e-2,
@@ -1136,14 +987,9 @@ fn test_capture_point_clamps_and_reports_saturation() {
         xi: Some(m.com_x + m.v_com / omega0(m.z_com, cfg.gravity).unwrap()),
         omega0: omega0(m.z_com, cfg.gravity).unwrap(),
         mpc_trigger: false,
-        bootstrap_gate: false,
-        toe_len: cfg.toe_len,
-        // Global push-off hold is driven from walk.rs; direct-StepPlan
-        // tests exercise the committed path here.
-        push_off_hold: false,
     };
     let hip_x = 0.0;
-    let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, hip_x, &cfg, &plan);
+    let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);
     assert!(
         (target - (hip_x + x_max)).abs() < 1e-2,
         "clamped target={target} expected={}",
@@ -4847,187 +4693,4 @@ fn test_attitude_flight_drops_gravity_term() {
     );
     // Both must still settle to upright.
     assert!(a.theta.abs() < 1e-3 && c.theta.abs() < 1e-3);
-}
-
-// -----------------------------------------------------------------
-// Stage 4b — push-off startup (PUSH_OFF): trailing-leg hold until the DCM
-// commits past the leading foot's toe edge
-// -----------------------------------------------------------------
-
-/// A [`StepPlan`] with a measured CoM state, for the direct push-off tests.
-/// `xi` and `push_off_hold` are set explicitly so each test controls the global
-/// hold independently of the velocity arithmetic.
-fn push_off_plan(cfg: &LowerBodyConfig, com_x: f32, v_com: f32, xi: f32, hold: bool) -> StepPlan {
-    StepPlan {
-        x_max: compute_x_max(
-            cfg.thigh_len,
-            cfg.calf_len,
-            cfg.hip_height,
-            cfg.safety_margin,
-        ),
-        stopping: false,
-        capture_offset: 0.0,
-        measured: Some(CaptureMeasure {
-            com_x,
-            v_com,
-            z_com: cfg.hip_height,
-        }),
-        xi: Some(xi),
-        omega0: omega0(cfg.hip_height, cfg.gravity).unwrap(),
-        mpc_trigger: false,
-        bootstrap_gate: false,
-        toe_len: cfg.toe_len,
-        push_off_hold: hold,
-    }
-}
-
-/// One `step_leg` stance tick with explicit opposite-plant x and `Contact`
-/// authority, no contact truth (the hold logic must not depend on contact).
-#[allow(clippy::too_many_arguments)]
-fn push_off_tick(
-    leg: &mut LegState,
-    hip_x: f32,
-    v: f32,
-    v_desired: f32,
-    cfg: &LowerBodyConfig,
-    plan: &StepPlan,
-    other_plant_x: f32,
-) -> Option<f32> {
-    let mut a = 0u32;
-    let mut b = 0u32;
-    step_leg(
-        leg,
-        hip_x,
-        v,
-        v_desired,
-        false,
-        cfg,
-        plan,
-        1.0 / 90.0,
-        None,
-        GaitAuthority::Contact,
-        0.05,
-        &mut a,
-        &mut b,
-        other_plant_x,
-    )
-}
-
-#[test]
-fn test_push_off_global_hold_keeps_both_feet_planted() {
-    // Startup: both feet planted (rear -20, front +20), CoM at 0, body still,
-    // intent on. The global hold (`push_off_hold`) says xi has not committed
-    // past the leading toe, so NO scheduled liftoff fires on either leg even
-    // though both timers have expired and each foot's `com_crossed`/timer would
-    // normally lift. This is the "start with stance" guarantee: the rear foot
-    // stays loaded (push-off), the front foot stays the pivot.
-    let mut cfg = default_config();
-    cfg.push_off = true;
-    let plan = push_off_plan(&cfg, 0.0, 0.0, 0.0, true); // uncommitted
-    let mut rear = stance_leg(&cfg, -20.0);
-    rear.phase_timer = 0.0;
-    let mut front = stance_leg(&cfg, 20.0);
-    front.phase_timer = 0.0;
-    let _ = push_off_tick(&mut rear, 0.0, 0.0, cfg.target_speed, &cfg, &plan, 20.0);
-    let _ = push_off_tick(&mut front, 0.0, 0.0, cfg.target_speed, &cfg, &plan, -20.0);
-    assert_eq!(
-        rear.phase,
-        GaitPhase::Stance,
-        "global hold: rear foot stays planted"
-    );
-    assert_eq!(
-        front.phase,
-        GaitPhase::Stance,
-        "global hold: front pivot stays planted"
-    );
-    assert_eq!(rear.phase_timer, 0.0, "timer pinned, not backlogged");
-}
-
-#[test]
-fn test_push_off_releases_trailing_foot_when_dcm_commits() {
-    // Once xi has committed past the leading toe, the global hold drops. The
-    // TRAILING foot releases into a FORWARD swing (the law at v=90 aims ahead
-    // of the pivot), while the LEADING foot is still pivot-held: with both feet
-    // down you never lift the one ahead of the other.
-    let mut cfg = default_config();
-    cfg.push_off = true;
-    let plan = push_off_plan(&cfg, 0.0, 90.0, 29.0, false); // committed (29>20+8)
-    let mut rear = stance_leg(&cfg, -20.0);
-    rear.phase_timer = 0.0;
-    let _ = push_off_tick(&mut rear, 0.0, 90.0, cfg.target_speed, &cfg, &plan, 20.0);
-    assert_eq!(
-        rear.phase,
-        GaitPhase::Swing,
-        "committed DCM releases the trailing leg"
-    );
-    assert!(
-        rear.swing_to.x > rear.plant_pos.x,
-        "release swing steps FORWARD of the pivot, got {}",
-        rear.swing_to.x
-    );
-    let mut front = stance_leg(&cfg, 20.0);
-    front.phase_timer = 0.0;
-    let _ = push_off_tick(&mut front, 0.0, 90.0, cfg.target_speed, &cfg, &plan, -20.0);
-    assert_eq!(
-        front.phase,
-        GaitPhase::Stance,
-        "leading foot is the pivot: not lifted while the rear foot is still planted"
-    );
-}
-
-#[test]
-fn test_push_off_flag_off_matches_committed_liftoff() {
-    // Bit-identical guarantee: with push_off=false the startup tick behaves
-    // exactly as the committed gait — the trailing leg's own `com_crossed`
-    // fires on an expired timer and it lifts immediately (the pathology the
-    // hold fixes), with the committed release reason recorded. walk.rs never
-    // raises `push_off_hold` when the flag is off, so the plan field is false.
-    let cfg = default_config(); // push_off = false
-    let plan = push_off_plan(&cfg, 0.0, 0.0, 0.0, false);
-    let mut rear = stance_leg(&cfg, -20.0);
-    rear.phase_timer = 0.0;
-    let _ = push_off_tick(&mut rear, 0.0, 0.0, cfg.target_speed, &cfg, &plan, 20.0);
-    assert_eq!(
-        rear.phase,
-        GaitPhase::Swing,
-        "flag-off committed behavior: com_crossed lifts the trailing leg at once"
-    );
-    assert_eq!(
-        rear.trigger_reason, 3,
-        "committed release reason is com-crossed"
-    );
-}
-
-#[test]
-fn test_push_off_cruise_is_inert() {
-    // At cruise neither push-off hold arms, so the normal alternating step
-    // fires exactly as the committed gait:
-    // - global: xi = com + v/ω₀ ≈ 36 is already past the leading toe (20 + 8),
-    //   so walk.rs computes push_off_hold = false;
-    // - pivot: the stepping leg is the TRAILING one (plant behind the other),
-    //   so `s*(plant - other_plant) > 0` is false.
-    // Both feet planted (the normal mid-stance handoff instant), other NOT
-    // swinging (the anti-phase gate lets the trailing foot lift once the
-    // leading foot is planted).
-    let mut cfg = default_config();
-    cfg.push_off = true;
-    let w = omega0(cfg.hip_height, cfg.gravity).unwrap();
-    let v = cfg.target_speed;
-    let xi = v / w; // ~36 ahead of com=0
-    assert!(xi > 28.0, "precondition: cruise xi past the leading toe");
-    let plan = push_off_plan(&cfg, 0.0, v, xi, false); // hold already evaluated false
-    let mut rear = stance_leg(&cfg, -40.0);
-    rear.phase_timer = 0.0;
-    let _ = push_off_tick(&mut rear, 0.0, v, v, &cfg, &plan, 20.0);
-    assert_eq!(
-        rear.phase,
-        GaitPhase::Swing,
-        "cruise trailing foot steps normally (global inert: committed; pivot inert: trailing)"
-    );
-    // And that swing is FORWARD: at cruise the law leads the pivot, exactly the
-    // committed gait — push_off adds nothing to the walking regime.
-    assert!(
-        rear.swing_to.x > rear.plant_pos.x,
-        "cruise step stays forward"
-    );
 }

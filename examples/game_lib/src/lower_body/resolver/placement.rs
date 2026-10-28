@@ -1,4 +1,4 @@
-use super::laws::{apply_bootstrap_floor, compute_forward_target};
+use super::laws::compute_forward_target;
 use super::types::*;
 // ---------------------------------------------------------------------------
 // Step
@@ -128,24 +128,6 @@ pub(crate) struct StepPlan {
     /// capped flight — measured to worsen the touchdown lead (−18/−32 px vs
     /// the baseline −7/+21). Stays off until §4 lands.
     pub(crate) mpc_trigger: bool,
-    /// Bootstrap gas guard ([`apply_bootstrap_floor`]): `true` while the
-    /// **measured** speed is still below `config.v_boot`, i.e. while the DCM has
-    /// no usable velocity and the placement law would command a backward step.
-    /// Always `false` when `v_boot < 0` (disabled) or the body has booted, which
-    /// keeps the committed behavior bit-identical.
-    pub(crate) bootstrap_gate: bool,
-    /// Forward support-edge proxy (`config.toe_len`) used by the gas guard.
-    pub(crate) toe_len: f32,
-    /// Push-off startup hold (Stage 4b, `config.push_off`): `true` while the DCM
-    /// `xi` has NOT yet committed past the leading stance foot's toe edge.
-    /// Computed globally by [`step_lower_body`](super::walk::step_lower_body):
-    /// while set, NO leg may leave stance on a schedule (timer, `com_crossed`,
-    /// or `dcm_crossed`) — both feet stay planted and the hip carries the CoM
-    /// over the front pivot until the forward fall is committed. Inert at
-    /// cruise: `xi` leads the CoM by `v/ω₀`, already past the leading toe on
-    /// every normal step, so this is `false` throughout the walking gait.
-    /// `false` = committed behavior (bit-identical when `push_off` is off).
-    pub(crate) push_off_hold: bool,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the
@@ -154,31 +136,20 @@ pub(crate) struct StepPlan {
 ///
 /// While stopping, targets the capture point instead of the forward plan.
 /// The result is always clamped to `hip ± x_max`.
-///
-/// `pivot_x` is the swing foot's lift-off plant (`LegState::plant_pos.x`).
-/// While `plan.bootstrap_gate` is set, the result passes through
-/// [`apply_bootstrap_floor`] so a bootstrapping step can never be placed behind
-/// its own pivot, then through the usual reach clamp.
 pub(crate) fn plan_target_x(
     hip_x: f32,
     v: f32,
     v_desired: f32,
     t_flight: f32,
-    pivot_x: f32,
     config: &LowerBodyConfig,
     plan: &StepPlan,
 ) -> f32 {
     let target = plan_target_x_raw(hip_x, v, v_desired, t_flight, config, plan);
-    let target = if plan.bootstrap_gate {
-        apply_bootstrap_floor(target, pivot_x, v_desired, plan.toe_len)
-    } else {
-        target
-    };
     target.clamp(hip_x - plan.x_max, hip_x + plan.x_max)
 }
 
-/// The placement law itself, without the bootstrap gas guard or the reach
-/// clamp ([`plan_target_x`] applies both).
+/// The placement law itself, without the reach clamp ([`plan_target_x`] applies
+/// it).
 pub(crate) fn plan_target_x_raw(
     hip_x: f32,
     v: f32,

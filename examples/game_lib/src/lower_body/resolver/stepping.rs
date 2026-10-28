@@ -95,7 +95,6 @@ pub(crate) fn step_leg(
     max_swing_wait: f32,
     early_lift_count: &mut u32,
     swing_wait_count: &mut u32,
-    other_plant_x: f32,
 ) -> Option<f32> {
     // `Contact` and above may trust the measured foot position. `Observe` and
     // `Timer` must not — that is what separates them from `Contact`.
@@ -203,50 +202,8 @@ pub(crate) fn step_leg(
                 }
                 None => false,
             };
-            // Bootstrap **suppression** (plan §2b): below `v_boot` a leg may not
-            // leave `Stance` on a *schedule* — not the nominal timer, not the DCM
-            // margin, not the CoM-crossed emergency — because every one of those
-            // is derived from a velocity that does not exist yet. Only a real
-            // contact loss ends the stance, so both feet stay loaded and the leg
-            // PD's stance thrust has a floor to push against. Without this the
-            // timer fires within one stance period of the command arriving, lifts
-            // the rear (push-off) foot, and the body never gains speed.
-            //
-            // The timer is pinned at zero while held: on release the leg steps on
-            // the very next tick instead of carrying a large negative debt that
-            // would fire several steps' worth of schedule at once.
-            let bootstrap_held = plan.bootstrap_gate && !lost_contact_early;
-            // Push-off startup (Stage 4b, `plans/walk-improvement-plan.md` §2b):
-            // two position-based holds, together = "start with stance":
-            //
-            // - `plan.push_off_hold` (global, computed in `step_lower_body`):
-            //   the DCM has not committed past the leading stance foot's toe
-            //   edge, so NO scheduled liftoff fires on either leg. The hip
-            //   carries the CoM over the front pivot while both feet stay
-            //   planted; the trailing foot is still the loaded push-off leg
-            //   when `xi` finally commits. Holding only the trailing leg was
-            //   measured to collapse the start (net −53 px): the LEADING foot
-            //   then stepped on its expired timer and, at `v ≈ 0`, the
-            //   placement law aimed that swing BACKWARD, removing the pivot.
-            // - pivot hold: while both feet are planted, the leg whose plant is
-            //   AHEAD of the other's may not lift at all — it is the vaulting
-            //   pivot. At cruise this is a no-op: the crossing leg that steps
-            //   is always the trailing one (`other_swinging` or a fresh timer
-            //   covers every normal liftoff), so the alternating gait is inert.
-            //
-            // A real contact loss releases both.
-            let s = if v_desired >= 0.0 { 1.0 } else { -1.0 };
-            let pivot_hold =
-                config.push_off && !other_swinging && s * (leg.plant_pos.x - other_plant_x) > 0.0;
-            let push_off_held = (plan.push_off_hold || pivot_hold) && !lost_contact_early;
-            let stance_over = if bootstrap_held || push_off_held {
-                false
-            } else {
-                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed
-            };
-            if bootstrap_held || push_off_held {
-                leg.phase_timer = leg.phase_timer.max(0.0);
-            }
+            let stance_over =
+                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed;
             if stance_over && wants_step && !other_swinging {
                 // Log which condition ended the stance (telemetry only).
                 leg.trigger_reason = if dcm_crossed {
@@ -260,16 +217,8 @@ pub(crate) fn step_leg(
                 // The jump never retargets a step: every swing targets its own
                 // forward Raibert landing point, exactly as in a normal walk, so a
                 // foot always leads ahead of the hip for the next step.
-                // `leg.plant_pos` is this swing's lift-off pivot for the gas guard.
-                swing_to.x = plan_target_x(
-                    hip_x,
-                    v,
-                    v_desired,
-                    config.swing_duration_ts,
-                    leg.plant_pos.x,
-                    config,
-                    plan,
-                );
+                swing_to.x =
+                    plan_target_x(hip_x, v, v_desired, config.swing_duration_ts, config, plan);
                 swing_to.y = config.floor_y;
                 leg.phase = GaitPhase::Swing;
                 leg.phase_timer = config.swing_duration_ts;
@@ -290,17 +239,8 @@ pub(crate) fn step_leg(
             // from the current hip position, velocity and remaining flight
             // time. Open-loop targets frozen at lift-off are what made sudden
             // stops land both feet on one side of the hip.
-            // Re-planned against the same lift-off pivot, so the gas guard keeps
-            // the whole swing forward of where the foot left the ground.
-            leg.swing_to.x = plan_target_x(
-                hip_x,
-                v,
-                v_desired,
-                leg.phase_timer.max(0.0),
-                leg.plant_pos.x,
-                config,
-                plan,
-            );
+            leg.swing_to.x =
+                plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
             // §19.2.1 deadbeat swing timing: traverse the spline so the foot
             // reaches the capture point about when the CoM does, instead of on
             // the fixed swing timer. `T_remain = |x_land − x_com| / v_com`

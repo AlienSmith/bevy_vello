@@ -125,23 +125,11 @@ impl HipPinParams {
         // see `LowerBodyConfig::mpc_trigger` for why it stays experimental
         // until the §4 exponential placement lands.
         p.config.mpc_trigger = env_bool("MPC_TRIGGER", p.config.mpc_trigger);
-        // Push-off startup (Stage 4b): hold the TRAILING foot in stance until the
-        // DCM crosses the LEADING foot's toe edge, so the body commits over the
-        // front pivot before the rear foot swings (stance-first, no backward
-        // kick). The position-based replacement for the noisy V_BOOT gate.
-        p.config.push_off = env_bool("PUSH_OFF", p.config.push_off);
         // Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`): the
         // touchdown backward solve may brake only down to TD_FLOOR·v_des,
         // never past it (no reversal against the command). Negative = off
         // (committed gait). Try TD_FLOOR=0.2.
         p.config.td_solve_floor = env_f32("TD_FLOOR", p.config.td_solve_floor);
-        // Stage 4a bootstrap gates (`plans/walk-improvement-plan.md` §2b), in
-        // px/s of **measured** speed: below this the gas guard forbids a swing
-        // target behind its pivot and the timer/DCM/CoM liftoff triggers are
-        // suppressed, so the rear foot stays planted and its stance thrust is
-        // the push-off that boots the body. Negative = off (committed gait).
-        // Try V_BOOT=30 (≈0.25·TARGET_SPEED).
-        p.config.v_boot = env_f32("V_BOOT", p.config.v_boot);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);
