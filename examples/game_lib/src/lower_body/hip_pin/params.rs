@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::lower_body::resolver::{GaitAuthority, LowerBodyConfig};
+use crate::lower_body::resolver::{DcmPropagate, GaitAuthority, LowerBodyConfig};
 
 #[derive(Resource)]
 pub struct HipPinParams {
@@ -104,22 +104,23 @@ impl HipPinParams {
         p.config.step_height = env_f32("STEP_HEIGHT", p.config.step_height).max(0.0);
         // Event-driven gait (`plans/swing-phase-timing.md` §3/§4): the
         // support-edge proxy for the DCM-margin liftoff trigger.
-        // `T_CONV` is no longer env-tunable: it is the ONE coefficient (`β`) of
-        // the analytic deadbeat law, so tuning it alone was proven harmful
-        // (see Stage 3 results — `T_CONV=0.5` net +59px, worst in the sweep).
-        // The field is fixed at its default `1.0` (= 1/ω₀) to keep the
-        // committed flag-off baseline bit-identical; use `DCM_TC` instead.
-        // Stage 3 proportional velocity-error placement gain (`DCM_KP`):
-        // `x_foot = DCM − Kp·(v_des − v)`. Enabled it REPLACES the T_CONV
-        // horizon form, because at cruise it keeps a real forward lead instead
-        // of cancelling to zero. Units are seconds. Negative = off (committed).
-        p.config.dcm_kp = env_f32("DCM_KP", p.config.dcm_kp);
         // Analytic deadbeat placement (`DCM_TC`): the exact two-coefficient law
-        // `p = xi + (v·e^(−ω₀·t_c) − v_des)/(ω₀·sinh(ω₀·t_c))`. `t_c` is the
-        // convergence deadline in seconds (`DCM_TC=0` auto-picks the stance
-        // duration). Enabled it takes precedence over DCM_KP and the horizon law;
-        // negative (default) leaves the committed law untouched.
+        // `p = xi + (v·e^(−ω₀·t_c) − v_des)/(ω₀·sinh(ω₀·t_c))` — the ONLY
+        // runtime placement law. `t_c` is the convergence deadline in seconds;
+        // `DCM_TC=0` (default) auto-picks the stance duration; negative
+        // disables it (Raibert neutral-point fallback). The former single-dof
+        // truncations (`T_CONV` horizon, `DCM_KP` gain) were removed 2026-10-28
+        // — deadbeat contains both as its `t_c → ∞` / `t_c → 0` limits.
         p.config.dcm_tc = env_f32("DCM_TC", p.config.dcm_tc);
+        // Mid-swing placement mode `PROPAGATE=off|stretch|land` (default off =
+        // committed receding horizon). `land` (state propagation to touchdown)
+        // measured worse 2026-10-28; `stretch` (absolute-deadline horizon)
+        // under test. See `DcmPropagate`.
+        p.config.dcm_propagate = match std::env::var("PROPAGATE").ok().as_deref().map(str::trim) {
+            Some("stretch") | Some("1") | Some("true") => DcmPropagate::Stretch,
+            Some("land") => DcmPropagate::Land,
+            _ => p.config.dcm_propagate,
+        };
         p.config.toe_len = env_f32("TOE_LEN", p.config.toe_len).max(0.0);
         // §3 DCM-margin liftoff trigger. Off by default (the committed gait);
         // see `LowerBodyConfig::mpc_trigger` for why it stays experimental

@@ -9,10 +9,10 @@
 #                       STANCE, SWING, GAIT_AUTHORITY, ATT_LEAN_KP, ATT_LEAN_KD,
 #                       SUBSTEPS, TARGET_SPEED, WIN_HIDDEN, COLLISION, FACING,
 #                       MPC_TRIGGER, TOE_LEN, DCM_TC, ...
-#                       (T_CONV was removed: it is the derived beta coefficient
-#                       of the analytic deadbeat law — tune DCM_TC instead.
-#                       V_BOOT and PUSH_OFF (startup gates) were removed: they
-#                       never worked and were never enabled.)
+#                       (T_CONV and DCM_KP were removed: they are single-dof
+#                       truncations of the analytic deadbeat law — tune DCM_TC
+#                       instead. V_BOOT and PUSH_OFF (startup gates) were
+#                       removed: they never worked and were never enabled.)
 #
 # The binary is `visual_arm_pd` — the rendered twin of the old headless bin:
 # same script driver, same 90 Hz XPBD physics, same telemetry CSV, but booted
@@ -23,9 +23,12 @@
 # end either way). This is the pipeline going forward: the QA walk IS the
 # visual app, so the graph we plot is the graph on screen.
 #
-# Defaults: LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70 COLLISION=1 WIN_HIDDEN=1,
-# plans/walk_script.json (mirrors run_visual.ps1; the older headless defaults
-# were LEG_COMPLIANCE=5e-9 STEP_HEIGHT=50).
+# Defaults: LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70 COLLISION=1 WIN_HIDDEN=1
+# DCM_TC=0 (analytic deadbeat placement is the ONLY runtime placement law, t_c
+# auto-picks the stance duration), plans/walk_script.json (mirrors
+# run_visual.ps1; the older headless defaults were LEG_COMPLIANCE=5e-9
+# STEP_HEIGHT=50). Pass DCM_TC=<s> to tune the deadline (or DCM_TC=-1 to disable
+# the law, falling back to the Raibert neutral point).
 # Artifacts land in tmp/headless/walks/:
 #   <TAG>.csv            telemetry (104+ columns)
 #   <TAG>.hips_feet.png  hip + feet x/y plot (plot_p3.py)
@@ -65,7 +68,7 @@ CSV=$OUTDIR/$TAG.csv
 cp "$REPO/examples/collision_detection/assets/character/v10.character.json" \
    "$OUTDIR/$TAG.character.json"
 
-echo "== run $TAG: ${ENVARGS[*]:-<defaults: LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70 COLLISION=1 WIN_HIDDEN=1>} (asset snapshot: $OUTDIR/$TAG.character.json)"
+echo "== run $TAG: ${ENVARGS[*]:-<defaults: LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70 COLLISION=1 WIN_HIDDEN=1 DCM_TC=0>} (asset snapshot: $OUTDIR/$TAG.character.json)"
 env ASSET_ROOT="$REPO/examples/collision_detection/assets" \
     SCRIPT="$REPO/plans/walk_script.json" \
     OUT_CSV="$CSV" \
@@ -73,6 +76,7 @@ env ASSET_ROOT="$REPO/examples/collision_detection/assets" \
     STEP_HEIGHT="${STEP_HEIGHT:-70}" \
     COLLISION="${COLLISION:-1}" \
     WIN_HIDDEN="${WIN_HIDDEN:-1}" \
+    DCM_TC="${DCM_TC:-0}" \
     "${ENVARGS[@]}" \
     "$BIN" 2>&1 | grep -E "body: rows|rigidity:|leg:|walk params|visual harness" || true
 

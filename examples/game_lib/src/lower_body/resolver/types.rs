@@ -47,14 +47,6 @@ pub struct LowerBodyConfig {
     /// keeps `½·a·T_swing² ≤ prediction_margin·X_max`, which bounds the hip
     /// acceleration at `a_max` (see [`GaitLimits`]).
     pub prediction_margin: f32,
-    /// Velocity-schedule convergence horizon of the committed horizon law
-    /// (`plans/swing-phase-timing.md` §4), in units of `1/ω₀`. **Not
-    /// env-tunable** (no `T_CONV`): it is the single coefficient `β` of the
-    /// analytic deadbeat law — `β(t_c) = 1/(T_conv·ω₀) ⟺ sinh(ω₀·t_c) = T_conv`
-    /// — and tuning it alone (without the matching `α`) was measured to be the
-    /// worst placement configuration (Stage 3 results). It stays fixed at
-    /// `1.0` for the flag-off baseline; tune `dcm_tc` (`DCM_TC`) instead.
-    pub t_conv: f32,
     /// Analytic (deadbeat) convergence window for foot placement, seconds.
     ///
     /// The exact LIPM solution of "with the foot planted, reach `v_desired`
@@ -65,35 +57,25 @@ pub struct LowerBodyConfig {
     /// ```
     ///
     /// i.e. `p = x + α·v − β·v_desired` with `α = 1/(ω₀·tanh(ω₀t_c))` and
-    /// `β = 1/(ω₀·sinh(ω₀t_c))`. Two coefficients from ONE physical parameter.
-    /// The [`capture_point_with_horizon`] law in use today keeps only `β`
-    /// (with a hand-picked `t_conv` and no `α` term beyond `1/ω₀`), and the
-    /// `ξ − Kp·(v_des − v)` gain family has a single dof, so neither can express
-    /// this: they can get the velocity gain right or the lead right, not both.
+    /// `β = 1/(ω₀·sinh(ω₀t_c))`. Two coefficients from ONE physical parameter —
+    /// the single-dof truncations (horizon form, `ξ − Kp·(v_des − v)` gain form)
+    /// could get the velocity gain right or the lead right, not both, and were
+    /// removed 2026-10-28.
     ///
     /// `t_c` is a **deadline**, so the physical choice is the stance duration
     /// `t_c = T_s` (`DCM_TC=0` → auto). `t_c → ∞` recovers the plain capture
     /// point `p = ξ` (asymptotic stop); `t_c → 0` recovers the stiff
     /// velocity-error spring `p = x + (v − v_des)/(ω₀²·t_c)`.
     ///
-    /// Env: `DCM_TC=<seconds>` tunes the window directly; `DCM_TC=0` auto-picks
-    /// the stance duration; negative (the default) disables this law so the
-    /// committed horizon law runs unchanged.
+    /// Env: `DCM_TC=<seconds>` tunes the window directly; `DCM_TC=0` (the
+    /// default) auto-picks the stance duration; negative disables this law so
+    /// the Raibert neutral-point fallback runs unchanged.
     pub dcm_tc: f32,
-    /// Proportional velocity-error foot-placement gain (Stage 3 candidate,
-    /// `plans/walk-improvement-plan.md`), the control form
-    /// `Step Placement = DCM − Kp·(v_target − v_current)`.
-    ///
-    /// Not a redundant copy of `t_conv`: it selects **which** velocity the gain
-    /// multiplies. The horizon law subtracts the absolute `v_desired`, which at
-    /// cruise cancels against the `v/ω₀` term and lands the foot *under* the CoM
-    /// — zero lead, the "feet never ahead of the hip" pathology. This form
-    /// subtracts only the *error*, so at cruise it targets the raw DCM
-    /// (`x + v_des/ω₀ ≈ 36 px` ahead) and the lead scales with speed.
-    ///
-    /// Units: seconds (a gain on a velocity, producing a length). Negative
-    /// (default) = disabled ⇒ the committed horizon law runs unchanged.
-    pub dcm_kp: f32,
+    /// Per-frame mid-swing placement mode for deadbeat. All modes share the
+    /// exact same planted answer (they coincide at `t_flight = 0`, the
+    /// touchdown tick) and differ only in how the airborne foot is AIMED
+    /// during flight. Env `PROPAGATE=off|stretch|land`.
+    pub dcm_propagate: DcmPropagate,
     /// Foot half-length ahead of the plant anchor, px (support-edge proxy for
     /// the §3 DCM-margin trigger; there are no heel/toe particles yet).
     pub toe_len: f32,
@@ -177,13 +159,13 @@ impl Default for LowerBodyConfig {
             beta: 1.0,
             safety_margin: 0.85,
             prediction_margin: 0.5,
-            t_conv: 1.0,
+            dcm_propagate: DcmPropagate::Off,
             toe_len: 8.0,
             mpc_trigger: false,
             td_solve_floor: -1.0,
-            dcm_kp: -1.0,
-            // Analytic deadbeat placement off; the committed horizon law runs.
-            dcm_tc: -1.0,
+            // Analytic deadbeat placement is the shipped law; `0` auto-picks
+            // the stance duration as the convergence deadline.
+            dcm_tc: 0.0,
             step_height: 28.0,
             floor_y: 0.0,
             bend_sign: 1.0,
@@ -201,6 +183,30 @@ impl Default for LowerBodyConfig {
             theta_max: 1.30,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Mid-swing placement mode
+// ---------------------------------------------------------------------------
+
+/// How the per-frame re-planning anchors the deadbeat horizon while a foot is
+/// airborne. See [`LowerBodyConfig::dcm_propagate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DcmPropagate {
+    /// Committed behavior: horizon re-anchored to "now" every frame
+    /// (`t_c = stance_duration` on the live state).
+    Off,
+    /// Horizon-stretch: keep the live state but promise at the ABSOLUTE
+    /// deadline — `t_c' = t_flight + stance_duration`. Every frame's promise
+    /// completes at touchdown + stance; coefficients soften as flight remains
+    /// (soft early, exact late) and the target stays inside the reach clamp.
+    Stretch,
+    /// State-propagation: carry the measured state to touchdown over the live
+    /// support pivot (`ξ_L`, `v_L`), then plain `t_c` deadbeat. Measured WORSE
+    /// than Off (2026-10-28 A/B, `plans/planner-rewrite-drop-sandbox.md`:
+    /// 1322 → 318 px servo-flow / 640 px pivot-flow; mid-flight targets
+    /// saturate `hip + x_max`). Kept for swing-momentum-aware experiments.
+    Land,
 }
 
 // ---------------------------------------------------------------------------

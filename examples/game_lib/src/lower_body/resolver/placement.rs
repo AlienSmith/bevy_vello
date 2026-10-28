@@ -97,6 +97,24 @@ pub fn capture_point(
 /// Per-tick planning context shared by both legs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StepPlan {
+    /// World x of the **support foot** — the planted foot the body is currently
+    /// pivoting around — for the leg this plan steers. `Some` only while the
+    /// leg is airborne and the opposite foot is planted (the anti-phase gate
+    /// makes it unique), the body is grounded, and a measurement exists.
+    /// When present, the placement law **propagates the state to touchdown
+    /// over this pivot** before evaluating deadbeat (see
+    /// [`propagate_to_landing`]), so every swing frame commands the same
+    /// absolute promise: `v = v_desired` one stance after the *actual*
+    /// landing, not `t_c` after the current tick. `None` = no pivot (both
+    /// legs grounded, airborne body, or unmeasured) → the law runs on the
+    /// live state exactly as before (`t_r = 0` degeneracy).
+    pub(crate) support_x: Option<f32>,
+    /// Horizon-stretch mode (`DcmPropagate::Stretch`): evaluate deadbeat with
+    /// the ABSOLUTE deadline `t_c' = t_c + t_flight` on the live state —
+    /// "settle one stance after the actual landing," promised identically from
+    /// every frame. Softens `(α, β)` early in flight, converges to the plain
+    /// law as `t_flight → 0`.
+    pub(crate) stretch: bool,
     /// Safety-margined reach; swing targets are clamped to `hip ± x_max` so a
     /// plant can never be aimed outside the workspace (which the IK would
     /// ray-clamp into a foot floating off the floor).
@@ -165,32 +183,44 @@ pub(crate) fn plan_target_x_raw(
         // no-measurement and settle paths, so the branch stays.)
         return (hip_x + plan.capture_offset).clamp(hip_x - plan.x_max, hip_x + plan.x_max);
     }
-    // Loop 1 balance (plan §2, §4): the LIPM capture point shifted by the
-    // desired CoM velocity, `x_foot = x_CoM + (v_CoM − v_des)/(T_conv·ω₀)`.
-    // This is a WORLD-space target — `x_CoM` is the measured CoM position — so
-    // it needs no `v·t_flight` prediction (unlike the hip-relative Raibert
-    // neutral point, which must predict where the hip will be at touchdown).
-    // Re-planning every frame with the fresh measurement makes the target track
-    // CoM motion mid-swing. If the measurement is degenerate (`z_com ≤ 0` or
+    // Loop 1 balance (plan §2, §4): foot placement from the LIPM capture point
+    // state. This is a WORLD-space target — `x_CoM` is the measured CoM
+    // position — so it needs no `v·t_flight` hip prediction (unlike the
+    // hip-relative Raibert neutral point, which must predict where the hip will
+    // be at touchdown). If the measurement is degenerate (`z_com ≤ 0` or
     // `gravity ≤ 0`), fall back to the Raibert neutral point below.
-    // Placement-law precedence: analytic deadbeat → velocity-error gain →
-    // committed horizon form → Raibert neutral point. Each is a strict
-    // superset/alternative of the one below, and each is off by default, so the
-    // bottom of the chain is the bit-identical committed behavior.
+    // Placement law: the analytic deadbeat solution (`DCM_TC`), the exact
+    // two-coefficient LIPM form, evaluated in one of three per-frame modes
+    // (`DcmPropagate`) that all plant the SAME point (they coincide at
+    // `t_flight = 0`) and differ only in the mid-flight aim:
     //
-    // (`DCM_TC`) is the exact two-coefficient solution; (`DCM_KP`) is the
-    // one-dof velocity-error form; the horizon law is the zero-lead truncation
-    // the walk currently inherits. `DCM_TC > 0` is the window in seconds;
-    // `DCM_TC == 0` auto-selects the stance duration (see
-    // [`resolve_deadbeat_tc`]).
+    // - `Off` (committed): horizon re-anchored to "now", `t_c = stance` on
+    //   the live state — the promise slides forward each tick (the receding-
+    //   horizon defect: only the final frame is honest).
+    // - `Stretch`: absolute deadline `t_c' = t_c + t_flight` on the live
+    //   state — every frame promises `v_des` at touchdown + stance; soft
+    //   `(α, β)` early, exact late; target stays in the reach workspace.
+    // - `Land`: propagate the state to touchdown (`ξ_L`, `v_L`, see
+    //   [`propagate_to_landing`]) with plain `t_c` coefficients — measured
+    //   worse (clamp-saturated mid-flight arcs), kept for experiments.
+    //
+    // `p = ξ + (v·e^{−ω₀·t_c} − v_des)/(ω₀·sinh(ω₀·t_c)) = x + α·v − β·v_des`.
+    // `DCM_TC > 0` is the window in seconds; `DCM_TC == 0` (the default)
+    // auto-selects the stance duration (see [`resolve_deadbeat_tc`]); negative
+    // disables the law, falling back to the Raibert neutral point below. The
+    // velocity-error-gain and horizon truncations of this family were removed
+    // (2026-10-28) — deadbeat contains both as its limits.
     let t_c = resolve_deadbeat_tc(config.dcm_tc, config.stance_duration_ts);
-    if let Some(x) = capture_point_deadbeat(plan.xi, v, v_desired, plan.omega0, t_c) {
-        return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
-    }
-    if let Some(x) = capture_point_with_gain(plan.xi, v, v_desired, config.dcm_kp) {
-        return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
-    }
-    if let Some(x) = capture_point_with_horizon(plan.xi, plan.omega0, v_desired, config) {
+    let t_c_eff = if plan.stretch && t_c > 0.0 {
+        t_c + t_flight.max(0.0)
+    } else {
+        t_c
+    };
+    let (xi_in, v_in) = match plan.support_x {
+        Some(p_s) if t_flight > 0.0 => propagate_to_landing(plan.xi, v, plan.omega0, p_s, t_flight),
+        _ => (plan.xi, v),
+    };
+    if let Some(x) = capture_point_deadbeat(xi_in, v_in, v_desired, plan.omega0, t_c_eff) {
         return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
     }
     let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
@@ -203,63 +233,47 @@ pub(crate) fn plan_target_x_raw(
     (hip_x + v * t_flight + x_target).clamp(hip_x - plan.x_max, hip_x + plan.x_max)
 }
 
-/// LIPM capture point with an explicit velocity-tracking convergence horizon
-/// (`plans/swing-phase-timing.md` §4/§5): `x_foot = x_CoM + (v_CoM − v_des) /
-/// (T_conv·ω₀)`, with `ω₀ = √(g / z_CoM)`. `T_conv = 1.0` is the plan's
-/// principled default (`T_conv = 1/ω₀`, human scale); a smaller `T_conv` tracks
-/// speed more aggressively.
-///
-/// `xi`/`omega0` come from [`StepPlan`] (`None`/`0` when the pendulum frequency
-/// is undefined, `z_com ≤ 0` or `gravity ≤ 0`), so callers fall back to the
-/// Raibert neutral point.
-#[inline]
-pub fn capture_point_with_horizon(
-    xi: Option<f32>,
-    omega0: f32,
-    v_desired: f32,
-    config: &LowerBodyConfig,
-) -> Option<f32> {
-    let x = xi?;
-    if omega0 > f32::EPSILON {
-        Some(x - v_desired / (config.t_conv.max(f32::EPSILON) * omega0))
-    } else {
-        None
-    }
-}
-
-/// Capture-point placement with a **proportional velocity-error gain**, the
-/// control form from the user's derivation (`plans/walk-improvement-plan.md`):
+/// Advance the capture state `(ξ, v)` a time `t_r` to the touchdown instant
+/// with the flow the body ACTUALLY follows mid-swing: the leg-PD velocity
+/// servo holds the hip near-constant (`v_L = v`), so the CoM advances
+/// linearly. With `x₀ = ξ − v/ω₀`:
 ///
 /// ```text
-/// Step Placement = DCM − Kp·(v_target − v_current)
+/// x_L = x₀ + v·t_r,   v_L = v,   ξ_L = x_L + v_L/ω₀ = ξ + v·t_r
 /// ```
 ///
-/// Algebraically this is the same family as
-/// [`capture_point_with_horizon`] — substituting `DCM = x + v/ω₀` gives
-/// `x + v/ω₀ − Kp·v_des + Kp·v`, i.e. the horizon form with
-/// `1/(T_conv·ω₀) = Kp` when the gain multiplies the **absolute** desired
-/// speed. The difference is what the gain multiplies:
+/// (A full LIPM pivot propagation over the support foot —
+/// `ξ_L = p_s + (ξ − p_s)·e^{ω₀·t_r}` — was implemented and measured first
+/// (2026-10-28, `walk_propagated`): net progress 1322 → 640 px. The free-
+/// pendulum divergence over a 0.28 s flight inflates `v_L` to ≈ 1.9·v_des,
+/// so every step plants too far ahead, the *next* pivot then brakes hard,
+/// and the gait oscillates. The XPBD walker is a velocity-servo plant, not
+/// a free LIPM: constant-v propagation is its correct flow. `p_s` is kept
+/// in the signature for the stance-correction term, unused.)
 ///
-/// * horizon form: `−v_des/(T_conv·ω₀)` — at cruise (`v = v_des`) the two terms
-///   cancel exactly and the foot lands **under the CoM** (zero lead), which is
-///   why the walk never puts a foot ahead of the hip.
-/// * gain form: `−Kp·(v_des − v)` — at cruise the error is zero and the target
-///   is the raw DCM itself, `x + v_des/ω₀` ≈ 36 px **ahead** of the CoM. The
-///   lead appears automatically and scales with speed.
-///
-/// So `Kp` is not a redundant gain: it picks which quantity is being regulated
-/// (absolute speed vs. speed *error*). `Kp < 0` disables the form.
+/// `t_r = 0` ⇒ identity; `ω₀` degenerate or `xi = None` ⇒ passthrough (the
+/// caller's fallback chain still applies). Used by
+/// [`plan_target_x_raw`] to evaluate the placement law at touchdown state
+/// every frame, with `t_r` = remaining swing flight time.
 #[inline]
-pub fn capture_point_with_gain(xi: Option<f32>, v: f32, v_desired: f32, kp: f32) -> Option<f32> {
-    if kp < 0.0 {
-        return None;
-    }
-    let x = xi?;
-    Some(x - kp * (v_desired - v))
+pub(crate) fn propagate_to_landing(
+    xi: Option<f32>,
+    v: f32,
+    omega0: f32,
+    _p_s: f32,
+    t_r: f32,
+) -> (Option<f32>, f32) {
+    let (Some(x), true) = (xi, omega0 > f32::EPSILON) else {
+        return (xi, v);
+    };
+    (Some(x + v * t_r.max(0.0)), v)
 }
 
 /// Analytic (deadbeat) foot placement — the **exact** solution, not a hand-tuned
-/// form of it.
+/// form of it. The only runtime placement law; its two single-dof truncations
+/// (the zero-lead horizon form and the `ξ − Kp·(v_des − v)` gain form) were
+/// removed 2026-10-28 and survive only as the `t_c → ∞` / `t_c → 0` limits
+/// pinned by `test_deadbeat_placement_is_the_exact_solution`.
 ///
 /// Ask: with the foot planted at `p` and the body at `(x, v)`, at what `p` does
 /// the LIPM deliver `v(T_c) = v_desired` exactly `T_c` seconds from now? The
@@ -272,20 +286,18 @@ pub fn capture_point_with_gain(xi: Option<f32>, v: f32, v_desired: f32, kp: f32)
 ///   = x + α·v − β·v_desired,   α = 1/(ω₀·tanh(ω₀t_c)),  β = 1/(ω₀·sinh(ω₀t_c))
 /// ```
 ///
-/// Two coefficients from one physical parameter. The horizon law
-/// ([`capture_point_with_horizon`]) keeps only `β` (plus the implicit `1/ω₀`
-/// inside `xi`), and the `ξ − Kp·(v_des − v)` family ([`capture_point_with_gain`])
-/// has a single dof so it forces `(α, β) = (1/ω₀ + Kp, Kp)`. **Both are
-/// truncations of this expression** — that is why neither can make the foot
-/// lead *and* regulate speed correctly at once.
+/// Two coefficients from one physical parameter. A single-dof form (fixed `α`
+/// or welded `α = 1/ω₀ + Kp`) can get the velocity gain right or the lead
+/// right, not both — this expression has both, which is why it is the shipped
+/// law.
 ///
 /// Limits: `t_c → ∞` ⇒ `p → xi` (plain capture point, asymptotic stop);
-/// `t_c → 0` ⇒ `p → x + (v − v_des)/(ω₀²·t_c)`, the stiff velocity-error spring
-/// — i.e. the `Kp` family with `Kp = 1/(ω₀²·t_c)`.
+/// `t_c → 0` ⇒ `p → x + (v − v_des)/(ω₀²·t_c)`, the stiff velocity-error spring.
 ///
 /// `t_c` is a **deadline**, so it must cover the flight it is planned through
 /// (`t_c ≥ T_swing`), otherwise the foot is asked for a velocity during its own
-/// swing. `t_c <= 0` disables it (the caller falls back to the horizon law).
+/// swing. `t_c <= 0` disables it (the caller falls back to the Raibert neutral
+/// point).
 #[inline]
 pub fn capture_point_deadbeat(
     xi: Option<f32>,
