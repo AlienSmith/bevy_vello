@@ -577,8 +577,6 @@ fn test_compute_x_max_pythagorean() {
 /// Non-stopping plan context for the direct `step_leg` unit tests.
 fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
     StepPlan {
-        support_x: None,
-        stretch: false,
         x_max: compute_x_max(
             cfg.thigh_len,
             cfg.calf_len,
@@ -723,163 +721,37 @@ fn test_dcm_tc_env_semantics() {
     );
 }
 
-#[test]
-fn test_propagate_to_landing_is_the_servo_flow() {
-    // `propagate_to_landing` advances the capture state to touchdown with the
-    // flow the XPBD body ACTUALLY follows mid-swing: the leg-PD velocity servo
-    // holds hip/CoM velocity near-constant, so
-    //   ξ_L = ξ + v·t_r,  v_L = v  (and x_L = x₀ + v·t_r stays closed).
-    // (The full LIPM pivot flow was measured first and halved net progress —
-    // see the doc comment; this test pins the replacement.)
-    let w = omega0(90.0, 980.0).unwrap();
-    let (x0, v0, p_s, t_r) = (0.0, 40.0, -20.0, 0.24);
-    let xi = x0 + v0 / w;
-    let (xi_l, v_l) = propagate_to_landing(Some(xi), v0, w, p_s, t_r);
-    assert!(
-        (v_l - v0).abs() < 1e-6,
-        "servo flow holds velocity: {v_l} vs {v0}"
-    );
-    assert!(
-        (xi_l.unwrap() - (xi + v0 * t_r)).abs() < 1e-3,
-        "ξ advances with the CoM: {:?} vs {}",
-        xi_l.unwrap(),
-        xi + v0 * t_r
-    );
-    // Closed form: recombining x_L = ξ_L − v_L/ω₀ equals x₀ + v·t_r.
-    let x_l = xi_l.unwrap() - v_l / w;
-    assert!(
-        (x_l - (x0 + v0 * t_r)).abs() < 1e-3,
-        "x {x_l} vs {}",
-        x0 + v0 * t_r
-    );
-    // t_r = 0 ⇒ identity; degenerate ω₀ or missing ξ ⇒ passthrough.
-    let (xi0, v0out) = propagate_to_landing(Some(xi), v0, w, p_s, 0.0);
-    assert!((xi0.unwrap() - xi).abs() < 1e-6 && (v0out - v0).abs() < 1e-6);
-    assert_eq!(propagate_to_landing(None, v0, w, p_s, t_r), (None, v0));
-    let (xi_d, v_d) = propagate_to_landing(Some(xi), v0, 0.0, p_s, t_r);
-    assert!((xi_d.unwrap() - xi).abs() < 1e-6 && (v_d - v0).abs() < 1e-6);
-}
-
-#[test]
-fn test_propagated_deadbeat_target_is_time_invariant_under_the_flow() {
-    // The rewrite property (plans/planner-rewrite-drop-sandbox.md,
-    // "propagated deadbeat"): every swing frame must command the same absolute
-    // promise — `v = v_des` one stance after the SAME landing instant. So
-    // advancing the measured state along the mid-flight flow (the leg-PD
-    // servo's constant-v translation) and re-planning with the shrunk
-    // `t_flight` must reproduce the identical world target. The receding
-    // as-if-now law (support_x = None) does NOT have this property — its
-    // deadline re-anchors to "now" each frame and its target drifts under the
-    // same advance; the contrast is asserted.
-    let cfg = default_config();
-    let w = omega0(90.0, 980.0).unwrap();
-    let v_des = 120.0;
-    let p_s = -20.0;
-    let (x0, v0, t_r) = (0.0, 40.0, 0.24);
-    let m = CaptureMeasure {
-        com_x: x0,
-        v_com: v0,
-        z_com: 90.0,
-    };
-    let mk = |m: CaptureMeasure, support: bool| StepPlan {
-        support_x: support.then_some(p_s),
-        stretch: false,
-        x_max: 1.0e6,
-        stopping: false,
-        capture_offset: 0.0,
-        measured: Some(m),
-        xi: Some(m.com_x + m.v_com / w),
-        omega0: w,
-        mpc_trigger: false,
-    };
-    let p1 = plan_target_x(x0, v0, v_des, t_r, &cfg, &mk(m, true));
-    // Advance the true flow by one frame and re-plan from the new state.
-    let dt = 1.0 / 90.0;
-    let x1 = x0 + v0 * dt;
-    let v1 = v0;
-    let m1 = CaptureMeasure {
-        com_x: x1,
-        v_com: v1,
-        z_com: 90.0,
-    };
-    let p2 = plan_target_x(x1, v1, v_des, t_r - dt, &cfg, &mk(m1, true));
-    assert!(
-        (p1 - p2).abs() < 0.05,
-        "propagated target must be invariant along the flow: {p1} vs {p2}"
-    );
-    // Contrast: the receding (as-if-now) law drifts — its promise slides
-    // forward with every tick, which is the defect the propagation removes.
-    let r1 = plan_target_x(x0, v0, v_des, t_r, &cfg, &mk(m, false));
-    let r2 = plan_target_x(x1, v1, v_des, t_r - dt, &cfg, &mk(m1, false));
-    assert!(
-        (r1 - r2).abs() > 0.05,
-        "receding law must NOT be time-invariant: {r1} vs {r2}"
-    );
-}
-
-#[test]
-fn test_propagated_deadbeat_is_exact_at_the_landing_state() {
-    // The propagated target must itself be the exact deadbeat answer at the
-    // LANDING state (constant-v touchdown: x_L = x₀ + v·t_r, v_L = v):
-    // forward-simulating the LIPM from there pivoting on the planted `p`
-    // delivers `v_des` exactly `t_c` later.
-    let cfg = default_config();
-    let w = omega0(90.0, 980.0).unwrap();
-    let v_des = 120.0;
-    let t_c = resolve_deadbeat_tc(cfg.dcm_tc, cfg.stance_duration_ts);
-    for (x0, v0) in [(-30.0, 10.0), (0.0, 0.0), (0.0, 150.0), (20.0, -60.0)] {
-        let p_s = x0 - 25.0;
-        let t_r = 0.2;
-        let xi = x0 + v0 / w;
-        let (xi_l, v_l) = propagate_to_landing(Some(xi), v0, w, p_s, t_r);
-        let m = CaptureMeasure {
-            com_x: x0,
-            v_com: v0,
-            z_com: 90.0,
-        };
-        let plan = StepPlan {
-            support_x: Some(p_s),
-            stretch: false,
-            x_max: 1.0e6,
-            stopping: false,
-            capture_offset: 0.0,
-            measured: Some(m),
-            xi: Some(xi),
-            omega0: w,
-            mpc_trigger: false,
-        };
-        let p = plan_target_x(x0, v0, v_des, t_r, &cfg, &plan);
-        let lipm_v = |x0: f32, v0: f32, t: f32| -> f32 {
-            w * (x0 - p) * (w * t).sinh() + v0 * (w * t).cosh()
-        };
-        let x_l = xi_l.unwrap() - v_l / w;
-        let v_at = lipm_v(x_l, v_l, t_c);
-        assert!(
-            (v_at - v_des).abs() < 0.05,
-            "propagated deadbeat missed: x0={x0} v0={v0} → p={p}, v(t_c)={v_at}"
-        );
-    }
-}
+// (Removed 2026-10-28: the `propagate_to_landing` / state-propagation ("Land")
+// tests. Horizon-stretch became the sole placement law; the propagation
+// experiment measured worse — clamp-saturated mid-flight arcs, net 1322 →
+// 318/640 px — and its machinery (`support_x`, `DcmPropagate`) was deleted.
+// The stretch properties are pinned by
+// `test_stretch_horizon_is_absolute_deadline_and_bounded_early`.)
 
 // (Removed 2026-10-28: `test_dcm_kp_gain_form_keeps_cruise_lead` tested the
 // single-dof truncations `capture_point_with_{gain,horizon}`, deleted in favour
 // of the exact deadbeat law; its distinguishing property — the cruise lead — is
 // pinned by `test_deadbeat_placement_is_the_exact_solution`.)
 #[test]
-fn test_stretch_horizon_is_absolute_deadline_and_soft_early() {
-    // Stretch mode: the SAME promise evaluated from two frames of one flight
-    // must complete at the same absolute instant — "settle at touchdown +
-    // stance". Evaluate at liftoff (t_r = full swing) and at a mid-flight
-    // state; with a constant-v state the promise is exactly invariant. Also:
-    // stretch coefficients must be SOFTER than the plain law (β decreases as
-    // the window grows) and must converge to the plain law as t_r → 0.
+fn test_stretch_horizon_is_absolute_deadline_and_bounded_early() {
+    // THE placement law (post-A/B, 2026-10-28): deadbeat evaluated at the
+    // ABSOLUTE deadline `t_c' = t_c + t_flight.max(0)` on the live state —
+    // "settle at touchdown + stance", promised identically from every swing
+    // frame. Assertions:
+    //  1. liftoff frame equals a manual call at `t_c + T_swing`;
+    //  2. wide-early: the cruise lead (α−β)·v = tanh(ω₀T/2)·v/ω₀ GROWS with
+    //     the horizon and is monotone in `t_flight`, but is BOUNDED by the
+    //     capture-point limit v/ω₀ (≈ 36 px at cruise) < x_max (≈ 54) — the
+    //     mid-flight aim can never saturate the reach clamp (unlike the
+    //     deleted `Land` variant, whose propagated aim of ≈ +86 px pinned
+    //     `hip + x_max` all flight and halved net progress);
+    //  3. exact-late: at `t_flight = 0` the law is the plain deadbeat at
+    //     `t_c` — every variant plants the same point on the touchdown tick.
     let cfg = default_config();
     let w = omega0(90.0, 980.0).unwrap();
     let v_des = 120.0;
     let (x0, v0) = (0.0, 120.0); // cruising at command
-    let mk = |stretch: bool| StepPlan {
-        support_x: None,
-        stretch,
+    let plan = StepPlan {
         x_max: 1.0e6,
         stopping: false,
         capture_offset: 0.0,
@@ -895,44 +767,27 @@ fn test_stretch_horizon_is_absolute_deadline_and_soft_early() {
     // t_c auto = stance (0.28); swing = 0.28 as well by default.
     let ts = cfg.stance_duration_ts;
     let sw = cfg.swing_duration_ts;
-    // Liftoff frame: stretch horizon = ts + sw.
-    let p_lift = plan_target_x(x0, v0, v_des, sw, &cfg, &mk(true));
     let t_c = resolve_deadbeat_tc(cfg.dcm_tc, ts);
+    // 1. Absolute deadline: liftoff horizon = t_c + T_swing.
+    let p_lift = plan_target_x(x0, v0, v_des, sw, &cfg, &plan);
     let manual = capture_point_deadbeat(Some(x0 + v0 / w), v0, v_des, w, t_c + sw).unwrap();
     assert!(
         (p_lift - manual).abs() < 1e-3,
-        "stretch must evaluate at t_c + t_flight: {p_lift} vs {manual}"
+        "must evaluate at t_c + t_flight: {p_lift} vs {manual}"
     );
-    // Wide-early, exact-late: the cruise lead (α−β)·v = tanh(ω₀T/2)·v/ω₀
-    // GROWS with the horizon, so the stretched aim leads MORE than the plain
-    // law early (absolute-deadline promise: settle later ⇒ the foot must
-    // already carry more at landing… no: a longer window needs a bigger lead
-    // to reach v_des on the deadline) and converges onto it as t_r → 0.
-    // Bounded: the lead never exceeds the capture-point limit v/ω₀ (≈ 36 px
-    // at cruise), which is what keeps it inside the reach clamp (x_max ≈ 54)
-    // — the structural difference from `Land`, whose mid-flight aim of ≈ +86
-    // px pinned `hip + x_max` all flight and halved net progress.
-    let p_str_mid = plan_target_x(x0, v0, v_des, sw * 0.5, &cfg, &mk(true));
-    let p_str_lift = plan_target_x(x0, v0, v_des, sw, &cfg, &mk(true));
-    let p_plain = plan_target_x(x0, v0, v_des, sw * 0.5, &cfg, &mk(false));
-    let lead = |p: f32| p - x0; // CoM sits at x0 == hip frame here
+    // 2. Wide-early but bounded, monotone in t_r. (x0 == 0 ⇒ lead = p.)
+    let p_mid = plan_target_x(x0, v0, v_des, sw * 0.5, &cfg, &plan);
+    let p_plain_mid = capture_point_deadbeat(Some(x0 + v0 / w), v0, v_des, w, t_c).unwrap();
     assert!(
-        lead(p_str_mid) > lead(p_plain) && lead(p_str_mid) < v0 / w + 1e-3,
-        "stretch lead must grow with horizon but stay under the capture limit: {}",
-        lead(p_str_mid)
+        p_mid > p_plain_mid && p_mid < v0 / w + 1e-3,
+        "lead must grow with horizon but stay under the capture limit: {p_mid}"
     );
+    assert!(p_lift > p_mid, "lead monotone in t_r: {p_mid} < {p_lift}");
+    // 3. Exact-late: the planting tick is the plain deadbeat at t_c.
+    let p_land = plan_target_x(x0, v0, v_des, 0.0, &cfg, &plan);
     assert!(
-        lead(p_str_lift) > lead(p_str_mid),
-        "stretch lead monotone in t_r: {} < {}",
-        lead(p_str_mid),
-        lead(p_str_lift)
-    );
-    // Exact-late: at t_r = 0 the stretch equals the plain law.
-    assert!(
-        (plan_target_x(x0, v0, v_des, 0.0, &cfg, &mk(true))
-            - plan_target_x(x0, v0, v_des, 0.0, &cfg, &mk(false)))
-        .abs()
-            < 1e-6
+        (p_land - p_plain_mid).abs() < 1e-6,
+        "t_flight = 0 must reduce to the plain law: {p_land} vs {p_plain_mid}"
     );
 }
 
@@ -1111,8 +966,6 @@ fn test_capture_point_worldspace_independent_of_hip() {
         // derived from the measurement once per tick.
         let w = omega0(m.z_com, g).unwrap();
         let plan = StepPlan {
-            support_x: None,
-            stretch: false,
             x_max: 1000.0,
             stopping: false,
             capture_offset: 0.0,
@@ -1145,8 +998,6 @@ fn test_capture_point_clamps_and_reports_saturation() {
         z_com: cfg.hip_height,
     };
     let plan = StepPlan {
-        support_x: None,
-        stretch: false,
         x_max,
         stopping: false,
         capture_offset: 0.0,

@@ -224,6 +224,25 @@ were both runs just the same attractor sampled at different noise phases?
 Probes: repeat runs per arm (n≥3, compare net spread), swing-foot-x-vs-hip
 traces from `*.leg.csv` per arm, and `PROPAGATE=stretch` with STANCE≠SWING to
 break the coincidence that masks the receding law's defect.
+
+**RESOLVED (2026-10-28, user verdict — visual over noisy metrics):** Stretch is
+THE placement law; `Off` and `Land` and the whole `DcmPropagate` switch are
+deleted. Rationale: the run-to-run spread (~±10%) makes the net-progress metric
+blind to the difference, but the qualitative behavior is distinct — `Off`
+visibly pauses mid-stride and walks back a little (the as-if-now re-anchor
+fiction: its promise slides forward every tick, so the foot is always aimed at
+a deadline it has already missed), `Land` falls over after ~6 s, `Stretch`
+walks with the hip almost a straight line. `Off` is also technically wrong per
+the discussion above. Implementation: `t_c_eff = t_c + t_flight.max(0)` is
+unconditional in `plan_target_x_raw` (and mirrored in `walk.rs` saturation
+report); `propagate_to_landing`, `StepPlan::{support_x, stretch}`,
+`DcmPropagate`, `dcm_propagate`, env `PROPAGATE` all removed; the stretch test
+is now `test_stretch_horizon_is_absolute_deadline_and_bounded_early` pinning
+(1) liftoff = plain deadbeat at `t_c + T_swing`, (2) lead monotone in
+`t_flight` and bounded by the capture limit `v/ω₀ < x_max` (can never saturate
+the clamp — the structural fix for `Land`'s failure), (3) touchdown tick
+reduces exactly to the plain `t_c` law (all arms always agreed on the planted
+point; the mid-flight arc was the entire difference).
 4. Replace phantom horizontal velocity/shaping with measured CoM passthrough.
 5. Rework Loop 2 per the scope answer.
 6. Trim `GaitLimits`/backward solve to only the live terms.

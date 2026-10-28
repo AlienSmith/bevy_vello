@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::lower_body::resolver::{DcmPropagate, GaitAuthority, LowerBodyConfig};
+use crate::lower_body::resolver::{GaitAuthority, LowerBodyConfig};
 
 #[derive(Resource)]
 pub struct HipPinParams {
@@ -112,15 +112,10 @@ impl HipPinParams {
         // truncations (`T_CONV` horizon, `DCM_KP` gain) were removed 2026-10-28
         // — deadbeat contains both as its `t_c → ∞` / `t_c → 0` limits.
         p.config.dcm_tc = env_f32("DCM_TC", p.config.dcm_tc);
-        // Mid-swing placement mode `PROPAGATE=off|stretch|land` (default off =
-        // committed receding horizon). `land` (state propagation to touchdown)
-        // measured worse 2026-10-28; `stretch` (absolute-deadline horizon)
-        // under test. See `DcmPropagate`.
-        p.config.dcm_propagate = match std::env::var("PROPAGATE").ok().as_deref().map(str::trim) {
-            Some("stretch") | Some("1") | Some("true") => DcmPropagate::Stretch,
-            Some("land") => DcmPropagate::Land,
-            _ => p.config.dcm_propagate,
-        };
+        // (Removed 2026-10-28: the `PROPAGATE=off|stretch|land` A/B switch.
+        // Horizon-stretch — `t_c' = t_c + t_flight`, the absolute deadline — is
+        // now THE placement law; the receding `off` is the as-if-now fiction
+        // and `land` saturated the reach clamp mid-flight.)
         p.config.toe_len = env_f32("TOE_LEN", p.config.toe_len).max(0.0);
         // §3 DCM-margin liftoff trigger. Off by default (the committed gait);
         // see `LowerBodyConfig::mpc_trigger` for why it stays experimental

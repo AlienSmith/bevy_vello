@@ -28,7 +28,10 @@
 # auto-picks the stance duration), plans/walk_script.json (mirrors
 # run_visual.ps1; the older headless defaults were LEG_COMPLIANCE=5e-9
 # STEP_HEIGHT=50). Pass DCM_TC=<s> to tune the deadline (or DCM_TC=-1 to disable
-# the law, falling back to the Raibert neutral point).
+# the law, falling back to the Raibert neutral point). The law is evaluated at
+# the horizon-stretched ABSOLUTE deadline t_c' = t_c + t_flight every swing
+# frame (the PROPAGATE=off|stretch|land A/B was resolved 2026-10-28 in favour
+# of stretch: off pauses/reverses mid-walk, land falls over after ~6 s).
 # Artifacts land in tmp/headless/walks/:
 #   <TAG>.csv            telemetry (104+ columns)
 #   <TAG>.hips_feet.png  hip + feet x/y plot (plot_p3.py)

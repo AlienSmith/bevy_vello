@@ -97,24 +97,6 @@ pub fn capture_point(
 /// Per-tick planning context shared by both legs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StepPlan {
-    /// World x of the **support foot** — the planted foot the body is currently
-    /// pivoting around — for the leg this plan steers. `Some` only while the
-    /// leg is airborne and the opposite foot is planted (the anti-phase gate
-    /// makes it unique), the body is grounded, and a measurement exists.
-    /// When present, the placement law **propagates the state to touchdown
-    /// over this pivot** before evaluating deadbeat (see
-    /// [`propagate_to_landing`]), so every swing frame commands the same
-    /// absolute promise: `v = v_desired` one stance after the *actual*
-    /// landing, not `t_c` after the current tick. `None` = no pivot (both
-    /// legs grounded, airborne body, or unmeasured) → the law runs on the
-    /// live state exactly as before (`t_r = 0` degeneracy).
-    pub(crate) support_x: Option<f32>,
-    /// Horizon-stretch mode (`DcmPropagate::Stretch`): evaluate deadbeat with
-    /// the ABSOLUTE deadline `t_c' = t_c + t_flight` on the live state —
-    /// "settle one stance after the actual landing," promised identically from
-    /// every frame. Softens `(α, β)` early in flight, converges to the plain
-    /// law as `t_flight → 0`.
-    pub(crate) stretch: bool,
     /// Safety-margined reach; swing targets are clamped to `hip ± x_max` so a
     /// plant can never be aimed outside the workspace (which the IK would
     /// ray-clamp into a foot floating off the floor).
@@ -189,20 +171,18 @@ pub(crate) fn plan_target_x_raw(
     // hip-relative Raibert neutral point, which must predict where the hip will
     // be at touchdown). If the measurement is degenerate (`z_com ≤ 0` or
     // `gravity ≤ 0`), fall back to the Raibert neutral point below.
-    // Placement law: the analytic deadbeat solution (`DCM_TC`), the exact
-    // two-coefficient LIPM form, evaluated in one of three per-frame modes
-    // (`DcmPropagate`) that all plant the SAME point (they coincide at
-    // `t_flight = 0`) and differ only in the mid-flight aim:
     //
-    // - `Off` (committed): horizon re-anchored to "now", `t_c = stance` on
-    //   the live state — the promise slides forward each tick (the receding-
-    //   horizon defect: only the final frame is honest).
-    // - `Stretch`: absolute deadline `t_c' = t_c + t_flight` on the live
-    //   state — every frame promises `v_des` at touchdown + stance; soft
-    //   `(α, β)` early, exact late; target stays in the reach workspace.
-    // - `Land`: propagate the state to touchdown (`ξ_L`, `v_L`, see
-    //   [`propagate_to_landing`]) with plain `t_c` coefficients — measured
-    //   worse (clamp-saturated mid-flight arcs), kept for experiments.
+    // Placement law: the analytic deadbeat solution (`DCM_TC`), the exact
+    // two-coefficient LIPM form, evaluated with the **horizon-stretched**
+    // absolute deadline `t_c' = t_c + t_flight.max(0)` on the live state:
+    // every swing frame promises `v = v_desired` one stance after the
+    // *actual* touchdown, so the promise never slides forward with the tick
+    // (the receding-horizon re-anchor was removed 2026-10-28 — it is the
+    // as-if-now fiction; the state-propagation variant was measured worse:
+    // clamp-saturated mid-flight arcs). The stretch softens `(α, β)` early in
+    // flight and converges to the plain law as `t_flight → 0` (the planting
+    // tick). Cruise lead `tanh(ω₀·t_c'/2)·v/ω₀` stays under the capture limit
+    // `v/ω₀ < x_max`, so the mid-flight aim never saturates the reach clamp.
     //
     // `p = ξ + (v·e^{−ω₀·t_c} − v_des)/(ω₀·sinh(ω₀·t_c)) = x + α·v − β·v_des`.
     // `DCM_TC > 0` is the window in seconds; `DCM_TC == 0` (the default)
@@ -211,16 +191,12 @@ pub(crate) fn plan_target_x_raw(
     // velocity-error-gain and horizon truncations of this family were removed
     // (2026-10-28) — deadbeat contains both as its limits.
     let t_c = resolve_deadbeat_tc(config.dcm_tc, config.stance_duration_ts);
-    let t_c_eff = if plan.stretch && t_c > 0.0 {
+    let t_c_eff = if t_c > 0.0 {
         t_c + t_flight.max(0.0)
     } else {
         t_c
     };
-    let (xi_in, v_in) = match plan.support_x {
-        Some(p_s) if t_flight > 0.0 => propagate_to_landing(plan.xi, v, plan.omega0, p_s, t_flight),
-        _ => (plan.xi, v),
-    };
-    if let Some(x) = capture_point_deadbeat(xi_in, v_in, v_desired, plan.omega0, t_c_eff) {
+    if let Some(x) = capture_point_deadbeat(plan.xi, v, v_desired, plan.omega0, t_c_eff) {
         return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
     }
     let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);
@@ -231,42 +207,6 @@ pub(crate) fn plan_target_x_raw(
     // cancels the prediction shrink) and makes the target track
     // acceleration/braking transients mid-swing.
     (hip_x + v * t_flight + x_target).clamp(hip_x - plan.x_max, hip_x + plan.x_max)
-}
-
-/// Advance the capture state `(ξ, v)` a time `t_r` to the touchdown instant
-/// with the flow the body ACTUALLY follows mid-swing: the leg-PD velocity
-/// servo holds the hip near-constant (`v_L = v`), so the CoM advances
-/// linearly. With `x₀ = ξ − v/ω₀`:
-///
-/// ```text
-/// x_L = x₀ + v·t_r,   v_L = v,   ξ_L = x_L + v_L/ω₀ = ξ + v·t_r
-/// ```
-///
-/// (A full LIPM pivot propagation over the support foot —
-/// `ξ_L = p_s + (ξ − p_s)·e^{ω₀·t_r}` — was implemented and measured first
-/// (2026-10-28, `walk_propagated`): net progress 1322 → 640 px. The free-
-/// pendulum divergence over a 0.28 s flight inflates `v_L` to ≈ 1.9·v_des,
-/// so every step plants too far ahead, the *next* pivot then brakes hard,
-/// and the gait oscillates. The XPBD walker is a velocity-servo plant, not
-/// a free LIPM: constant-v propagation is its correct flow. `p_s` is kept
-/// in the signature for the stance-correction term, unused.)
-///
-/// `t_r = 0` ⇒ identity; `ω₀` degenerate or `xi = None` ⇒ passthrough (the
-/// caller's fallback chain still applies). Used by
-/// [`plan_target_x_raw`] to evaluate the placement law at touchdown state
-/// every frame, with `t_r` = remaining swing flight time.
-#[inline]
-pub(crate) fn propagate_to_landing(
-    xi: Option<f32>,
-    v: f32,
-    omega0: f32,
-    _p_s: f32,
-    t_r: f32,
-) -> (Option<f32>, f32) {
-    let (Some(x), true) = (xi, omega0 > f32::EPSILON) else {
-        return (xi, v);
-    };
-    (Some(x + v * t_r.max(0.0)), v)
 }
 
 /// Analytic (deadbeat) foot placement — the **exact** solution, not a hand-tuned

@@ -71,11 +71,6 @@ pub struct LowerBodyConfig {
     /// default) auto-picks the stance duration; negative disables this law so
     /// the Raibert neutral-point fallback runs unchanged.
     pub dcm_tc: f32,
-    /// Per-frame mid-swing placement mode for deadbeat. All modes share the
-    /// exact same planted answer (they coincide at `t_flight = 0`, the
-    /// touchdown tick) and differ only in how the airborne foot is AIMED
-    /// during flight. Env `PROPAGATE=off|stretch|land`.
-    pub dcm_propagate: DcmPropagate,
     /// Foot half-length ahead of the plant anchor, px (support-edge proxy for
     /// the §3 DCM-margin trigger; there are no heel/toe particles yet).
     pub toe_len: f32,
@@ -159,7 +154,6 @@ impl Default for LowerBodyConfig {
             beta: 1.0,
             safety_margin: 0.85,
             prediction_margin: 0.5,
-            dcm_propagate: DcmPropagate::Off,
             toe_len: 8.0,
             mpc_trigger: false,
             td_solve_floor: -1.0,
@@ -183,30 +177,6 @@ impl Default for LowerBodyConfig {
             theta_max: 1.30,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Mid-swing placement mode
-// ---------------------------------------------------------------------------
-
-/// How the per-frame re-planning anchors the deadbeat horizon while a foot is
-/// airborne. See [`LowerBodyConfig::dcm_propagate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DcmPropagate {
-    /// Committed behavior: horizon re-anchored to "now" every frame
-    /// (`t_c = stance_duration` on the live state).
-    Off,
-    /// Horizon-stretch: keep the live state but promise at the ABSOLUTE
-    /// deadline — `t_c' = t_flight + stance_duration`. Every frame's promise
-    /// completes at touchdown + stance; coefficients soften as flight remains
-    /// (soft early, exact late) and the target stays inside the reach clamp.
-    Stretch,
-    /// State-propagation: carry the measured state to touchdown over the live
-    /// support pivot (`ξ_L`, `v_L`), then plain `t_c` deadbeat. Measured WORSE
-    /// than Off (2026-10-28 A/B, `plans/planner-rewrite-drop-sandbox.md`:
-    /// 1322 → 318 px servo-flow / 640 px pivot-flow; mid-flight targets
-    /// saturate `hip + x_max`). Kept for swing-momentum-aware experiments.
-    Land,
 }
 
 // ---------------------------------------------------------------------------

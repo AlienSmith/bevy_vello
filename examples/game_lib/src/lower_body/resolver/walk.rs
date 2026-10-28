@@ -179,8 +179,6 @@ pub fn step_lower_body(
         .and_then(|m| omega0(m.z_com, config.gravity))
         .unwrap_or(0.0);
     let plan = StepPlan {
-        support_x: None,
-        stretch: config.dcm_propagate == DcmPropagate::Stretch,
         x_max,
         stopping,
         capture_offset,
@@ -188,28 +186,6 @@ pub fn step_lower_body(
         xi,
         omega0,
         mpc_trigger: config.mpc_trigger,
-    };
-    // Per-leg support pivot for the propagated placement law. The anti-phase
-    // gate makes the opposite foot the ONLY possible pivot during this leg's
-    // flight: it cannot lift off until this foot lands, so it is planted for
-    // the whole remaining flight whether it is mid-stance or its timer has
-    // already expired. `None` (body airborne, opposite leg swinging too, or
-    // unmeasured) makes `plan_target_x` use the live state directly —
-    // bit-identical pre-propagation behavior.
-    let support_of = |other: &LegState| -> Option<f32> {
-        (config.dcm_propagate == DcmPropagate::Land
-            && !airborne
-            && other.phase == GaitPhase::Stance
-            && state.measured.is_some())
-        .then_some(other.plant_pos.x)
-    };
-    let plan_l = StepPlan {
-        support_x: support_of(&state.right),
-        ..plan
-    };
-    let plan_r = StepPlan {
-        support_x: support_of(&state.left),
-        ..plan
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -221,26 +197,22 @@ pub fn step_lower_body(
         {
             Some(raw) => {
                 let sat_a = raw < state.hip_pos.x - x_max || raw > state.hip_pos.x + x_max;
-                // Report saturation for the active placement law (propagated
-                // analytic deadbeat; `None` when `DCM_TC` is negative, i.e. the
-                // law is off and the Raibert fallback runs instead). Same law,
-                // same per-leg pivot and remaining-flight horizon as
-                // `plan_target_x` — "in trouble" describes the placement that
-                // is actually being steered, for either leg.
+                // Report saturation for the ACTIVE placement law (horizon-
+                // stretched deadbeat; `None` when `DCM_TC` is negative, i.e.
+                // the law is off and the Raibert fallback runs). The horizon
+                // is stretched by each leg's own remaining flight time, exactly
+                // as `plan_target_x` will evaluate it this tick — so "in
+                // trouble" describes the placement actually being steered.
                 let t_c = resolve_deadbeat_tc(config.dcm_tc, config.stance_duration_ts);
-                let raw_b = |support_x: Option<f32>, t_flight: f32| -> Option<f32> {
-                    let t_c_eff = if plan.stretch && t_c > 0.0 {
+                let out_of_reach =
+                    |x: f32| x < state.hip_pos.x - x_max || x > state.hip_pos.x + x_max;
+                let raw_b = |t_flight: f32| -> Option<f32> {
+                    let t_c_eff = if t_c > 0.0 {
                         t_c + t_flight.max(0.0)
                     } else {
                         t_c
                     };
-                    let (xi_in, v_in) = match support_x {
-                        Some(p_s) if t_flight > 0.0 => {
-                            propagate_to_landing(plan.xi, v, plan.omega0, p_s, t_flight)
-                        }
-                        _ => (plan.xi, v),
-                    };
-                    capture_point_deadbeat(xi_in, v_in, v_desired_scalar, plan.omega0, t_c_eff)
+                    capture_point_deadbeat(plan.xi, v, v_desired_scalar, plan.omega0, t_c_eff)
                 };
                 let t_l = if state.left.phase == GaitPhase::Swing {
                     state.left.phase_timer.max(0.0)
@@ -252,9 +224,7 @@ pub fn step_lower_body(
                 } else {
                     config.swing_duration_ts
                 };
-                let out_of_reach =
-                    |x: f32| x < state.hip_pos.x - x_max || x > state.hip_pos.x + x_max;
-                let sat_b = [raw_b(plan_l.support_x, t_l), raw_b(plan_r.support_x, t_r)]
+                let sat_b = [raw_b(t_l), raw_b(t_r)]
                     .into_iter()
                     .flatten()
                     .any(out_of_reach);
@@ -314,7 +284,7 @@ pub fn step_lower_body(
         v_desired_scalar,
         state.right.phase == GaitPhase::Swing,
         config,
-        &plan_l,
+        &plan,
         dt,
         contact_left,
         authority,
@@ -329,7 +299,7 @@ pub fn step_lower_body(
         v_desired_scalar,
         state.left.phase == GaitPhase::Swing,
         config,
-        &plan_r,
+        &plan,
         dt,
         contact_right,
         authority,
