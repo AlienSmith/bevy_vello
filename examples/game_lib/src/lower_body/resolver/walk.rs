@@ -10,14 +10,21 @@ use bevy::math::Vec2;
 /// Boot FSM: the lunge window, seconds. Short by design — it is a launch
 /// impulse, not a gait. `BOOT_LUNGE_HOLD` extends it forever (the
 /// falsification run: a locked, kicked body must fall over).
-///
-/// The kick itself is NOT scripted here: the physics launch is the direct
-/// hip-joint rest-angle override in `drive_hip_pin` (`BOOT_LUNGE_LEAN`). The
-/// measured failure of the earlier scripted hip-translation (measured hip
-/// 172.8→171.7 during a +90 px/s reference window): `hip_t.x` tracks the LIVE
-/// P3 x, so an advancing fiction only stretched the drawn legs and the PD
-/// dragged the pinned feet — backward. Here the lock only freezes the fiction.
 pub(crate) const BOOT_LUNGE_T: f32 = 0.18;
+/// Boot FSM: the scripted hip translation during the Lunge window, px/s.
+///
+/// This is the agreed kick (design: "move the hip forward parallel to the
+/// ground, resolve the angle for both legs"). The earlier version failed ONLY
+/// because the fiction was delivered through the leg-PD *reference*
+/// (`hip_t.x` tracked the live P3), so the advancing pose just stretched the
+/// drawn legs and the PD dragged the pinned feet backward. Here the SAME
+/// fiction additionally drives a stiff external position constraint on the P3
+/// hip particle in `drive_hip_pin`: the particle is dragged forward directly,
+/// the legs IK-follow, and the planted feet resist through friction — a real
+/// hip translation, not a posture lean. The live value is the runtime knob
+/// `config.boot_lunge_v` (`BOOT_LUNGE_V` env, default 160); this const is the
+/// sandbox reference for the unit tests.
+pub(crate) const BOOT_LUNGE_V: f32 = 160.0;
 
 /// Run one full resolver tick.
 ///
@@ -192,14 +199,17 @@ pub fn step_lower_body(
         }
     }
 
-    // Boot lock: while the feet are pinned the horizontal fiction is frozen at
-    // zero, so the drawn pose is a pure stand and the leg PD is not asked to
-    // chase a translating hip (that chase is what dragged the body backward).
-    // The launch momentum comes from the physics-side lean override only; on
-    // release the rebalancer + gait resume and the DCM reads the REAL velocity
-    // via `measured`.
-    if boot_locked {
-        v = 0.0;
+    // Boot lock. `Stand` is totally idle: the horizontal fiction is frozen at
+    // zero (pure quiet stance, no control). `Lunge` is the agreed kick: the
+    // hip reference translates forward at `BOOT_LUNGE_V`, and — unlike the
+    // earlier absorbed version — `drive_hip_pin` additionally drags the P3
+    // particle via a stiff external position constraint, so the fiction
+    // actually moves the body and `state.hip_vel.x` carries a real forward
+    // velocity the DCM can read on release. Feet stay locked (no liftoff).
+    match state.boot {
+        BootPhase::Lunge { dir, .. } if config.boot_lunge => v = dir * config.boot_lunge_v,
+        _ if boot_locked => v = 0.0,
+        _ => {}
     }
     // In Flight there is no ground authority: horizontal velocity carries
     // ballistically (no shaping, no braking). This is what makes walk → jump →

@@ -1,9 +1,10 @@
 use bevy::{prelude::*, time::Fixed};
 use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloParticle,
+    CharacterAngularConstraintEvent, CharacterExternalPositionConstraintEvent,
+    VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloParticle,
 };
 use leafwing_input_manager::prelude::ActionState;
-use vello_physics::AngularConstraintConfig;
+use vello_physics::{AngularConstraintConfig, ExternalPositionConstraintConfig};
 
 use super::ground::*;
 use super::params::*;
@@ -31,7 +32,7 @@ pub fn drive_hip_pin(
     mut left_leg_q: Query<&mut LeftLegController>,
     p_q: Query<&VelloParticle>,
     action_q: Query<&ActionState<PlayerAction>>,
-    world: ResMut<VelloConstraintWorld>,
+    mut world: ResMut<VelloConstraintWorld>,
     mut log_tick: Local<u64>,
 ) {
     let dt = time.delta_secs();
@@ -323,6 +324,36 @@ pub fn drive_hip_pin(
             //         },
             //     },
             // );
+        }
+
+        // Boot kick (Stage 4d, the agreed design): drag the P3 hip PARTICLE
+        // forward, parallel to the ground, for the lunge window. This is the
+        // fix for the earlier absorbed hip-translation: there the advancing
+        // fiction only moved the leg-PD *reference* (`hip_t.x` tracked the live
+        // P3), so the pinned feet were dragged and the body went backward. Here
+        // the fiction velocity `state.hip_vel.x` (= dir·BOOT_LUNGE_V, preserved
+        // by FEEDBACK which only overwrites position x) drives a stiff external
+        // position constraint on the hip particle itself: one step of forward
+        // translation per tick. Feet stay planted (locked, no liftoff) and
+        // resist through friction, so the constraint levers the body forward —
+        // a genuine hip translation. On release the Walk gait inherits the real
+        // forward hip velocity the DCM was blind to at v = 0.
+        if params.config.boot_lunge {
+            if let BootPhase::Lunge { .. } = pin.state.boot {
+                let p3 = states[2].0;
+                let drag = Vec2::X * (pin.state.hip_vel.x * dt);
+                world.queue_character_one_time_external_position_constraint(
+                    &CharacterExternalPositionConstraintEvent {
+                        character_entity: entity,
+                        joint_entity: spine.particles[4],
+                        config: ExternalPositionConstraintConfig {
+                            target: p3 + drag,
+                            compliance: params.compliance,
+                            damping: params.damping,
+                        },
+                    },
+                );
+            }
         }
 
         // Opt-in telemetry (`PIN_LOG=1`).

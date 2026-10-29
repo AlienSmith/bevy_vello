@@ -138,6 +138,7 @@ impl HipPinParams {
         // (proves the Walk switch is the real gait door). See BootPhase.
         p.config.boot_lunge = env_bool("BOOT_LUNGE", p.config.boot_lunge);
         p.config.boot_lunge_hold = env_bool("BOOT_LUNGE_HOLD", p.config.boot_lunge_hold);
+        p.config.boot_lunge_v = env_f32("BOOT_LUNGE_V", p.config.boot_lunge_v).max(0.0);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);

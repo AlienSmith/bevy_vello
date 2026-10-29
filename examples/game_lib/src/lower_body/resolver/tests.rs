@@ -4745,11 +4745,14 @@ fn test_boot_lunge_locks_then_releases_to_walk() {
     );
 
     // Hold: run until the window releases. Every locked tick must keep BOTH
-    // feet planted (no gait while Stand/Lunge) and freeze the fiction.
+    // feet planted (no gait while Stand/Lunge). In `Stand` the fiction is
+    // frozen; in `Lunge` the agreed kick commands a forward hip velocity
+    // (`dir * BOOT_LUNGE_V`), and `drive_hip_pin` drags the P3 particle to
+    // match — the fiction translation is the reference for that pin.
     let mut lunged = 0;
     for _ in 0..40 {
         step_lower_body(Vec2::X, &cfg, &mut s, dt);
-        if s.boot.is_locked() {
+        if matches!(s.boot, BootPhase::Lunge { .. }) {
             lunged += 1;
             assert_eq!(
                 (s.left.phase, s.right.phase),
@@ -4759,8 +4762,8 @@ fn test_boot_lunge_locks_then_releases_to_walk() {
                 s.right.phase
             );
             assert!(
-                s.hip_vel.x.abs() < 1e-3,
-                "locked fiction must be frozen (the kick is physics-side), got {}",
+                s.hip_vel.x > 0.0,
+                "Lunge must command forward hip velocity, got {}",
                 s.hip_vel.x
             );
         } else {
@@ -4773,10 +4776,10 @@ fn test_boot_lunge_locks_then_releases_to_walk() {
         lunged as f32 * dt >= BOOT_LUNGE_T * 0.5,
         "window shorter than scripted: {lunged} ticks"
     );
-    // The planted feet never moved under the lock (no phantom drag).
+    // The fiction hip translated forward under the kick.
     assert!(
-        (s.hip_pos.x - start_hip).abs() < 1.0,
-        "locked fiction must not translate the hip: {} -> {}",
+        s.hip_pos.x > start_hip + 10.0,
+        "kick barely advanced the hip: {} -> {}",
         start_hip,
         s.hip_pos.x
     );

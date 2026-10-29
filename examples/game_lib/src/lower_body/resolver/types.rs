@@ -148,6 +148,10 @@ pub struct LowerBodyConfig {
     /// `BOOT_LUNGE_V`. The character MUST fall over; if it does not, the lock
     /// is not airtight and the `Walk` switch is doing nothing.
     pub boot_lunge_hold: bool,
+    /// Launch hip-translation speed during the Lunge window, px/s
+    /// (`BOOT_LUNGE_V`). The kick is delivered through the P3 external
+    /// position constraint (see `drive_hip_pin`). Default 160.
+    pub boot_lunge_v: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -189,6 +193,7 @@ impl Default for LowerBodyConfig {
             theta_max: 1.30,
             boot_lunge: false,
             boot_lunge_hold: false,
+            boot_lunge_v: 160.0,
         }
     }
 }
