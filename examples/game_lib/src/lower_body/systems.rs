@@ -62,6 +62,7 @@ impl LowerBodyController {
             left_trigger_reason: 0,
             right_trigger_reason: 0,
             capture_saturated: false,
+            plan_v_law: 0.0,
             v_phase: VerticalPhase::Stand,
             hip_height: config.hip_height,
             hip_vel_y: 0.0,

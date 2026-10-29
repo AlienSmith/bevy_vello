@@ -591,6 +591,9 @@ fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
         xi: None,
         omega0: 0.0,
         mpc_trigger: false,
+        // `xi` is None ⇒ the deadbeat branch is skipped and the Raibert
+        // fallback uses the caller's `v`; this value never reaches the law.
+        v_law: 0.0,
     }
 }
 
@@ -765,6 +768,8 @@ fn test_stretch_horizon_is_absolute_deadline_and_bounded_early() {
         xi: Some(x0 + v0 / w),
         omega0: w,
         mpc_trigger: false,
+        // cruising at command: law velocity == the fiction `v` the test passes.
+        v_law: v0,
     };
     // t_c auto = stance (0.28); swing = 0.28 as well by default.
     let ts = cfg.stance_duration_ts;
@@ -975,6 +980,9 @@ fn test_capture_point_worldspace_independent_of_hip() {
             xi: Some(m.com_x + m.v_com / w),
             omega0: w,
             mpc_trigger: false,
+            // world-space independence probe: law velocity == the 0.0 the test
+            // passes (the target must be hip-independent regardless of `v`).
+            v_law: 0.0,
         };
         let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &cfg_test, &plan);
         let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
@@ -1007,6 +1015,7 @@ fn test_capture_point_clamps_and_reports_saturation() {
         xi: Some(m.com_x + m.v_com / omega0(m.z_com, cfg.gravity).unwrap()),
         omega0: omega0(m.z_com, cfg.gravity).unwrap(),
         mpc_trigger: false,
+        v_law: m.v_com,
     };
     let hip_x = 0.0;
     let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);
@@ -4865,4 +4874,73 @@ fn test_boot_lunge_off_is_inert() {
         swung_by.map_or(false, |i| i < 30),
         "legacy gait lost its first step: {swung_by:?}"
     );
+}
+
+/// The gentle brake (`PLAN_MEAS_V`): the placement-law velocity must be an
+/// EMA of the measured `v_com`, NOT the raw signal — the raw ±100 step ripple
+/// rang the brake target and destabilized the walk (measured 2026-10-29).
+/// Two guarantees:
+///   1. with `plan_meas_v` ON, an oscillating measurement (400/200 alternating)
+///      settles near its mean (300), i.e. the ripple is rejected;
+///   2. with the flag OFF, polluting the filter state changes NO output —
+///      the committed gait stays bit-identical.
+#[test]
+fn test_plan_meas_v_low_passes_and_off_is_inert() {
+    let dt = 1.0 / 90.0;
+
+    // 1. ON: EMA converges toward the mean of the ripple.
+    let mut cfg = LowerBodyConfig::default();
+    cfg.plan_meas_v = true;
+    let mut s = ResolverState::new(&cfg);
+    for i in 0..200 {
+        let ripple = if i % 2 == 0 { 400.0 } else { 200.0 };
+        s.measured = Some(CaptureMeasure {
+            com_x: s.hip_pos.x,
+            v_com: ripple,
+            z_com: cfg.hip_height,
+        });
+        step_lower_body(Vec2::X, &cfg, &mut s, dt);
+    }
+    let f = s
+        .v_meas_filt
+        .expect("filter must track while measured is fed");
+    assert!(
+        (f - 300.0).abs() < 30.0,
+        "EMA must settle near the mean 300 (raw last sample was 200/400), got {f}"
+    );
+
+    // 2. OFF: the filter is state-only — poisoning it cannot move the output.
+    let cfg2 = LowerBodyConfig::default(); // plan_meas_v = false
+    let mut a = ResolverState::new(&cfg2);
+    let mut b = ResolverState::new(&cfg2);
+    for i in 0..80 {
+        let ripple = if i % 2 == 0 { 400.0 } else { 200.0 };
+        let m = Some(CaptureMeasure {
+            v_com: ripple,
+            z_com: cfg2.hip_height,
+            ..a.measured.unwrap_or(CaptureMeasure {
+                com_x: 0.0,
+                v_com: 0.0,
+                z_com: 1.0,
+            })
+        });
+        a.measured = m.map(|mm| CaptureMeasure {
+            com_x: a.hip_pos.x,
+            ..mm
+        });
+        b.measured = m.map(|mm| CaptureMeasure {
+            com_x: b.hip_pos.x,
+            ..mm
+        });
+        b.v_meas_filt = Some(-9999.0); // poison the OFF-path state
+        let (pa, da) = step_lower_body(Vec2::X, &cfg2, &mut a, dt);
+        let (pb, db) = step_lower_body(Vec2::X, &cfg2, &mut b, dt);
+        assert!(
+            pa.hip.x == pb.hip.x
+                && pa.left_foot.x == pb.left_foot.x
+                && pa.right_foot.x == pb.right_foot.x
+                && da.plan_v_law == db.plan_v_law,
+            "off-path filter pollution leaked into the outputs at tick {i}"
+        );
+    }
 }

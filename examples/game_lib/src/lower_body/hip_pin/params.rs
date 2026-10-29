@@ -139,6 +139,12 @@ impl HipPinParams {
         p.config.boot_lunge = env_bool("BOOT_LUNGE", p.config.boot_lunge);
         p.config.boot_lunge_hold = env_bool("BOOT_LUNGE_HOLD", p.config.boot_lunge_hold);
         p.config.boot_lunge_v = env_f32("BOOT_LUNGE_V", p.config.boot_lunge_v).max(0.0);
+        // Route measured `v_com` into the deadbeat LEAD term (the brake is
+        // computed against the TRUE speed, not the fiction). Default off ⇒
+        // committed gait bit-identical. Pairs with the boot kick to stop the
+        // post-launch cruise runaway.
+        p.config.plan_meas_v = env_bool("PLAN_MEAS_V", p.config.plan_meas_v);
+        p.config.v_meas_tau = env_f32("V_MEAS_TAU", p.config.v_meas_tau).max(1e-3);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);

@@ -263,6 +263,32 @@ pub fn step_lower_body(
         .measured
         .and_then(|m| omega0(m.z_com, config.gravity))
         .unwrap_or(0.0);
+    // EMA of the measured CoM velocity (used only by `plan_meas_v`). Raw
+    // `v_com` carries the ±140 px/s gait-cycle ripple; feeding it to the law
+    // directly rang the brake target and destabilized the walk. A low-pass
+    // with `v_meas_tau` (~1–2 stances) keeps the TRUE average speed — the
+    // signal the fiction is blind to — while the per-step ripple is rejected.
+    if let Some(m) = state.measured {
+        let alpha = (dt / config.v_meas_tau.max(1e-3)).min(1.0);
+        state.v_meas_filt = Some(match state.v_meas_filt {
+            Some(f) => f + alpha * (m.v_com - f),
+            None => m.v_com,
+        });
+    }
+    // The velocity fed to the deadbeat LEAD term. By default the fiction `v`
+    // (committed gait, bit-identical). With `PLAN_MEAS_V`, the filtered
+    // measured velocity (falling back to the fiction when no measurement
+    // exists), so the brake foot is placed against the TRUE AVERAGE speed —
+    // a body seeded past cruise by the boot kick is caught by the deadbeat
+    // instead of outrunning it. The finite deadline `t_c` of the law spreads
+    // the velocity error over the stance horizon: a GENTLE multi-step bleed,
+    // not a one-step impulse (the hip is much heavier than the feet; a single
+    // stance cannot transfer that momentum without dragging the plants).
+    let v_law = if config.plan_meas_v {
+        state.v_meas_filt.unwrap_or(v)
+    } else {
+        v
+    };
     let plan = StepPlan {
         x_max,
         stopping,
@@ -271,6 +297,7 @@ pub fn step_lower_body(
         xi,
         omega0,
         mpc_trigger: config.mpc_trigger,
+        v_law,
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -297,7 +324,13 @@ pub fn step_lower_body(
                     } else {
                         t_c
                     };
-                    capture_point_deadbeat(plan.xi, v, v_desired_scalar, plan.omega0, t_c_eff)
+                    capture_point_deadbeat(
+                        plan.xi,
+                        plan.v_law,
+                        v_desired_scalar,
+                        plan.omega0,
+                        t_c_eff,
+                    )
                 };
                 let t_l = if state.left.phase == GaitPhase::Swing {
                     state.left.phase_timer.max(0.0)
@@ -664,6 +697,7 @@ pub fn step_lower_body(
         left_trigger_reason: state.left.trigger_reason,
         right_trigger_reason: state.right.trigger_reason,
         capture_saturated,
+        plan_v_law: v_law,
         v_phase: state.vs.phase,
         hip_height: h,
         hip_vel_y: state.hip_vel.y,

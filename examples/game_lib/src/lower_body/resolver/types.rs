@@ -152,6 +152,27 @@ pub struct LowerBodyConfig {
     /// (`BOOT_LUNGE_V`). The kick is delivered through the P3 external
     /// position constraint (see `drive_hip_pin`). Default 160.
     pub boot_lunge_v: f32,
+    /// Route the measured whole-body `v_com` into the foot-placement deadbeat
+    /// law's LEAD term (`PLAN_MEAS_V`). By default the law's `xi` uses the
+    /// measured capture point but its velocity lead `v·e^(−ω₀·t_c)` uses the
+    /// *fiction* hip velocity, so a body seeded past cruise (e.g. after the
+    /// boot kick, measured ~171 vs the 120 command) is under-braked: the brake
+    /// is computed from the wrong speed. With this on, the lead uses the
+    /// **low-pass filtered** measured `v_com` (see `v_meas_tau`): the true
+    /// speed without the ±140 px/s step-ripple that rang the raw-measure
+    /// variant and destabilized the gait. The deadbeat's finite deadline `t_c`
+    /// then spreads the velocity error over one-stance-scale placement deltas
+    /// — a gentle multi-step bleed, not a one-step impulse (the hip is far
+    /// heavier than the feet; a single stance can't transfer that momentum
+    /// without dragging the plants). Off ⇒ bit-identical committed gait (the
+    /// fiction `v` is used). Does NOT touch the fiction integrator velocity (a
+    /// hard velocity feedback was measured to stop the body — it cancels the
+    /// command-vs-realized lead).
+    pub plan_meas_v: bool,
+    /// Time constant of the measured-velocity low-pass used by `plan_meas_v`,
+    /// seconds (`V_MEAS_TAU`). ~1–2 stances smooths the gait-cycle ripple while
+    /// still tracking a real speed change within a few strides. Default 0.6.
+    pub v_meas_tau: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -194,6 +215,8 @@ impl Default for LowerBodyConfig {
             boot_lunge: false,
             boot_lunge_hold: false,
             boot_lunge_v: 160.0,
+            plan_meas_v: false,
+            v_meas_tau: 0.6,
         }
     }
 }
@@ -527,6 +550,10 @@ pub struct ResolverState {
     /// the ECS layer from [`measure_body`]; `None` in the pure kinematic
     /// sandbox, where `plan_target_x` falls back to the Raibert neutral point.
     pub measured: Option<CaptureMeasure>,
+    /// EMA state of the measured horizontal CoM velocity for the
+    /// `plan_meas_v` placement law (`v_meas_tau` time constant). `None` until
+    /// the first measurement.
+    pub v_meas_filt: Option<f32>,
     /// Measured whole-body CoM apex **rise** above the standing height, px
     /// (loop 2, plan §4). Fed in by the ECS layer from the §1 measurement each
     /// tick. When present, `Flight` latches `h_apex_prev` from this physics
@@ -640,6 +667,7 @@ impl ResolverState {
             } else {
                 BootPhase::Walk
             },
+            v_meas_filt: None,
         }
     }
 }
@@ -725,6 +753,11 @@ pub struct DebugInfo {
     /// "in trouble" signal. `false` when there is no measurement (pure
     /// kinematic fallback) or the capture point is within reach.
     pub capture_saturated: bool,
+    /// The velocity actually fed to the deadbeat placement law's lead term
+    /// this tick (`StepPlan::v_law`): the fiction `v`, or the EMA-filtered
+    /// measured `v_com` while `plan_meas_v` is on. Telemetry for the gentle
+    /// brake A/B.
+    pub plan_v_law: f32,
 
     // --- Loop 1 (vertical) telemetry. See `plans/raibert_vertical_loop.md`. ---
     /// Current vertical-controller phase.

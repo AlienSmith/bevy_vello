@@ -112,6 +112,14 @@ pub(crate) struct StepPlan {
     /// kinematic sandbox; `plan_target_x` then falls back to the Raibert
     /// neutral point.
     pub(crate) measured: Option<CaptureMeasure>,
+    /// Velocity used for the deadbeat law's LEAD term `v·e^(−ω₀·t_c)`. By
+    /// default the fiction hip velocity (`v_law = v`); with `PLAN_MEAS_V` the
+    /// measured whole-body `v_com`, so a body running past the cruise command
+    /// is braked against its TRUE speed. `xi` already uses the measured capture
+    /// point; this closes the second half of the inconsistency. The Raibert
+    /// neutral fallback (`compute_forward_target`) intentionally keeps the
+    /// fiction `v` — it is the no-measurement path.
+    pub(crate) v_law: f32,
     /// Signed DCM/capture-point state `xi = x_CoM + v_CoM/ω₀` for this tick,
     /// with `ω₀ = √(g / z_CoM)`. `Some` only when a measurement exists and the
     /// pendulum frequency is defined; drives both the §3 DCM-margin liftoff
@@ -196,7 +204,7 @@ pub(crate) fn plan_target_x_raw(
     } else {
         t_c
     };
-    if let Some(x) = capture_point_deadbeat(plan.xi, v, v_desired, plan.omega0, t_c_eff) {
+    if let Some(x) = capture_point_deadbeat(plan.xi, plan.v_law, v_desired, plan.omega0, t_c_eff) {
         return x.clamp(hip_x - plan.x_max, hip_x + plan.x_max);
     }
     let x_target = compute_forward_target(v, v_desired, config.kv, config.stance_duration_ts);

@@ -72,6 +72,13 @@ pub fn drive_hip_pin(
                 let anchor_x = pin.anchor_p3.x;
                 let world_dx = measured_x - anchor_x;
                 pin.state.hip_pos.x = pin.seed_hip.x + world_dx;
+                // NOTE (reverted): overwriting `state.hip_vel.x` with the
+                // measured `P3vx` (a hard velocity feedback) STOPS the body — it
+                // cancels the command-vs-realized lead the feed-forward gait runs
+                // on (A/B: net +6 px, thrashing ±140). The runaway is fixed at
+                // the right layer instead: measured velocity is routed into the
+                // foot-placement law only (`StepPlan::v_law`, `PLAN_MEAS_V`),
+                // never into the integrator.
             }
         }
 
