@@ -129,9 +129,14 @@ pub struct WaitArgs {
 /// Whole-body walk: hold a horizontal body input for `dur` seconds. Only `dir[0]`
 /// (the x sign) is used — `+x` walks right, `-x` walks left — matching the
 /// resolver's `input_dir.x`.
+/// `speed` optionally overrides the global `target_speed` (px/s, magnitude) for
+/// the duration of this command: a mid-walk speed change is just two `move`
+/// entries with different `speed`. `None` = the global config speed.
 #[derive(Deserialize, Clone)]
 pub struct MoveArgs {
     pub dir: [f32; 2],
+    #[serde(default)]
+    pub speed: Option<f32>,
     pub dur: f32,
 }
 
@@ -187,6 +192,15 @@ impl Command {
             Command::Jump(a) => a.dur,
             // Instant: applied for exactly one tick.
             Command::Set(_) | Command::Reset(_) => 0.0,
+        }
+    }
+
+    /// The per-command walk speed override (px/s, magnitude): the `speed` of an
+    /// active `move`, or `None` for every other command (use the global).
+    pub fn move_speed(&self) -> Option<f32> {
+        match self {
+            Command::Move(a) => a.speed,
+            _ => None,
         }
     }
 

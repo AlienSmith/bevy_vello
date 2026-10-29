@@ -13,7 +13,7 @@ mod systems;
 
 pub use hip_pin::{
     drive_hip_pin, measure_body, parse_gait_authority, reset_hip_pin, tick_loop3_angular,
-    update_ground_support, FootContact, GroundSupport, HipPin, HipPinParams,
+    update_ground_support, FootContact, GroundSupport, HipPin, HipPinParams, MoveSpeed,
 };
 pub use measure::{
     center_of_mass, com_velocity, ema_alpha, torso_pitch, update_measurements, BodyMeasureFilter,

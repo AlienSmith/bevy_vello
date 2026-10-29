@@ -23,12 +23,15 @@ import matplotlib.pyplot as plt
 def load(path, targets):
     t, hip, lft, rft, gl, gr = [], [], [], [], [], []
     lt, rt = [], []  # commanded foot targets (x, y) if wanted
+    vx, vcmd = [], []  # measured hip vx (P3vx) + fiction commanded vx (cmd_vx)
     with open(path) as f:
         for row in csv.DictReader(f):
             t.append(float(row["t"]))
             hip.append((float(row["P3x"]), -float(row["P3y"])))  # up is +
             lft.append((float(row["PLLLx"]), -float(row["PLLLy"])))
             rft.append((float(row["PRLLx"]), -float(row["PRLLy"])))
+            vx.append(float(row.get("P3vx") or 0.0))
+            vcmd.append(float(row.get("cmd_vx") or 0.0))
             if targets:
                 lt.append((float(row["tPLLLx"]), -float(row["tPLLLy"])))
                 rt.append((float(row["tPRLLx"]), -float(row["tPRLLy"])))
@@ -46,6 +49,8 @@ def load(path, targets):
         np.array(gr),
         np.array(lt) if targets else None,
         np.array(rt) if targets else None,
+        np.array(vx),
+        np.array(vcmd),
     )
 
 
@@ -56,9 +61,9 @@ def main():
         sys.exit(__doc__)
     path = args[0]
     out = args[1] if len(args) > 1 else path.rsplit(".", 1)[0] + ".p3.png"
-    t, hip, lft, rft, gl, gr, lt, rt = load(path, targets)
+    t, hip, lft, rft, gl, gr, lt, rt, vx, vcmd = load(path, targets)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
 
     def shade(ax):
         for sig, c in ((gl, "#ffc2d1"), (gr, "#bfd4ff")):
@@ -98,7 +103,16 @@ def main():
 
     curves(ax1, 0, "x (px)", f"Hip + feet position vs time — {path}")
     curves(ax2, 1, "y (px, up +)")
-    ax2.set_xlabel("t (s)")
+    # Hip x-velocity panel: measured P3vx (black) vs fiction command (green),
+    # so speed changes and brake/launch transients read directly off the plot.
+    shade(ax3)
+    ax3.plot(t, vcmd, lw=1.0, color="#2f9e44", alpha=0.8, label="cmd_vx (fiction)")
+    ax3.plot(t, vx, lw=1.4, color="k", label="P3vx (measured)")
+    ax3.axhline(0.0, color="gray", lw=0.6)
+    ax3.grid(alpha=0.3)
+    ax3.legend(loc="upper left", ncol=2)
+    ax3.set_ylabel("hip vx (px/s)")
+    ax3.set_xlabel("t (s)")
 
     fig.tight_layout()
     fig.savefig(out, dpi=110)

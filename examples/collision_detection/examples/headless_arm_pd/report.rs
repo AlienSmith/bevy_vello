@@ -8,7 +8,7 @@ use bevy::input::ButtonInput;
 use bevy::prelude::{error, info, ResMut};
 
 use game_lib::{
-    check_bone_rigidity, tail_verdict, Bone, GaitPhase, HipPinParams, TelemetryBuffer,
+    check_bone_rigidity, tail_verdict, Bone, GaitPhase, HipPinParams, MoveSpeed, TelemetryBuffer,
     VerticalPhase,
 };
 
@@ -57,7 +57,11 @@ pub fn path_with_suffix(main: &str, suffix: &str) -> String {
 /// `keyboard → leafwing ActionState → hip pin` path, same as the retired
 /// `headless_pin` harness, but driven by the command playhead. Also records the
 /// input timeline for the events sidecar.
-pub fn drive_body_keys(mut keys: ResMut<ButtonInput<KeyCode>>, mut probe: ResMut<Probe>) {
+pub fn drive_body_keys(
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut probe: ResMut<Probe>,
+    mut move_speed: ResMut<MoveSpeed>,
+) {
     if !probe.body || probe.character.is_none() {
         return;
     }
@@ -66,6 +70,14 @@ pub fn drive_body_keys(mut keys: ResMut<ButtonInput<KeyCode>>, mut probe: ResMut
         0
     } else {
         probe.script.get(cur).map(|c| c.active_mask()).unwrap_or(0)
+    };
+    // Publish the active `move`'s speed override for `drive_hip_pin` this step.
+    // Any command without `speed` (or `wait`/`done`) falls back to the global
+    // config speed via `None`.
+    move_speed.target = if probe.script_done {
+        None
+    } else {
+        probe.script.get(cur).and_then(|c| c.move_speed())
     };
     let kind: &'static str = if probe.script_done {
         "done"

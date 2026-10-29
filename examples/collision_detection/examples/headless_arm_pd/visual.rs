@@ -190,6 +190,8 @@ fn main() {
         })
         // Ground gate for the pin's vertical authority (same as the harness).
         .insert_resource(GroundSupport::default())
+        // Per-command walk speed override, published by `drive_body_keys`.
+        .init_resource::<game_lib::MoveSpeed>()
         // The spine drive must stay silent (the pin owns P1/P2/P3 in body mode;
         // the frame is passive in limb mode).
         .insert_resource(SpineDriveEnabled(false))

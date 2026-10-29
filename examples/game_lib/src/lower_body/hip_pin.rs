@@ -25,6 +25,8 @@
 //! - [`drive`] — the `drive_hip_pin` system, loop-3 angular tick, reset.
 //! Public names are re-exported here so downstream imports are unchanged.
 
+use bevy::prelude::Resource;
+
 mod drive;
 mod ground;
 mod params;
@@ -36,6 +38,17 @@ pub use ground::*;
 pub use params::*;
 pub use seeding::*;
 pub use state::*;
+
+/// Script-driven walk speed: a per-command `target_speed` override (px/s,
+/// magnitude) that `drive_hip_pin` applies to its per-tick config while the
+/// harness's active `move` command carries a `speed`. `None` ⇒ the global
+/// `HipPinParams.config.target_speed` (bit-identical for scripts without the
+/// field). Lives as a resource so the example crate (which owns the script
+/// playhead) can publish it without touching the game-lib config plumbing.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct MoveSpeed {
+    pub target: Option<f32>,
+}
 
 #[cfg(test)]
 mod tests;

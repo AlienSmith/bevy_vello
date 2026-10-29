@@ -10,6 +10,7 @@ use super::ground::*;
 use super::params::*;
 use super::seeding::*;
 use super::state::*;
+use super::MoveSpeed;
 use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
 use crate::lower_body::resolver::{
@@ -25,6 +26,7 @@ use crate::lower_body::resolver::{
 pub fn drive_hip_pin(
     time: Res<Time<Fixed>>,
     params: Res<HipPinParams>,
+    move_speed: Option<Res<MoveSpeed>>,
     ground_support: Option<Res<GroundSupport>>,
     mut pin_q: Query<(Entity, &mut HipPin)>,
     spine_q: Query<(&SpineController, &VelloCharacterPhysicsRoot)>,
@@ -200,6 +202,12 @@ pub fn drive_hip_pin(
         // (reach envelope, LIPM, stand regulator, plant) sees this override.
         let mut cfg = params.config.clone();
         cfg.hip_height = pin.standing_height;
+        // Script-driven speed change: an active `move` with `speed` overrides
+        // the global `target_speed` for its duration (see `MoveSpeed`). Absent
+        // resource or `None` ⇒ global config, bit-identical.
+        if let Some(ms) = move_speed.as_ref().and_then(|m| m.target) {
+            cfg.target_speed = ms;
+        }
         let (pose, debug) = step_lower_body(input_dir, &cfg, &mut pin.state, dt);
         // Loop-3 telemetry latch: the torque/accel are per-tick `DebugInfo`
         // values (not persistent state), so keep the last tick's for the

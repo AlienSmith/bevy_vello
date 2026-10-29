@@ -264,6 +264,8 @@ fn main() {
     // Ground gate for the pin's vertical authority; refreshed only when the
     // collision pipeline runs, otherwise it keeps its grounded default.
     .insert_resource(GroundSupport::default())
+    // Per-command walk speed override, published by `drive_body_keys`.
+    .init_resource::<game_lib::MoveSpeed>()
     // The spine drive must stay silent: in body mode the pin owns P1/P2/P3, in
     // limb mode the frame must be passive (absent resource = ON ⇒ insert false).
     .insert_resource(SpineDriveEnabled(false))

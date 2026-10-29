@@ -24,6 +24,8 @@
 # visual app, so the graph we plot is the graph on screen.
 #
 # Defaults: LEG_COMPLIANCE=1e-8 STEP_HEIGHT=70 COLLISION=1 WIN_HIDDEN=1
+# BOOT_LUNGE=1 (the hip-kick launch is the QA baseline; pass BOOT_LUNGE=0 to
+# run the fiction-only startup).
 # DCM_TC=0 (analytic deadbeat placement is the ONLY runtime placement law, t_c
 # auto-picks the stance duration), plans/walk_script.json (mirrors
 # run_visual.ps1; the older headless defaults were LEG_COMPLIANCE=5e-9
@@ -82,6 +84,7 @@ env ASSET_ROOT="$REPO/examples/collision_detection/assets" \
     COLLISION="${COLLISION:-1}" \
     WIN_HIDDEN="${WIN_HIDDEN:-1}" \
     DCM_TC="${DCM_TC:-0}" \
+    BOOT_LUNGE="${BOOT_LUNGE:-1}" \
     "${ENVARGS[@]}" \
     "$BIN" 2>&1 | grep -E "body: rows|rigidity:|leg:|walk params|visual harness" || true
 

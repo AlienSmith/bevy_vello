@@ -58,7 +58,7 @@ pub use crate::{
         tick_loop3_angular, update_ground_support, BodyMeasurements, DebugInfo, GaitLimits,
         GaitPhase, GroundSupport, HipPin, HipPinParams, LegState, LowerBodyConfig,
         LowerBodyController, LowerBodyInput, LowerBodyParams, LowerBodyPose,
-        LowerBodySandboxPlugin, ResolverState, VerticalPhase,
+        LowerBodySandboxPlugin, MoveSpeed, ResolverState, VerticalPhase,
     },
 };
 
