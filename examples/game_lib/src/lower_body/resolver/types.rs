@@ -136,6 +136,18 @@ pub struct LowerBodyConfig {
     pub attitude_gravity_coupling: bool,
     /// Tilt clamp, rad (default 1.30 ≈ 75° — never spin past "fallen over").
     pub theta_max: f32,
+
+    // --- Boot FSM (`BOOT_LUNGE`, Stage 4d). All `false` = committed behavior. ---
+    /// Stand→lunge→walk boot switch. `false` (default): the whole FSM is inert
+    /// and the resolver is bit-identical to the committed build. `true`: the
+    /// character starts locked (`Stand`), converts the first move intent into a
+    /// short scripted hip lunge, and only then opens the door to the gait.
+    pub boot_lunge: bool,
+    /// Falsification knob (`BOOT_LUNGE_HOLD`): the `Lunge` window never
+    /// releases — feet stay locked after the hip has been thrown forward at
+    /// `BOOT_LUNGE_V`. The character MUST fall over; if it does not, the lock
+    /// is not airtight and the `Walk` switch is doing nothing.
+    pub boot_lunge_hold: bool,
 }
 
 impl Default for LowerBodyConfig {
@@ -175,6 +187,8 @@ impl Default for LowerBodyConfig {
             attitude_accel_coupling: 1.0,
             attitude_gravity_coupling: true,
             theta_max: 1.30,
+            boot_lunge: false,
+            boot_lunge_hold: false,
         }
     }
 }
@@ -190,6 +204,57 @@ pub enum GaitPhase {
     Stance,
     /// Foot is travelling through the air toward its next plant.
     Swing,
+}
+
+// ---------------------------------------------------------------------------
+// Boot FSM (Stage 4d, `BOOT_LUNGE`)
+// ---------------------------------------------------------------------------
+
+/// Whole-body horizontal gait mode. The per-leg [`GaitPhase`] machine is
+/// untouched; this switch only *vetoes* liftoffs (feet locked) while it is not
+/// `Walk`, and scripts the hip through a short forward lunge.
+///
+/// Why a scripted lunge instead of a weight shift (the three failed attempts
+/// of Stage 4c): this plant has no ankle actuator, so a *posture* (lean or
+/// backward plant-drag) cannot migrate the CoM while both feet are pinned.
+/// The leg PD can, however, *drag the hip particle itself* toward an
+/// advancing reference: translate the resolver hip forward through a short
+/// window and the physics pipeline gives the body real forward velocity. The
+/// DCM law (`xi = x + v/ω₀`) is blind at `v = 0`; after the lunge it reads
+/// positive `v_com` on its very first tick, so the first swing targets land
+/// ahead of the hip and the 2 s catch-up scramble disappears.
+///
+/// Release is a *timer by intent*: the window IS the maneuver (like a jump's
+/// launch phase), so unlike the Stage 4c cap it is not an escape hatch for a
+/// weight shift that failed to arrive. `BOOT_LUNGE_HOLD` refuses the release
+/// to prove the state switch is real (a locked body thrown forward falls).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BootPhase {
+    /// Feet locked (no liftoff, stance timers frozen), hip sitting. Initial
+    /// armed state while `boot_lunge` is on; inert (`Walk`) when off.
+    Stand,
+    /// Scripted forward hip translation in progress: `dir` is the signed lunge
+    /// direction captured at entry, `t` is the time held so far (seconds).
+    /// Feet stay locked; the hip reference advances at `BOOT_LUNGE_V`.
+    Lunge { dir: f32, t: f32 },
+    /// The gait door is open: the DCM law, the triggers and the timers own
+    /// everything. Sticky — once released, never re-armed (a stopped walker
+    /// does not re-stand; the committed stop-settle owns that).
+    Walk,
+}
+
+impl Default for BootPhase {
+    fn default() -> Self {
+        BootPhase::Stand
+    }
+}
+
+impl BootPhase {
+    /// True while the feet-lock veto is active (`Stand` or `Lunge`).
+    #[inline]
+    pub fn is_locked(&self) -> bool {
+        !matches!(self, BootPhase::Walk)
+    }
 }
 
 /// How much authority the physics contact layer has over the gait clock.
@@ -486,6 +551,9 @@ pub struct ResolverState {
     /// gait's rhythm, and the counters make that visible without telemetry.
     pub early_lift_count: [u32; 2],
     pub swing_wait_count: [u32; 2],
+    /// Boot FSM (Stage 4d): the stand→lunge→walk switch. `Walk` when
+    /// `config.boot_lunge` is off (the committed gait, bit-identical).
+    pub boot: BootPhase,
 }
 
 impl ResolverState {
@@ -560,6 +628,13 @@ impl ResolverState {
             max_swing_wait: 0.05,
             early_lift_count: [0; 2],
             swing_wait_count: [0; 2],
+            // Off ⇒ inert `Walk`; on ⇒ armed `Stand` (feet locked until the
+            // lunge releases).
+            boot: if config.boot_lunge {
+                BootPhase::Stand
+            } else {
+                BootPhase::Walk
+            },
         }
     }
 }

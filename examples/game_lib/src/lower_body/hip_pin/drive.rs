@@ -1,7 +1,6 @@
 use bevy::{prelude::*, time::Fixed};
 use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent,
-    VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloParticle,
+    CharacterAngularConstraintEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloParticle,
 };
 use leafwing_input_manager::prelude::ActionState;
 use vello_physics::AngularConstraintConfig;
@@ -13,7 +12,7 @@ use super::state::*;
 use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
 use crate::lower_body::resolver::{
-    attitude_lean_pd, step_lower_body, CaptureMeasure, GaitAuthority, GaitPhase,
+    attitude_lean_pd, step_lower_body, BootPhase, CaptureMeasure, GaitAuthority, GaitPhase,
     ResolverState, VerticalPhase,
 };
 
@@ -354,6 +353,35 @@ pub fn drive_hip_pin(
         // Sandbox → legs: write the resolver poses into the leg controllers.
         // `update_character_movement` (ordered after) reads them for the IK.
         if params.hip_drives_legs {
+            // Boot FSM (Stage 4d) — the physics-side launch authority. The body
+            // above P3 is a straight stiff stick, and the ONLY actuator that
+            // pitches it is the hip-joint rest angle (the world-upright lean
+            // reference; see `leg_pd.rs` §loop-3 delivery). The two measured
+            // failures of the scripted hip-translation lunge: (a) the hip target
+            // follows the LIVE P3 x (`hip_t.x = actual_p3.x`), so an advancing
+            // resolver reference never drags the particle — it only stretches
+            // the drawn legs, whose PD then pulls the pinned feet and the body
+            // drifts BACKWARD; (b) the measured-attitude rebalancer stayed live
+            // and caught every tip, so the HOLD falsification run stayed
+            // upright. The fix follows the user's directive literally:
+            //   * Stand  = totally idle: no rebalancer, no lean PD — 0.0 lean
+            //     aims the stick at true world vertical and nothing else, so
+            //     whatever momentum the kick injects is unopposed;
+            //   * Lunge  = DIRECT override of the angular constraint: an
+            //     open-loop forward lean written straight into the hip-joint
+            //     reference for the short window, bypassing the measured-attitude
+            //     PD entirely. SIGN: `leg_pd.rs` documents the actuator as
+            //     "leaning the reference backward makes the stance legs push the
+            //     trunk forward" (the rebalancer corrects a forward lean with a
+            //     NEGATIVE lean) — so a forward KICK uses `-dir * params.boot_lean`.
+            //     (A +lean command measured `body_theta < 0`: trunk went backward.)
+            // On release (`Walk`) the rebalancer resumes automatically because
+            // these fields are rewritten from `params` every tick.
+            let boot_locked = params.config.boot_lunge && pin.state.boot.is_locked();
+            let boot_lunge_dir = match pin.state.boot {
+                BootPhase::Lunge { dir, .. } if params.config.boot_lunge => Some(dir),
+                _ => None,
+            };
             let (Ok(mut right_leg), Ok(mut left_leg)) =
                 (right_leg_q.get_mut(entity), left_leg_q.get_mut(entity))
             else {
@@ -384,19 +412,28 @@ pub fn drive_hip_pin(
             //     reference is held straight instead of trimming;
             //   * `measured.n > 0` — no valid whole-body measurement yet
             //     (startup / detached parts) means no error signal to act on.
-            let upright_lean =
-                if params.attitude_enabled && !ext_pin && grounded && pin.measured.n > 0 {
-                    attitude_lean_pd(
-                        pin.measured.theta,
-                        pin.measured.omega,
-                        params.attitude_target_bias,
-                        params.attitude_lean_kp,
-                        params.attitude_lean_kd,
-                        params.attitude_max_angle,
-                    )
-                } else {
-                    0.0
-                };
+            let upright_lean = if let Some(ldir) = boot_lunge_dir {
+                // Launch: the direct override. A/B-calibrated sign: `+lean`
+                // advanced the hip (net +37.9 px), `−lean` toppled it backward
+                // (hip collapsed 173→87 px) — so the forward kick is `+dir`.
+                ldir * params.boot_lean
+            } else if !boot_locked
+                && params.attitude_enabled
+                && !ext_pin
+                && grounded
+                && pin.measured.n > 0
+            {
+                attitude_lean_pd(
+                    pin.measured.theta,
+                    pin.measured.omega,
+                    params.attitude_target_bias,
+                    params.attitude_lean_kp,
+                    params.attitude_lean_kd,
+                    params.attitude_max_angle,
+                )
+            } else {
+                0.0
+            };
             right_leg.config.upright_reference_lean = upright_lean;
             left_leg.config.upright_reference_lean = upright_lean;
 

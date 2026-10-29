@@ -93,6 +93,7 @@ pub(crate) fn step_leg(
     contact: Option<LegContactInput>,
     authority: GaitAuthority,
     max_swing_wait: f32,
+    boot_locked: bool,
     early_lift_count: &mut u32,
     swing_wait_count: &mut u32,
 ) -> Option<f32> {
@@ -128,7 +129,13 @@ pub(crate) fn step_leg(
             // The stance foot is pinned in world space; the hip moves away and
             // the leg stretches through the IK solve.
             leg.foot_pos = leg.plant_pos;
-            leg.phase_timer -= dt;
+            // Boot FSM: while the whole body is `locked` (Stand/Lunge), NO
+            // stance timer advances, so the release is a posture, not a race
+            // against an elapsed clock. The timer resumes exactly where it
+            // stopped (the release kick overwrites it deliberately).
+            if !boot_locked {
+                leg.phase_timer -= dt;
+            }
             // Step while there is move *intent*, or while braking to a stop
             // (the capture-point plan needs a foot to land on). With neither,
             // the gait freezes and the hip settles over the planted feet (see
@@ -204,7 +211,11 @@ pub(crate) fn step_leg(
             };
             let stance_over =
                 leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed;
-            if stance_over && wants_step && !other_swinging {
+            // Boot FSM: the gait door. `boot_locked` vetoes every liftoff path
+            // (trigger AND timer) — the character physically cannot walk while
+            // Stand/Lunge is active, so the scripted lunge without the switch
+            // to Walk is what makes the falsification run fall over.
+            if stance_over && wants_step && !other_swinging && !boot_locked {
                 // Log which condition ended the stance (telemetry only).
                 leg.trigger_reason = if dcm_crossed {
                     2

@@ -32,6 +32,7 @@ fn step_leg_kinematic(
         None,
         GaitAuthority::Timer,
         0.05,
+        false,
         &mut a,
         &mut b,
     )
@@ -66,6 +67,7 @@ fn step_leg_contact(
         contact,
         authority,
         0.05,
+        false,
         &mut a,
         &mut b,
     )
@@ -4711,4 +4713,153 @@ fn test_attitude_flight_drops_gravity_term() {
     );
     // Both must still settle to upright.
     assert!(a.theta.abs() < 1e-3 && c.theta.abs() < 1e-3);
+}
+
+// ---------------------------------------------------------------------------
+// Boot FSM (Stage 4d): stand → lunge → walk, `BOOT_LUNGE`.
+// ---------------------------------------------------------------------------
+
+/// The lock: while `Stand`/`Lunge` the gait door is shut (both feet Stance),
+/// the horizontal fiction is frozen (`hip_vel.x == 0` — the launch momentum is
+/// delivered downstream by the physics-side lean override, NOT by a scripted
+/// hip translation, which the measured pipeline showed dragged the body
+/// BACKWARD), and the window releases to `Walk` on the timer. After the
+/// release the rear foot must take the first step and the gait must walk on.
+/// Sandbox mode (no measurement): fully deterministic here — the
+/// physics-pipeline fall/walk is run 2.
+#[test]
+fn test_boot_lunge_locks_then_releases_to_walk() {
+    let mut cfg = LowerBodyConfig::default();
+    cfg.boot_lunge = true;
+    let mut s = ResolverState::new(&cfg);
+    let dt = 1.0 / 90.0;
+    assert_eq!(s.boot, BootPhase::Stand, "armed config must start locked");
+    let start_hip = s.hip_pos.x;
+
+    // Tick 1: intent + both stance ⇒ Lunge (feet still locked, no liftoff yet).
+    step_lower_body(Vec2::X, &cfg, &mut s, dt);
+    assert!(
+        matches!(s.boot, BootPhase::Lunge { dir, .. } if dir > 0.0),
+        "expected forward lunge, got {:?}",
+        s.boot
+    );
+
+    // Hold: run until the window releases. Every locked tick must keep BOTH
+    // feet planted (no gait while Stand/Lunge) and freeze the fiction.
+    let mut lunged = 0;
+    for _ in 0..40 {
+        step_lower_body(Vec2::X, &cfg, &mut s, dt);
+        if s.boot.is_locked() {
+            lunged += 1;
+            assert_eq!(
+                (s.left.phase, s.right.phase),
+                (GaitPhase::Stance, GaitPhase::Stance),
+                "lock leaked a liftoff: L={:?} R={:?}",
+                s.left.phase,
+                s.right.phase
+            );
+            assert!(
+                s.hip_vel.x.abs() < 1e-3,
+                "locked fiction must be frozen (the kick is physics-side), got {}",
+                s.hip_vel.x
+            );
+        } else {
+            break;
+        }
+    }
+    assert_eq!(s.boot, BootPhase::Walk, "lunge never released");
+    // The scripted window (0.18 s ≈ 16 ticks) plus slack.
+    assert!(
+        lunged as f32 * dt >= BOOT_LUNGE_T * 0.5,
+        "window shorter than scripted: {lunged} ticks"
+    );
+    // The planted feet never moved under the lock (no phantom drag).
+    assert!(
+        (s.hip_pos.x - start_hip).abs() < 1.0,
+        "locked fiction must not translate the hip: {} -> {}",
+        start_hip,
+        s.hip_pos.x
+    );
+
+    // The rear (left, seed puts it behind the CoM for +x) steps on the kick.
+    let rear_is_left = s.left.plant_pos.x < s.right.plant_pos.x;
+    let mut first_swing = None;
+    for i in 0..6 {
+        step_lower_body(Vec2::X, &cfg, &mut s, dt);
+        if s.left.phase == GaitPhase::Swing {
+            first_swing = Some(true);
+            break;
+        }
+        if s.right.phase == GaitPhase::Swing {
+            first_swing = Some(false);
+            break;
+        }
+    }
+    assert_eq!(
+        first_swing,
+        Some(rear_is_left),
+        "rear foot must step first after the release kick (rear_is_left={rear_is_left})"
+    );
+
+    // And it walks on: advance well past the seed CoM line.
+    for _ in 0..400 {
+        step_lower_body(Vec2::X, &cfg, &mut s, dt);
+    }
+    assert!(
+        s.hip_pos.x > start_hip + 200.0,
+        "no walking after the lunge: hip={}",
+        s.hip_pos.x
+    );
+}
+
+/// The falsification knob: `boot_lunge_hold` never opens the gait door, so
+/// with intent held the character stays locked forever and can NEVER swing a
+/// foot — that is what makes the physics-pipeline run fall over (the Walk
+/// switch is load-bearing). In the sandbox we can only observe the lock.
+#[test]
+fn test_boot_lunge_hold_never_opens_the_walk_door() {
+    let mut cfg = LowerBodyConfig::default();
+    cfg.boot_lunge = true;
+    cfg.boot_lunge_hold = true;
+    let mut s = ResolverState::new(&cfg);
+    let dt = 1.0 / 90.0;
+    // Far past the normal window.
+    for _ in 0..120 {
+        step_lower_body(Vec2::X, &cfg, &mut s, dt);
+        assert!(
+            s.boot.is_locked(),
+            "HOLD must never release to Walk, got {:?}",
+            s.boot
+        );
+        assert_eq!(
+            (s.left.phase, s.right.phase),
+            (GaitPhase::Stance, GaitPhase::Stance),
+            "a held body must not swing (the gait door is shut)"
+        );
+    }
+}
+
+/// Default config (`boot_lunge = false`): the FSM parks at `Walk` from
+/// construction and the legacy gait is bit-identical (a swing still fires
+/// promptly on the half-phase timer stagger).
+#[test]
+fn test_boot_lunge_off_is_inert() {
+    let cfg = LowerBodyConfig::default();
+    let mut s = ResolverState::new(&cfg);
+    let dt = 1.0 / 90.0;
+    assert_eq!(s.boot, BootPhase::Walk, "off config must start at Walk");
+    let mut swung_by = None;
+    for i in 0..60 {
+        step_lower_body(Vec2::X, &cfg, &mut s, dt);
+        assert_eq!(s.boot, BootPhase::Walk, "boot must stay inert off");
+        if swung_by.is_none()
+            && (s.left.phase == GaitPhase::Swing || s.right.phase == GaitPhase::Swing)
+        {
+            swung_by = Some(i);
+        }
+    }
+    assert!(
+        swung_by.map_or(false, |i| i < 30),
+        "legacy gait lost its first step: {swung_by:?}"
+    );
 }

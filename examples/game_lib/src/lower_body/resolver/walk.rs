@@ -6,6 +6,19 @@ use super::stepping::*;
 use super::types::*;
 use super::vertical::*;
 use bevy::math::Vec2;
+
+/// Boot FSM: the lunge window, seconds. Short by design — it is a launch
+/// impulse, not a gait. `BOOT_LUNGE_HOLD` extends it forever (the
+/// falsification run: a locked, kicked body must fall over).
+///
+/// The kick itself is NOT scripted here: the physics launch is the direct
+/// hip-joint rest-angle override in `drive_hip_pin` (`BOOT_LUNGE_LEAN`). The
+/// measured failure of the earlier scripted hip-translation (measured hip
+/// 172.8→171.7 during a +90 px/s reference window): `hip_t.x` tracks the LIVE
+/// P3 x, so an advancing fiction only stretched the drawn legs and the PD
+/// dragged the pinned feet — backward. Here the lock only freezes the fiction.
+pub(crate) const BOOT_LUNGE_T: f32 = 0.18;
+
 /// Run one full resolver tick.
 ///
 /// # Pipeline (mirrors `plans/raibert_redesign.md`)
@@ -78,6 +91,59 @@ pub fn step_lower_body(
     state.v_ref = approach(state.v_ref, v_cmd, config.accel * dt);
     let v_desired_scalar = state.v_ref;
 
+    // 2c. --- Boot FSM (Stage 4d): stand → lunge → walk ---
+    // The gait door. While `boot_lunge` is armed and the FSM has not released
+    // to `Walk`, BOTH liftoffs and stance timers are frozen (`boot_locked`) and
+    // the horizontal fiction is parked (`v = 0` below): the character cannot
+    // walk while standing, so the launch kick — delivered downstream as the
+    // direct hip-joint rest-angle override in `drive_hip_pin`, with the
+    // measured-attitude rebalancer silenced — is the only motion command.
+    // Without the `Walk` switch the kicked, locked body falls. Off ⇒
+    // `state.boot` starts `Walk`, every gate here is inert, bit-identical.
+    let boot_locked = if !config.boot_lunge || airborne {
+        false
+    } else {
+        match state.boot {
+            BootPhase::Stand => {
+                let both_stance =
+                    state.left.phase == GaitPhase::Stance && state.right.phase == GaitPhase::Stance;
+                if both_stance && v_cmd.abs() > SWING_TRIGGER_SPEED {
+                    // First move intent from a locked quiet stance ⇒ lunge.
+                    // Direction from the instantaneous command (not the ramped
+                    // reference), captured once.
+                    state.boot = BootPhase::Lunge {
+                        dir: v_cmd.signum(),
+                        t: 0.0,
+                    };
+                }
+                true
+            }
+            BootPhase::Lunge { dir, mut t } => {
+                t += dt;
+                if t >= BOOT_LUNGE_T && !config.boot_lunge_hold {
+                    // Release kick: guarantee the REAR foot steps first. The
+                    // frozen timers are stale by design; reset so the rear's
+                    // timer expires on the next tick and the anti-phase gate
+                    // holds the lead leg while the rear passes over it.
+                    let rear_is_left =
+                        (state.left.plant_pos.x < state.right.plant_pos.x) == (dir > 0.0);
+                    let (rear_leg, front_leg) = if rear_is_left {
+                        (&mut state.left, &mut state.right)
+                    } else {
+                        (&mut state.right, &mut state.left)
+                    };
+                    rear_leg.phase_timer = 0.0;
+                    front_leg.phase_timer = config.stance_duration_ts;
+                    state.boot = BootPhase::Walk;
+                    false
+                } else {
+                    state.boot = BootPhase::Lunge { dir, t };
+                    true
+                }
+            }
+            BootPhase::Walk => false,
+        }
+    };
     // 3. --- Velocity shaping ---
     // While braking to a stop, raise the deceleration to at least the stop
     // floor `v²/(2·X_max)`: this guarantees the capture point stays within
@@ -126,6 +192,15 @@ pub fn step_lower_body(
         }
     }
 
+    // Boot lock: while the feet are pinned the horizontal fiction is frozen at
+    // zero, so the drawn pose is a pure stand and the leg PD is not asked to
+    // chase a translating hip (that chase is what dragged the body backward).
+    // The launch momentum comes from the physics-side lean override only; on
+    // release the rebalancer + gait resume and the DCM reads the REAL velocity
+    // via `measured`.
+    if boot_locked {
+        v = 0.0;
+    }
     // In Flight there is no ground authority: horizontal velocity carries
     // ballistically (no shaping, no braking). This is what makes walk → jump →
     // walk one continuous loop at a constant `v_x` (doc §6.2, §5A).
@@ -289,6 +364,7 @@ pub fn step_lower_body(
         contact_left,
         authority,
         max_wait,
+        boot_locked,
         &mut lift_count_l,
         &mut wait_count_l,
     );
@@ -304,6 +380,7 @@ pub fn step_lower_body(
         contact_right,
         authority,
         max_wait,
+        boot_locked,
         &mut lift_count_r,
         &mut wait_count_r,
     );

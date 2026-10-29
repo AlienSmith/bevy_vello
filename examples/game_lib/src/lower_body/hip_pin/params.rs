@@ -62,6 +62,11 @@ pub struct HipPinParams {
     /// Loop-3 derivative gain (radians of leg-reference lean per rad/s of
     /// measured torso rate). Damps the reference tilt; `0.0` disables.
     pub attitude_lean_kd: f32,
+    /// Boot FSM (`BOOT_LUNGE`): magnitude of the open-loop launch lean,
+    /// radians. Written into the hip-joint reference (sign-corrected in
+    /// `drive_hip_pin`) for the lunge window while the balance control is
+    /// idle. `BOOT_LEAN` env; default 0.30 (~17°).
+    pub boot_lean: f32,
     /// How much authority the plan §6 contact layer has over the gait clock.
     /// `GAIT_AUTHORITY=timer|observe|contact|full` (default `timer`).
     ///
@@ -126,6 +131,13 @@ impl HipPinParams {
         // never past it (no reversal against the command). Negative = off
         // (committed gait). Try TD_FLOOR=0.2.
         p.config.td_solve_floor = env_f32("TD_FLOOR", p.config.td_solve_floor);
+        // Boot FSM (Stage 4d): stand→lunge→walk (`BOOT_LUNGE=1`). Default off
+        // ⇒ committed behavior, bit-identical. `BOOT_LUNGE_HOLD=1` is the
+        // falsification run: the lunge window never releases, so the feet stay
+        // locked after the hip is thrown forward — the character MUST fall over
+        // (proves the Walk switch is the real gait door). See BootPhase.
+        p.config.boot_lunge = env_bool("BOOT_LUNGE", p.config.boot_lunge);
+        p.config.boot_lunge_hold = env_bool("BOOT_LUNGE_HOLD", p.config.boot_lunge_hold);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);
@@ -151,6 +163,7 @@ impl HipPinParams {
             .max(0.0);
         p.attitude_lean_kp = env_f32("ATT_LEAN_KP", p.attitude_lean_kp).max(0.0);
         p.attitude_lean_kd = env_f32("ATT_LEAN_KD", p.attitude_lean_kd).max(0.0);
+        p.boot_lean = env_f32("BOOT_LEAN", p.boot_lean).max(0.0);
         if let Ok(raw) = std::env::var("GAIT_AUTHORITY") {
             p.gait_authority = parse_gait_authority(&raw);
         }
@@ -231,6 +244,7 @@ impl Default for HipPinParams {
             // the measured lean in one tick; `0.03` damps the reference tilt.
             attitude_lean_kp: 0.5,
             attitude_lean_kd: 0.03,
+            boot_lean: 0.30,
             // §6 is opt-in and off by default: see `GaitAuthority`.
             gait_authority: GaitAuthority::Timer,
         }
