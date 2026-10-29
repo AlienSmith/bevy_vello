@@ -587,6 +587,7 @@ fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
         ),
         stopping: false,
         capture_offset: 0.0,
+        brake_step: false,
         measured: None,
         xi: None,
         omega0: 0.0,
@@ -760,6 +761,7 @@ fn test_stretch_horizon_is_absolute_deadline_and_bounded_early() {
         x_max: 1.0e6,
         stopping: false,
         capture_offset: 0.0,
+        brake_step: false,
         measured: Some(CaptureMeasure {
             com_x: x0,
             v_com: v0,
@@ -976,6 +978,7 @@ fn test_capture_point_worldspace_independent_of_hip() {
             x_max: 1000.0,
             stopping: false,
             capture_offset: 0.0,
+            brake_step: false,
             measured: Some(m),
             xi: Some(m.com_x + m.v_com / w),
             omega0: w,
@@ -1011,6 +1014,7 @@ fn test_capture_point_clamps_and_reports_saturation() {
         x_max,
         stopping: false,
         capture_offset: 0.0,
+        brake_step: false,
         measured: Some(m),
         xi: Some(m.com_x + m.v_com / omega0(m.z_com, cfg.gravity).unwrap()),
         omega0: omega0(m.z_com, cfg.gravity).unwrap(),
@@ -4943,4 +4947,55 @@ fn test_plan_meas_v_low_passes_and_off_is_inert() {
             "off-path filter pollution leaked into the outputs at tick {i}"
         );
     }
+}
+
+/// The stop path (trigger + capture offset) must read the filtered measured
+/// speed when `plan_meas_v` is on: a fiction-collapsed-at-rest body whose
+/// measured EMA says 170 px/s must still be braking onto a capture-point foot.
+/// Off-path (default), the same state must stay pure fiction: no brake, zero
+/// offset — bit-identical behavior (the fiction is at rest here).
+#[test]
+fn test_stop_path_uses_measured_brake_when_on_and_fiction_when_off() {
+    let dt = 1.0 / 90.0;
+
+    // A quiet-stance fiction (v_prev = 0) + a measured filter insisting the
+    // body is coasting at 170 px/s (the post-kick runaway speed).
+    let mut cfg_on = LowerBodyConfig::default();
+    cfg_on.plan_meas_v = true;
+    let mut s = ResolverState::new(&cfg_on);
+    s.measured = Some(CaptureMeasure {
+        com_x: s.hip_pos.x,
+        v_com: 170.0,
+        z_com: cfg_on.hip_height,
+    });
+    let (_, d_on) = step_lower_body(Vec2::ZERO, &cfg_on, &mut s, dt);
+    // v_meas_filt initializes to the first raw sample (170), so `stopping`
+    // must fire and the brake foot must be aimed far ahead of the hip.
+    assert!(
+        d_on.capture_x > 10.0,
+        "measured-brake stop: capture offset must brake a 170 px/s body, got {}",
+        d_on.capture_x
+    );
+    // Sanity: the offset stays within reach (clamping is the planner's job).
+    assert!(
+        d_on.capture_x <= 2.0 * d_on.x_max,
+        "offset wildly out of scale: {}",
+        d_on.capture_x
+    );
+
+    // OFF: identical polluted state must NOT move the brake — fiction rules.
+    let cfg_off = LowerBodyConfig::default();
+    let mut s2 = ResolverState::new(&cfg_off);
+    s2.measured = Some(CaptureMeasure {
+        com_x: s2.hip_pos.x,
+        v_com: 170.0,
+        z_com: cfg_off.hip_height,
+    });
+    s2.v_meas_filt = Some(170.0); // poison: the EMA is state-only when off
+    let (_, d_off) = step_lower_body(Vec2::ZERO, &cfg_off, &mut s2, dt);
+    assert!(
+        d_off.capture_x == 0.0,
+        "off-path must keep the fiction stop (rest => no brake), got offset {}",
+        d_off.capture_x
+    );
 }

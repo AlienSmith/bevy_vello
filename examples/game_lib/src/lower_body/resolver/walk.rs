@@ -157,10 +157,34 @@ pub fn step_lower_body(
     // reach, so the hip can always brake onto its next foot instead of
     // overshooting both plants.
     let v_prev = state.hip_vel.x;
-    let stopping = v_desired_scalar == 0.0 && v_prev.abs() > SWING_TRIGGER_SPEED;
+    // EMA of the measured CoM velocity (shared by `plan_meas_v`: the gentle
+    // cruise brake AND the stop path below). Raw `v_com` carries the ±140
+    // px/s gait-cycle ripple; feeding it directly rang the brake target and
+    // destabilized the walk. A low-pass with `v_meas_tau` (~1–2 stances)
+    // keeps the TRUE average speed — the signal the fiction is blind to —
+    // while the per-step ripple is rejected.
+    if let Some(m) = state.measured {
+        let alpha = (dt / config.v_meas_tau.max(1e-3)).min(1.0);
+        state.v_meas_filt = Some(match state.v_meas_filt {
+            Some(f) => f + alpha * (m.v_com - f),
+            None => m.v_com,
+        });
+    }
+    // The speed the BRAKE believes. Off (default): the fiction `v_prev`,
+    // bit-identical. On: the filtered measured speed. Without this, the stop
+    // path is fiction-blind: releasing input collapses `v_ref`/fiction `v` to
+    // 0 within ~0.15 s (`accel/a_eff`), while a body kicked past cruise is
+    // still coasting at 170+ px/s — the trigger flips off, the capture-point
+    // foot is never aimed, and the character walks through its own stop.
+    let v_brake = if config.plan_meas_v {
+        state.v_meas_filt.unwrap_or(v_prev)
+    } else {
+        v_prev
+    };
+    let stopping = v_desired_scalar == 0.0 && v_brake.abs() > SWING_TRIGGER_SPEED;
     let a_cmd = config.accel.min(limits.a_max).max(f32::EPSILON);
     let a_eff = if stopping {
-        let a_stop_floor = v_prev * v_prev / (2.0 * x_max.max(f32::EPSILON));
+        let a_stop_floor = v_brake * v_brake / (2.0 * x_max.max(f32::EPSILON));
         a_cmd.max(a_stop_floor)
     } else {
         a_cmd
@@ -250,12 +274,20 @@ pub fn step_lower_body(
     // 5. --- Capture point + per-leg foot placement ---
     // While stopping, aim the swing foot at the point where the hip will come
     // to rest under `a_eff` (Pratt capture point), so the hip brakes onto its
-    // foot rather than past it.
+    // foot rather than past it. With `plan_meas_v` the offset is sized by the
+    // TRUE speed (`v_brake`): a body still coasting at 170 gets a foot placed
+    // at its real stopping distance. Off-path the fiction `v` is used exactly
+    // as before (bit-identical).
+    let v_cap = if config.plan_meas_v { v_brake } else { v };
     let capture_offset = if stopping {
-        v * v.abs() / (2.0 * a_eff)
+        v_cap * v_cap.abs() / (2.0 * a_eff)
     } else {
         0.0
     };
+    // The brake-step gate (see `StepPlan::brake_step`): the gait must keep
+    // stepping brake feet while the TRUE speed is still above the swing
+    // trigger, even if the fiction has already collapsed to rest.
+    let brake_step = stopping && v_cap.abs() > super::placement::SWING_TRIGGER_SPEED;
     let xi = state
         .measured
         .and_then(|m| omega0(m.z_com, config.gravity).map(|w| m.com_x + m.v_com / w));
@@ -263,18 +295,6 @@ pub fn step_lower_body(
         .measured
         .and_then(|m| omega0(m.z_com, config.gravity))
         .unwrap_or(0.0);
-    // EMA of the measured CoM velocity (used only by `plan_meas_v`). Raw
-    // `v_com` carries the ±140 px/s gait-cycle ripple; feeding it to the law
-    // directly rang the brake target and destabilized the walk. A low-pass
-    // with `v_meas_tau` (~1–2 stances) keeps the TRUE average speed — the
-    // signal the fiction is blind to — while the per-step ripple is rejected.
-    if let Some(m) = state.measured {
-        let alpha = (dt / config.v_meas_tau.max(1e-3)).min(1.0);
-        state.v_meas_filt = Some(match state.v_meas_filt {
-            Some(f) => f + alpha * (m.v_com - f),
-            None => m.v_com,
-        });
-    }
     // The velocity fed to the deadbeat LEAD term. By default the fiction `v`
     // (committed gait, bit-identical). With `PLAN_MEAS_V`, the filtered
     // measured velocity (falling back to the fiction when no measurement
@@ -293,6 +313,7 @@ pub fn step_lower_body(
         x_max,
         stopping,
         capture_offset,
+        brake_step,
         measured: state.measured,
         xi,
         omega0,

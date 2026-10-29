@@ -141,8 +141,12 @@ pub(crate) fn step_leg(
             // the gait freezes and the hip settles over the planted feet (see
             // the stop-settle servo in `step_lower_body`). Steps also require
             // the opposite foot to be planted (anti-phase swap).
-            let wants_step = v_desired.abs() > SWING_TRIGGER_SPEED
-                || (plan.stopping && v.abs() > SWING_TRIGGER_SPEED);
+            // The brake test is precomputed in `StepPlan::brake_step` against
+            // the stop-path BRAKE speed (`v_cap`), not the fiction `v`: when
+            // `plan_meas_v` routes the measured EMA, a body still coasting at
+            // 170 while the fiction has collapsed to 0 must keep stepping.
+            // Off-path `v_cap == v` — bit-identical.
+            let wants_step = v_desired.abs() > SWING_TRIGGER_SPEED || plan.brake_step;
             // Plan §6 early lift-off (`Full` only): a timer that says Stance
             // while the foot is airborne makes loop 2 extend a leg against
             // nothing, and makes loop 1 believe it has support it does not have.

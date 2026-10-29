@@ -120,6 +120,13 @@ pub(crate) struct StepPlan {
     /// neutral fallback (`compute_forward_target`) intentionally keeps the
     /// fiction `v` — it is the no-measurement path.
     pub(crate) v_law: f32,
+    /// True while the BRAKE needs strides to land on: the stop-path capture
+    /// speed (`v_cap` = fiction `v`, or the filtered measured speed while
+    /// `plan_meas_v`) still exceeds the swing trigger. `wants_step` ORs this
+    /// with `plan.stopping` instead of reading the fiction `v` directly, so a
+    /// body coasting past the collapsed fiction keeps stepping brake feet.
+    /// Bit-identical when `plan_meas_v` is off (`v_cap == v`).
+    pub(crate) brake_step: bool,
     /// Signed DCM/capture-point state `xi = x_CoM + v_CoM/ω₀` for this tick,
     /// with `ω₀ = √(g / z_CoM)`. `Some` only when a measurement exists and the
     /// pendulum frequency is defined; drives both the §3 DCM-margin liftoff

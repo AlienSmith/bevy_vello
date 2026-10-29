@@ -52,7 +52,9 @@ BIN=$REPO/target/release/examples/visual_arm_pd
 TAG="walk"
 ENVARGS=()
 for a in "$@"; do
-  if [[ "$a" == *"="* && "$a" != */* ]]; then
+  # KEY=VALUE if it starts with an identifier followed by '=' — the VALUE may
+  # contain '/' (e.g. SCRIPT=/abs/path); anything else is the TAG.
+  if [[ "$a" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
     ENVARGS+=("$a")
   else
     TAG="$a"
