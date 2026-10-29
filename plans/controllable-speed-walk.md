@@ -12,6 +12,93 @@ a 60→100 step-up from rest walks 0. The DCM/deadbeat machinery supports
 velocity control in theory — the problem is which channels are closed, and what
 happens when the placement channel saturates.
 
+## 0. Background: the fiction model, the hookup, and why speed is uncontrolled
+
+### 0a. Why we have a fiction model
+
+The physics (XPBD) is **reactive, not proactive**: each tick it resolves
+constraints — particles move toward targets, joints hold, feet friction against
+the floor. It has no notion of "in 0.3 s the body will be over its front foot
+and must catch itself." Walking *is* that notion: foot-placement decisions made
+now for where the body will be later (the DCM / capture-point math in
+`resolver/placement.rs`). Those decisions need a model that can be integrated
+forward cheaply, deterministically, in the resolver's own frame. That model is
+the **fiction**: a mass-on-legs inverted pendulum the planner owns
+(`hip_pos`, `hip_vel`, `v_ref`, leg timers, plants).
+
+History forced it, it was not chosen for elegance:
+- physics-only startup deadlocked (`PUSH_OFF`, Stage 4b — a resting body has no
+  state-derivable reason to take the first step);
+- hard velocity feedback from physics into the resolver **stopped a walking body
+  dead** (`VEL_FEEDBACK`: net +6 px — see §5).
+
+The fiction persists because it is the only thing that can *disagree* with
+reality — and that disagreement is what moves the body.
+
+### 0b. How it's hooked up
+
+Fiction → physics every tick, through the hip-pin servo
+(`hip_pin/state.rs::delta_frame_targets`):
+
+```
+target_delta = hip_delta + (v_hip − v_c)·dt + gravity_term
+   position plan            ^^^^^^^^^^^^^^^
+                            THE LEAD: fiction velocity − measured velocity
+```
+
+The body is dragged toward a target sitting **ahead of itself** by the fiction's
+velocity advantage; friction at the planted feet converts that lead into forward
+push. The boot kick is pure lead (fiction pinned to 160 px/s while the feet hold).
+
+Physics → fiction feeds back:
+- **hip position** (`drive.rs` FEEDBACK write-back) — planning stays honest about
+  *where* the body is;
+- **CoM + foot-contact measurement** (`pin.measured`) — feeds the capture point
+  `ξ`, and under `PLAN_MEAS_V` the placement law's lead term;
+- **landing error** at each touchdown (the `v_support` backward solve,
+  `walk.rs` §6) — a per-stride nudge.
+
+**Deliberately excluded: measured velocity → fiction velocity.** The one direct
+wire (overwriting `state.hip_vel.x`) zeroes the lead and kills the engine, so the
+fiction's velocity runs on its own command schedule and *never learns the true
+speed*. The hookup is half-open by design: the position channel is closed, the
+velocity channel is not.
+
+### 0c. Why that equals "no control of speed"
+
+Velocity control needs a loop: sense error → act → error shrinks. Trace ours:
+
+1. **Command** `speed=120` → fiction ramps to 120. Works — the `cmd_vx` track
+   does this.
+2. **Fiction → body**: the lead pushes the body. Works at startup (the kick
+   proves it: fiction 160 → body 160+).
+3. **Body → speed controller**: should say "you're at 230, command was 120,
+   stride shorter." The only channel that can shrink stride is the **placement
+   law**, and by default its lead term is fed the *fiction* `v` (obediently 120
+   while the body runs 230) — so the error is invisible. **Open loop.** This is
+   the runaway.
+4. `PLAN_MEAS_V` patches #3 (routes the measured EMA into the law; measured
+   236→205→127 bleed). But there is a hard wall: feet reach only
+   `x_max ≈ 54 px`, while a 230 px/s body's capture point sits `v/ω₀ ≈ 70 px`
+   ahead — **unreachable above ~177 px/s**. There the law saturates, every stride
+   aims max-reach, and a *speed-down produces no control event at all* until the
+   fiction-vs-body race crosses by accident: the 8.5 s cliff (brake engages ~4 s
+   after the 4.5 s edge, then overshoots to 0 — nothing senses the over-braking
+   either).
+5. **Speed-UP has no engine from rest**: at rest the lead is zero
+   (fiction ≈ measured ≈ 0) and the only thing that ever seeds a big lead — the
+   kick — is one-shot in the boot FSM. The 60→100 segment after the cliff walked
+   ~0 px/s.
+
+So "not hooked up properly" is precise: **position closed, velocity deliberately
+broken (for good reason), and the one legitimate speed authority — stride length
+— is fed a blind signal by default and saturates beyond ~177 px/s.** The command
+can *start* motion (lead engine) and *lean on* feet (placement) but has no
+continuous governor between them. Stages B (saturation-aware horizon → an
+N-stride brake expression within reach), C (bounded lead clamp → command edges
+produce real control events), and D (re-armable surge → a speed-UP engine) close
+exactly those three holes.
+
 ## 1. The control structure, honestly
 
 There are exactly **two channels** by which the controller can change the
