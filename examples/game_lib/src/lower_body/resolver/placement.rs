@@ -143,6 +143,11 @@ pub(crate) struct StepPlan {
     /// capped flight — measured to worsen the touchdown lead (−18/−32 px vs
     /// the baseline −7/+21). Stays off until §4 lands.
     pub(crate) mpc_trigger: bool,
+    /// Measured swing-wait from the PREVIOUS stride, seconds (`ADAPT_TC`).
+    /// Folded into the deadline as `t_c' = t_c + t_flight + τ` so the brake is
+    /// calibrated against the stance the gait will actually be granted.
+    /// `0.0` when the switch is off ⇒ bit-identical.
+    pub(crate) adapt_tc_wait: f32,
 }
 
 /// World-x swing target for a foot, given `t_flight` seconds remaining in the
@@ -207,7 +212,11 @@ pub(crate) fn plan_target_x_raw(
     // (2026-10-28) — deadbeat contains both as its limits.
     let t_c = resolve_deadbeat_tc(config.dcm_tc, config.stance_duration_ts);
     let t_c_eff = if t_c > 0.0 {
-        t_c + t_flight.max(0.0)
+        // `ADAPT_TC`: pay for the previous stride's measured contact wait. A
+        // contact-gated flight overruns by τ and the successor's stance is
+        // stretched by the same τ (stride = stance + swing), so the nominal
+        // deadline over-brakes. `adapt_tc_wait` is 0.0 when off.
+        t_c + t_flight.max(0.0) + plan.adapt_tc_wait.max(0.0)
     } else {
         t_c
     };

@@ -193,6 +193,23 @@ pub struct LowerBodyConfig {
     /// backward solve is skipped when on: its fiction correction is overwritten
     /// by the re-blend on the very next tick anyway.
     pub hip_v_mix: f32,
+    /// EXPERIMENT (`ADAPT_TC=1`, default off): add the *measured* last swing
+    /// wait (`τ`) to the deadbeat deadline, `t_c' = t_c + t_flight + τ_last`.
+    ///
+    /// Why (measured 2026-10-30, `GAIT_AUTHORITY=full`): the deadbeat promises
+    /// `v = v_des` exactly one NOMINAL stance after touchdown. Contact-gated
+    /// landing stretches a flight by τ, and because stride = stance + swing the
+    /// successor's stance is stretched by τ too — so a brake calibrated for
+    /// 0.28 s was applied for 0.28+τ s. Observed flights 300→311 ms with waits
+    /// up to ~100 ms: the law over-braked through zero and the walk went
+    /// backward (v_filt −20…−29, 50% of samples negative), at every mix tested.
+    /// Feeding the measured wait back into the horizon makes the promise
+    /// self-consistent with the stance actually granted. `τ` is clamped to
+    /// `adapt_tc_max` so a pathological stride cannot invert the law.
+    pub adapt_tc: bool,
+    /// Clamp on the measured wait folded into the horizon, seconds
+    /// (`ADAPT_TC_MAX`, default 0.10 ≈ the largest observed wait).
+    pub adapt_tc_max: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -238,6 +255,8 @@ impl Default for LowerBodyConfig {
             plan_meas_v: false,
             v_meas_tau: 0.6,
             hip_v_mix: -1.0,
+            adapt_tc: false,
+            adapt_tc_max: 0.10,
         }
     }
 }
@@ -428,6 +447,11 @@ pub struct LegState {
     /// `phase_timer` into profile progress. This is the schedule's time base,
     /// never the landing trigger itself.
     pub flight_span: f32,
+    /// `swing_wait` latched at the moment the foot planted (seconds). Survives
+    /// the `swing_wait = 0.0` reset that happens on the same tick, so the
+    /// `ADAPT_TC` horizon can read the realised hold of the flight that just
+    /// ended.
+    pub planted_wait: f32,
 }
 
 /// Discrete phase of the vertical (loop 1) controller.
@@ -598,6 +622,10 @@ pub struct ResolverState {
     /// contact before landing anyway (§6 swing extension). Without a cap, a
     /// foot that never touches would swing forever.
     pub max_swing_wait: f32,
+    /// Measured `swing_wait` of the most recent completed swing, seconds
+    /// (`ADAPT_TC`). The deadbeat horizon folds this in so the brake is sized
+    /// against the stance the gait actually receives. `0.0` when never waited.
+    pub last_swing_wait: f32,
     /// Diagnostic: per-leg count of stances that `GaitAuthority::Full` ended
     /// before their timer expired, and swings that overran waiting for
     /// contact. Exposed because these are the two mechanisms that changed the
@@ -634,6 +662,7 @@ impl ResolverState {
             swing_prog: 0.0,
             trigger_reason: 0,
             flight_span: config.stance_duration_ts,
+            planted_wait: 0.0,
         };
         // Right leg starts half a stance out of phase with the left, so the two
         // legs alternate once the gait begins; both stay planted while standing
@@ -652,6 +681,7 @@ impl ResolverState {
             swing_prog: 0.0,
             trigger_reason: 0,
             flight_span: config.stance_duration_ts,
+            planted_wait: 0.0,
         };
 
         Self {
@@ -679,6 +709,7 @@ impl ResolverState {
             // collision frame, short enough that a genuinely stuck foot lands
             // instead of hanging the gait.
             max_swing_wait: 0.05,
+            last_swing_wait: 0.0,
             early_lift_count: [0; 2],
             swing_wait_count: [0; 2],
             // Off ⇒ inert `Walk`; on ⇒ armed `Stand` (feet locked until the

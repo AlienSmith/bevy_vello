@@ -89,6 +89,7 @@ fn stance_leg(cfg: &LowerBodyConfig, plant_x: f32) -> LegState {
         swing_prog: 0.0,
         trigger_reason: 0,
         flight_span: cfg.stance_duration_ts,
+        planted_wait: 0.0,
     }
 }
 
@@ -595,6 +596,7 @@ fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
         // `xi` is None ⇒ the deadbeat branch is skipped and the Raibert
         // fallback uses the caller's `v`; this value never reaches the law.
         v_law: 0.0,
+        adapt_tc_wait: 0.0,
     }
 }
 
@@ -772,6 +774,7 @@ fn test_stretch_horizon_is_absolute_deadline_and_bounded_early() {
         mpc_trigger: false,
         // cruising at command: law velocity == the fiction `v` the test passes.
         v_law: v0,
+        adapt_tc_wait: 0.0,
     };
     // t_c auto = stance (0.28); swing = 0.28 as well by default.
     let ts = cfg.stance_duration_ts;
@@ -986,6 +989,7 @@ fn test_capture_point_worldspace_independent_of_hip() {
             // world-space independence probe: law velocity == the 0.0 the test
             // passes (the target must be hip-independent regardless of `v`).
             v_law: 0.0,
+            adapt_tc_wait: 0.0,
         };
         let target = plan_target_x(hip_x, 0.0, 0.0, 0.5, &cfg_test, &plan);
         let expected = capture_point(m.com_x, m.v_com, 0.0, z, g).unwrap();
@@ -1020,6 +1024,7 @@ fn test_capture_point_clamps_and_reports_saturation() {
         omega0: omega0(m.z_com, cfg.gravity).unwrap(),
         mpc_trigger: false,
         v_law: m.v_com,
+        adapt_tc_wait: 0.0,
     };
     let hip_x = 0.0;
     let target = plan_target_x(hip_x, 300.0, 120.0, 0.5, &cfg, &plan);

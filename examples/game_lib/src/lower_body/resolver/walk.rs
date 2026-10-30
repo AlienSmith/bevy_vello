@@ -332,6 +332,16 @@ pub fn step_lower_body(
         omega0,
         mpc_trigger: config.mpc_trigger,
         v_law,
+        // `ADAPT_TC`: fold the measured previous-stride wait into the horizon so
+        // the brake is sized for the stance the gait is actually granted.
+        // Clamped so one pathological flight cannot invert the law; `0.0` off.
+        adapt_tc_wait: if config.adapt_tc {
+            state
+                .last_swing_wait
+                .clamp(0.0, config.adapt_tc_max.max(0.0))
+        } else {
+            0.0
+        },
     };
 
     // Loop 1 "in trouble" signal (plan §2): the reachability clamp fired on the
@@ -354,7 +364,10 @@ pub fn step_lower_body(
                     |x: f32| x < state.hip_pos.x - x_max || x > state.hip_pos.x + x_max;
                 let raw_b = |t_flight: f32| -> Option<f32> {
                     let t_c_eff = if t_c > 0.0 {
-                        t_c + t_flight.max(0.0)
+                        // Mirror `plan_target_x_raw` exactly, including the
+                        // `ADAPT_TC` term — the "in trouble" report must
+                        // describe the deadline actually being promised.
+                        t_c + t_flight.max(0.0) + plan.adapt_tc_wait.max(0.0)
                     } else {
                         t_c
                     };
@@ -465,6 +478,17 @@ pub fn step_lower_body(
     state.early_lift_count[1] = state.early_lift_count[1].saturating_add(lift_count_r);
     state.swing_wait_count[0] = state.swing_wait_count[0].saturating_add(wait_count_l);
     state.swing_wait_count[1] = state.swing_wait_count[1].saturating_add(wait_count_r);
+    // `ADAPT_TC` measurement: latch the realised hold of the swing that just
+    // planted (read back before `step_leg` resets it to 0.0 on the next landing
+    // cycle). Collected here, before anything else can clear it.
+    // `planted_wait` is latched inside `step_leg` before the `swing_wait`
+    // reset, so it still holds the flight's realised hold here.
+    let just_planted_wait = if left_td.is_some() || right_td.is_some() {
+        state.left.planted_wait.max(state.right.planted_wait)
+    } else {
+        state.last_swing_wait
+    };
+    state.last_swing_wait = just_planted_wait;
 
     // 6. --- Backward solve at touchdown (foot → hip) ---
     // Invert the *actual* plant offset to get the hip velocity whose next

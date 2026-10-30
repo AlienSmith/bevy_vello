@@ -319,6 +319,10 @@ pub(crate) fn step_leg(
                 *swing_wait_count = swing_wait_count.saturating_add(1);
             }
             if leg.phase_timer <= 0.0 {
+                // Latch the realised hold BEFORE the reset below: this is the
+                // extra time the flight actually took over its nominal schedule,
+                // and `ADAPT_TC` sizes the next brake against it.
+                leg.planted_wait = leg.swing_wait;
                 leg.foot_pos = leg.swing_to;
                 leg.plant_pos = leg.swing_to;
                 leg.phase = GaitPhase::Stance;

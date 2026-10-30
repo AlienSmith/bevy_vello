@@ -156,6 +156,9 @@ impl HipPinParams {
         // Single-knob fiction blend (see LowerBodyConfig): 0 = pure observer,
         // 1 = pure command fiction; default −1 = legacy integrator (off).
         p.config.hip_v_mix = env_f32("HIP_V_MIX", p.config.hip_v_mix).clamp(-1.0, 1.0);
+        // Adaptive deadbeat horizon: fold the measured last swing wait into t_c.
+        p.config.adapt_tc = env_bool("ADAPT_TC", p.config.adapt_tc);
+        p.config.adapt_tc_max = env_f32("ADAPT_TC_MAX", p.config.adapt_tc_max).clamp(0.0, 1.0);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);
