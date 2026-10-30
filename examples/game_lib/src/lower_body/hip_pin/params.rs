@@ -62,6 +62,13 @@ pub struct HipPinParams {
     /// Loop-3 derivative gain (radians of leg-reference lean per rad/s of
     /// measured torso rate). Damps the reference tilt; `0.0` disables.
     pub attitude_lean_kd: f32,
+    /// EXPERIMENT (`VEL_FEEDBACK=1`, default off): overwrite the fiction hip
+    /// velocity `state.hip_vel.x` with the measured `P3vx` every tick — the
+    /// hard velocity feedback reverted in bf65865 (A/B: walk died, net +6 px,
+    /// thrashing ±140). Re-added behind a flag to re-measure its behavior now
+    /// that the `PLAN_MEAS_V` placement brake exists. See the NOTE in
+    /// `drive_hip_pin`.
+    pub vel_feedback: bool,
     /// Boot FSM (`BOOT_LUNGE`): magnitude of the open-loop launch lean,
     /// radians. Written into the hip-joint reference (sign-corrected in
     /// `drive_hip_pin`) for the lunge window while the balance control is
@@ -101,6 +108,7 @@ impl HipPinParams {
     pub fn from_env() -> Self {
         let mut p = Self::default();
         p.config.target_speed = env_f32("TARGET_SPEED", p.config.target_speed);
+        p.vel_feedback = env_bool("VEL_FEEDBACK", p.vel_feedback);
         // Gait shape. `SWING` shorter = the foot must travel the step in less
         // time (a faster swing); `STEP_HEIGHT` is the swing arc apex above the
         // plant line, i.e. how high the foot lifts to clear the floor.
@@ -252,6 +260,7 @@ impl Default for HipPinParams {
             attitude_lean_kp: 0.5,
             attitude_lean_kd: 0.03,
             boot_lean: 0.30,
+            vel_feedback: false,
             // §6 is opt-in and off by default: see `GaitAuthority`.
             gait_authority: GaitAuthority::Timer,
         }

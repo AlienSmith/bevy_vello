@@ -81,6 +81,13 @@ pub fn drive_hip_pin(
                 // the right layer instead: measured velocity is routed into the
                 // foot-placement law only (`StepPlan::v_law`, `PLAN_MEAS_V`),
                 // never into the integrator.
+                //
+                // EXPERIMENT SWITCH (`VEL_FEEDBACK=1`, default off): re-applies
+                // that overwrite for re-measurement now that the placement brake
+                // exists. Off ⇒ bit-identical to the committed baseline.
+                if params.vel_feedback {
+                    pin.state.hip_vel.x = p3.particle.velocity.x;
+                }
             }
         }
 
