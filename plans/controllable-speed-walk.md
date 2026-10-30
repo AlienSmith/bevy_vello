@@ -272,6 +272,19 @@ step (D2 → document the envelope).
 With B+C (and D1 if chosen), re-run `stop_script.json` from post-kick speed. Today
 `stopk_*` still falls (P3y 182→265; one-step wall 177 < release speed ~230). B's
 graded horizon is exactly what a >177 release needs.
+
+**Stage E deficit measured on the new baseline (2026-10-30, `stop_script.json`
+walk-4s-then-stop):** the trio still falls, and the trace names WHY:
+| run | net | coast after release | P3y end | verdict |
+|---|---|---|---|---|
+| `stop_kick_only` (BL=1, VF=0, PLMV=0) | +1089 | +169 | 265 | FELL |
+| `stop_vf_mv` (baseline trio)           | +1075 | +155 | 270 | FELL |
+Both pitch over at the SAME window (t 4.6→6.0): at t=5.0 the body still runs
++172–186 px/s while P3y has already dropped to 231–235 — toppling AT the moment
+braking is demanded. Not fiction divergence (fed back now), not ripple (EMA'd):
+pure one-step capture-wall saturation — an 180 px/s capture point `v/ω₀ ≈ 55 px`
+≈ full `x_max` cannot be caught in one stance. Deficit to the "stand" gate
+(P3y < 200) is ~65–70 px. Stage B is the fix.
 **Gate:** `stopk_on` stands: P3y stays < 200 after release; coast ≤ ~1 stride
 budget; `fall_check.py` upright; gates: swing/SLIDING verdicts no worse than
 `stop_bl` baseline.
