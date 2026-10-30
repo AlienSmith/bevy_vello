@@ -4999,3 +4999,122 @@ fn test_stop_path_uses_measured_brake_when_on_and_fiction_when_off() {
         d_off.capture_x
     );
 }
+
+// ---------------------------------------------------------------------------
+// DCM stride map — pure math, NO sandbox, NO physics (2026-10-30 long-walk
+// forensics). The closed loop per stride, under the user's two assumptions:
+//   (1) during swing no ground force acts ⇒ hip velocity is CONSTANT, the hip
+//       advances `v · T_swing`;
+//   (2) the stance leg is an exact LIPM pivot about the planted foot.
+// The deadbeat placement law is exact against this map: planted at the demanded
+// offset, one stance delivers `v' = v_des` identically (pinned below). The
+// long-walk telemetry showed feet landing ~56 px BEHIND the demand — exactly
+// the one-step swing-travel term ⇒ the map's error multiplier is `+1` and the
+// excess speed GROWS by ~75 px/s per stride instead of braking: the runaway.
+// ---------------------------------------------------------------------------
+
+/// Ideal-stride constants matching the QA baseline (run_walk.sh defaults):
+/// hip_height 90 ⇒ z_com ≈ 90, g = 980, stance 0.28, swing 0.28.
+const MAP_G: f32 = 980.0;
+const MAP_Z: f32 = 90.0;
+const MAP_T_ST: f32 = 0.28;
+const MAP_T_SW: f32 = 0.28;
+
+/// One ideal stance of the LIPM about a foot planted `rel` px AHEAD of the hip
+/// (positive = foot ahead, the braking sign convention):
+/// `v' = v·cosh(s) − ω·rel·sinh(s)`, `s = ω·T_st`.
+fn lipm_stance(v: f32, rel: f32) -> f32 {
+    let w = (MAP_G / MAP_Z).sqrt();
+    let s = w * MAP_T_ST;
+    v * s.cosh() - w * rel * s.sinh()
+}
+
+#[test]
+fn test_stride_map_deadbeat_is_exact() {
+    // The shipped law's coefficients, recomputed here as the test's reference.
+    let w = (MAP_G / MAP_Z).sqrt();
+    let s = w * MAP_T_ST; // t_c_eff = stance at the landing tick (t_flight = 0)
+    let alpha = 1.0 / (w * s.tanh()); // velocity gain
+    let beta = 1.0 / (w * s.sinh()); // desired lead
+    for &v in &[60.0f32, 120.0, 200.0, 260.0] {
+        let v_des = 90.0;
+        let rel = alpha * v - beta * v_des; // demanded foot-ahead offset
+        let v_next = lipm_stance(v, rel);
+        assert!(
+            (v_next - v_des).abs() < 1e-2,
+            "deadbeat must land on v_des in one stance: v {v} -> {v_next}, want {v_des}"
+        );
+    }
+}
+
+#[test]
+fn test_stride_map_missing_swing_travel_is_the_runaway() {
+    // If the delivered touchdown offset is the SAME demand frozen at liftoff
+    // while the hip advanced v·T_swing during flight, the effective placement
+    // is short by exactly v·T_swing — the measured −56 px @ v ≈ 200.
+    let w = (MAP_G / MAP_Z).sqrt();
+    let s = w * MAP_T_ST;
+    let (alpha, beta) = (1.0 / (w * s.tanh()), 1.0 / (w * s.sinh()));
+    let v_des = 90.0;
+    // rel_eff = alpha·v − beta·v_des − v·T_sw ⇒ v' = v_des + gain·v, the
+    // swing-miss pole gain = ω·sinh(ω·T_st)·T_sw:
+    let gain = w * s.sinh() * MAP_T_SW; // ≈0.976 — MARGINAL: errors persist
+    assert!(
+        gain < 1.0 && gain > 0.9,
+        "pole ω·sinh(ωT_st)·T_sw = {gain} must be ≈1 (but < 1): with the \
+         swing-travel term missing the deadbeat loop becomes MARGINAL — placement \
+         errors decay by only (1−gain) ≈ 2% per stride, so any energy the physics \
+         injects per stride accumulates and the excess speed persists/grows (the \
+         measured long-walk runaway)"
+    );
+    // fixed point v* = v_des/(1−gain) — absurdly high: the "runaway ceiling"
+    // the gait drifts toward whenever physics adds a little energy per stride.
+    assert!(v_des / (1.0 - gain) > 1000.0, "runaway fixed point too low");
+    let mut v = 200.0;
+    for _ in 0..4 {
+        let rel_eff = alpha * v - beta * v_des - v * MAP_T_SW;
+        v = lipm_stance(v, rel_eff);
+        assert!(
+            v > 200.0 + 40.0,
+            "missing swing-travel must pump the gait, got {v}"
+        );
+    }
+}
+
+#[test]
+fn test_stride_map_error_gain_and_reach_ceiling() {
+    // Quantifies the user's observation (2026-10-30): at landing the foot was
+    // ≈35 px BEHIND the hip (telemetry foot_rel −35..−43 @ v≈200) while the
+    // deadbeat demanded ≈+24..57 px AHEAD (target_rel +21..27 at cruise).
+    // Exactness ⇒ the stance is an affine map around v_des:
+    //   v' − v_des = ω·sinh(ωT_st)·(rel_demand − rel_delivered),
+    // a placement ERROR GAIN of ≈3.5 (px/s) per px. Landing 90 px short of the
+    // demand injects ≈ +315 px/s — the vault over a rear plant, per stride.
+    let w = (MAP_G / MAP_Z).sqrt();
+    let s = w * MAP_T_ST;
+    let (alpha, beta) = (1.0 / (w * s.tanh()), 1.0 / (w * s.sinh()));
+    let egain = w * s.sinh();
+    assert!(egain > 3.0 && egain < 4.0, "error gain = {egain}");
+    // Cruise self-consistency with telemetry: the demand at v = 120 must match
+    // the measured commanded target_rel (+21..27 px) at landing.
+    let v_des = 90.0;
+    let cruise_demand = alpha * 120.0 - beta * v_des;
+    assert!(
+        (cruise_demand - 24.0).abs() < 8.0,
+        "cruise demand = {cruise_demand}, telemetry target_rel ≈ 24"
+    );
+    // Reach ceiling: the speed at which the braking demand hits the envelope
+    // x_max (computed by the SHIPPED envelope, default config, h = 90). Above
+    // it the law CANNOT ask for enough foot-ahead to brake — the measured
+    // long-walk stall band 190–240 px/s is exactly this ceiling: below it the
+    // demand is feasible, above it the demand clamps and every residual
+    // excess-vault keeps feeding energy.
+    let limits = GaitLimits::from_config(&LowerBodyConfig::default(), 90.0, v_des);
+    let x_max = limits.x_max;
+    let v_sat = (x_max + beta * v_des) / alpha;
+    assert!(
+        v_sat > 170.0 && v_sat < 210.0,
+        "deadbeat braking demand saturates at v_sat = {v_sat} (x_max = {x_max}) \
+         — the plateau every long-walk variant stalls around"
+    );
+}
