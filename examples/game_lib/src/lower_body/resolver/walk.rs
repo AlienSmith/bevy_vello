@@ -198,7 +198,20 @@ pub fn step_lower_body(
     } else {
         limits.v_abs.min(limits.v_cruise_max)
     };
-    let mut v = approach(v_prev, v_desired_scalar, a_eff * dt).clamp(-v_ceil, v_ceil);
+    // `HIP_V_MIX=a` (a ∈ [0,1]): ONE memoryless blend replaces the integrator —
+    // `v = (1−a)·filtered reality + a·command`. The fiction can no longer forget
+    // what physics did (the old `approach(v_prev, …)` re-anchored from `v_prev`
+    // every tick), and its command bias `a·(v_ref − reality)` IS the pin drag
+    // `(v_hip − v_c)·dt` in `delta_frame_targets`: one knob plans and brakes.
+    // a=0 → velocity changes only through placement+friction; a=1 → pure
+    // command fiction. Negative (default) keeps the legacy integrator,
+    // bit-identical.
+    let mut v = if config.hip_v_mix >= 0.0 {
+        let a = config.hip_v_mix.clamp(0.0, 1.0);
+        state.v_meas_filt.unwrap_or(v_prev) * (1.0 - a) + v_desired_scalar * a
+    } else {
+        approach(v_prev, v_desired_scalar, a_eff * dt).clamp(-v_ceil, v_ceil)
+    };
 
     // 4. --- Stop settle: the feet own the hip ---
     // Once braking has bled the speed off and both feet are planted, glide the
@@ -472,7 +485,10 @@ pub fn step_lower_body(
     // vacuous because the kinematic plant equals the same-tick plan.)
     let mut v_support = 0.0;
     // Skipped in Flight: no touchdown can fire, and `v_x` must carry unchanged.
-    if !airborne && v_desired_scalar != 0.0 {
+    // Skipped in HIP_V_MIX mode: the solve re-anchors the fiction toward the
+    // plan/command, but the next tick's blend overwrites it anyway — dead code
+    // that only muddies the one-knob story.
+    if !airborne && v_desired_scalar != 0.0 && config.hip_v_mix < 0.0 {
         if let Some(delta) = left_td.or(right_td) {
             v_support = compute_support_velocity(
                 delta,

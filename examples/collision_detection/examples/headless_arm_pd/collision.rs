@@ -100,7 +100,19 @@ pub fn spawn_collision_floor(
     const FLOOR_HALF_THICKNESS: f32 = 20.0;
     let floor_surface_y = hip_y - stance_h - floor_drop;
     let floor_y = floor_surface_y - FLOOR_HALF_THICKNESS;
-    let rect = Rect::new(-2400.0, -20.0, 2400.0, 20.0);
+    // `FLOOR_HALF_LEN=<px>` widens the single-rect floor collider (default 2400 ⇒
+    // 4800 px total). A long walk (~40 s × ~150 px/s ≈ 6000 px) walks off the
+    // default edge and free-falls, truncating the test; widen it to keep the body
+    // supported for the whole run. EXPERIMENT: a single very wide quad path can
+    // stress the GPU narrow phase / BVH, so this is also a collision-system
+    // stress test for a long floor.
+    let floor_half_len = env_f32("FLOOR_HALF_LEN", 2400.0).max(2400.0) as f64;
+    let rect = Rect::new(
+        -floor_half_len,
+        -(FLOOR_HALF_THICKNESS as f64),
+        floor_half_len,
+        FLOOR_HALF_THICKNESS as f64,
+    );
     let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
     let transform = Transform::from_xyz(0.0, floor_y, 0.0);
     commands.spawn((

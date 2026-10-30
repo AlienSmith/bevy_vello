@@ -153,6 +153,9 @@ impl HipPinParams {
         // post-launch cruise runaway.
         p.config.plan_meas_v = env_bool("PLAN_MEAS_V", p.config.plan_meas_v);
         p.config.v_meas_tau = env_f32("V_MEAS_TAU", p.config.v_meas_tau).max(1e-3);
+        // Single-knob fiction blend (see LowerBodyConfig): 0 = pure observer,
+        // 1 = pure command fiction; default −1 = legacy integrator (off).
+        p.config.hip_v_mix = env_f32("HIP_V_MIX", p.config.hip_v_mix).clamp(-1.0, 1.0);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);

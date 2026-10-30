@@ -173,6 +173,26 @@ pub struct LowerBodyConfig {
     /// seconds (`V_MEAS_TAU`). ~1–2 stances smooths the gait-cycle ripple while
     /// still tracking a real speed change within a few strides. Default 0.6.
     pub v_meas_tau: f32,
+    /// EXPERIMENT (`HIP_V_MIX`, default −1 = off): replace the fiction velocity
+    /// integrator (`approach(v_prev, v_desired, a·dt)`) with a single memoryless
+    /// convex blend of filtered reality and the rate-limited command, evaluated
+    /// fresh every tick:
+    /// `v = (1−a)·v_meas_filt + a·v_ref`, a ∈ [0, 1].
+    ///
+    /// Motivation (2026-10-30 long-walk tests): the old integrator re-anchored
+    /// the fiction to the command within ~0.2 s no matter what physics did, so
+    /// the DCM never saw the body's real speed (flat 120 while the body ran
+    /// 240). The blend has no such memory leak — reality re-enters every tick.
+    ///
+    /// The beauty of one knob: the fiction's command bias `a·(v_ref − reality)`
+    /// *automatically* becomes the pin drag `(v_hip − v_c)·dt` in
+    /// `delta_frame_targets` — the brake is the blend, not a second mechanism.
+    /// a = 0 → pure observer (velocity changes only through foot placement +
+    /// friction); a = 1 → pure command fiction (≈ the baseline). Negative
+    /// (default) selects the legacy integrator, bit-identical. The touchdown
+    /// backward solve is skipped when on: its fiction correction is overwritten
+    /// by the re-blend on the very next tick anyway.
+    pub hip_v_mix: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -217,6 +237,7 @@ impl Default for LowerBodyConfig {
             boot_lunge_v: 160.0,
             plan_meas_v: false,
             v_meas_tau: 0.6,
+            hip_v_mix: -1.0,
         }
     }
 }

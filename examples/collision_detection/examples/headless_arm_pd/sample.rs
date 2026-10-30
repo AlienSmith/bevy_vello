@@ -126,16 +126,23 @@ pub fn limb_sample(
         // The pin seeds lazily; degrade to zeros rather than dropping the row, so
         // the frozen header (scalars set in this exact order on the first capture)
         // always matches the values.
-        let (cmd_vx, vphase, gait_l, gait_r) = match pin_q.get(character) {
+        let (cmd_vx, vphase, gait_l, gait_r, v_filt, v_des) = match pin_q.get(character) {
             Ok(pin) => (
                 pin.state.hip_vel.x,
                 vphase_code(pin.state.vs.phase),
                 gait_code(pin.state.left.phase),
                 gait_code(pin.state.right.phase),
+                // The PERSISTENT velocity the placement law brakes against:
+                // EMA of the measured CoM speed (`v_meas_filt`).
+                pin.state.v_meas_filt.unwrap_or(0.0),
+                // The DESIRED velocity: rate-limited command (`state.v_ref`).
+                pin.state.v_ref,
             ),
-            Err(_) => (0.0, 0, 0, 0),
+            Err(_) => (0.0, 0, 0, 0, 0.0, 0.0),
         };
         row.set("cmd_vx", format!("{cmd_vx:.2}"));
+        row.set("v_filt", format!("{v_filt:.2}"));
+        row.set("v_des", format!("{v_des:.2}"));
         row.set("vphase", vphase.to_string());
         // Per-leg gait phase (0 = Stance, 1 = Swing) from the resolver. This is
         // the event signal that segments stance from swing independently of the
