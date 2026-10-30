@@ -199,8 +199,8 @@ Why no contact: the feet **hover above the floor**.
 | commanded foot y (median) | 257.4 / 257.1 |
 | **commanded foot above surface** | **21.6 / 21.9 px** |
 
-The commanded stance foot is parked ~22 px above the real collider. Root cause
-is measurable and specific: [`spawn_collision_floor`](../examples/collision_detection/examples/headless_arm_pd/collision.rs:80)
+The commanded stance foot is parked ~22 px above the real collider. The leading
+candidate cause is specific and measurable: [`spawn_collision_floor`](../examples/collision_detection/examples/headless_arm_pd/collision.rs:80)
 places the floor at `hip_y − pin.stance_height()`, and the run log shows
 
 ```
@@ -208,14 +208,87 @@ live_stance_h=106.00   resolver_hip_height=90.00
 ```
 
 `standing_height` is latched from the **straight-legged seed pose (106 px)**
-while the resolver is configured at **90 px** — a **16 px** disagreement. The
-virtual floor the gait plans against therefore sits 16 px ABOVE the real
-collider, the leg PD parks the foot in that gap, and the "stance" leg is
-standing on nothing.
+while the resolver is configured at **90 px** — a **16 px** disagreement, which
+would put the gait's virtual floor 16 px ABOVE the real collider.
 
-So: **the slide is not a friction problem. It is a floor-reference problem
-(16 px) plus a swing-reach problem (~55 px).** Friction would only matter once
-the foot is actually on the ground.
+### 6a. Why the penetration test above cannot decide contact (retracted)
+
+**The `penetration > 0` test compares the foot PARTICLE CENTRE to the floor
+surface — and the foot particle is a point at the centre of a CAPSULE.** The
+collider has non-zero radius, so a particle centre 6.2 px above the surface can
+be in solid, load-bearing contact: the cap is already touching the plane.
+
+This invalidates the headline claim of the previous commit:
+
+- **"Both feet are in the air ~93 % of the time" is RETRACTED.** It only says the
+  particle *centre* is above the plane.
+- **The derived "we land the feet too hard / the pose is too bouncy" reading is
+  RETRACTED too** — nothing measured supports it, and the hover→bounce story was
+  built on the invalid number. (The user's objection to it was correct.)
+- **The slide/friction-budget ratios (0.48 / 0.56) are approximations only**,
+  because the `0.9·penetration` budget uses that same suspect penetration. They
+  are not evidence either way.
+- The 16 px floor-reference disagreement remains a *candidate*, not a cause:
+  with a capsule radius on the order of the 6.2 px gap it may be entirely
+  harmless.
+
+Also retracted: §9 item 1's success gate "stance frames with contact 7 % →
+> 70 %", because 7 % was measured with the invalid test.
+
+What **survives**, because it does not depend on the contact test at all:
+
+- friction is enabled (strength 0.9, scaler 0.1, feet 0.35);
+- the stance foot slides ~25 px per stance, front-loaded;
+- the swing delivers only 74–80 % of its target advance (55–58 px short);
+- the foot lands ~33 px BEHIND the hip and the LIPM therefore predicts
+  **acceleration**, of which ~10 % is realised.
+
+So the current best statement is: **not a friction problem, and the contact
+fraction is unknown.** It is a swing-reach problem (~55 px) with an unexplained
+loss of pendulum transmission, on a contact state we have not yet measured.
+
+## 6b. The measurement that settles it: emit collision events to the CSV
+
+Contact truth already exists in the collision layer, and the pin already
+consumes it (`ground_support` → `left_stance_loaded`/`right_stance_loaded` in
+[`drive_hip_pin`](../examples/game_lib/src/lower_body/hip_pin/drive.rs:641),
+and `gait_authority >= GaitAuthority::Contact`). The resolver *uses* it; the
+telemetry does not *record* it. Every contact argument in this document — mine
+and any future one — is therefore a geometric proxy. Stop guessing from y and
+log the ground truth.
+
+| proposed column | source | why |
+|---|---|---|
+| `contact_l`, `contact_r` | the **debounced** per-foot `grounded` flag the pin already computes | 1 = the physics says this foot is on the floor |
+| `hit_l`, `hit_r` | whether that foot's collider appears in `CollisionEventBatch` this tick | separates "the physics is resting on it" from "a collision was resolved" |
+| `n_contacts` | `batch.entries.len()` | total collision events this tick |
+| `pen_l`, `pen_r` | penetration/normal carried by the event, if available | tells a skim from a load |
+
+The **cheap version is the first row alone**: `contact_l` / `contact_r` is a
+two-line addition next to the existing `gait_l`/`gait_r` writes in
+[`sample.rs`](../examples/collision_detection/examples/headless_arm_pd/sample.rs:129),
+plus a reader in
+[`analyze_stance_delivery.py`](../tools/physics-qa/analyze_stance_delivery.py:1)
+that bins stance frames by `contact` / `no-contact` instead of by particle y.
+
+That single column makes every open question here decidable:
+
+- is the stance foot genuinely on the ground, or skimming?
+- does the ~25 px slide happen **while loaded**, or only while losing contact?
+- is the LIPM reaction ~10 % because there is no contact, or because the leg
+  servo (`LEG_COMPLIANCE=1e-8`, targets rebuilt from the moving hip every frame)
+  is too soft to transmit it?
+
+Decisive outcome either way — no more inference from geometry:
+
+- if `contact_l/r` show the foot down for **~95 %** of stance while the y-test
+  said 7 %, the "hover" was a **capsule-radius artefact**, the 16 px floor
+  reference is a non-issue, and the real story is the swing reach (§2–3);
+- if the flags agree at **~7 %**, the hover is real, and the 16 px floor
+  disagreement (§6) becomes the thing to fix.
+
+**Rule going forward: no contact claim from particle y.** Use the collision
+event / debounced flag or say it is unknown.
 
 ## 7. Retractions
 
@@ -235,16 +308,14 @@ the foot is actually on the ground.
 
 ## 8. Open questions (honest, unresolved)
 
-1. **Soft-body geometry.** The legs are soft-body constraints and the foot
-   particle sits at the **centre of a round cap**, and the cap itself deforms on
-   contact. My "penetration" is therefore the *particle centre* vs the floor
-   surface, not the true contact depth — the round cap means the real gap/hover
-   is roughly `cap_radius` smaller than the 6.2 px measured. The 7 %/6 % contact
-   fraction and the 0.9·pen budget are **approximations** at best, and the
-   friction verdict ("not saturated, 0.48–0.56 of budget") should be re-tested
-   against a real contact-depth measure before being relied on.
-2. **Whether the 16 px floor disagreement is the whole hover.** It is the
-   largest single candidate, but `thrust.stance_extend` (applied only when
+1. **Soft-body / capsule geometry (now the top open question).** The foot
+   particle is a point at the centre of a capsule, and the capsule deforms on
+   contact, so particle-centre-vs-surface is **not** contact depth (§6a). Until
+   the collision events are logged, the contact fraction is unknown and no
+   hover/bounce conclusion can be drawn. See §6b for the proposed columns.
+2. **Whether the 16 px floor disagreement matters at all.** It is a candidate
+   cause of the commanded-foot 22 px gap, but with an unknown capsule radius it
+   may be harmless, and `thrust.stance_extend` (applied only when
    `left_stance_loaded`) also moves the commanded foot down by a few px and was
    not separated out.
 3. **Why the LIPM reaction is ~10 % instead of ~100 %.** With the foot hovering,
@@ -263,17 +334,26 @@ the foot is actually on the ground.
 
 Cheapest first; each gated on numbers, not plots:
 
-1. **Fix the floor reference** — make `standing_height` and the resolver
-   `hip_height` agree (or derive the collider from the live foot line). Success:
-   median stance foot 6.2 px above surface → **≤ 1 px**, stance frames with
-   contact 7 % → **> 70 %**.
-2. **Then re-measure the slide.** If the slide drops with contact restored,
-   friction was never the issue and §6 stands. If it does not, escalate to
-   question 3.
+1. **Log contact truth** (§6b) — emit `contact_l` / `contact_r` (the pin's
+   debounced `grounded` flag) into the telemetry, and teach
+   [`analyze_stance_delivery.py`](../tools/physics-qa/analyze_stance_delivery.py:1)
+   to bin stance frames by it. This is the gate for everything else: it decides
+   whether the hover is real or a capsule artefact.
+2. **Re-measure the slide against contact truth.** Success: fricional slide
+   while `contact == 1` is small, OR the slide turns out to happen only in
+   `contact == 0` frames (in which case the "stance" clock and the real foot
+   contact disagree, which is a different bug).
 3. **Swing time budget** — lengthen `SWING` or make the Hermite advance segment
    actually reach `swing_to`. Success: delivery ratio 0.74–0.80 → **> 0.95**,
-   shortfall 55–58 px → **< 10 px**.
-4. Only after 1–3: revisit whether the placement law needs a different
+   shortfall 55–58 px → **< 10 px**. This one is independent of contact and can
+   run in parallel.
+4. **Only if** step 1 shows `contact == 1` for most of stance AND step 3 has
+   lifted the delivery ratio: re-check the ~10 % LIPM transmission (§8.3). If it
+   is still ~10 % with a loaded foot, the leak is the per-frame rebuild of both
+   leg targets from the moving hip at `LEG_COMPLIANCE=1e-8` — the stance leg is
+   a position servo chasing the hip, not a strut. That is the next place to
+   instrument.
+5. Only after 1–4: revisit whether the placement law needs a different
    reference point (§8.4).
 
 Do **not** resume `HIP_V_MIX` / `DCM_TC` / `ADAPT_TC` sweeps until contact exists
