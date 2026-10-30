@@ -99,6 +99,50 @@ N-stride brake expression within reach), C (bounded lead clamp → command edges
 produce real control events), and D (re-armable surge → a speed-UP engine) close
 exactly those three holes.
 
+## 1b. LOCKED baseline (2026-10-30): `BOOT_LUNGE=1 VEL_FEEDBACK=1 PLAN_MEAS_V=1`
+
+The A/B matrix on `speed3_script` (120→60→100→stop) makes the case for running
+all three feedbacks together as the baseline going forward. Measured `P3vx`
+segment means:
+
+| run                | @120  | @60   | @100  | net    | outcome |
+|--------------------|-------|-------|-------|--------|---------|
+| s3_off (kick)      | 219.6 | 174.2 |  43.0 | +1826  | cliff, fell |
+| s3_on  (kick+PLMV) | 219.6 | 174.2 |  39.5 | +2045  | cliff, fell |
+| vf_only (no kick)  | -70.3 | -37.3 | -53.7 |  -494  | startup dies |
+| kick_vf (VF only)  | 219.6 | 165.0 | -26.6 | +1663  | |
+| **kick_vf_mv**     | 235.8 | **125.0** | **135.7** | +2105 | **every edge responds** |
+
+The architecture the trio forms — each part covering another's hole:
+- **kick** = the feed-forward lead engine at startup. Without it the closed loop
+  is dead at rest (`v_hip == v_c` ⇒ zero lead ⇒ `vf_only` walks backward, −494).
+- **VEL_FEEDBACK** = closes the *horizontal state* channel: fiction `hip_pos.x`
+  and `hip_vel.x` re-anchored to the solved `P3` every tick, so the fiction can
+  no longer diverge from physics (the root cause named in §0c). The fiction is
+  demoted from *self-belief* to a **one-tick lookahead** (`v =
+  approach(measured, v_des, a·dt)`): the servo push becomes ∝ velocity error.
+- **PLAN_MEAS_V** = the smoothing. Raw `v_com` carries a ±140 px/s gait ripple;
+  feeding it to the placement law verbatim destabilized the walk (V-sweep
+  −239…+450). The EMA `v_meas_filt` keeps the slow average speed and rejects the
+  ripple — the "relative smooth representation" the deadbeat law needs to act on.
+
+This validates the §0c thesis: the deadbeat DCM law *can* command walking speed;
+the loss of control was fiction↔physics divergence (now fed back) plus an
+over-violent un-smoothed measurement (now EMA'd). Remaining open failures are
+exactly the places the smooth-tracking premise is still violated:
+- **@120 overshoot to 235.8** — the kick seed bleeds over ~2 strides; bounded by
+  placement-brake authority (`x_max`), tunable via τ / `BOOT_LUNGE_V`.
+- **fall in the stop** — a >177 px/s release saturates the one-step capture wall;
+  the EMA cannot fix saturation. **This is Stage E** and is now the primary
+  blocker to a trustworthy "walk to a stop", not the cruise speed.
+
+Implication for the later stages: Stage C (bounded lead management) is largely
+**superseded** by VEL_FEEDBACK — the fiction no longer freewheels, so a separate
+lead clamp may be redundant; re-scope C only if VF proves too aggressive (jitter).
+Stage B (saturation-aware horizon) becomes **more** important, not less: it is
+the one mechanism that lets the brake express "decelerate over N strides" once
+the fiction and measurement finally agree.
+
 ## 1. The control structure, honestly
 
 There are exactly **two channels** by which the controller can change the
@@ -266,9 +310,16 @@ cruise number is ~25 px; do not aim below physics).
 
 ## 7. Status
 
-- Committed: `412606f` (stop-path measured routing + brake-step gate), `2ef3427`
-  (placement-law EMA brake), `bf65865` (boot kick). Working tree: speed `move`
-  schema + `MoveSpeed` resource + vx plot panel (uncommitted).
-- 131/131 lower_body tests pass; QA scripts: `plans/speed_script.json`,
+- Baseline (see §1b): `BOOT_LUNGE=1 VEL_FEEDBACK=1 PLAN_MEAS_V=1` — locked
+  2026-10-30. `BOOT_LUNGE=1` is now also the `run_walk.sh` default.
+- Committed: `aec88d3` (VEL_FEEDBACK behind a default-off flag), `6c1e11c`
+  (per-move `speed` + `MoveSpeed` resource + hip-vx plot panel + BOOT_LUNGE
+  default), `412606f` (stop-path measured routing + brake-step gate), `2ef3427`
+  (placement-law EMA brake), `bf65865` (boot kick).
+- 131/131 lower_body tests pass. QA scripts: `plans/speed_script.json`,
   `plans/speed2_script.json`, `plans/speed3_script.json`, `plans/stop_script.json`;
-  `run_walk.sh` now accepts `SCRIPT=/abs/path` KEY=VALUE args.
+  `run_walk.sh` accepts `SCRIPT=/abs/path` KEY=VALUE args.
+- Immediate next: **Stage E** — walk→stand still falls from post-kick speed
+  (one-step capture-wall saturation, §0c / §1b). Run the `kick_vf_mv` matrix on
+  `plans/stop_script.json` to size the deficit, then Stage B to fix it.
+  Stage C is likely superseded by VEL_FEEDBACK (fiction no longer freewheels).
