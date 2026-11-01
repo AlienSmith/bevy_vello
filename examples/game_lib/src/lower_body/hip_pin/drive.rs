@@ -74,6 +74,19 @@ pub fn drive_hip_pin(
                 let anchor_x = pin.anchor_p3.x;
                 let world_dx = measured_x - anchor_x;
                 pin.state.hip_pos.x = pin.seed_hip.x + world_dx;
+                // Vertical mirror (`HIP_Y_SYNC=1`): sync the fiction hip height to
+                // the measured P3 each frame, so `regulate_height` reads the TRUE
+                // (possibly sagged) height and can command recovery. Vello is
+                // y-down, the resolver is y-up, so the world delta enters NEGATED:
+                // a body that sank (measured y > anchor y in vello) lowers the
+                // fiction y. Position-only — the fiction hip VELOCITY (`hip_vel.y`,
+                // the spring's damping state) is left intact so we don't inject
+                // measured gravity sag into the integrator (the x-side
+                // `VEL_FEEDBACK` trap). Off ⇒ committed fiction-vertical behavior.
+                if params.hip_y_sync {
+                    let world_dy = p3.particle.pos.y - pin.anchor_p3.y;
+                    pin.state.hip_pos.y = pin.seed_hip.y - world_dy;
+                }
                 // NOTE (reverted): overwriting `state.hip_vel.x` with the
                 // measured `P3vx` (a hard velocity feedback) STOPS the body — it
                 // cancels the command-vs-realized lead the feed-forward gait runs
@@ -661,6 +674,28 @@ pub fn drive_hip_pin(
                 knee_r.y = knee_r.y + thrust.flight_retract;
             } else if right_stance_loaded {
                 foot_r.y = foot_r.y - thrust.stance_extend.max(thrust.land_absorb);
+            }
+
+            // EXPERIMENT (`FLOOR_SNAP=1`): fake raycast plant. The DCM is purely
+            // horizontal — it never reads foot height — so the only thing the
+            // plant's vertical position does is set whether the foot is ON the
+            // floor to provide the friction brake. The hip-rooted
+            // `transfer_segment` reconstruction leaves the stance plant floating
+            // ~21 px above the collider floor (measured), which disengages that
+            // brake mid-stance. With a known flat-rect floor, the exact contact
+            // point of a downward ray from the commanded foot is just the rect
+            // surface, i.e. the seed foot line in this bevy y-up frame. Snap the
+            // stance foot's y there (never a swing foot, which must lift for
+            // clearance). Keeps the commanded x untouched.
+            if params.floor_snap {
+                let floor_l = seed.live[0].foot.y;
+                let floor_r = seed.live[1].foot.y;
+                if debug.left_phase != GaitPhase::Swing {
+                    foot_l.y = floor_l;
+                }
+                if debug.right_phase != GaitPhase::Swing {
+                    foot_r.y = floor_r;
+                }
             }
 
             left_leg.hip_target = hip_t;

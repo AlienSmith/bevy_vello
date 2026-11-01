@@ -82,6 +82,27 @@ pub struct HipPinParams {
     /// rather than in `LowerBodyConfig` because the config is shared by every
     /// character and is copied by value; the authority is per-pin state.
     pub gait_authority: GaitAuthority,
+    /// EXPERIMENT (`HIP_Y_SYNC=1`, default off): close the vertical fiction→
+    /// reality loop. Each frame, reset the resolver's fiction hip `y` to the
+    /// measured `P3` particle height (mirroring the x-feedback at `drive.rs:76`
+    /// on the y channel). The height spring in `regulate_height` then reads the
+    /// TRUE (possibly sagged) hip every tick and produces upward acceleration to
+    /// recover standing height — the "sync fiction with reality → algorithm
+    /// predicts → IK → physics" loop, applied to the vertical channel. Position-
+    /// only: the fiction hip *velocity* (the spring's damping state) is left
+    /// intact so we don't inject measured sag into the integrator (the x-side
+    /// `VEL_FEEDBACK` trap). Off ⇒ bit-identical committed behavior.
+    pub hip_y_sync: bool,
+    /// EXPERIMENT (`FLOOR_SNAP=1`, default off): fake raycast plant. For a leg
+    /// the gait clock says is in Stance, pin the commanded foot target straight
+    /// DOWN onto the flat-rect floor surface (the seed foot y in this y-up
+    /// frame) after the loop-2 thrust adjustment. The DCM is purely horizontal
+    /// (it never reads foot height), so forcing the stance plant onto the known
+    /// floor is the exact degenerate case of a downward raycast onto the rect —
+    /// it removes the ~21 px stance float introduced by the hip-rooted
+    /// `transfer_segment` reconstruction, keeping the friction brake engaged
+    /// through the whole stance. Off ⇒ bit-identical committed behavior.
+    pub floor_snap: bool,
 }
 
 /// Parse a `GAIT_AUTHORITY` value. Accepts the enum name or a single-letter /
@@ -188,6 +209,8 @@ impl HipPinParams {
         if let Ok(raw) = std::env::var("GAIT_AUTHORITY") {
             p.gait_authority = parse_gait_authority(&raw);
         }
+        p.floor_snap = env_bool("FLOOR_SNAP", p.floor_snap);
+        p.hip_y_sync = env_bool("HIP_Y_SYNC", p.hip_y_sync);
         // Facing direction for the knee winding pin (+1 = facing +x/right, the
         // default; -1 = facing -x/left). `FACING=left`/`-1` mirrors the bend side.
         p.config.facing = match std::env::var("FACING").ok().as_deref().map(str::trim) {
@@ -269,6 +292,10 @@ impl Default for HipPinParams {
             vel_feedback: false,
             // §6 is opt-in and off by default: see `GaitAuthority`.
             gait_authority: GaitAuthority::Timer,
+            // Fake-raycast floor snap is opt-in and off by default.
+            floor_snap: false,
+            // Vertical fiction→reality sync is opt-in and off by default.
+            hip_y_sync: false,
         }
     }
 }

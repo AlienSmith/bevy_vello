@@ -359,3 +359,60 @@ Cheapest first; each gated on numbers, not plots:
 Do **not** resume `HIP_V_MIX` / `DCM_TC` / `ADAPT_TC` sweeps until contact exists
 — those knobs act on a law whose output cannot reach the physics, and any
 "improvement" measured without contact is, as already demonstrated, an artifact.
+
+## 10. Contact truth logged + vertical-fiction root cause (2026-11-01, Windows)
+
+§9.1 is DONE: `contact_l/r` (debounced `grounded`), `hit_l/r` (raw touching) and
+`ns_l/r` (normal speed) are emitted per frame from `GroundSupport` (sourced from
+`CollisionEventBatch`, the per-tick stream — NOT the cool-down-deduplicated
+`VelloCollisionTrigger` observers) in [`sample.rs`](../examples/collision_detection/examples/headless_arm_pd/sample.rs:156).
+The visual harness now runs the full GPU collision chain, so contact is measured
+on screen too. A debug overlay ([`debug_lines.rs`](../examples/collision_detection/examples/headless_arm_pd/debug_lines.rs:1),
+`DCM_LINES=1`) draws the real collider floor (magenta slab), the resolver floor
+line (yellow), the DCM ξ (cyan), CoM (red), commanded foot IK ticks (green/blue)
+and the realized leg skeleton (white hip→knee→foot) with commanded knee ticks.
+`tools/physics-qa/run_visual.ps1` is the Windows port of `run_walk.sh`.
+
+### 10.1 Contact findings (`tmp/headless/posture.py`, `knee_divergence.py`)
+- Stance foot in real contact only **~62 %** of stance frames (settles §6b: not
+  7 %, not 95 %). Slide is roughly split floor/air; touchdown is a **shallow
+  graze** (tangent/normal speed ratio 2.2–2.8 — the "football kick").
+- **Restitution 0.9→0.1 left contact unchanged (~62 %)** but made the feet plow
+  into the floor and raised hip speed 130→208 px/s. So the hop is **commanded
+  (target height), not elastic bounce** — falsifies the bounce hypothesis.
+
+### 10.2 The stance plant is not world-pinned, and the DCM can't see it
+- The stance plant target **floats ~21 px above the real floor** AND **slides
+  forward ~22 px/stance**. But `regulate_height`/`transfer_segment` is the source,
+  NOT an IK out-of-reach clamp (hip→target dist is ~69 px vs 111 px full-ext, so
+  in reach 93 % of stance). The hip-rooted bridge reconstruction leaks hip motion
+  into the plant. §8.3's "position servo chasing the hip, not a strut" is correct.
+- **The DCM is purely horizontal** (`capture_point` = `com_x + v/ω₀`; foot height
+  never enters the plan — only `z_com` via ω₀). So the controller is blind to the
+  float. A **fake raycast** onto the known flat-rect floor (`FLOOR_SNAP=1`)
+  removes the float and world-pins the plant (drift 22→0 px) — but then it
+  **stalls cruise** (stride 65→12 px): a perfectly braked foot is one the hip
+  cannot outrun at 120 px/s. This brackets the two-sided symptom:
+  *Timer* = too little bracing (can't decelerate + sink); *Contact/snap* = too
+  much (stall). The fix lives in between.
+
+### 10.3 Root cause of the hip-drop / knee-scrape: the vertical fiction is open-loop
+- Loop-2 was never *weak* — it was *blind*. `state.hip_pos.y` is a spring that
+  closes on its **own** fiction value ([`vertical.rs`](../examples/game_lib/src/lower_body/resolver/vertical.rs:82));
+  the real `P3.y` is NEVER fed back (only `P3.x`, [`drive.rs`](../examples/game_lib/src/lower_body/hip_pin/drive.rs:76)).
+  And `stance_extend` is hard-zero during level-walk `Stand`
+  ([`walk.rs`](../examples/game_lib/src/lower_body/resolver/walk.rs:742)). So the
+  body sank to a ~60 px crouch (stance knee ~8 px off floor) while the displayed
+  commanded height sat flat at 122 px — pure fiction−reality gap.
+
+### 10.4 Fix: mirror the x-feedback onto y (`HIP_Y_SYNC`, validated)
+- Re-sync fiction hip y to measured `P3.y` each frame (position-only, so the
+  `g·dt²` sag can't accumulate — it is re-read every tick). **Stance hip recovers
+  ~47–60 px → ~114–117 px, knee off floor 8→64 px, fiction−reality gap 62→1 px,
+  rig `max_rel_dev` 0.98→0.15** (`ysync_contact`: 0.068). Loop-2 given reality
+  holds the body upright. The original collapse is SOLVED.
+- **Next (improvement, per user's "modify then improve"):** the recovery currently
+  overshoots (swing foot ~147 px = 2× STEP_HEIGHT) and forward speed stalls
+  (`hipVx`→~2 px/s). Bound the vertical recovery so height holds (~106 px) without
+  over-lift or stall — a capped / PD height command, and reconcile the plant floor
+  height with the DCM-neutral bridge. Both remain angular-constraints-only.
