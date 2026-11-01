@@ -75,23 +75,33 @@ pub struct HipPinParams {
     /// idle. `BOOT_LEAN` env; default 0.30 (~17°).
     pub boot_lean: f32,
     /// How much authority the plan §6 contact layer has over the gait clock.
-    /// `GAIT_AUTHORITY=timer|observe|contact|full` (default `timer`).
+    /// `GAIT_AUTHORITY=timer|observe|contact|full` (default `full`).
+    ///
+    /// `Full` is the default: below it the unbraced stance plant lets the body
+    /// walk backwards / sink, whereas `Full` (contact plant re-anchor + thrust
+    /// gating + stance/swing timing corrections) holds upright and forward.
+    /// `GAIT_AUTHORITY=timer` recovers the old control arm.
     ///
     /// Written into [`ResolverState::gait_authority`] every tick, so it is
     /// switchable at runtime exactly like the other tuning knobs. Kept here
     /// rather than in `LowerBodyConfig` because the config is shared by every
     /// character and is copied by value; the authority is per-pin state.
     pub gait_authority: GaitAuthority,
-    /// EXPERIMENT (`HIP_Y_SYNC=1`, default off): close the vertical fiction→
-    /// reality loop. Each frame, reset the resolver's fiction hip `y` to the
-    /// measured `P3` particle height (mirroring the x-feedback at `drive.rs:76`
-    /// on the y channel). The height spring in `regulate_height` then reads the
-    /// TRUE (possibly sagged) hip every tick and produces upward acceleration to
-    /// recover standing height — the "sync fiction with reality → algorithm
-    /// predicts → IK → physics" loop, applied to the vertical channel. Position-
-    /// only: the fiction hip *velocity* (the spring's damping state) is left
-    /// intact so we don't inject measured sag into the integrator (the x-side
-    /// `VEL_FEEDBACK` trap). Off ⇒ bit-identical committed behavior.
+    /// Close the vertical fiction→reality loop (ON by default now;
+    /// `HIP_Y_SYNC=0` opts back out to the committed open-loop behavior). Each
+    /// frame, reset the resolver's fiction hip `y` to the measured `P3` particle
+    /// height (mirroring the x-feedback at `drive.rs:76` on the y channel). The
+    /// height spring in `regulate_height` then reads the TRUE (possibly sagged)
+    /// hip every tick and produces upward acceleration to recover standing
+    /// height — the "sync fiction with reality → algorithm predicts → IK →
+    /// physics" loop, applied to the vertical channel. Position-only: the fiction
+    /// hip *velocity* (the spring's damping state) is left intact so we don't
+    /// inject measured sag into the integrator (the x-side `VEL_FEEDBACK` trap).
+    /// Default ON because without it the body sinks to a crouch (see
+    /// `stance-delivery-is-the-brake.md` §10.3/§11); pairs with
+    /// `gait_authority: Full`. KNOWN SIDE EFFECTS (improvement pending, §12.1):
+    /// un-damped recovery over-lifts (the "jump") and the velocity loop still
+    /// stalls cruise (the "stall").
     pub hip_y_sync: bool,
     /// EXPERIMENT (`FLOOR_SNAP=1`, default off): fake raycast plant. For a leg
     /// the gait clock says is in Stance, pin the commanded foot target straight
@@ -107,14 +117,15 @@ pub struct HipPinParams {
 
 /// Parse a `GAIT_AUTHORITY` value. Accepts the enum name or a single-letter /
 /// numeric prefix, so `c`, `contact`, `Contact`, and `2` all mean
-/// [`GaitAuthority::Contact`]. Anything unrecognised falls back to `Timer`,
-/// which is the safe control arm.
+/// [`GaitAuthority::Contact`]. Anything unrecognised falls back to `Full`,
+/// the current default.
 pub fn parse_gait_authority(raw: &str) -> GaitAuthority {
     match raw.trim().to_ascii_lowercase().as_str() {
         "full" | "f" | "3" => GaitAuthority::Full,
         "contact" | "c" | "2" => GaitAuthority::Contact,
         "observe" | "o" | "1" => GaitAuthority::Observe,
-        _ => GaitAuthority::Timer,
+        "timer" | "t" | "0" => GaitAuthority::Timer,
+        _ => GaitAuthority::Full,
     }
 }
 
@@ -157,8 +168,9 @@ impl HipPinParams {
         p.config.mpc_trigger = env_bool("MPC_TRIGGER", p.config.mpc_trigger);
         // Stage 1 sign-flip floor (`plans/walk-improvement-plan.md`): the
         // touchdown backward solve may brake only down to TD_FLOOR·v_des,
-        // never past it (no reversal against the command). Negative = off
-        // (committed gait). Try TD_FLOOR=0.2.
+        // never past it (no reversal against the command). Default 0.5 now
+        // (cruise-stall fix, `stance-delivery-is-the-brake.md` §11); negative
+        // = off (pre-floor committed gait). TD_FLOOR=0.2 remains a valid A/B.
         p.config.td_solve_floor = env_f32("TD_FLOOR", p.config.td_solve_floor);
         // Boot FSM (Stage 4d): stand→lunge→walk (`BOOT_LUNGE=1`). Default off
         // ⇒ committed behavior, bit-identical. `BOOT_LUNGE_HOLD=1` is the
@@ -290,12 +302,16 @@ impl Default for HipPinParams {
             attitude_lean_kd: 0.03,
             boot_lean: 0.30,
             vel_feedback: false,
-            // §6 is opt-in and off by default: see `GaitAuthority`.
-            gait_authority: GaitAuthority::Timer,
+            // §6 contact layer is ON by default at the top of the spectrum
+            // (`Full`): below it the walk runs backwards / sinks. See
+            // `GaitAuthority` and `hip_pin::params::parse_gait_authority`.
+            gait_authority: GaitAuthority::Full,
             // Fake-raycast floor snap is opt-in and off by default.
             floor_snap: false,
-            // Vertical fiction→reality sync is opt-in and off by default.
-            hip_y_sync: false,
+            // Vertical fiction→reality sync is ON by default: without it the
+            // open-loop height spring lets the body sink (`§10.3`). `HIP_Y_SYNC=0`
+            // opts out. Pairs with `gait_authority: Full`.
+            hip_y_sync: true,
         }
     }
 }

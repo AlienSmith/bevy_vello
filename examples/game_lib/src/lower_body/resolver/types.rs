@@ -83,7 +83,13 @@ pub struct LowerBodyConfig {
     /// hip toward this floor but never past it — a lagged plant (the zero-lead
     /// law's systematic landing error) otherwise gets *inverted* into a
     /// reversed velocity command, the measured walk-backwards oscillator.
-    /// Negative (default) = disabled, committed behavior. (A plan-vs-achieved
+    /// Default **0.5**: with `beta = 1` the landing solve fully overwrites
+    /// `hip_vel.x` at every touchdown, so an unbounded solve brakes the
+    /// COMMAND itself toward 0 whenever feet land behind the hip — the cruise
+    /// stall of `stance-delivery-is-the-brake.md` §11 (`cmd_vx` 120→7 px/s
+    /// while the schedule held `v_des` at 120). Floored at 0.5·v_des the
+    /// command tracks the schedule (115→99 px/s). Negative = disabled (old
+    /// committed behavior); `TD_FLOOR` env overrides. (A plan-vs-achieved
     /// *tolerance* gate was considered and removed: at the landing tick the
     /// kinematic plant equals the same-tick plan by construction, so such a
     /// check is vacuous; the physical lag enters through `delta` itself,
@@ -230,7 +236,9 @@ impl Default for LowerBodyConfig {
             prediction_margin: 0.5,
             toe_len: 8.0,
             mpc_trigger: false,
-            td_solve_floor: -1.0,
+            // Sign-flip floor ON by default (see field doc): the unbounded
+            // touchdown solve stalls cruise once the body actually stands up.
+            td_solve_floor: 0.5,
             // Analytic deadbeat placement is the shipped law; `0` auto-picks
             // the stance duration as the convergence deadline.
             dcm_tc: 0.0,

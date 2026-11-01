@@ -416,3 +416,118 @@ and the realized leg skeleton (white hip→knee→foot) with commanded knee tick
   (`hipVx`→~2 px/s). Bound the vertical recovery so height holds (~106 px) without
   over-lift or stall — a capped / PD height command, and reconcile the plant floor
   height with the DCM-neutral bridge. Both remain angular-constraints-only.
+
+## 11. `GAIT_AUTHORITY=full` is now the default + the stall is a COMMAND decision (2026-11-01)
+
+`Full` + `HIP_Y_SYNC` are BOTH the default now (same commit series) in
+[`params.rs`](../examples/game_lib/src/lower_body/hip_pin/params.rs:300)
+(`gait_authority: Full`, `hip_y_sync: true`; `from_env` falls back to `Full`;
+all 167 game_lib resolver tests still pass — they construct authority
+explicitly, so the default flips are inert offline). Verified: the plain
+default run (`default_now`) is bit-identical to the old `full_ysync` A/B arm
+(rig 0.0881, hip 113–114 px). Opt-outs: `GAIT_AUTHORITY=timer`, `HIP_Y_SYNC=0`.
+
+Re-ran the A/B on fresh artifacts (`full_20261101`, `full_ysync_20261101`) with a
+new velocity-channel split diagnostic `tmp/headless/stall_check.py`
+(`cmd_vx` = resolver fiction hip velocity / `tP3vx` = pin hip-velocity target /
+`P3vx` = realized physics / `v_filt` = filtered measured v the DCM reads):
+
+- **Full WITHOUT `HIP_Y_SYNC` walks BACKWARDS.** `full_20261101`: the body still
+  sinks (hip →5 px at t5.6 because the vertical fiction is open-loop) and the
+  realized `P3vx` goes deeply NEGATIVE (−30…−160 px/s, t2–t9) while `cmd_vx` sits
+  near 0. So `Full` authority alone does NOT keep the walk upright/forward — it
+  needs the vertical sync too. (`Full`+`HIP_Y_SYNC` is the upright pair.)
+- **The stall is a COMMAND decision, not a delivery failure.** In `full_ysync`:
+  `cmd_vx` *itself* collapses 120→86→54→7→…→1.8 px/s (t3→t11), and `P3vx` tracks
+  it (realized ≈ command, both →0). `tP3vx == cmd_vx` exactly (the pin writes the
+  fiction velocity into the hip target). The physics IS delivering what the
+  controller asks; the controller is *asking for zero*.
+- **Mechanism = DCM over-brake + a dead-at-zero feedback trap.** `v_filt` (the
+  measured velocity in the deadbeat LEAD/brake term) runs away HIGH early
+  (165→189 px/s at t1–t2: the boot lunge overshoots `TARGET_SPEED`), so the brake
+  term over-corrects, dragging the command itself down through 0 and slightly
+  negative. Once both command and measured v sit ≈0, `capture_point` has no lead
+  to remove (ξ−com ≈ 0 ⇒ target ≈ current stance) and the deadbeat law cannot
+  *restart* toward 120 px/s — it stalls in place. This is the user's "DCM doesn't
+  work at v=0" + "shouldn't drop to zero when desired is 110–120" — both confirmed.
+- **Implication:** the remaining bug is NOT the stance plant or the vertical loop
+  (both fixed) but the **speed controller itself**: an over-strong early brake and a
+  deadbeat law with no positive-velocity set-point term to climb back from v≈0.
+  Next: bound the brake (anti-windup on `v_filt` / cap the decel authority) and/or
+  add a minimum-cruise lead so the command cannot collapse below the set-point.
+  Both stay angular-constraints-only.
+
+## 12. The stall was the touchdown SOLVE (not the DCM) — TD_FLOOR baked in; the bounce is negative damping (2026-11-01, evening)
+
+**§11 retraction, first:** the "DCM over-brake" mechanism in §11 is superseded.
+`v_des` (the rate-limited command `state.v_ref`) holds flat 120 px/s all run
+(`tmp/headless/vdes_check.py`) — the schedule never brakes. The channel that
+collapses the command is `state.hip_vel.x`, and the only writer that pulls it to
+the floor is the **touchdown backward solve** [`walk.rs`](../examples/game_lib/src/lower_body/resolver/walk.rs:515)
+(`beta = 1` ⇒ `v = v_sup_eff` fully overwrites the integrator every landing).
+Feet land systematically *behind* the hip (swing delivers 74–80 %; §2), so the
+inversion reads a permanent lag as "brake", every stride. The user's framing was
+right: the DCM/placement law was over-tuned in the knee-scrape regime; the actual
+dead guard was `TD_FLOOR` (`apply_support_floor`, [`laws.rs`](../examples/game_lib/src/lower_body/resolver/laws.rs:85)),
+built for exactly this and shipped disabled.
+
+**Fix + validation (baked):** `td_solve_floor: 0.5` is the new default in
+[`types.rs`](../examples/game_lib/src/lower_body/resolver/types.rs:233)
+(A/B `td_floor02/05`; `td_floor05` chosen; all 167 tests pass; `TD_FLOOR` env
+still overrides, negative disables). Command stall GONE: `cmd_vx` now tracks the
+schedule 115→99–108 px/s through cruise (was 104→7→2). Posture holds (hip
+106–117, gap ≤ +3 px). Artifacts `td_default_20261101`, `td_visual`.
+
+**What the new default exposes (still open, parked per user "focus on jump first"):**
+- command **sawtooth** 120→60→120 at every landing (the floor still allows a
+  50 % bite; candidates: `beta`<1 to spread the correction, or fix swing delivery
+  so the landing error stops being systematic);
+- realized velocity thrash from t7 (−11…−236 px/s while cmd ≈100) and stance
+  slide runaway (93–313 px/s) — the §10.2 unbraced-plant bracket, now the
+  dominant horizontal problem.
+
+### 12.1 The "jump"/bounce: quantified + three bounded fixes, none yet accepted
+Per-frame zoom (`tmp/headless/bounce_zoom.py` on `td_visual.csv`): hip band
+**50–86 px p-p at ~1.5 Hz** during t1–2 (body 77→153 px), fiction spring
+velocity `tP3vy` running **±430 px/s a quarter-period OUT OF PHASE** with the
+real body (at the rebound frame t1.63: fiction −430 [diving] while the body
+rises +233). Standing reference 106 px.
+
+Experiments run and **rejected — the code was removed from the tree** (rig
+baseline stays 0.0943):
+1. **`HIP_VY_MAX=120/250`** clamp at the sync point — **ineffective** (band 86/63
+   vs 76/52 uncapped): the spring re-grows its velocity *within* the tick.
+2. **`HIP_VY_MAX=60/120`** clamp inside `regulate_height` (post-integration, via
+   a temporary `ResolverState::height_vy_max` input) — **worse** (rig 0.32/0.56
+   vs 0.094): bounding magnitude while keeping the stale phase turns recovery
+   against the body.
+3. **`HIP_VY_SYNC=1`** full state sync (position + fiction velocity ← measured)
+   — **worse** (rig 0.36, band 62 px, foot peak 134 px): injects every ±400 px/s
+   measured impact spike straight into the PD feed-forward.
+
+Diagnosis: the spring wind-up is real but it is *driven* by the body's own
+vertical thrash — which comes from **foot impacts**, not the height loop: the
+asset runs **restitution 0.9** (the reverted edit — the earlier 0.1 test
+"made feet plow + raised hip speed 130→208") plus stance-slide touchdown. The
+position-only `HIP_Y_SYNC` is currently the best of the tested set because it
+filters those spikes out of the command channel; syncing velocity re-admits them.
+**Next candidates, in order:** (a) settle the asset restitution question (0.1 vs
+0.9 as the QA default) since it predates all A/Bs; (b) attack stance-slide
+landing velocity via the plant (the §10.2 bracket), which feeds both bounce and
+the horizontal thrash; (c) revisit `beta`/swing delivery for the sawtooth. The
+three `HIP_VY_*` variants above are recorded here as measured dead ends so they
+are not re-implemented blind.
+
+## 13. Open problems after this commit series (2026-11-01)
+
+Shipped defaults now: `GAIT_AUTHORITY=Full`, `HIP_Y_SYNC=1`, `TD_FLOOR=0.5`.
+Two problems remain, both tracked here:
+
+1. **The jump/bounce** — hip band 50–86 px at ~1.5 Hz (§12.1). Three controller-
+   side fixes rejected; the suspect is the IMPULSE SOURCE (asset restitution 0.9
+   + stance-slide touchdown impacts), not the height spring.
+2. **The stall in its second form** — the command sawtooth (120→60→120 every
+   landing) and the realized-velocity collapse from t7 (thrash toward negative
+   while `cmd_vx` ≈100), both rooted in the unbraced sliding plant (§10.2) and
+   the systematic landing error (swing delivers 74–80 %, §2). The mid-script
+   command death is fixed (TD_FLOOR); the "can't hold cruise" residue is not.
