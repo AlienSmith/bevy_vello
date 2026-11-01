@@ -35,6 +35,8 @@
 #   <TAG>.hips_feet.png  hip + feet x/y plot (plot_p3.py)
 #   <TAG>.character.json asset snapshot (self-identifying artifacts)
 #   stdout summary       rig/leg verdicts + swing + foot-slide gates
+# The PNG is written but NOT auto-opened; pass SHOW_PLOT=1 to open it in the
+# default image viewer after the run.
 #
 # The character asset (examples/collision_detection/assets/character/
 # v10.character.json) is read at startup, so collider edits need no rebuild.
@@ -171,5 +173,7 @@ Write-Host '== gates'
 $ErrorActionPreference = $prevEAP
 
 # --- artifacts ---------------------------------------------------------------
+# The plot is NOT opened by default (it popped a viewer on every automated run
+# and blocked batch sweeps). Pass SHOW_PLOT=1 to open it.
 Write-Host "== artifacts: $Csv  $Png"
-if (Test-Path $Png) { Invoke-Item $Png }
+if ((Test-Path $Png) -and ($EnvAll['SHOW_PLOT'] -eq '1')) { Invoke-Item $Png }
