@@ -34,6 +34,7 @@ mod assets;
 mod collision;
 mod command;
 mod config;
+mod debug_lines;
 mod dispatch;
 mod math;
 mod probe;
@@ -277,6 +278,11 @@ fn main() {
     );
     // One contact-stat line per sim-second (same as the headless bin).
     app.add_systems(FixedPostUpdate, log_collision_stats);
+    // Debug overlay: real floor (magenta) vs resolver floor line (yellow),
+    // DCM ξ (cyan), CoM (red), foot IK targets (green/blue). `DCM_LINES=1`.
+    if env_flag("DCM_LINES") {
+        app.add_systems(FixedPostUpdate, debug_lines::dcm_overlay);
+    }
     // Pan/zoom camera controls.
     app.add_systems(Update, edge_pan_camera::update_edge_pan_camera);
 

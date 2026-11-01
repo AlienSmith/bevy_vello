@@ -1,7 +1,8 @@
 //! Telemetry collection + cell classification.
 //!
-//! [`limb_sample`] writes the frozen 104-column row (harness scalars + body
-//! telemetry + per-leg gait phase + per-leg foot lag + lower-body target
+//! [`limb_sample`] writes the frozen 110-column row (harness scalars + body
+//! telemetry + per-leg gait phase + per-foot ground-truth contact + per-leg foot
+//! lag + lower-body target
 //! exports) via the shared
 //! [`TelemetryRow`]; [`limb_finalize`] closes a cell once the script completes,
 //! and [`finalize_cell`] classifies the settled tail.
@@ -13,8 +14,8 @@ use bevy::prelude::{info, Entity, Query, Res, ResMut};
 use bevy_vello::integrations::physics::VelloParticle;
 
 use game_lib::{
-    cell_verdict, check_invariants, flush_csv, flush_rows, rows_hash, tail_verdict, HipPin,
-    HipPinParams, InvariantConfig, LeftArmController, LeftLegController,
+    cell_verdict, check_invariants, flush_csv, flush_rows, rows_hash, tail_verdict, GroundSupport,
+    HipPin, HipPinParams, InvariantConfig, LeftArmController, LeftLegController,
     ResetLimbControlConstraintsEvent, RightArmController, RightLegController, TelemetryBuffer,
     TelemetryRow,
 };
@@ -67,6 +68,7 @@ pub fn limb_sample(
     mut probe: ResMut<Probe>,
     mut row: ResMut<TelemetryRow>,
     params: Option<Res<HipPinParams>>,
+    support: Option<Res<GroundSupport>>,
     pin_q: Query<&HipPin>,
     right_arm_q: Query<&RightArmController>,
     left_arm_q: Query<&LeftArmController>,
@@ -150,6 +152,32 @@ pub fn limb_sample(
         // geometric floor tolerance to tell the two apart.
         row.set("gait_l", gait_l.to_string());
         row.set("gait_r", gait_r.to_string());
+
+        // --- Per-foot ground truth from the collision layer (doc
+        // stance-delivery-is-the-brake.md §6b). Sourced from `CollisionEventBatch`
+        // → `GroundSupport` (refreshed by `update_ground_support` each tick, in
+        // BOTH the headless and the visual harness); never from particle y.
+        // `contact_*` is the pin's debounced `grounded` flag, `hit_*` the raw
+        // touching bit this tick, and `ns_*` the closing speed along the contact
+        // normal (positive = the foot is driving into the floor: loaded, not
+        // merely skimming).
+        let (contact_l, contact_r, hit_l, hit_r, ns_l, ns_r) = match support.as_deref() {
+            Some(s) if s.feet_valid => (
+                s.feet[0].grounded,
+                s.feet[1].grounded,
+                s.feet[0].touching,
+                s.feet[1].touching,
+                s.feet[0].normal_speed,
+                s.feet[1].normal_speed,
+            ),
+            _ => (false, false, false, false, 0.0, 0.0),
+        };
+        row.set("contact_l", format!("{}", contact_l as u8));
+        row.set("contact_r", format!("{}", contact_r as u8));
+        row.set("hit_l", format!("{}", hit_l as u8));
+        row.set("hit_r", format!("{}", hit_r as u8));
+        row.set("ns_l", format!("{ns_l:.2}"));
+        row.set("ns_r", format!("{ns_r:.2}"));
 
         // --- Loop 3 (attitude/tilt) telemetry, from the same pin. The resolver's
         // persistent `theta`/`omega` (rad, rad/s) plus the per-tick control input
