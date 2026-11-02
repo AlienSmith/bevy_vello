@@ -249,6 +249,58 @@ around that now masks x), and partially for the brake horizon (0.6 > auto).
 Not shipped (defaults unchanged); needs a resolver-side fix for the 8-11 s
 transient, not a static t_c. Env-only sweep, no rebuild.
 
+### 3f. TD_SOLVE audit (2026-11-02): the §6 solve is a stale second corrector — CONFIRMED, but not the late-blowup root cause
+
+Code read-through (the user's "check that part of code"):
+`walk.rs` §6 inverts `compute_support_velocity`, which is the exact inverse of
+**`compute_forward_target` (the Raibert law)** — see its doc ("Composing
+backward∘forward is the identity"). But placement has run the **analytic
+deadbeat** (`capture_point_deadbeat`, placement.rs:223) since 2026-10-28; the
+Raibert form is only the no-measurement fallback. The deadbeat already
+annihilates landing error through foot placement; the §6 solve *re-corrects the
+same error through hip velocity* with `beta = 1` (full overwrite of
+`hip_vel.x` at every touchdown). With a systematically lagged plant the solve
+writes below `TD_FLOOR·v_des` → short stride → next touchdown solves *above*
+v_des. This is the measured cruise `cmd_vx` 45↔126 period-2 sawtooth — the
+lower vertex is not "the floor binding", it is the floor being *the output the
+solve is clamped to*. TD_FLOOR (0.5, the deceleration-era patch) treats the
+symptom of the double correction; it never fixed the cause.
+
+New env gate `TD_SOLVE=0` (default on = committed gait, bit-identical —
+verified: `ts_base` reproduces `fs_strut` exactly: +502, stall 14.1 s, bands
+27/41/23/16/43/122). Unit test `test_td_solve_off_is_inert_without_reality_lag`
+pins that in the fiction-only world (no XPBD lag) on/off agree (the solve is
+the identity there) — it only bites on the real walk.
+
+A/B on the best arm (V_STABILIZE+HIP_STRUT+FLOOR_SNAP, long_walk20_s90,
+TARGET_SPEED=120):
+
+| arm | net_x | stall | v_min | bands (1.5-3/3-5/5-8/8-11/11-15/15-21) | cmd_vx 3–12 s |
+|---|---|---|---|---|---|
+| solve on (base) | +502 | 14.1 s | −139 | 27 41 23 16 43 122 | sawtooth 45↔126, std 14.2 |
+| **TD_SOLVE=0** | **+1463** | 13.1 s | −146 | 52 15 24 25 **142** 151 | **flat 90.0, std 0.0** |
+| TD_SOLVE=0 + DCM_TC=0.6 | +508 | 6.2 s | −115 | 54 23 18 15 160 118 | flat 90.0 |
+| TD_SOLVE=0 + PLAN_MEAS_V=1 | +703 | 9.2 s | −183 | 65 40 111 93 50 168 | flat 90.0, v̄_filt 23 |
+
+Readings:
+1. **Sawtooth origin CONFIRMED**: turning the solve off makes `cmd_vx` exactly
+   flat at the command value (std 0.0). The period-2 brake oscillation was the
+   stale backward solve double-correcting the deadbeat's error.
+2. **But it is not the late-blowup root cause**: with the solve off the body
+   still collapses into backward motion (v_min −146) and the late bands blow
+   up (142 @ 11–15 s) — slightly EARLIER than base. The constant-v fiction now
+   rides a body it cannot deliver (stance drift 46–55 px, SLIDING gate): the
+   fiction/reality velocity gap, not its oscillation, feeds the y-coupling.
+3. Forward progress nearly triples (+502 → +1463) — the over-tune was
+   real and was eating ~1000 px of travel.
+
+Verdict: user's hypothesis (over-tuned + stale bug in the horizontal brake
+code) CONFIRMED as a mechanism and as a progress sink; `TD_SOLVE` stays
+default-ON until the residual backward collapse is fixed (otherwise the
+constant-velocity fiction slides the plants). Next suspect for the collapse:
+the fiction `v` has NO reality feedback once the solve is off — the intended
+channel is `PLAN_MEAS_V`/`HIP_V_MIX`, not a per-touchdown velocity rewrite.
+
 ## 4. Risks / guards
 
 - **Over-constraining the knee**: three fixed sides freeze it — avoided because

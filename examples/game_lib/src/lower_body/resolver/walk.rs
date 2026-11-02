@@ -512,7 +512,13 @@ pub fn step_lower_body(
     // Skipped in HIP_V_MIX mode: the solve re-anchors the fiction toward the
     // plan/command, but the next tick's blend overwrites it anyway — dead code
     // that only muddies the one-knob story.
-    if !airborne && v_desired_scalar != 0.0 && config.hip_v_mix < 0.0 {
+    //
+    // `TD_SOLVE=0` (default on = committed behavior) skips the whole rewrite.
+    // The solve inverts the Raibert forward law, but placement now runs the
+    // analytic deadbeat, which already annihilates landing error through foot
+    // placement — the velocity rewrite double-corrects it (measured 45↔126
+    // period-2 cruise sawtooth, `plans/hip-foot-strut.md` §3e/§3f).
+    if config.td_solve && !airborne && v_desired_scalar != 0.0 && config.hip_v_mix < 0.0 {
         if let Some(delta) = left_td.or(right_td) {
             v_support = compute_support_velocity(
                 delta,

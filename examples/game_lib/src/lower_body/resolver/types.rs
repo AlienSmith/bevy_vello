@@ -96,6 +96,19 @@ pub struct LowerBodyConfig {
     /// because `hip_pos` is anchored to the real P3 — the floor is the
     /// mechanism that reads it.)
     pub td_solve_floor: f32,
+    /// Enable the §6 backward touchdown solve (`walk.rs`, foot → hip velocity
+    /// rewrite at the landing tick). The solve inverts the *Raibert* forward
+    /// law (`compute_forward_target`), but since 2026-10-28 the shipped
+    /// placement law is the analytic deadbeat (`capture_point_deadbeat`),
+    /// which already corrects landing error through foot placement. With
+    /// `beta = 1` the solve therefore **double-corrects** the same error
+    /// through hip velocity every touchdown — the measured cruise `cmd_vx`
+    /// 45↔126 period-2 sawtooth (`plans/hip-foot-strut.md` §3e): a lagged
+    /// plant solves below the `td_solve_floor` clamp, the resulting short
+    /// stride over-corrects above it. Default `true` keeps the committed gait
+    /// bit-identical; env `TD_SOLVE=0` skips the rewrite so the deadbeat law
+    /// owns velocity error alone.
+    pub td_solve: bool,
     /// Swing arc apex height above the plant/floor line, px.
     pub step_height: f32,
     /// World y of the flat floor line.
@@ -299,6 +312,7 @@ impl Default for LowerBodyConfig {
             // Sign-flip floor ON by default (see field doc): the unbounded
             // touchdown solve stalls cruise once the body actually stands up.
             td_solve_floor: 0.5,
+            td_solve: true,
             // Analytic deadbeat placement is the shipped law; `0` auto-picks
             // the stance duration as the convergence deadline.
             dcm_tc: 0.0,

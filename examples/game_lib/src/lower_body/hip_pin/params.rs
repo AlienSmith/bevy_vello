@@ -195,6 +195,10 @@ impl HipPinParams {
         // (cruise-stall fix, `stance-delivery-is-the-brake.md` §11); negative
         // = off (pre-floor committed gait). TD_FLOOR=0.2 remains a valid A/B.
         p.config.td_solve_floor = env_f32("TD_FLOOR", p.config.td_solve_floor);
+        // §6 backward touchdown solve on/off (`TD_SOLVE=0` to disable). Default
+        // on = committed gait bit-identical. See `LowerBodyConfig::td_solve` for
+        // why the solve double-corrects the deadbeat placement law.
+        p.config.td_solve = env_bool("TD_SOLVE", p.config.td_solve);
         // Boot FSM (Stage 4d): stand→lunge→walk (`BOOT_LUNGE=1`). Default off
         // ⇒ committed behavior, bit-identical. `BOOT_LUNGE_HOLD=1` is the
         // falsification run: the lunge window never releases, so the feet stay

@@ -903,6 +903,53 @@ fn test_support_velocity_corrects_plant_error() {
 }
 
 #[test]
+fn test_td_solve_off_is_inert_without_reality_lag() {
+    // §3f (`plans/hip-foot-strut.md`): the §6 backward solve inverts the
+    // Raibert forward law, so when the kinematic plant equals the plan (the
+    // no-measurement fiction, no XPBD lag) its rewrite is the identity:
+    // `(forward_target(v) + kv·v_d)/(Ts/2 + kv) = v`. `TD_SOLVE=0` must be
+    // indistinguishable from `TD_SOLVE=1` in that world — the solve only
+    // bites when reality lags the plan (the ECS walk), where it stacks as a
+    // SECOND corrector on the deadbeat placement law.
+    let mut cfg = default_config();
+    let dt = 1.0 / 60.0;
+    let stride = cfg.stance_duration_ts + cfg.swing_duration_ts;
+    let frames = (stride * 8.0 / dt) as usize;
+
+    let mut run = |solves: bool| -> Vec<f32> {
+        cfg.td_solve = solves;
+        let mut state = ResolverState::new(&cfg);
+        let mut out = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let (_pose, debug) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+            out.push(debug.v_clamped);
+        }
+        out
+    };
+    let on = run(true);
+    let off = run(false);
+    for f in 0..frames {
+        assert!(
+            (on[f] - off[f]).abs() < 0.5,
+            "frame {f}: solve on/off diverged {} vs {} (rewrite must be near-identity without lag)",
+            on[f],
+            off[f]
+        );
+    }
+    // With the solve off, no frame reports a support-velocity rewrite (the
+    // touchdown marker `test_velocity_continuity` uses for its exemption).
+    cfg.td_solve = false;
+    let mut state = ResolverState::new(&cfg);
+    for _ in 0..frames {
+        let (_pose, debug) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
+        assert_eq!(
+            debug.v_support, 0.0,
+            "TD_SOLVE=0 must skip the backward solve entirely"
+        );
+    }
+}
+
+#[test]
 fn test_compute_forward_target_neutral_point() {
     // At v == v_desired, x_target = v·Ts/2 (the neutral stance midpoint).
     let cfg = default_config();
