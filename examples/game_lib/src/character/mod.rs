@@ -400,6 +400,10 @@ pub struct LegPdMemory {
 pub struct RightLegController {
     pub particles: [Entity; 4],
     pub joints: [Entity; 2],
+    /// Distance joint (P3↔foot) re-sourced from the IK each tick while this
+    /// foot is in stance (`plans/hip-foot-strut.md`). `None` when the blueprint
+    /// declares no `strut_joint` binding.
+    pub strut: Option<Entity>,
     pub config: LimbConfig,
     /// Previous target angles for the velocity feed-forward.
     pub pd_memory: LegPdMemory,
@@ -424,6 +428,10 @@ pub struct RightLegController {
 pub struct LeftLegController {
     pub particles: [Entity; 4],
     pub joints: [Entity; 2],
+    /// Distance joint (P3↔foot) re-sourced from the IK each tick while this
+    /// foot is in stance (`plans/hip-foot-strut.md`). `None` when the blueprint
+    /// declares no `strut_joint` binding.
+    pub strut: Option<Entity>,
     pub config: LimbConfig,
     /// Previous target angles for the velocity feed-forward.
     pub pd_memory: LegPdMemory,

@@ -787,6 +787,15 @@ pub fn assemble_character(
             .get(&intern(name))
             .unwrap_or_else(|| panic!("missing entity for {name}"))
     };
+    // Optional lookup for bindings a blueprint may omit (e.g. `strut_joint` on
+    // characters without a hip↔foot distance joint). Empty name ⇒ `None`.
+    let try_get = |name: &str| -> Option<Entity> {
+        if name.is_empty() {
+            None
+        } else {
+            character_connectivity.parts.get(&intern(name)).copied()
+        }
+    };
 
     // Spine particles: [PH, P0, P1, P2, P3]
     // Driving config (compliance, damping, max_pos_speed) is now owned by the
@@ -892,6 +901,7 @@ pub fn assemble_character(
                     get(&right_cfg.particles[3]),
                 ],
                 joints: [get(&right_cfg.joints[0]), get(&right_cfg.joints[1])],
+                strut: try_get(&right_cfg.strut_joint),
                 config: leg_config(),
                 pd_memory: Default::default(),
                 target: right_target,
@@ -909,6 +919,7 @@ pub fn assemble_character(
                     get(&left_cfg.particles[3]),
                 ],
                 joints: [get(&left_cfg.joints[0]), get(&left_cfg.joints[1])],
+                strut: try_get(&left_cfg.strut_joint),
                 config: leg_config(),
                 pd_memory: Default::default(),
                 target: left_target,

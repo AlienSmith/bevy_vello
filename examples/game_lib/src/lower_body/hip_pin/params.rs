@@ -113,6 +113,22 @@ pub struct HipPinParams {
     /// `transfer_segment` reconstruction, keeping the friction brake engaged
     /// through the whole stance. Off ⇒ bit-identical committed behavior.
     pub floor_snap: bool,
+    /// Hip↔stance-foot distance strut (`HIP_STRUT=1`, default off;
+    /// `plans/hip-foot-strut.md`). For each leg whose foot is stance-loaded,
+    /// the blueprint `P3_<FOOT>` distance joint's rest length is re-sourced
+    /// every tick from the IK-solved leg reach ‖hip − foot‖ with the ACTIVE
+    /// compliance below; a swing leg gets the idle (very soft) compliance so
+    /// the joint idles. Physical authority against the jump: with the foot
+    /// friction-pinned, "hip stays at leg-reach from the foot" forbids the hip
+    /// rising off the floor IN the solver (not a tick late like the PD).
+    pub hip_strut: bool,
+    /// Strut compliance while stance-loaded (lower = stiffer). `1e-6` matches
+    /// the leg angular stiffness scale; sweep via `HIP_STRUT_COMPLIANCE`.
+    pub hip_strut_compliance: f32,
+    /// Strut compliance while NOT stance-loaded (swing / airborne): large
+    /// enough to be inert, mirroring the blueprint's dormant value, so the
+    /// joint never fights the gait or the jump (`HIP_STRUT_IDLE`).
+    pub hip_strut_idle: f32,
 }
 
 /// Parse a `GAIT_AUTHORITY` value. Accepts the enum name or a single-letter /
@@ -239,6 +255,11 @@ impl HipPinParams {
         }
         p.floor_snap = env_bool("FLOOR_SNAP", p.floor_snap);
         p.hip_y_sync = env_bool("HIP_Y_SYNC", p.hip_y_sync);
+        // Hip↔stance-foot strut (plans/hip-foot-strut.md Phase 2). Default off
+        // ⇒ the blueprint joints stay at their dormant soft compliance.
+        p.hip_strut = env_bool("HIP_STRUT", p.hip_strut);
+        p.hip_strut_compliance = env_f32("HIP_STRUT_COMPLIANCE", p.hip_strut_compliance).max(1e-12);
+        p.hip_strut_idle = env_f32("HIP_STRUT_IDLE", p.hip_strut_idle).max(1e-12);
         // Facing direction for the knee winding pin (+1 = facing +x/right, the
         // default; -1 = facing -x/left). `FACING=left`/`-1` mirrors the bend side.
         p.config.facing = match std::env::var("FACING").ok().as_deref().map(str::trim) {
@@ -328,6 +349,12 @@ impl Default for HipPinParams {
             // open-loop height spring lets the body sink (`§10.3`). `HIP_Y_SYNC=0`
             // opts out. Pairs with `gait_authority: Full`.
             hip_y_sync: true,
+            // Strut off by default; the blueprint joints spawn with a very soft
+            // compliance so even their initial state is inert until the driver
+            // emits (last-write-wins per tick while on).
+            hip_strut: false,
+            hip_strut_compliance: 1e-6,
+            hip_strut_idle: 0.1,
         }
     }
 }

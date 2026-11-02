@@ -110,7 +110,42 @@ Deferred until Phase 1 is green, listed so the interface is designed to fit:
 - **Stance gate is essential** (design `vertical-stabilizer.md` §3): a swing
   foot is mid-arc; tethering the hip to it fights the gait + DCM.
 
-## 3. Validation (Phase 2)
+## 3. Validation (Phase 2) — MEASURED 2026-11-02 (below)
+
+### 3a. Results (aligned command: SCRIPT=long_walk20_s90 TARGET_SPEED=120 FLOOR_HALF_LEN=3500; arms differ only by V_STABILIZE/V_STAB_KP/HIP_STRUT)
+
+| arm | airborne 2-21s | hip band p-p | net_x | stall | stance drift |
+|---|---|---|---|---|---|
+| s1: PD-stiff(144)/strut-off | 46.8 % | 163 px | **+1316** | 4.1 s | 145 px |
+| s2: PD-stiff/strut-ON | 55.5 % | 236 px | −155 | 7.0 s | 70 px |
+| s3: PD-soft(25)/strut-ON | 61.1 % | 294 px | +471 | 7.0 s | 94 px |
+
+Per-window hip band p-p (px, live P3):
+
+| window | s1 off | s2 stiff/on | s3 soft/on |
+|---|---|---|---|
+| 2-3 s | 83 | 56 | 63 |
+| 3-5 s | 109 | 94 | **16** |
+| 5-8 s | 114 | 67 | 123 |
+| 8-11 s | 162 | 95 | 286 |
+
+**Findings**
+- Strut-on HOLDS HEIGHT while cruise is healthy (s3 16 px band in 3-5 s — the
+  only arm that ever meets the <±15 target) and DELAYS the stall (4.1→7.0 s);
+  stance drift improves (145→70).
+- But fiction-vs-reality y-gap stays ≤3 px in the good windows: the early
+  step-2/3 wobble is COMMAND-SIDE — the resolver itself commands a −65 px sink
+  over t≈1.3-1.9 (boot release→first steps) and reality faithfully follows.
+- Late blow-up (s3 5-8 s onward) tracks the stall/brake sawtooth: v_filt
+  collapses 172→47 px/s at t≈2-2.3 in s3 vs staying 130+ in s1; once the x-loop
+  thrashes, ω₀(z_com) + reach x_max couple it back into y (design doc §"height→x
+  couplings" in vertical-stabilizer.md, here inverted).
+- Chord-drag cost: rest = ‖hip−foot‖ pulls along the hip→foot axis, so it
+  reduces forward progress (s2 net −155). Candidates: (a) touchdown-LATCHED rest
+  from the LIVE distance (true third side, no per-tick re-imposition of the
+  commanded pose), (b) measured-chord sourcing (physics authority only).
+
+## 3b. Original validation targets (kept for reference)
 
 A/B on the aligned baseline (`tools/physics-qa/run_walk.sh`,
 `long_walk20_s90`, TARGET_SPEED=120):

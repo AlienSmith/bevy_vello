@@ -556,6 +556,28 @@
       }
     },
     {
+      "svg_id": "Distance/P3_PRLL",
+      "path_id": "P3_PRLL",
+      "config": {
+        "Distance": [
+          "P3",
+          "PRLL",
+          0.1
+        ]
+      }
+    },
+    {
+      "svg_id": "Distance/P3_PLLL",
+      "path_id": "P3_PLLL",
+      "config": {
+        "Distance": [
+          "P3",
+          "PLLL",
+          0.1
+        ]
+      }
+    },
+    {
       "svg_id": "Angular/P1_P2_P3",
       "path_id": "P1_P2_P3",
       "config": {
@@ -1049,7 +1071,8 @@
       "joints": [
         "P2_P3_P41",
         "P3_P41_PRLL"
-      ]
+      ],
+      "strut_joint": "P3_PRLL"
     },
     "left_leg": {
       "particles": [
@@ -1061,7 +1084,8 @@
       "joints": [
         "P2_P3_P40",
         "P3_P40_PLLL"
-      ]
+      ],
+      "strut_joint": "P3_PLLL"
     }
   }
 }

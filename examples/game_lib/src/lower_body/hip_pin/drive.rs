@@ -1,10 +1,13 @@
 use bevy::{prelude::*, time::Fixed};
 use bevy_vello::integrations::physics::{
-    CharacterAngularConstraintEvent, CharacterExternalPositionConstraintEvent,
-    VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloParticle,
+    CharacterAngularConstraintEvent, CharacterDistanceConstraintEvent,
+    CharacterExternalPositionConstraintEvent, VelloCharacterPhysicsRoot, VelloConstraintWorld,
+    VelloParticle,
 };
 use leafwing_input_manager::prelude::ActionState;
-use vello_physics::{AngularConstraintConfig, ExternalPositionConstraintConfig};
+use vello_physics::{
+    AngularConstraintConfig, DistanceConstraintConfig, ExternalPositionConstraintConfig,
+};
 
 use super::ground::*;
 use super::params::*;
@@ -732,6 +735,37 @@ pub fn drive_hip_pin(
             right_leg.hip_vel = pose.hip_vel;
             right_leg.knee_vel = pose.right_knee_vel;
             right_leg.target_vel = pose.right_foot_vel;
+
+            // Hip↔stance-foot strut (`HIP_STRUT=1`, plans/hip-foot-strut.md
+            // Phase 2): re-source each leg's P3↔foot distance joint from the IK
+            // targets JUST written — the same tick, so the strut never lags the
+            // pose it tethers. Rest length = ‖hip − foot‖ (a norm: the bevy
+            // y-up vs vello y-down flip is irrelevant). Stance-loaded leg gets
+            // the active compliance (physical authority: with the foot
+            // friction-pinned, the hip cannot rise past leg-reach — the jump is
+            // stopped IN the solver); a swing/airborne leg gets the idle
+            // (very soft) compliance so the tether never fights the gait or
+            // the jump. Off ⇒ no event ⇒ the blueprint joints stay dormant.
+            if params.hip_strut {
+                for (strut, loaded, foot_t) in [
+                    (right_leg.strut, right_stance_loaded, foot_r),
+                    (left_leg.strut, left_stance_loaded, foot_l),
+                ] {
+                    let Some(strut) = strut else { continue };
+                    world.queue_character_distance_constraints(&CharacterDistanceConstraintEvent {
+                        character_entity: entity,
+                        joint_entity: strut,
+                        config: DistanceConstraintConfig {
+                            rest_length: (hip_t - foot_t).length().max(1.0),
+                            compliance: if loaded {
+                                params.hip_strut_compliance
+                            } else {
+                                params.hip_strut_idle
+                            },
+                        },
+                    });
+                }
+            }
         } else {
             // No pin ⇒ the frame is free; use the full mass matrix.
             if let Ok(mut right_leg) = right_leg_q.get_mut(entity) {
