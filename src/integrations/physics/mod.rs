@@ -82,6 +82,20 @@ impl VelloConstraintWorld {
         }
     }
 
+    /// Queue a per-frame update of a **distance** constraint's rest length +
+    /// compliance (a dynamic strut the game re-sources from the IK each tick),
+    /// mirroring [`Self::queue_character_angular_constraints`]. Idempotent
+    /// last-write-wins on the proxy joint entity; inert if that joint is not a
+    /// distance constraint.
+    pub fn queue_character_distance_constraints(
+        &mut self,
+        event: &CharacterDistanceConstraintEvent,
+    ) {
+        if let Ok(group) = self.data.get_group_mut(event.character_entity) {
+            group.set_connect_distance_config(&event.joint_entity, &event.config);
+        }
+    }
+
     pub fn queue_character_one_time_external_position_constraint(
         &mut self,
         event: &CharacterExternalPositionConstraintEvent,
@@ -122,8 +136,8 @@ pub use vello_physics::soft_body_connection::ConnectionInitConfig;
 pub use vello_physics::ConnectionConstraintInitConfig;
 use vello_physics::{
     utility::BalancedCoreFrame, AngularConstraintConfig, ConnectionConstraint, ConstraintWorld,
-    ExternalPositionConstraintConfig, FrameInitConfig, FRAME_PARTICLES_COUNT,
-    SPINE_FRAME_PARTICLES_COUNT,
+    DistanceConstraintConfig, ExternalPositionConstraintConfig, FrameInitConfig,
+    FRAME_PARTICLES_COUNT, SPINE_FRAME_PARTICLES_COUNT,
 };
 
 // #[derive(Event)]
@@ -177,6 +191,17 @@ pub struct CharacterExternalPositionConstraintEvent {
     pub character_entity: Entity,
     pub joint_entity: Entity,
     pub config: ExternalPositionConstraintConfig,
+}
+
+/// Per-frame dynamic update of a distance constraint's rest condition +
+/// compliance, mirroring [`CharacterAngularConstraintEvent`]. The game layer
+/// emits one per tick for a hip↔stance-foot strut whose `rest_length` is the
+/// IK-solved leg reach (see `plans/hip-foot-strut.md`).
+#[derive(Event)]
+pub struct CharacterDistanceConstraintEvent {
+    pub character_entity: Entity,
+    pub joint_entity: Entity,
+    pub config: DistanceConstraintConfig,
 }
 
 #[derive(Component)]

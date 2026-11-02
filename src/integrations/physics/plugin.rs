@@ -19,9 +19,9 @@ use crate::{
             run_broad_phase, run_gpu_collision, update_collider_from_soft_body,
             update_connection_particles, update_constraint_world, visualize_colliders,
         },
-        CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotImpulseEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
-        VelloConstraintWorld,
+        CharacterAngularConstraintEvent, CharacterDistanceConstraintEvent,
+        CharacterFrameForceEvent, CharacterPivotForceEvent, CharacterPivotImpulseEvent,
+        CharacterPivotVelocityEvent, ColliderExternalImpulseEvent, VelloConstraintWorld,
     },
 };
 
@@ -39,6 +39,7 @@ impl Plugin for VelloCollisionResponsePlugin {
             .add_event::<CharacterPivotVelocityEvent>()
             .add_event::<CharacterPivotImpulseEvent>()
             .add_event::<CharacterAngularConstraintEvent>()
+            .add_event::<CharacterDistanceConstraintEvent>()
             .add_event::<CharacterFrameForceEvent>()
             .add_event::<VelloRayTraceCommand>()
             // Collision response runs FIRST, then collision detection runs LAST.

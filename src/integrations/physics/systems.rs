@@ -8,10 +8,10 @@ use crate::{
         VELLO_COLLISION_WORLD_RATIO,
     },
     integrations::physics::{
-        CharacterAngularConstraintEvent, CharacterFrameForceEvent, CharacterPivotForceEvent,
-        CharacterPivotImpulseEvent, CharacterPivotVelocityEvent, ColliderExternalImpulseEvent,
-        PivotVisualizer, VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint,
-        VelloParticle,
+        CharacterAngularConstraintEvent, CharacterDistanceConstraintEvent,
+        CharacterFrameForceEvent, CharacterPivotForceEvent, CharacterPivotImpulseEvent,
+        CharacterPivotVelocityEvent, ColliderExternalImpulseEvent, PivotVisualizer,
+        VelloCharacterPhysicsRoot, VelloConstraintWorld, VelloJoint, VelloParticle,
     },
     mat4_to_affine, VelloCollider, VelloScene, VelloSceneBundle,
 };
@@ -594,6 +594,7 @@ pub fn apply_explicit_impulse_on_connection_particle(
     mut v_events: EventReader<CharacterPivotVelocityEvent>,
     mut frame_events: EventReader<CharacterFrameForceEvent>,
     mut angular_event: EventReader<CharacterAngularConstraintEvent>,
+    mut distance_event: EventReader<CharacterDistanceConstraintEvent>,
 ) {
     for event in events.read() {
         // Guard against stale events targeting a group whose root was removed
@@ -631,6 +632,12 @@ pub fn apply_explicit_impulse_on_connection_particle(
             continue;
         };
         group.set_connect_angular_config(&event.joint_entity, &event.config);
+    }
+    for event in distance_event.read() {
+        let Ok(group) = constraint_world.data.get_group_mut(event.character_entity) else {
+            continue;
+        };
+        group.set_connect_distance_config(&event.joint_entity, &event.config);
     }
 }
 
