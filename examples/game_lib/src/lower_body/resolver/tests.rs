@@ -5258,25 +5258,38 @@ fn test_v_stab_bypassed_by_jump() {
 }
 
 #[test]
-fn test_v_stab_no_airborne_authority() {
-    // Gate 3: with physics reporting NO contact in the `Stand` phase, the
-    // stabilizer mirrors reality verbatim (no spring, no PD) — it can neither
-    // cancel a fall nor add lift. That is the anti-hover invariant measured
-    // against reality rather than a fiction model.
+fn test_v_stab_walk_keeps_fiction_authority_when_ungrounded() {
+    // Walk-only fiction ownership (2026-11-02): during `Stand` with contact
+    // flickering OFF (the walking regime where both feet leave the debounced
+    // gate ~half the ticks), the fiction must NOT mirror reality verbatim —
+    // the old follow-reality sub-branch imported the sagged/measured height
+    // and velocity into the fiction every flicker tick, desyncing the vertical
+    // from the step (period-2 wobble). The fiction holds its own height spring
+    // instead. (The anti-hover invariant for *deliberate* jumps is untouched:
+    // `Launch`/`Flight` are still ballistic — see test_v_stab_bypassed_by_jump
+    // and test_vertical_flight_is_ballistic.)
     let cfg = LowerBodyConfig::default();
     let mut s = ResolverState::new(&cfg);
     let dt = 1.0 / 90.0;
     s.vs.phase = VerticalPhase::Stand;
     s.reality_v = Some(RealityVertical {
-        grounded: false, // airborne per physics contact
+        grounded: false, // contact flicker per physics
         h_meas: cfg.hip_height + 30.0,
         vy_up: -40.0, // falling
     });
     step_lower_body(Vec2::ZERO, &cfg, &mut s, dt);
+    // Fiction did NOT import the measured velocity …
     assert!(
-        (s.hip_vel.y - (-40.0)).abs() < 1e-3,
-        "controller altered the airborne velocity: {}",
+        (s.hip_vel.y - (-40.0)).abs() > 1.0,
+        "fiction imported the measured airborne velocity: {}",
         s.hip_vel.y
+    );
+    // … and its own spring held the fiction height at the stand line (started
+    // at equilibrium; no sag import ⇒ no fall in one tick).
+    assert!(
+        (s.hip_pos.y - (cfg.floor_y + cfg.hip_height)).abs() < 5.0,
+        "fiction height fell away during a contact flicker: {}",
+        s.hip_pos.y
     );
 }
 

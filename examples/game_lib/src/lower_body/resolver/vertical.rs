@@ -192,18 +192,21 @@ pub(crate) fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig,
 
     match state.vs.phase {
         VerticalPhase::Stand => {
+            // Walk-only fiction ownership (user directive 2026-11-02): the
+            // former airborne sub-branch that snapped the fiction to the
+            // measured (sagged) height while `Stand` lost contact is GONE.
+            // During walking, contact flickers on ~half the ticks (both feet
+            // ungrounded 45-55 %), and every snap imported the sag into the
+            // fiction's own state — desynchronizing the vertical from the
+            // step (hip max mid one step, min mid the next: period-2 wobble).
+            // The fiction now owns `hip_pos.y` through the whole gait cycle:
+            // grounded ticks get the stabilizer (reality enters as feedback,
+            // not as a state overwrite), ungrounded ticks coast on the plain
+            // height spring. The deliberate jump never passes through here
+            // (its airborne ticks live in `Launch`/`Flight`).
             match state.reality_v {
                 Some(rv) if rv.grounded => stabilize_height(state, config, &rv, dt),
-                Some(rv) => {
-                    // Airborne = no authority (design §3, the anti-hover
-                    // invariant holds with reality as the reference): the
-                    // fiction *follows* the ballistic body instead of
-                    // free-running under the spring.
-                    state.hip_pos.y = floor + rv.h_meas.max(0.0);
-                    state.hip_vel.y = rv.vy_up;
-                    state.v_stab_filt = Some(rv.vy_up);
-                }
-                None => regulate_height(state, floor + stand, dt),
+                Some(_) | None => regulate_height(state, floor + stand, dt),
             }
             if state.vs.jump_requested && grounded {
                 state.vs.jump_requested = false;
