@@ -1411,3 +1411,40 @@ reactive directions the user proposed — **(A) speed-scaled lead, no model** an
 recorded in **`plans/event-gait-phaseA-handoff.md`**, which is the live resume
 point. The recommended next step is the combined
 `foot = hip + clamp(gain·v·T_stance, ±x_max)` law behind a new flag.
+
+## 26. Strut phase 2 + vertical ownership + the TD_SOLVE double-corrector (2026-11-02)
+
+Three threads landed today; full numbers live in `plans/hip-foot-strut.md`
+(§3a–§3f) and `plans/vertical-stabilizer.md`.
+
+1. **Hip↔foot strut (phase 2) wired end-to-end**: blueprint distance joints
+   (`Distance/P3_PRLL`, `P3_PLLL`, dormant at compliance 0.1), factory
+   `strut_joint` lookup, `Right/LeftLegController.strut`, stance-gated rest
+   re-sourcing in `drive_hip_pin` (`HIP_STRUT=1`, default off). XPBD facts: the
+   strut is a symmetric spring; chord-error rms ≈ 1.2 px ⇒ it exerts negligible
+   drag while fiction ≈ reality. It helps early (boot-phase bands), is NOT the
+   late-problem cause.
+2. **Vertical is fiction-owned while ungrounded** (`559a1b6`): the airborne
+   follow-reality sub-branch in the stabilizer's Stand branch was removed — it
+   imported landing dips into the height target. With V_STABILIZE + FLOOR_SNAP +
+   HIP_STRUT the best arm holds bands ≤ 43 px for 11 s (was 71/38/67/59), stall
+   5.9 → 14.1 s, net +502.
+3. **The x-brake sawtooth is a stale double-corrector — CONFIRMED (`b2cb933`)**:
+   `walk.rs` §6 backward solve inverts the *Raibert* forward law, but placement
+   has run the analytic *deadbeat* since 2026-10-28; `beta = 1` overwrites
+   `hip_vel.x` every touchdown on top of the deadbeat's p-channel correction.
+   The measured 45↔126 `cmd_vx` period-2 sawtooth is exactly this (the 45 is
+   TD_FLOOR's output). New gate `TD_SOLVE=0` (default on, committed behavior
+   bit-identical): sawtooth dies (cmd_vx flat std 0.0), **net_x +502 → +1463**.
+   BUT the late backward collapse persists (band 142 at 11–15 s, v_filt → −146):
+   with the solve off the fiction velocity is pure open-loop, and physics drags
+   the body below it (stance feet slide 46–55 px). The solve was accidentally
+   serving as the fiction→reality velocity feedback channel.
+
+**Resume point (the horizontal feedback problem)**: build the proper reality→
+fiction velocity feedback for cruise — candidates measured inadequate so far:
+`PLAN_MEAS_V` raw (feeds gait ripple into the brake, worse), TD_FLOOR variants
+(crutches on the symptom). See `plans/controllable-speed-walk.md` Stage B/C.
+Test harness: `tools/physics-qa/walk_bands.py` (air/net/stall/bands recipe,
+calibrated against the §3d/§3e tables). 173 lower_body tests green; analyzer
+script committed with §3f.
