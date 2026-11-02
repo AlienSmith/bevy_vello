@@ -181,6 +181,35 @@ the snap holds the plant, the spring holds the hip at the IK chord — physical
 authority does what the PD could not. Late blow-up (45/127 after 11 s) tracks
 the brake sawtooth (v_min −139, stall 14.1 s), i.e. the x-loop again.
 
+### 3d. THRUST_PHASE_GATE test (2026-11-02): hypothesis FALSIFIED
+
+User proposal: simplify stance thrust to "push the whole stance, gait clock
+owns it" (`THRUST_PHASE_GATE=1`, contact sample no longer vetoes mid-stance).
+
+| arm | air % | net_x | stall | bands 1.5-3 / 3-5 / 5-8 / 8-11 / 11-15 / 15-21 |
+|---|---|---|---|---|
+| contact-gate, no strut | 49.4 | +519 | 5.9 s | 71 38 67 59 28 45 |
+| **PHASE-gate, no strut** | **49.4** | **+519** | **5.9 s** | **71 38 67 59 28 45 (byte-identical)** |
+| PHASE-gate + strut | 59.3 | −1217 | 1.9 s | 113 104 140 106 123 171 (catastrophic) |
+| FLOOR_SNAP + strut (best) | 46.7 | +502 | 14.1 s | 26 43 24 17 45 127 |
+
+Readings:
+1. No-strut arm byte-identical ⇒ during `Stance` the contact flag and the
+   phase clock AGREE (no mid-stance vetoes to remove). The dip ticks
+   (t=1.54–1.61, contact=0) are **pre-touchdown Swing**: the drop is the
+   landing-absorb + the hip-rooted reconstruction punching the plant ~14 px
+   BELOW the floor line (foot −292 vs seed −278), not a thrust-gate flicker.
+   The flicker-thrust theory is dead; FLOOR_SNAP fixes the actual geometry.
+2. Phase-gate + strut is catastrophic precisely because ~50 % of walking ticks
+   are ghost-stance (phase Stance, foot airborne): the gate tethers the hip to
+   an airborne foot and extends a leg against air — the plan's own warning
+   ("swing foot is mid-arc; tethering the hip to it fights the gait"). The
+   contact gate's veto during ghost stance is load-BEARING, not noise.
+
+Flag kept default-off (`THRUST_PHASE_GATE=0`). Best config remains
+V_STABILIZE + HIP_STRUT + FLOOR_SNAP; late blow-up (11 s+) still tracks the
+x-brake sawtooth.
+
 ## 4. Risks / guards
 
 - **Over-constraining the knee**: three fixed sides freeze it — avoided because

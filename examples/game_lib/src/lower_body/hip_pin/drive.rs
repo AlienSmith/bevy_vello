@@ -675,8 +675,18 @@ pub fn drive_hip_pin(
             // authority for a single flicker tick is what makes the leg PD
             // chatter.
             let contact_authority = params.gait_authority >= GaitAuthority::Contact;
+            // `THRUST_PHASE_GATE=1` (plans/hip-foot-strut.md §3c): the gait
+            // clock owns stance authority outright — a leg in Stance pushes for
+            // the WHOLE stance, no per-frame contact veto. Rationale: walking
+            // keeps a foot on the ground by design, and the debounced foot
+            // sample (`grounded`) flickers 0 for ~3 ticks mid-stance (it reads
+            // the capsule center, not a contact patch). Every lie withdraws
+            // `stance_extend` while the pillar is loaded — the measured knee
+            // fold (chord 106->84 px) and the step2-high/step3-low wobble.
+            // Off => the contact-gated behavior (bit-identical).
+            let phase_gate = params.thrust_phase_gate && contact_authority;
             let (left_stance_loaded, right_stance_loaded) = match ground_support.as_deref() {
-                Some(s) if s.feet_valid && contact_authority => {
+                Some(s) if s.feet_valid && contact_authority && !phase_gate => {
                     (s.feet[0].grounded, s.feet[1].grounded)
                 }
                 _ => (

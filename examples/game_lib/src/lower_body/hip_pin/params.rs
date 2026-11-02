@@ -129,6 +129,13 @@ pub struct HipPinParams {
     /// enough to be inert, mirroring the blueprint's dormant value, so the
     /// joint never fights the gait or the jump (`HIP_STRUT_IDLE`).
     pub hip_strut_idle: f32,
+    /// `THRUST_PHASE_GATE=1`: the gait clock (not the per-frame foot-contact
+    /// sample) owns stance thrust authority — a leg in Stance gets
+    /// `stance_extend` for the WHOLE stance. The debounced contact flag
+    /// flickers off ~3 ticks mid-stance and each lie buckles the loaded knee
+    /// (the measured dip; plans/hip-foot-strut.md §3c). Default off ⇒
+    /// contact-gated behavior, bit-identical.
+    pub thrust_phase_gate: bool,
 }
 
 /// Parse a `GAIT_AUTHORITY` value. Accepts the enum name or a single-letter /
@@ -258,6 +265,7 @@ impl HipPinParams {
         // Hip↔stance-foot strut (plans/hip-foot-strut.md Phase 2). Default off
         // ⇒ the blueprint joints stay at their dormant soft compliance.
         p.hip_strut = env_bool("HIP_STRUT", p.hip_strut);
+        p.thrust_phase_gate = env_bool("THRUST_PHASE_GATE", p.thrust_phase_gate);
         p.hip_strut_compliance = env_f32("HIP_STRUT_COMPLIANCE", p.hip_strut_compliance).max(1e-12);
         p.hip_strut_idle = env_f32("HIP_STRUT_IDLE", p.hip_strut_idle).max(1e-12);
         // Facing direction for the knee winding pin (+1 = facing +x/right, the
@@ -355,6 +363,7 @@ impl Default for HipPinParams {
             hip_strut: false,
             hip_strut_compliance: 1e-6,
             hip_strut_idle: 0.1,
+            thrust_phase_gate: false,
         }
     }
 }
