@@ -210,6 +210,45 @@ Flag kept default-off (`THRUST_PHASE_GATE=0`). Best config remains
 V_STABILIZE + HIP_STRUT + FLOOR_SNAP; late blow-up (11 s+) still tracks the
 x-brake sawtooth.
 
+### 3e. Horizontal over-tune audit (2026-11-02) — TD_FLOOR fingerprint + brake horizon sweep
+
+User recall: the deceleration bug (foot can't get ahead of hip with the folded
+knee) drove TD_FLOOR/brake tuning; once the vertical loop2 height was broken,
+"feet ahead of hip" was impossible, so the horizontal law was clamped to work
+around a VERTICAL defect. With height now held (strut+snap), those clamps can
+over-correct. Fingerprint in the log: sawtooth lower vertex == 45.0 ==
+TD_FLOOR(0.5) x v_des(90) EXACTLY -- the support floor binding every stance;
+upper vertex (126) is the deadbeat recovery.
+
+Sweep on the best arm (V_STABILIZE+HIP_STRUT+FLOOR_SNAP):
+
+| arm | net_x | stall | v_min | bands (1.5-3/3-5/5-8/8-11/11-15/15-21) |
+|---|---|---|---|---|
+| auto t_c, TD_FLOOR=0.5 | +502 | 14.1 s | −139 | 26 43 24 17 45 127 |
+| TD_FLOOR=0.7 | +599 | 9.3 s | −134 | 52 30 34 92 135 136 |
+| TD_FLOOR=off | +606 | 6.8 s | −161 | 26 43 24 73 66 144 |
+| **DCM_TC=0.6** | **+1836** | 8.9 s | **−75** | 26 27 15 **200** 147 84 |
+| TC=0.6 + TD=0.7 | +650 | 8.5 s | −92 | 26 27 37 100 279 130 |
+| TC=0.45 | +777 | 6.5 s | −121 | 26 38 80 113 116 150 |
+| TC=0.6 + kick=110 | +804 | 3.0 s | −223 | 54 54 161 157 46 175 |
+
+Readings:
+1. **TD_FLOOR is a crutch now** — off/0.7 raise net_x (+502 -> +600) but drop
+   the stall (14.1 -> 6.8/9.3 s): the clamp only slowed the brake, it did not
+   fix the over-correction; the sawtooth floor at exactly floor*v_des confirms.
+2. **The horizon is the real knob** — DCM_TC=0.6 (brake spread over ~2 strides)
+   is the best x of the session: net +1836, v_min −75 (least negative, no
+   backward runaway). Early bands stay 15-27 px.
+3. **But TC=0.6 still blows up 8-11 s** (band 200) and combos are worse: the
+   long horizon over-anticipates, and mixing it with a raised/removed floor
+   double-corrects. The x-loop is not yet linear-stable across the whole
+   command profile.
+
+Conclusion: user's over-tune hypothesis CONFIRMED for TD_FLOOR (a vertical-work
+around that now masks x), and partially for the brake horizon (0.6 > auto).
+Not shipped (defaults unchanged); needs a resolver-side fix for the 8-11 s
+transient, not a static t_c. Env-only sweep, no rebuild.
+
 ## 4. Risks / guards
 
 - **Over-constraining the knee**: three fixed sides freeze it — avoided because
