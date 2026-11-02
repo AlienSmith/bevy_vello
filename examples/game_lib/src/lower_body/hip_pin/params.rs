@@ -192,6 +192,22 @@ impl HipPinParams {
         // Adaptive deadbeat horizon: fold the measured last swing wait into t_c.
         p.config.adapt_tc = env_bool("ADAPT_TC", p.config.adapt_tc);
         p.config.adapt_tc_max = env_f32("ADAPT_TC_MAX", p.config.adapt_tc_max).clamp(0.0, 1.0);
+        // Vertical stabilizer (plans/vertical-stabilizer.md): full reality-anchor
+        // of the fiction hip y during grounded Stand. Default off ⇒ committed
+        // vertical fiction, bit-identical. Gains in 1/s², 1/s, seconds, px/s,
+        // px/s²; AFF is the gravity feed-forward fraction (match 1 − SUPPORT_SHARE).
+        p.config.v_stabilize = env_bool("V_STABILIZE", p.config.v_stabilize);
+        p.config.v_stab_kp = env_f32("V_STAB_KP", p.config.v_stab_kp).max(0.0);
+        p.config.v_stab_kd = env_f32("V_STAB_KD", p.config.v_stab_kd).max(0.0);
+        p.config.v_stab_tau = env_f32("V_STAB_TAU", p.config.v_stab_tau).max(1e-3);
+        p.config.v_stab_slew = env_f32("V_STAB_SLEW", p.config.v_stab_slew).max(0.0);
+        p.config.v_stab_amax = env_f32("V_STAB_AMAX", p.config.v_stab_amax).max(0.0);
+        p.config.v_stab_aff = env_f32("V_STAB_AFF", p.config.v_stab_aff).clamp(0.0, 1.0);
+        // Complementary-filter trusts (see LowerBodyConfig): position pull-back
+        // toward the measured height, and velocity nudge toward the measured
+        // rate, both per tick (0..1).
+        p.config.v_stab_trust = env_f32("V_STAB_TRUST", p.config.v_stab_trust).clamp(0.0, 1.0);
+        p.config.v_stab_sync = env_f32("V_STAB_SYNC", p.config.v_stab_sync).clamp(0.0, 1.0);
         p.compliance = env_f32("COMPLIANCE", p.compliance);
         p.damping = env_f32("DAMPING", p.damping);
         p.hip_drop = env_f32("HIP_DROP", p.hip_drop);

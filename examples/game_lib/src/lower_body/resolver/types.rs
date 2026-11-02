@@ -216,6 +216,66 @@ pub struct LowerBodyConfig {
     /// Clamp on the measured wait folded into the horizon, seconds
     /// (`ADAPT_TC_MAX`, default 0.10 ≈ the largest observed wait).
     pub adapt_tc_max: f32,
+
+    // --- Vertical stabilizer (walking phase). See `plans/vertical-stabilizer.md`. ---
+    /// EXPERIMENT (`V_STABILIZE=1`, default off): while grounded and in
+    /// `VerticalPhase::Stand`, the fiction hip y is **anchored to reality**:
+    /// every tick `hip_pos.y`/`hip_vel.y` are set from the measured height and
+    /// (EMA-filtered) measured vertical velocity plus a bounded PD correction —
+    /// no gravity term, because a stance foot always exists while walking and
+    /// the ground reaction cancels it. The fiction spring integrator can no
+    /// longer accumulate momentum reality does not have (the measured
+    /// out-of-phase bounce, `stance-delivery-is-the-brake.md` §12.1). The jump
+    /// path (Load/Launch/Flight/Land) is untouched, so a standing jump stays
+    /// bit-identical. Off ⇒ `reality_v` is never fed ⇒ bit-identical baseline.
+    pub v_stabilize: bool,
+    /// Stabilizer proportional gain, 1/s² (`V_STAB_KP`). Default **144**
+    /// (ωₙ = √Kp ≈ 12 rad/s). A stiff hold is what pins the feet and keeps the
+    /// walk going forward: measured, the slow variant (ωₙ ≈ 0.8 Hz, well below
+    /// the 1.8 Hz gait) let the bob drift and net progress regressed to −101 px
+    /// (≈ the baseline's backward walk), whereas the stiff hold reached +1170 px.
+    /// The residual per-step bob at this gain is an open follow-up (see the
+    /// measured table in `plans/vertical-stabilizer.md`), not a reason to soften.
+    pub v_stab_kp: f32,
+    /// Stabilizer derivative gain, 1/s (`V_STAB_KD`). Default 24 = 2·ωₙ
+    /// (critical damping at the default Kp).
+    pub v_stab_kd: f32,
+    /// EMA time constant of the measured vertical velocity, seconds
+    /// (`V_STAB_TAU`). Default 0.03: τ=0.1 eats 20° of phase margin at ωₙ=12;
+    /// the horizontal `V_MEAS_TAU` (0.6) would eat ~88° — do not reuse.
+    pub v_stab_tau: f32,
+    /// Slew limit of the commanded stand height, px/s (`V_STAB_SLEW`). Default
+    /// 100: height steps (crouch) are followed gently enough for the x_max
+    /// envelope and ω₀ to track them.
+    pub v_stab_slew: f32,
+    /// Acceleration authority cap, px/s² (`V_STAB_AMAX`). Default 980 ≈ 1 g:
+    /// the controller never demands more press/push than free fall allows,
+    /// which the legs physically could not deliver.
+    pub v_stab_amax: f32,
+    /// Gravity feed-forward as a fraction of `gravity` (`V_STAB_AFF`). Default
+    /// **0.0**: the user's rule is *ignore gravity while walking* — a stance
+    /// foot always exists so the ground reaction cancels g, and the fiction
+    /// carries no gravity term. The pin's residual `g_eff = (1−support_share)·g`
+    /// (params.rs `support_share = 0.5`) is left for the PD + reality-trust to
+    /// measure and correct. A positive `aff` adds an UPWARD fiction bias that
+    /// pumps energy into the bob (measured), so tune it up only if a steady
+    /// droop survives the trust pull-back.
+    pub v_stab_aff: f32,
+    /// Complementary-filter POSITION trust, per tick (0..1) (`V_STAB_TRUST`).
+    /// The grounded regulator integrates the fiction height from its own smooth
+    /// velocity (so the pin keeps restoring authority); this term then pulls the
+    /// fiction a fraction of the way back to the MEASURED height each tick, so
+    /// it can neither drift off physics (the open-loop sag) nor track the bob
+    /// 1:1 (which would cancel the damping authority — the measured
+    /// re-anchor-observer failure: airborne 52→49 %). Default 0.1 ⇒ ~0.1 s
+    /// position time constant at 90 Hz.
+    pub v_stab_trust: f32,
+    /// Complementary-filter VELOCITY trust, per tick (0..1) (`V_STAB_SYNC`).
+    /// Nudges the fiction vertical velocity toward the measured (filtered) rate.
+    /// 0 = fully free-running integrator; 1 = pure observer (no authority).
+    /// Default 0.15: keeps the commanding velocity smooth yet phase-locked to
+    /// reality so it can never re-wobble out of phase (the §0 bounce).
+    pub v_stab_sync: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -265,6 +325,20 @@ impl Default for LowerBodyConfig {
             hip_v_mix: -1.0,
             adapt_tc: false,
             adapt_tc_max: 0.10,
+            v_stabilize: false,
+            // Fast height hold, paired with HIP_Y_SYNC=1 (both ON = the measured
+            // best arm: net forward −429 → +1170 px, rigidity 0.140 → 0.093,
+            // WAGGLE rms 31.4 → 9.4, swing gates PASS, stall pushed 7.3 → 11.4 s).
+            // A slow hold (ωₙ ≈ 0.8 Hz) let the bob drift and the walk regressed
+            // to −101 px, so the hold must be stiff enough to pin the feet.
+            v_stab_kp: 144.0,
+            v_stab_kd: 24.0,
+            v_stab_tau: 0.03,
+            v_stab_slew: 100.0,
+            v_stab_amax: 980.0,
+            v_stab_aff: 0.0,
+            v_stab_trust: 0.1,
+            v_stab_sync: 0.15,
         }
     }
 }
@@ -389,6 +463,30 @@ pub struct LegContactInput {
     /// `None` to leave `plant_pos` alone. Only used under
     /// [`GaitAuthority::Contact`].
     pub foot_x: Option<f32>,
+}
+
+/// Measured vertical reality of the body, fed in by the ECS layer each fixed
+/// tick when `config.v_stabilize` is on (the *only* writer is `drive_hip_pin`;
+/// the pure kinematic sandbox never sets it, so the resolver's committed
+/// vertical fiction runs exactly as before).
+///
+/// Like [`LegContactInput`] this is an *input*: the resolver stays pure math
+/// and all collision/physics knowledge lives in `hip_pin.rs`. All values are
+/// already in the resolver's y-up convention.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RealityVertical {
+    /// Debounced physics ground truth: at least one foot (or the body) has
+    /// maintained contact long enough to count as grounded (`GroundSupport`).
+    /// This is the stabilizer's gate — NOT the gait clock, which was measured
+    /// claiming stance while both feet were off the floor (48.9 % of ticks,
+    /// `plans/vertical-stabilizer.md` §0).
+    pub grounded: bool,
+    /// Measured hip height above the floor, px (positive up), from the live
+    /// `P3` particle mapped through the seed/anchor frame.
+    pub h_meas: f32,
+    /// Raw measured hip vertical velocity, px/s, resolver sign (positive =
+    /// rising). The stabilizer runs its own EMA on it (`v_stab_tau`).
+    pub vy_up: f32,
 }
 
 /// Per-leg persistent state.
@@ -622,6 +720,17 @@ pub struct ResolverState {
     /// timer. This is an *input* so `resolver.rs` stays pure math; all
     /// collision knowledge lives in `hip_pin.rs`.
     pub foot_contact: Option<[LegContactInput; 2]>,
+    /// Measured vertical reality (grounded truth + hip height + hip vy) fed by
+    /// the ECS layer when `config.v_stabilize` is on. `None` ⇒ the committed
+    /// vertical fiction (gait-clock grounded, fiction spring) runs bit-identical.
+    pub reality_v: Option<RealityVertical>,
+    /// EMA state of the measured vertical velocity for the stabilizer
+    /// (`v_stab_tau`). `None` until the first reality sample.
+    pub v_stab_filt: Option<f32>,
+    /// Slew-limited commanded stand height (px above floor) for the stabilizer.
+    /// Initialized to `config.hip_height`; tracks `crouch_height` while
+    /// crouching, so a height change becomes a gentle ramp instead of a step.
+    pub stab_h_ref: f32,
     /// How much authority the contact layer above is granted. Defaults to
     /// [`GaitAuthority::Timer`] so the pre-§6 walk is the default and every
     /// step up is an explicit, measurable decision.
@@ -711,6 +820,9 @@ impl ResolverState {
             measured: None,
             measured_apex: None,
             foot_contact: None,
+            reality_v: None,
+            v_stab_filt: None,
+            stab_h_ref: config.hip_height,
             // The pre-§6 timer is the default. Each §6 mechanism is opt-in.
             gait_authority: GaitAuthority::Timer,
             // ~4 ticks at 90 Hz. Long enough to ride out a single missed

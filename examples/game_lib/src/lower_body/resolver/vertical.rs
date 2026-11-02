@@ -1,6 +1,6 @@
-use bevy::math::Vec2;
 use super::placement::{FLIGHT_SWING_LIFT_FRACTION, SWING_TRIGGER_SPEED};
 use super::types::*;
+use bevy::math::Vec2;
 // ---------------------------------------------------------------------------
 // Math primitives
 // ---------------------------------------------------------------------------
@@ -85,10 +85,96 @@ pub(crate) fn regulate_height(state: &mut ResolverState, y_target: f32, dt: f32)
     state.hip_pos.y += state.hip_vel.y * dt;
 }
 
+/// The walking-phase vertical stabilizer (`V_STABILIZE`,
+/// `plans/vertical-stabilizer.md`).
+///
+/// Grounded height regulator that closes its **damping** on measured reality
+/// while keeping the fiction's own smooth commanding velocity. While physics
+/// reports ground contact and the vertical phase is `Stand`:
+///
+/// ```text
+/// a = Kp·(h_ref − h_fiction) − Kd·v_meas        (no gravity term: ground cancels g)
+/// v_fiction += a·dt ; h_fiction += v_fiction·dt (integrate the fiction)
+/// h_fiction += trust·(h_meas − h_fiction)        (complementary position pull-back)
+/// v_fiction = (1−sync)·v_fiction + sync·v_meas   (phase-lock to reality's rate)
+/// ```
+///
+/// Two measured failure modes this balances:
+/// * the baseline's **out-of-phase bounce** (all 33 airborne onsets: fiction
+///   velocity read *down* while the body *rose*) — fixed because the damping
+///   term now reads `v_meas`, never the free-running fiction velocity;
+/// * a **re-anchor observer** (set `v_fiction = v_meas` outright) zeroes the pin
+///   servo `(v_hip − v_c)·dt` and the body bounces unopposed (measured:
+///   airborne 52 → 49 %). The fiction therefore keeps its own integrated
+///   velocity — the restoring authority — and is only nudged toward reality by
+///   the `trust`/`sync` complementary filter, bounded so it can neither drift
+///   off physics nor track the bob 1:1.
+///
+/// Anti-jump by construction: a rising body ⇒ `v_meas > 0` ⇒ the `−Kd·v_meas`
+/// term brakes the commanded velocity, and the fiction height stops rising. The
+/// command is capped at `±v_stab_amax` (≈1 g) so it never demands more press
+/// than the legs can deliver. Squash-to-jump, inverted.
+pub(crate) fn stabilize_height(
+    state: &mut ResolverState,
+    config: &LowerBodyConfig,
+    rv: &RealityVertical,
+    dt: f32,
+) {
+    let g = config.gravity.max(1.0);
+    let stand = if config.crouch {
+        config.crouch_height
+    } else {
+        config.hip_height
+    };
+
+    // Commanded stand height: slew-limited so a crouch/height change is a
+    // gentle ramp the x_max envelope and ω₀ can track (design §2).
+    state.stab_h_ref = approach(state.stab_h_ref, stand, config.v_stab_slew * dt);
+
+    // EMA of the measured vertical velocity, resolver sign (positive = rising).
+    let tau = config.v_stab_tau.max(1e-3);
+    let alpha = dt / (tau + dt);
+    state.v_stab_filt = Some(match state.v_stab_filt {
+        Some(f) => f + alpha * (rv.vy_up - f),
+        None => rv.vy_up,
+    });
+    let v_meas = state.v_stab_filt.unwrap_or(rv.vy_up);
+
+    // Height regulator on the FICTION's own integrated state, damped by the
+    // MEASURED rate (this is the out-of-phase fix: the damping no longer reads
+    // the fiction's free-running velocity that was caught pointing *down* while
+    // the body rose — §0 of the design). The fiction keeps a smooth commanding
+    // velocity, so the pin servo `(v_hip − v_c)·dt` has real restoring
+    // authority; a re-anchor to reality (v_hip ≈ v_c) would zero that term and
+    // the body would bounce unopposed (measured: airborne only 52 → 49 %).
+    let h = state.hip_pos.y - config.floor_y;
+    let a = (config.v_stab_kp * (state.stab_h_ref - h) - config.v_stab_kd * v_meas
+        + config.v_stab_aff * g)
+        .clamp(-config.v_stab_amax, config.v_stab_amax);
+    state.hip_vel.y += a * dt;
+    state.hip_pos.y += state.hip_vel.y * dt;
+
+    // Bounded reality correction (complementary filter): pull the fiction back
+    // toward the measured height/rate by a fraction each tick, so it can neither
+    // drift off physics (the open-loop sag the baseline suffered) nor track the
+    // bob 1:1 (which would cancel the damping authority above). `v_stab_trust`
+    // is the position trust; the velocity re-syncs by `v_stab_sync`.
+    let dh = rv.h_meas - (state.hip_pos.y - config.floor_y);
+    state.hip_pos.y += config.v_stab_trust * dh;
+    state.hip_vel.y = state.hip_vel.y * (1.0 - config.v_stab_sync) + v_meas * config.v_stab_sync;
+}
+
 /// One tick of the loop-1 (vertical) controller.
 ///
 /// State-based triggers only: crouch depth reached, measured h-dot cutoff,
 /// full extension, contact loss, settle band. No timers gate the launch.
+///
+/// `grounded` gate (`V_STABILIZE`, design §3): when the ECS layer feeds
+/// [`ResolverState::reality_v`] the physics contact truth **replaces the gait
+/// clock** — the clock was measured claiming stance while both feet were off
+/// the floor (48.9 % of ticks, `plans/vertical-stabilizer.md` §0). Without a
+/// reality feed (pure kinematic sandbox or the switch off) the committed
+/// clock-based definition runs bit-identical.
 pub(crate) fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig, dt: f32) {
     let g = config.gravity.max(1.0);
     let floor = config.floor_y;
@@ -98,12 +184,27 @@ pub(crate) fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig,
         config.hip_height
     };
     let h = state.hip_pos.y - floor;
-    let grounded = state.left.phase == GaitPhase::Stance || state.right.phase == GaitPhase::Stance;
+    let grounded = match state.reality_v {
+        Some(rv) => rv.grounded,
+        None => state.left.phase == GaitPhase::Stance || state.right.phase == GaitPhase::Stance,
+    };
     let full_ext = config.thigh_len + config.calf_len - 2.0;
 
     match state.vs.phase {
         VerticalPhase::Stand => {
-            regulate_height(state, floor + stand, dt);
+            match state.reality_v {
+                Some(rv) if rv.grounded => stabilize_height(state, config, &rv, dt),
+                Some(rv) => {
+                    // Airborne = no authority (design §3, the anti-hover
+                    // invariant holds with reality as the reference): the
+                    // fiction *follows* the ballistic body instead of
+                    // free-running under the spring.
+                    state.hip_pos.y = floor + rv.h_meas.max(0.0);
+                    state.hip_vel.y = rv.vy_up;
+                    state.v_stab_filt = Some(rv.vy_up);
+                }
+                None => regulate_height(state, floor + stand, dt),
+            }
             if state.vs.jump_requested && grounded {
                 state.vs.jump_requested = false;
                 // Apply the displacement law for this hop, using the last hop's
@@ -175,7 +276,12 @@ pub(crate) fn tick_vertical(state: &mut ResolverState, config: &LowerBodyConfig,
             }
         }
         VerticalPhase::Flight => {
-            // Ballistic, unactuated — the anti-hover guarantee.
+            // Ballistic, unactuated — the anti-hover guarantee. The deliberate
+            // jump arc is fiction-owned (the same model the leg swing times
+            // against); the stabilizer NEVER touches a committed jump, so the
+            // jump path is structurally identical to the baseline. Reality
+            // still drives the body (physics) and the apex latches on
+            // `measured_apex` below.
             state.hip_vel.y -= g * dt;
             state.hip_pos.y += state.hip_vel.y * dt;
             // Advance the airborne-swing clock (drives the flight foot arc).

@@ -15,7 +15,7 @@ use crate::character::{LeftLegController, RightLegController, SpineController};
 use crate::input_management::actions::PlayerAction;
 use crate::lower_body::resolver::{
     attitude_lean_pd, step_lower_body, BootPhase, CaptureMeasure, GaitAuthority, GaitPhase,
-    ResolverState, VerticalPhase,
+    RealityVertical, ResolverState, VerticalPhase,
 };
 
 /// Step the resolver and queue the three stiff external position constraints
@@ -213,6 +213,27 @@ pub fn drive_hip_pin(
             }
         } else {
             pin.state.foot_contact = None;
+        }
+
+        // Vertical stabilizer feed (`V_STABILIZE=1`, plans/vertical-stabilizer.md):
+        // hand the resolver the measured vertical reality — the debounced physics
+        // `grounded` truth (NOT the gait clock, which claimed stance with both
+        // feet off the floor 48.9 % of ticks) plus the live P3 height and vy.
+        // `h_meas` maps the P3 particle exactly like `HIP_Y_SYNC` above (vello
+        // y-down delta negated into the seed-relative y-up fiction frame), but
+        // reads the particle directly so it is independent of the sync switch.
+        // Off ⇒ `None` ⇒ the committed vertical fiction runs bit-identical.
+        if params.config.v_stabilize {
+            if let Ok(p3) = p_q.get(spine.particles[4]) {
+                let world_dy = p3.particle.pos.y - pin.anchor_p3.y;
+                pin.state.reality_v = Some(RealityVertical {
+                    grounded,
+                    h_meas: (pin.seed_hip.y - world_dy - params.config.floor_y).max(0.0),
+                    vy_up: -p3.particle.velocity.y,
+                });
+            }
+        } else {
+            pin.state.reality_v = None;
         }
 
         // Per-pin config: the resolver's ground-referenced geometry is computed
