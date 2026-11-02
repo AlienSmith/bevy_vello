@@ -159,6 +159,28 @@ If the strut lets `V_STAB_KP` drop off the resonant 144 **and** airborne drops
 toward 0, it confirms physical authority replaced command authority. The five
 `test_v_stab_*` unit tests stay green (Phase 1 does not touch the resolver).
 
+## 3c. Follow-up sweep (2026-11-02, resolver @ 559a1b6 fiction-owned height)
+
+| arm | air % | net_x | stall | bands 1.5-3 / 3-5 / 5-8 / 8-11 / 11-15 / 15-21 |
+|---|---|---|---|---|
+| stiff/off | 49.4 | +519 | 5.9 s | 71 38 67 59 28 45 |
+| stiff/on | 54.1 | −375 | 6.9 s | 66 63 147 118 66 222 |
+| **FLOOR_SNAP + strut** | 46.7 | **+502** | **14.1 s** | **26 43 24 17** 45 127 |
+| FLOOR_SNAP alone (no strut) | 53.2 | +381 | 4.7 s | 102 83 55 77 78 190 |
+
+**Dip mechanism (measured, deep dip t=1.54–1.67):** the stance CHORD collapses
+106→84 px — the leg folds while `contact=0` flickers off mid-stance (thrust
+authority revoked exactly when the loaded leg needs extension). Pendulum arc
+(L−√(L²−d²)) explains only 0.3–4 px of a 5–24 px drop. Fiction tracks the
+collapse 1:1 → command-side, as suspected.
+
+**FLOOR_SNAP alone hurts** (bands up): snapping the plant without the strut
+makes the leg fight itself. **FLOOR_SNAP + strut is the best vertical arm to
+date** (bands ≤43 px through 11 s, stall 5.9→14.1 s, net_x restored positive):
+the snap holds the plant, the spring holds the hip at the IK chord — physical
+authority does what the PD could not. Late blow-up (45/127 after 11 s) tracks
+the brake sawtooth (v_min −139, stall 14.1 s), i.e. the x-loop again.
+
 ## 4. Risks / guards
 
 - **Over-constraining the knee**: three fixed sides freeze it — avoided because
