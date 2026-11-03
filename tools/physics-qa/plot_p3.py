@@ -24,6 +24,7 @@ def load(path, targets):
     t, hip, lft, rft, gl, gr = [], [], [], [], [], []
     lt, rt = [], []  # commanded foot targets (x, y) if wanted
     vx, vcmd = [], []  # measured hip vx (P3vx) + fiction commanded vx (cmd_vx)
+    lfx, rfx = [], []  # measured FOOT vx (PLLLvx/PRLLvx) — horizontal collision jitter
     v_filt, v_des = [], []  # persistent filtered reality + desired velocity (new columns)
     has_filt = False  # column present only in CSVs from the HIP_V_MIX harness build
     with open(path) as f:
@@ -33,6 +34,8 @@ def load(path, targets):
             lft.append((float(row["PLLLx"]), -float(row["PLLLy"])))
             rft.append((float(row["PRLLx"]), -float(row["PRLLy"])))
             vx.append(float(row.get("P3vx") or 0.0))
+            lfx.append(float(row.get("PLLLvx") or 0.0))
+            rfx.append(float(row.get("PRLLvx") or 0.0))
             vcmd.append(float(row.get("cmd_vx") or 0.0))
             if "v_filt" in row:
                 has_filt = True
@@ -59,6 +62,8 @@ def load(path, targets):
         np.array(vcmd),
         np.array(v_filt) if has_filt else None,
         np.array(v_des) if has_filt else None,
+        np.array(lfx),
+        np.array(rfx),
     )
 
 
@@ -69,7 +74,22 @@ def main():
         sys.exit(__doc__)
     path = args[0]
     out = args[1] if len(args) > 1 else path.rsplit(".", 1)[0] + ".p3.png"
-    t, hip, lft, rft, gl, gr, lt, rt, vx, vcmd, v_filt, v_des = load(path, targets)
+    (
+        t,
+        hip,
+        lft,
+        rft,
+        gl,
+        gr,
+        lt,
+        rt,
+        vx,
+        vcmd,
+        v_filt,
+        v_des,
+        lfx,
+        rfx,
+    ) = load(path, targets)
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
 
@@ -119,6 +139,12 @@ def main():
     # rate-limited desired command. The transient per-frame fiction (cmd_vx) is
     # drawn thin/behind; the filtered reality leads visually (thick blue).
     shade(ax3)
+    # Feet horizontal velocity first, thin, BEHIND the hip line: the feet are
+    # pinned by contact then yanked by the solver, so their vx rings ±1000s of
+    # px/s. The hip (black) inherits that jitter through the leg constraints —
+    # these two lines show whether the hip shake is foot-collision-driven.
+    ax3.plot(t, lfx, lw=0.6, color="#d6336c", alpha=0.55, label="L foot PLLLvx")
+    ax3.plot(t, rfx, lw=0.6, color="#1971c2", alpha=0.75, label="R foot PRLLvx")
     ax3.plot(t, vx, lw=1.4, color="k", alpha=0.5, label="P3vx (measured)")
     if v_filt is not None:
         ax3.plot(t, v_des, lw=1.0, ls="--", color="#e8590c", label="v_des (desired cmd)")
