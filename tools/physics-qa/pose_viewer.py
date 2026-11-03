@@ -28,6 +28,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.widgets import Slider, Button
 
 # Realized-particle columns (vello y-down; we flip y so up is +).
 # Lower body (drawn solid) and a thin upper body for context.
@@ -92,18 +93,28 @@ class Viewer:
         # floor = deepest (lowest up-y) any foot reaches across the run.
         self.floor = min(d["lft"][1].min(), d["rft"][1].min())
         self.i = int(np.argmin(np.abs(d["t"] - start_t)))
+        self._syncing = False  # guard: slider<->cursor updates don't loop
+        self.playing = False
+        self.timer = None
         self._build()
 
     def _build(self):
         gs = matplotlib.gridspec.GridSpec(
-            3, 2, width_ratios=[2, 1], height_ratios=[1, 1, 1], hspace=0.35, wspace=0.18
+            4,
+            2,
+            width_ratios=[2, 1],
+            height_ratios=[1, 1, 1, 0.16],
+            hspace=0.55,
+            wspace=0.18,
         )
-        self.fig = plt.figure(figsize=(15, 9))
-        self.fig.canvas.manager.set_window_title("pose scrubber — click left strip to pick time")
+        self.fig = plt.figure(figsize=(15, 10))
+        self.fig.canvas.manager.set_window_title(
+            "pose scrubber — drag the time slider / click the left strip / arrow keys"
+        )
         self.axX = self.fig.add_subplot(gs[0, 0])
         self.axY = self.fig.add_subplot(gs[1, 0])
         self.axV = self.fig.add_subplot(gs[2, 0])
-        self.axPose = self.fig.add_subplot(gs[:, 1])
+        self.axPose = self.fig.add_subplot(gs[0:3, 1])
         self.left_axes = [self.axX, self.axY, self.axV]
         d = self.d
         # LEFT strip
@@ -136,6 +147,18 @@ class Viewer:
         self.fig.canvas.mpl_connect("motion_notify_event", self.on_drag)
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
         self._dragging = False
+        # explicit, discoverable controls: a time slider + a Play button.
+        ax_sl = self.fig.add_subplot(gs[3, 0])
+        self.slider = Slider(
+            ax_sl, "time", 0, self.n - 1, valinit=self.i, valstep=1, valfmt="%d", color="#e8590c"
+        )
+        # show seconds under the slider thumb via the label
+        ax_sl.set_xlabel(f"tick → time ({self.d['t'][0]:.1f}–{self.d['t'][-1]:.1f} s)", fontsize=8)
+        self.slider.on_changed(self.on_slider)
+        ax_btn = self.fig.add_subplot(gs[3, 1])
+        self.btn_play = Button(ax_btn, "▶ Play")
+        self.btn_play.on_clicked(self.toggle_play)
+        self.fig.subplots_adjust(bottom=0.09, top=0.96, left=0.05, right=0.98)
         self.update()
 
     def _shade(self, ax):
@@ -226,28 +249,71 @@ class Viewer:
         )
         self.fig.canvas.draw_idle()
 
+    def set_index(self, i):
+        """Single source of truth for the current tick: moves the slider,
+        the red cursor line and the pose together. Guard prevents slider
+        on_changed feedback loops when we set the value programmatically."""
+        self.i = int(np.clip(i, 0, self.n - 1))
+        if not self._syncing:
+            self._syncing = True
+            self.slider.set_val(self.i)  # fires on_changed -> re-enter, guarded
+            self._syncing = False
+        self.update()
+
+    def on_slider(self, _val):
+        if self._syncing:
+            return
+        self.i = int(self.slider.val)
+        self.update()
+
+    def toggle_play(self, _event):
+        if self.playing:
+            self.playing = False
+            if self.timer is not None:
+                self.timer.stop()
+                self.timer = None
+            self.btn_play.label.set_text("▶ Play")
+        else:
+            self.playing = True
+            self.btn_play.label.set_text("⏸ Pause")
+            if self.i >= self.n - 1:
+                self.set_index(0)
+            # ~20 fps playback
+            self.timer = self.fig.canvas.new_timer(interval=50)
+            self.timer.add_callback(self._play_step)
+            self.timer.start()
+        self.fig.canvas.draw_idle()
+
+    def _play_step(self):
+        if not self.playing:
+            return
+        nxt = self.i + 1
+        if nxt >= self.n:
+            self.toggle_play(None)  # reached the end, stop
+            return
+        self.set_index(nxt)
+
     def on_click(self, event):
         if event.inaxes in self.left_axes and event.xdata is not None:
-            self.i = int(np.clip(np.argmin(np.abs(self.d["t"] - event.xdata)), 0, self.n - 1))
-            self._dragging = event.inaxes is not None
-            self.update()
+            self._dragging = True
+            self.set_index(np.argmin(np.abs(self.d["t"] - event.xdata)))
 
     def on_drag(self, event):
         if self._dragging and event.inaxes in self.left_axes and event.xdata is not None:
-            self.i = int(np.clip(np.argmin(np.abs(self.d["t"] - event.xdata)), 0, self.n - 1))
-            self.update()
+            self.set_index(np.argmin(np.abs(self.d["t"] - event.xdata)))
         elif event.button is None:
             self._dragging = False
 
     def on_key(self, event):
         step = 10 if event.key in ("shift+left", "shift+right") else 1
         if event.key in ("left", "shift+left"):
-            self.i = max(0, self.i - step)
+            self.set_index(self.i - step)
         elif event.key in ("right", "shift+right"):
-            self.i = min(self.n - 1, self.i + step)
+            self.set_index(self.i + step)
+        elif event.key == " ":
+            self.toggle_play(None)
         else:
             return
-        self.update()
 
 
 def main():
