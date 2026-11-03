@@ -107,7 +107,13 @@ class Viewer:
             hspace=0.55,
             wspace=0.18,
         )
-        self.fig = plt.figure(figsize=(15, 10))
+        self.fig = plt.figure(figsize=(8, 6), dpi=100)  # ~800x600 px by default
+        # Ask the GUI backend to open at 800x600 (harmless on backends that
+        # ignore it; keeps a tiny window instead of maximized/fullscreen).
+        try:
+            self.fig.canvas.manager.resize(800, 600)
+        except Exception:
+            pass
         self.fig.canvas.manager.set_window_title(
             "pose scrubber — drag the time slider / click the left strip / arrow keys"
         )
