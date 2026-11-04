@@ -46,7 +46,7 @@ use bevy_vello::VelloCollider;
 
 use crate::emit::LegHandles;
 use crate::observe::ObserveHandles;
-use crate::telemetry::SCALAR_COLUMNS;
+use crate::telemetry::legacy_header;
 use crate::walker::{
     actuate_stage, control_stage, observe_stage, set_command, Walker, WalkerConfig,
 };
@@ -119,10 +119,11 @@ pub struct WalkerTelemetryBuffer {
 }
 
 impl WalkerTelemetryBuffer {
-    /// The frozen walker-only header.
+    /// The legacy-format header: the frozen scalar block plus the measured
+    /// particle channels, so rows drop straight into `plot_p3.py` etc.
     pub fn new() -> Self {
         Self {
-            header: SCALAR_COLUMNS.join(","),
+            header: legacy_header(),
             rows: Vec::new(),
         }
     }
@@ -282,6 +283,7 @@ impl Plugin for WalkerControlPlugin {
 mod tests {
     use super::*;
     use crate::control::Command;
+    use crate::telemetry::SCALAR_COLUMNS;
 
     /// A walker with no rig attached must not be touched by the stage systems:
     /// `Query<(Entity, &mut Walker, &WalkerRig)>` simply skips it, which is why
@@ -289,8 +291,11 @@ mod tests {
     #[test]
     fn header_matches_the_frozen_scalar_columns() {
         let buffer = WalkerTelemetryBuffer::new();
-        assert_eq!(buffer.header, SCALAR_COLUMNS.join(","));
-        assert_eq!(buffer.header.split(',').count(), SCALAR_COLUMNS.len());
+        assert_eq!(buffer.header, legacy_header());
+        assert_eq!(
+            buffer.header.split(',').count(),
+            SCALAR_COLUMNS.len() + 4 * crate::telemetry::REALITY_PARTICLES.len()
+        );
         assert!(buffer.rows.is_empty());
     }
 

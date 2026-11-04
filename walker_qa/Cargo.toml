@@ -1,0 +1,22 @@
+[package]
+name = "walker_qa"
+description = "Headless QA harness for walker_control: v10 character + floor + keyboard/script intent, exports walker_control::telemetry's frozen SCALAR_COLUMNS CSV for tools/physics-qa."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "walker_qa"
+path = "src/main.rs"
+
+[dependencies]
+# A windowed scene app: VelloCharacterPlugin assembles the rig,
+# VelloCollisionResponsePlugin runs the XPBD physics, VelloPlugin renders it,
+# and WalkerControlPlugin attaches the walker to the assembled character.
+bevy = { workspace = true }
+bevy_vello = { path = ".." }
+game_lib = { path = "../examples/game_lib" }
+walker_control = { path = "../walker_control" }
+walker_math = { path = "../walker_math" }

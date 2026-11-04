@@ -126,6 +126,32 @@ pub const SCALAR_COLUMNS: [&str; 56] = [
 /// (left knee), `tP41` (right knee), `tPLLL` (left foot), `tPRLL` (right foot).
 const TARGET_NAMES: [&str; 5] = ["tP3", "tP40", "tP41", "tPLLL", "tPRLL"];
 
+/// The *measured* particle channels appended after the scalar block, in the
+/// exact `game_lib::V10_PARTICLES` order the old headless harnesses used
+/// (`capture_telemetry` emitted `x,y,vx,vy` per name, raw Vello y-down frame).
+///
+/// The observer supplies the hip (`P3`) and both feet (`PLLL`/`PRLL`); every
+/// other slot is zero-filled. The full rectangular header is the contract with
+/// the analysis tools (`plot_p3.py`, `pose_viewer.py`), so an absent feature
+/// exports zeros rather than dropped columns — the same law as the scalars.
+pub const REALITY_PARTICLES: [&str; 13] = [
+    "P0", "P1", "P2", "P3", "P40", "P41", "P10", "P13", "PH", "PLLA", "PRLA", "PRLL", "PLLL",
+];
+
+/// The complete legacy-format header: the frozen scalar block, then `x`, `y`,
+/// `vx`, `vy` for every [`REALITY_PARTICLES`] name. A CSV written with this
+/// header and [`TickRecord::format`] rows loads directly in the old tools.
+pub fn legacy_header() -> String {
+    let mut cols: Vec<String> = SCALAR_COLUMNS.iter().map(|s| (*s).to_string()).collect();
+    for name in REALITY_PARTICLES {
+        cols.push(format!("{name}x"));
+        cols.push(format!("{name}y"));
+        cols.push(format!("{name}vx"));
+        cols.push(format!("{name}vy"));
+    }
+    cols.join(",")
+}
+
 /// Stable CSV spelling of a mode (`mode` column).
 pub fn mode_name(mode: LocoMode) -> &'static str {
     match mode {
@@ -214,6 +240,15 @@ pub struct TickRecord {
     pub hit: [bool; 2],
     /// Debounced whole-body support flag.
     pub grounded: bool,
+    /// Measured hip (`P3`) position, raw Vello frame.
+    pub real_hip: Vec2,
+    /// Measured hip velocity (pre-filter — the legacy particle channels are
+    /// raw, exactly like the old `capture_telemetry` output).
+    pub real_hip_vel: Vec2,
+    /// Measured foot positions `[left (PLLL), right (PRLL)]`.
+    pub real_feet: [Vec2; 2],
+    /// Measured foot velocities `[left, right]`, unfiltered.
+    pub real_feet_vel: [Vec2; 2],
 
     // ---- written by `control_stage` (command block) ----
     /// Commanded hip velocity x (the frozen `cmd_vx` / `tP3vx` signal).
@@ -263,6 +298,10 @@ impl Default for TickRecord {
             contact: [false; 2],
             hit: [false; 2],
             grounded: false,
+            real_hip: Vec2::ZERO,
+            real_hip_vel: Vec2::ZERO,
+            real_feet: [Vec2::ZERO; 2],
+            real_feet_vel: [Vec2::ZERO; 2],
             cmd_vx: 0.0,
             v_des: 0.0,
             stance: [true; 2],
@@ -292,6 +331,12 @@ impl TickRecord {
             self.hit[i] = fiction.feet[i].touching;
         }
         self.grounded = fiction.grounded;
+        self.real_hip = fiction.hip;
+        self.real_hip_vel = observer.raw.v_hip;
+        for i in 0..2 {
+            self.real_feet[i] = fiction.feet[i].pos;
+            self.real_feet_vel[i] = fiction.feet[i].vel;
+        }
     }
 
     /// Record the command block. Called by `control_stage` from the output it
@@ -322,6 +367,10 @@ impl TickRecord {
         self.contact = [false; 2];
         self.hit = [false; 2];
         self.grounded = false;
+        self.real_hip = Vec2::ZERO;
+        self.real_hip_vel = Vec2::ZERO;
+        self.real_feet = [Vec2::ZERO; 2];
+        self.real_feet_vel = [Vec2::ZERO; 2];
         self.v_filt = 0.0;
         self.body_theta = 0.0;
         self.body_omega = 0.0;
@@ -434,6 +483,21 @@ impl TickRecord {
         push("mode", mode_name(self.mode).to_string());
         push("grounded", format!("{}", self.grounded as u8));
 
+        // ---- Measured particle channels, legacy V10 order (plot_p3.py,
+        // pose_viewer.py): hip + feet real, every other slot zero-filled. ----
+        for name in REALITY_PARTICLES {
+            let (pos, vel) = match name {
+                "P3" => (self.real_hip, self.real_hip_vel),
+                "PLLL" => (self.real_feet[0], self.real_feet_vel[0]),
+                "PRLL" => (self.real_feet[1], self.real_feet_vel[1]),
+                _ => (Vec2::ZERO, Vec2::ZERO),
+            };
+            push(&format!("{name}x"), format!("{:.2}", pos.x));
+            push(&format!("{name}y"), format!("{:.2}", pos.y));
+            push(&format!("{name}vx"), format!("{:.2}", vel.x));
+            push(&format!("{name}vy"), format!("{:.2}", vel.y));
+        }
+
         rows
     }
 }
@@ -513,16 +577,26 @@ mod tests {
     fn format_emits_exactly_the_frozen_columns_in_order() {
         let mut rec = TickRecord::default();
         let rows = rec.format(1.0 / 90.0);
-        let expected: Vec<String> = SCALAR_COLUMNS.iter().map(|s| s.to_string()).collect();
+        // Scalars first, then the legacy particle channels — exactly the
+        // `legacy_header()` contract.
+        let mut expected: Vec<String> = SCALAR_COLUMNS.iter().map(|s| s.to_string()).collect();
+        for name in REALITY_PARTICLES {
+            for suffix in ["x", "y", "vx", "vy"] {
+                expected.push(format!("{name}{suffix}"));
+            }
+        }
         assert_eq!(keys(&rows), expected);
-        assert_eq!(rows.len(), SCALAR_COLUMNS.len());
+        assert_eq!(rows.len(), legacy_header().split(',').count());
     }
 
     #[test]
     fn an_unwritten_record_is_all_zeros_and_still_rectangular() {
         let mut rec = TickRecord::default();
         let rows = rec.format(1.0 / 90.0);
-        assert_eq!(rows.len(), 56);
+        assert_eq!(
+            rows.len(),
+            SCALAR_COLUMNS.len() + 4 * REALITY_PARTICLES.len()
+        );
         for key in ["cmd_vx", "v_filt", "v_des", "att_torque", "hip_accel_x"] {
             assert_eq!(value(&rows, key), "0.00", "{key} is zero");
         }
@@ -535,6 +609,30 @@ mod tests {
         assert_eq!(value(&rows, "mode"), "standing");
         assert_eq!(value(&rows, "grounded"), "0");
         assert_eq!(value(&rows, "tP3x"), "0.00");
+        // Unwritten reality channels are zero-filled too, so the legacy tools
+        // load a stalled record without missing-column crashes.
+        assert_eq!(value(&rows, "P3x"), "0.00");
+        assert_eq!(value(&rows, "PLLLvx"), "0.00");
+    }
+
+    #[test]
+    fn write_reality_fills_the_legacy_hip_and_feet_channels() {
+        // The observer's fiction carries the measured hip/feet; the other v10
+        // particles the old harness logged stay zero-filled.
+        let mut observer = Observer::new();
+        observer.fiction = fiction(0.0, 0.0, true, [true, true]);
+        observer.raw.v_hip = Vec2::new(7.5, -1.0);
+        let mut rec = TickRecord::default();
+        rec.write_reality(&observer);
+        let rows = rec.format(1.0 / 90.0);
+        assert_eq!(value(&rows, "P3x"), "0.00");
+        assert_eq!(value(&rows, "P3y"), "-140.00");
+        assert_eq!(value(&rows, "P3vx"), "7.50", "raw pre-filter hip velocity");
+        assert_eq!(value(&rows, "PLLLx"), "-20.00");
+        assert_eq!(value(&rows, "PLLLy"), "-90.00");
+        assert_eq!(value(&rows, "PRLLx"), "20.00");
+        assert_eq!(value(&rows, "P1x"), "0.00", "absent particle ⇒ zero-fill");
+        assert_eq!(value(&rows, "P40vy"), "0.00");
     }
 
     #[test]

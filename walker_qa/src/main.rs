@@ -1,0 +1,373 @@
+//! Minimal walker scene: the existing character-assembly + physics + render
+//! plugins, a static floor, the v10 character spawned on top of it, and the
+//! `walker_control` plugin attached to the root once the rig is assembled.
+//!
+//! The observer (reality) and actuator (constraints) are wired to the character
+//! by [`WalkerControlPlugin`]; the keyboard only writes [`WalkerIntent`]. Run
+//! with:
+//!
+//! ```sh
+//! cargo run -p walker_qa
+//! ```
+//!
+//! This opens a window like the tuning app. The character stands — the walking
+//! controller is a stub until the gait seam lands (plan §12).
+
+use bevy::{asset::AssetMetaCheck, input::keyboard::KeyCode, prelude::*, window::PresentMode};
+use bevy_vello::{
+    collision::{path_to_ccw_quad_path, VELLO_COLLISION_COOL_DOWN_TIME},
+    integrations::physics::VelloConstraintWorld,
+    prelude::*,
+    vello::{
+        kurbo::{Rect, Shape},
+        peniko,
+    },
+    VelloCollider, VelloCollisionResponsePlugin, VelloPlugin,
+};
+use game_lib::{
+    character_asset::{
+        BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
+        SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
+    },
+    flush_rows, CharacterRoot, Connectivity, LeftLegController, RightLegController,
+    SpineController, SpineDriveEnabled, VelloCharacterPlugin,
+};
+use walker_control::{
+    emit::LegHandles,
+    observe::ObserveHandles,
+    plugin::{AttachWalker, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer},
+    walker::WalkerConfig,
+};
+
+/// Character asset ids (must match `CharacterRoot` and the blueprint controller
+/// bindings: `left_leg`/`right_leg` particles + `PLLL`/`PRLL` colliders).
+const SVG_ASSET: &str = "v10.character.svg";
+const BP_ASSET: &str = "v10.character.json";
+const SVG_PATH: &str = "character/v10.character.svg";
+const BP_PATH: &str = "character/v10.character.json";
+
+/// Gravity magnitude (px/s²), Vello y-down. 100 px = 1 m ⇒ Earth-like. The
+/// fixed clock (90 Hz) is owned by `VelloCollisionResponsePlugin` itself.
+const GRAVITY: Vec2 = Vec2::new(0.0, 980.0);
+
+/// Spawn pose. The root's scale is baked into the particle positions by
+/// `assemble_character`, so the hip lands near world origin.
+const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, 0.0, 100.0);
+const SPAWN_SCALE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
+
+/// Foot collider line in physics space (y-down): the seed feet rest at Vello
+/// y = +279 (matching the headless walk — see `character_tuning_main.rs`).
+const FOOT_SURFACE_Y: f32 = 279.0;
+/// The floor collider's half thickness (40 px rect, same as the harness).
+const FLOOR_HALF_THICKNESS: f32 = 20.0;
+/// Half-length of the floor rect (4800 px total).
+const FLOOR_HALF_LEN: f64 = 2400.0;
+
+/// Commanded speed for a held direction key (px/s).
+const WALK_SPEED: f32 = 120.0;
+
+/// Where the telemetry CSV lands (relative to the working directory; the
+/// repo's QA tools read e.g. `python3 tools/physics-qa/plot_p3.py
+/// tmp/walker_qa/walk.csv out.png`).
+const CSV_PATH: &str = "tmp/walker_qa/walk.csv";
+/// Flush cadence: rewrite the whole buffer every ~1 s of ticks (90 Hz). The
+/// app has no clean teardown hook in a windowed run, so up to the last flush
+/// interval of rows may be dropped at close — acceptable for QA, and the
+/// buffer stays whole while the app runs.
+const FLUSH_EVERY_ROWS: usize = 90;
+
+fn main() {
+    App::default()
+        .insert_resource(ClearColor(Color::BLACK))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Walker QA".into(),
+                        present_mode: PresentMode::AutoNoVsync,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    meta_check: AssetMetaCheck::Never,
+                    file_path: asset_root().into(),
+                    ..default()
+                }),
+        )
+        // Existing character assembly + factories + input.
+        .add_plugins(VelloCharacterPlugin::default())
+        // The walk control: AttachWalker observer + the
+        // Input→Observe→Control→Actuate→Assemble chain (before the solver).
+        .add_plugins(WalkerControlPlugin)
+        // Physics + collision (owns the XPBD step, GPU collision, 90 Hz clock).
+        .add_plugins(VelloPlugin)
+        .add_plugins(VelloCollisionResponsePlugin)
+        // The walker drives the legs; the game-side spine drive must stay off so
+        // it cannot fight the actuator (same rule as the hip-pin tuning app).
+        .insert_resource(SpineDriveEnabled(false))
+        .init_state::<WalkerState>()
+        .add_systems(Startup, (setup_scene, apply_gravity).chain())
+        .add_systems(
+            Update,
+            (
+                register_character_assets,
+                mark_assets_loaded,
+                check_character_loaded.run_if(in_state(WalkerState::Loading)),
+                attach_walker,
+                keyboard_intent,
+                flush_telemetry,
+            ),
+        )
+        .add_systems(OnEnter(WalkerState::Game), spawn_character)
+        .run();
+}
+
+fn asset_root() -> String {
+    std::env::var("ASSET_ROOT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| {
+            "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets".to_string()
+        })
+}
+
+#[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+enum WalkerState {
+    #[default]
+    Loading,
+    Game,
+}
+
+/// The physics world boots at zero gravity; open it.
+fn apply_gravity(mut world: ResMut<VelloConstraintWorld>) {
+    world.set_gravity(GRAVITY);
+}
+
+fn setup_scene(mut commands: Commands) {
+    commands.spawn(Camera2d::default());
+    let mut bg = VelloScene::default();
+    bg.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::rgb(1.0, 1.0, 1.0),
+        None,
+        &kurbo::Rect::new(-2048.0, -2048.0, 2048.0, 2048.0),
+    );
+    commands.spawn(VelloSceneBundle {
+        scene: bg,
+        ..default()
+    });
+
+    // Static floor: a 40 px-thick rect whose TOP surface sits on the live foot
+    // line. Physics space is y-down, so "below the feet" = larger y ⇒ the center
+    // is one half-thickness below the surface.
+    let rect = Rect::new(
+        -FLOOR_HALF_LEN,
+        -(FLOOR_HALF_THICKNESS as f64),
+        FLOOR_HALF_LEN,
+        FLOOR_HALF_THICKNESS as f64,
+    );
+    let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
+    let floor_y = FOOT_SURFACE_Y + FLOOR_HALF_THICKNESS;
+    let transform = Transform::from_xyz(0.0, floor_y, 0.0);
+    commands.spawn((
+        VelloCollider::new(
+            &shape,
+            None,
+            &rect,
+            Vec2::ZERO,
+            peniko::Brush::Solid(peniko::Color::rgb(1.0, 0.0, 0.0)),
+            0.0,
+            false,
+            None,
+            None,
+            None,
+            0,
+            transform,
+            VELLO_COLLISION_COOL_DOWN_TIME,
+        ),
+        transform,
+        GlobalTransform::from(transform),
+    ));
+    info!("floor: surface y={FOOT_SURFACE_Y:.0}, center y={floor_y:.0}");
+}
+
+/// Spawn the character root; the assembly factories do the rest (particles,
+/// joints, colliders are inserted `Added` and picked up by the physics plugin).
+fn spawn_character(mut commands: Commands) {
+    commands.spawn((
+        VelloSceneBundle {
+            transform: Transform {
+                translation: SPAWN_TRANSLATION,
+                scale: SPAWN_SCALE,
+                ..default()
+            },
+            ..default()
+        },
+        CharacterRoot {
+            svg_asset_id: SVG_ASSET.to_owned(),
+            blueprint_asset_id: BP_ASSET.to_owned(),
+            collision_group: 1,
+        },
+        WalkerIntent::default(),
+    ));
+    info!("character root spawned; waiting for assembly");
+}
+
+// ---------------------------------------------------------------------------
+// Assets
+// ---------------------------------------------------------------------------
+
+fn register_character_assets(
+    mut svg: ResMut<SvgCharacterAssetManager>,
+    mut bp: ResMut<BlueprintCharacterAssetManager>,
+    server: Res<AssetServer>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *done = true;
+    svg.push(
+        server.load(SVG_PATH),
+        SvgCharacterAssetMetaData::default(),
+        SVG_ASSET,
+    );
+    bp.push(
+        server.load(BP_PATH),
+        BlueprintCharacterAssetMetaData::default(),
+        BP_ASSET,
+    );
+}
+
+fn mark_assets_loaded(
+    mut cs: EventReader<AssetEvent<SvgCharacterAsset>>,
+    mut cb: EventReader<AssetEvent<BlueprintCharacterAsset>>,
+    mut svg: ResMut<SvgCharacterAssetManager>,
+    mut bp: ResMut<BlueprintCharacterAssetManager>,
+) {
+    for e in cs.read() {
+        if let AssetEvent::LoadedWithDependencies { id } = e {
+            svg.mark_as_loaded(id);
+        }
+    }
+    for e in cb.read() {
+        if let AssetEvent::LoadedWithDependencies { id } = e {
+            bp.mark_as_loaded(id);
+        }
+    }
+}
+
+fn check_character_loaded(
+    svg: Res<SvgCharacterAssetManager>,
+    bp: Res<BlueprintCharacterAssetManager>,
+    mut next: ResMut<NextState<WalkerState>>,
+) {
+    if svg.all_loaded() && bp.all_loaded() {
+        next.set(WalkerState::Game);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attach
+// ---------------------------------------------------------------------------
+
+/// When a freshly assembled character has both leg controllers (the blueprint
+/// declares them), fire [`AttachWalker`] so the plugin inserts the component
+/// pair. The leg controllers' `[P2, P3, knee, foot]` particle arrays map
+/// straight onto [`LegHandles`]; the foot *collider* entities are found by
+/// `Connectivity` name. Runs once per character (tracked in `attached`).
+fn attach_walker(
+    mut commands: Commands,
+    roots: Query<(
+        Entity,
+        &SpineController,
+        &LeftLegController,
+        &RightLegController,
+    )>,
+    colliders: Query<(Entity, &Connectivity, &VelloCollider)>,
+    walker_q: Query<(), With<walker_control::walker::Walker>>,
+    mut attached: Local<std::collections::HashSet<Entity>>,
+) {
+    for (root, _spine, left, right) in &roots {
+        if attached.contains(&root) || walker_q.get(root).is_ok() {
+            continue;
+        }
+        // Foot collider entities, keyed by the blueprint's PLLL/PRLL names.
+        let mut foot_colliders: [Option<Entity>; 2] = [None, None];
+        for (e, conn, _c) in &colliders {
+            if conn.character != root {
+                continue;
+            }
+            match &*conn.name {
+                "PLLL" | "LLL" => foot_colliders[0] = Some(e),
+                "PRLL" | "RLL" => foot_colliders[1] = Some(e),
+                _ => {}
+            }
+        }
+        let (Some(plll), Some(prll)) = (foot_colliders[0], foot_colliders[1]) else {
+            // Feet not assembled yet — retry next frame.
+            continue;
+        };
+        let handles = ObserveHandles {
+            hip: left.particles[1],
+            waist: left.particles[0],
+            feet: [left.particles[3], right.particles[3]],
+            foot_colliders: [plll, prll],
+        };
+        // The two controllers are distinct component types, so build each leg's
+        // handles explicitly rather than through one shared closure.
+        let left_handles = LegHandles {
+            parts: left.particles,
+            hip_joint: left.joints[0],
+            knee_joint: left.joints[1],
+            strut: left.strut,
+        };
+        let right_handles = LegHandles {
+            parts: right.particles,
+            hip_joint: right.joints[0],
+            knee_joint: right.joints[1],
+            strut: right.strut,
+        };
+        commands.trigger_targets(
+            AttachWalker {
+                config: WalkerConfig::default(),
+                facing: 1.0,
+                handles,
+                left: left_handles,
+                right: right_handles,
+            },
+            root,
+        );
+        attached.insert(root);
+        info!("attached walker to character {root:?}");
+    }
+}
+
+/// Write the telemetry CSV to disk. The buffer's header is the full legacy
+/// format (`legacy_header()`), so the file loads directly in the existing
+/// analysis tools.
+fn flush_telemetry(buf: Res<WalkerTelemetryBuffer>, mut last: Local<usize>) {
+    if buf.rows.len() >= *last + FLUSH_EVERY_ROWS {
+        flush_rows(CSV_PATH, &buf.header, &buf.rows);
+        *last = buf.rows.len();
+    }
+}
+
+/// Key → intent. No keys ⇒ standing (a valid command); the mode machine holds
+/// the measured pose through the actuator.
+fn keyboard_intent(keys: Res<ButtonInput<KeyCode>>, mut intents: Query<&mut WalkerIntent>) {
+    for mut intent in &mut intents {
+        let mut dir = Vec2::ZERO;
+        if keys.pressed(KeyCode::ArrowRight) || keys.pressed(KeyCode::KeyD) {
+            dir.x += 1.0;
+        }
+        if keys.pressed(KeyCode::ArrowLeft) || keys.pressed(KeyCode::KeyA) {
+            dir.x -= 1.0;
+        }
+        intent.dir = dir;
+        intent.speed = if dir.length() > 0.0 { WALK_SPEED } else { 0.0 };
+        intent.jump_edge = keys.just_pressed(KeyCode::Space);
+    }
+}
