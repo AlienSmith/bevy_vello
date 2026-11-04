@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
   "examples/collision_detection",
-  "examples/game_lib"
+  "examples/game_lib",
+  "walker_math",
+  "walker_control"
 ]
 
 [workspace.package]

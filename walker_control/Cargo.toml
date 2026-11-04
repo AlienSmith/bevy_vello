@@ -1,0 +1,15 @@
+[package]
+name = "walker_control"
+description = "Observe / control / actuate walker bridge. This step: the pure actuate core (pose → IK → angular/distance constraint configs)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+glam = "0.29"
+bevy = { workspace = true }
+walker_math = { path = "../walker_math" }
+bevy_vello = { path = ".." }
+vello_physics = { workspace = true }

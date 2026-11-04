@@ -1,0 +1,10 @@
+[package]
+name = "walker_math"
+description = "Pure Raibert/DCM walking math: the extracted, dependency-free core of the lower-body resolver."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+glam = "0.29"
