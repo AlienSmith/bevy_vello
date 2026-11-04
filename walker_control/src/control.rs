@@ -224,18 +224,52 @@ pub trait Step {
     fn mode(&self) -> LocoMode;
 }
 
-/// Balanced quiet stance. Holds the measured stance and drifts the hip toward
-/// the foot midpoint; commands an upright attitude.
-#[derive(Debug, Clone, Copy, Default)]
+/// Balanced quiet stance: a **rigid pose anchored at the hip**, commanded
+/// every frame, no conditions.
+///
+/// The frame: hip = the measured hip (no vertical authority — the frame is
+/// the legs, gravity and the floor do the rest); feet at `hip.x ∓ spread`
+/// along facing (one ahead, one behind, the sagittal support base) and
+/// `stand_height = leg_len − drop` below the hip. It is the *default stand
+/// pose*: the same frame is commanded while airborne and while grounded, so
+/// the legs are already standing before the feet ever meet the floor.
+#[derive(Debug, Clone, Copy)]
 pub struct StandingCtrl {
     /// Seconds spent standing (telemetry; also lets later hysteresis gates read
     /// a settle time).
     pub since: f32,
+    /// Full leg reach: `thigh_len + calf_len`, px (rig geometry, from config).
+    leg_len: f32,
+    /// How far the stance hip drops below full reach, px — bent-knee comfort
+    /// plus reach margin so the IK is never near-degenerate.
+    drop: f32,
+    /// Fore/aft offset of each foot from the hip, px: one foot ahead, one
+    /// behind, along `facing`. The sagittal support base.
+    spread: f32,
 }
 
+/// The default stance geometry (px). Sized for the v10 rig at scale 0.5
+/// (leg reach ≈ 110 ⇒ hip height ≈ 90, feet straddling the hip by ±10 along
+/// facing). A wider stance cannot be settled in the ~0.2 s drop before
+/// touchdown, and 10 px of fore/aft base is enough to break the topple.
+const STANCE_DROP: f32 = 20.0;
+const STANCE_SPREAD: f32 = 10.0;
+
 impl StandingCtrl {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(lower: &walker_math::LowerBodyConfig) -> Self {
+        Self {
+            since: 0.0,
+            leg_len: lower.thigh_len + lower.calf_len,
+            drop: STANCE_DROP,
+            spread: STANCE_SPREAD,
+        }
+    }
+
+    /// Commanded hip height above the ground line: full reach minus the drop,
+    /// floored so the stance triangle (`stand_h`, `spread`) stays solvable.
+    #[inline]
+    fn stand_height(&self) -> f32 {
+        (self.leg_len - self.drop).max(self.spread + 5.0)
     }
 }
 
@@ -244,48 +278,30 @@ impl Step for StandingCtrl {
         &mut self,
         _cmd: &Command,
         fiction: &Fiction,
-        cfg: &ControlConfig,
+        _cfg: &ControlConfig,
         dt: f32,
         facing: f32,
     ) -> ControlOut {
         if dt > 0.0 {
             self.since += dt;
         }
-
-        // Horizontal target: the support midpoint when both feet bear load,
-        // otherwise hold. The drift is rate-limited so a widened stance cannot
-        // yank the hip across in one tick.
-        let both_stance = fiction.feet[0].touching && fiction.feet[1].touching;
-        let target_x = if both_stance {
-            let mid = (fiction.feet[0].pos.x + fiction.feet[1].pos.x) * 0.5;
-            let max_step = cfg.stand_settle_rate.max(0.0) * dt.max(0.0);
-            let delta = mid - fiction.hip.x;
-            if max_step > 0.0 {
-                fiction.hip.x + delta.clamp(-max_step, max_step)
-            } else {
-                fiction.hip.x
-            }
-        } else {
-            // One foot (or none) bearing load: the midpoint is not a support,
-            // so hold exactly. Any real single-support case is the gait
-            // controller's job, not standing's.
-            fiction.hip.x
-        };
-
-        // Height is held: the vertical loop does not exist in standing (the
-        // ground reaction already holds the body up; there is nothing to
-        // integrate and nothing to command).
-        let hip = Vec2::new(target_x, fiction.hip.y);
+        // The rigid frame, every tick: hip measured, feet `spread` fore/aft
+        // of it and `stand_height` below it. No rate limits, no branches.
+        let hip = fiction.hip;
+        let front = facing.signum() * self.spread;
+        let foot_y = hip.y + self.stand_height();
+        let left_foot = Vec2::new(hip.x - front, foot_y);
+        let right_foot = Vec2::new(hip.x + front, foot_y);
 
         ControlOut {
             pose: Pose {
                 hip,
                 left_foot: FootPose {
-                    pos: fiction.feet[0].pos,
+                    pos: left_foot,
                     stance: fiction.feet[0].touching,
                 },
                 right_foot: FootPose {
-                    pos: fiction.feet[1].pos,
+                    pos: right_foot,
                     stance: fiction.feet[1].touching,
                 },
                 facing,
@@ -395,7 +411,7 @@ impl Controller {
     /// Build the controller for a mode. `lower` supplies the gait config.
     pub fn for_mode(mode: LocoMode, lower: &LowerBodyConfig) -> Self {
         match mode {
-            LocoMode::Standing => Controller::Standing(StandingCtrl::new()),
+            LocoMode::Standing => Controller::Standing(StandingCtrl::new(lower)),
             LocoMode::Walking => Controller::Walking(WalkingCtrl::new(lower)),
             LocoMode::BoostStart => Controller::BoostStart(BoostStartCtrl::new()),
         }
@@ -429,7 +445,7 @@ impl Controller {
 
 impl Default for Controller {
     fn default() -> Self {
-        Controller::Standing(StandingCtrl::new())
+        Controller::Standing(StandingCtrl::new(&LowerBodyConfig::default()))
     }
 }
 
@@ -445,14 +461,6 @@ pub struct LocoState {
     pub mode: LocoMode,
     /// Seconds in the current mode.
     pub since: f32,
-    /// Latch set when a boost window expires without reaching
-    /// `boost_exit_speed`. While the move command stays held, boosts are not
-    /// retried — otherwise the timeout would re-arm every tick and the machine
-    /// would flap `Standing ↔ BoostStart` once per frame (`since` resets on
-    /// every re-entry, so the timeout could never take effect). The latch
-    /// clears when the command drops below `move_threshold`, so a fresh launch
-    /// request gets a fresh assist.
-    pub boost_failed: bool,
 }
 
 impl Default for LocoState {
@@ -460,7 +468,6 @@ impl Default for LocoState {
         Self {
             mode: LocoMode::Standing,
             since: 0.0,
-            boost_failed: false,
         }
     }
 }
@@ -470,79 +477,19 @@ impl LocoState {
         Self::default()
     }
 
-    /// Decide the mode for this tick, updating `since` on change. Pure: same
-    /// inputs ⇒ same mode, which keeps the whole loop deterministic (D1).
-    ///
-    /// Transitions (all read command + measured fiction only):
-    /// - `Standing → Walking` when a move is commanded, the body is supported,
-    ///   `walk_ready`, and either it already moves at `boost_exit_speed` or a
-    ///   boost attempt already failed (`boost_failed`: the gait controller is
-    ///   the real locomotion, so a failed launch assist must not forbid walking).
-    /// - `Standing → BoostStart` when a move is commanded, supported,
-    ///   `walk_ready`, slower than `boost_exit_speed`, and no boost has failed
-    ///   while the command stayed held.
-    /// - `BoostStart → Walking` when measured speed reaches `boost_exit_speed`
-    ///   (and `walk_ready`), or on timeout with `boost_failed` latched;
-    ///   `BoostStart → Standing` if the command was withdrawn.
-    /// - `Walking → Standing` when the command drops below `move_threshold`.
+    /// Decide the mode for this tick. The machine still *owns* the decision —
+    /// this is the seam the walking/boost work will fill — but for the QA
+    /// phase it is pinned to standing: the stand pose is the only controller
+    /// whose actuation is validated end-to-end.
     pub fn decide(
         &mut self,
-        cmd: &Command,
-        fiction: &Fiction,
-        cfg: &ControlConfig,
+        _cmd: &Command,
+        _fiction: &Fiction,
+        _cfg: &ControlConfig,
         dt: f32,
     ) -> LocoMode {
         self.since += dt.max(0.0);
-
-        let vx = fiction.v_hip.x.abs();
-        let moving = cmd.vx().abs() > cfg.move_threshold;
-        if !moving {
-            // A withdrawn command re-arms the launch assist.
-            self.boost_failed = false;
-        }
-        let next = match self.mode {
-            LocoMode::Standing => {
-                if moving && cfg.walk_ready && fiction.grounded {
-                    if vx >= cfg.boost_exit_speed || self.boost_failed {
-                        LocoMode::Walking
-                    } else {
-                        LocoMode::BoostStart
-                    }
-                } else {
-                    LocoMode::Standing
-                }
-            }
-            LocoMode::BoostStart => {
-                if !moving {
-                    LocoMode::Standing
-                } else if cfg.walk_ready && vx >= cfg.boost_exit_speed {
-                    LocoMode::Walking
-                } else if self.since >= cfg.boost_timeout.max(0.0) {
-                    // Failed launch: latch (no re-arm while held) and hand the
-                    // body to the gait controller — the real locomotion.
-                    self.boost_failed = true;
-                    if cfg.walk_ready {
-                        LocoMode::Walking
-                    } else {
-                        LocoMode::Standing
-                    }
-                } else {
-                    LocoMode::BoostStart
-                }
-            }
-            LocoMode::Walking => {
-                if moving {
-                    LocoMode::Walking
-                } else {
-                    LocoMode::Standing
-                }
-            }
-        };
-
-        if next != self.mode {
-            self.mode = next;
-            self.since = 0.0;
-        }
+        self.mode = LocoMode::Standing;
         self.mode
     }
 }
@@ -582,9 +529,11 @@ mod tests {
     }
 
     fn centered() -> Fiction {
+        // Feet at ±STANCE_SPREAD, exactly on the x-stance: standing holds x and
+        // only lifts the hip toward the stand height.
         fiction(
             Vec2::new(0.0, -140.0),
-            [Vec2::new(-20.0, -90.0), Vec2::new(20.0, -90.0)],
+            [Vec2::new(-10.0, -90.0), Vec2::new(10.0, -90.0)],
             [true, true],
             0.0,
             Vec2::ZERO,
@@ -592,65 +541,54 @@ mod tests {
     }
 
     #[test]
-    fn standing_on_a_centered_pose_commands_the_measured_pose() {
-        // The dummy contract: targets equal reality ⇒ actuate emits nothing.
+    fn standing_is_a_rigid_frame_anchored_at_the_measured_hip() {
+        // The frame is hip-centered and always active: feet at `hip.x ∓
+        // spread·facing` and `stand_height` below the measured hip, whatever
+        // the fiction's feet look like (grounded or airborne — no branch).
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
+        for touching in [[true, true], [false, false]] {
+            let f = fiction(
+                Vec2::new(3.0, -120.0),
+                [Vec2::new(-45.0, -11.0), Vec2::new(12.0, -80.0)],
+                touching,
+                0.0,
+                Vec2::new(11.0, -7.0),
+            );
+            let mut c = StandingCtrl::new(&walker_math::LowerBodyConfig::default());
+            let out = c.step(&Command::default(), &f, &cfg, dt, 1.0);
+            let stand_h = 55.0 + 55.0 - STANCE_DROP;
+            assert_eq!(out.mode, LocoMode::Standing);
+            assert_eq!(out.pose.hip, f.hip, "the frame is anchored at the hip");
+            assert_eq!(
+                out.pose.left_foot.pos,
+                Vec2::new(3.0 - 10.0, -120.0 + stand_h),
+                "left foot behind the hip at full stand height"
+            );
+            assert_eq!(
+                out.pose.right_foot.pos,
+                Vec2::new(3.0 + 10.0, -120.0 + stand_h),
+                "right foot ahead of the hip at full stand height"
+            );
+            assert_eq!(out.pose.left_foot.stance, touching[0]);
+            assert_eq!(out.pose.right_foot.stance, touching[1]);
+            assert_eq!(out.pose.upper_angle, 0.0, "standing commands upright");
+            assert_eq!(out.pose.facing, 1.0);
+            assert!(out.debug.is_none(), "no gait internals in standing");
+        }
+    }
+
+    #[test]
+    fn the_frame_spreads_opposite_to_facing() {
+        // facing −1 flips which foot leads, but the frame stays one ahead and
+        // one behind the hip.
+        let cfg = ControlConfig::default();
         let f = centered();
-        let mut c = StandingCtrl::new();
-        let out = c.step(&Command::default(), &f, &cfg, dt, 1.0);
-
-        assert_eq!(out.mode, LocoMode::Standing);
-        assert_eq!(out.pose.hip, f.hip, "hip is already at the foot midpoint");
-        assert_eq!(out.pose.left_foot.pos, f.feet[0].pos);
-        assert_eq!(out.pose.right_foot.pos, f.feet[1].pos);
-        assert!(out.pose.left_foot.stance && out.pose.right_foot.stance);
-        assert_eq!(out.pose.upper_angle, 0.0, "standing commands upright");
-        assert_eq!(out.pose.facing, 1.0, "facing is passed through untouched");
-        assert!(out.debug.is_none(), "no gait internals in standing");
-    }
-
-    #[test]
-    fn standing_drifts_the_hip_toward_the_foot_midpoint_rate_limited() {
-        let cfg = ControlConfig {
-            stand_settle_rate: 40.0,
-            ..ControlConfig::default()
-        };
-        let dt = 1.0 / 90.0;
-        // Hip sits 30 px to the left of the support midpoint.
-        let f = fiction(
-            Vec2::new(-30.0, -140.0),
-            [Vec2::new(-10.0, -90.0), Vec2::new(10.0, -90.0)],
-            [true, true],
-            0.0,
-            Vec2::ZERO,
-        );
-        let mut c = StandingCtrl::new();
-        let out = c.step(&Command::default(), &f, &cfg, dt, 1.0);
-        let expected_step = 40.0 * dt;
-        assert!(
-            (out.pose.hip.x - (-30.0 + expected_step)).abs() < 1e-4,
-            "hip must step exactly rate·dt toward mid, got {}",
-            out.pose.hip.x
-        );
-        assert_eq!(out.pose.hip.y, f.hip.y, "height is held, never integrated");
-    }
-
-    #[test]
-    fn standing_with_one_foot_only_holds_instead_of_drifting() {
-        let cfg = ControlConfig::default();
-        let dt = 1.0 / 90.0;
-        let f = fiction(
-            Vec2::new(-30.0, -140.0),
-            [Vec2::new(-10.0, -90.0), Vec2::new(10.0, -60.0)],
-            [true, false],
-            0.0,
-            Vec2::ZERO,
-        );
-        let mut c = StandingCtrl::new();
-        let out = c.step(&Command::default(), &f, &cfg, dt, 1.0);
-        assert_eq!(out.pose.hip, f.hip, "no slab midpoint without two supports");
-        assert!(!out.pose.right_foot.stance, "swing foot is not a strut");
+        let mut c = StandingCtrl::new(&walker_math::LowerBodyConfig::default());
+        let out = c.step(&Command::default(), &f, &cfg, 1.0 / 90.0, -1.0);
+        let stand_h = 55.0 + 55.0 - STANCE_DROP;
+        assert_eq!(out.pose.left_foot.pos, Vec2::new(10.0, -140.0 + stand_h));
+        assert_eq!(out.pose.right_foot.pos, Vec2::new(-10.0, -140.0 + stand_h));
     }
 
     #[test]
@@ -711,147 +649,6 @@ mod tests {
             assert_eq!(m, LocoMode::Standing);
         }
         assert!(st.since > 0.5, "since accumulates while standing");
-    }
-
-    #[test]
-    fn a_move_from_rest_enters_boost_start_when_walking_is_ready() {
-        let cfg = ControlConfig {
-            walk_ready: true,
-            ..ControlConfig::default()
-        };
-        let mut st = LocoState::new();
-        let f = centered();
-        let m = st.decide(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0);
-        assert_eq!(
-            m,
-            LocoMode::BoostStart,
-            "a launch from rest goes through boost"
-        );
-        assert_eq!(st.since, 0.0, "entering a mode resets the timer");
-    }
-
-    #[test]
-    fn walking_is_not_entered_while_walk_ready_is_false() {
-        // The walking controller is a stub; the machine must not hand over to
-        // it yet. This flag disappears the moment `WalkingCtrl::step` lands.
-        let cfg = ControlConfig::default();
-        assert!(!cfg.walk_ready);
-        let mut st = LocoState::new();
-        let f = fiction(
-            Vec2::new(0.0, -140.0),
-            [Vec2::new(-20.0, -90.0), Vec2::new(20.0, -90.0)],
-            [true, true],
-            0.0,
-            Vec2::new(120.0, 0.0),
-        );
-        for _ in 0..10 {
-            let m = st.decide(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0);
-            assert_eq!(m, LocoMode::Standing);
-        }
-    }
-
-    #[test]
-    fn boost_exits_on_measured_speed_not_on_a_timer() {
-        let cfg = ControlConfig {
-            walk_ready: true,
-            boost_exit_speed: 90.0,
-            boost_timeout: 10.0,
-            ..ControlConfig::default()
-        };
-        let mut st = LocoState::new();
-        // Enter boost.
-        let slow = centered();
-        assert_eq!(
-            st.decide(&Command::walk(120.0), &slow, &cfg, 1.0 / 90.0),
-            LocoMode::BoostStart
-        );
-        // Still slow, still in boost.
-        let m = st.decide(&Command::walk(120.0), &slow, &cfg, 1.0 / 90.0);
-        assert_eq!(m, LocoMode::BoostStart);
-        // The body actually accelerated ⇒ hand over.
-        let fast = fiction(
-            Vec2::new(0.0, -140.0),
-            [Vec2::new(-20.0, -90.0), Vec2::new(20.0, -90.0)],
-            [true, true],
-            0.0,
-            Vec2::new(95.0, 0.0),
-        );
-        assert_eq!(
-            st.decide(&Command::walk(120.0), &fast, &cfg, 1.0 / 90.0),
-            LocoMode::Walking,
-            "exit must read the measured velocity the boost cannot fake"
-        );
-    }
-
-    #[test]
-    fn a_failed_launch_hands_off_to_the_gait_and_does_not_flap() {
-        // The timeout must not return to Standing: with the command still held
-        // and the speed still low, Standing would re-enter BoostStart on the
-        // very next tick — an infinite one-tick flap, and `since` resets on
-        // every re-entry, so the timeout could never take effect at all.
-        let cfg = ControlConfig {
-            walk_ready: true,
-            boost_timeout: 0.05,
-            ..ControlConfig::default()
-        };
-        let mut st = LocoState::new();
-        let f = centered();
-        let cmd = Command::walk(120.0);
-        let first = st.decide(&cmd, &f, &cfg, 1.0 / 90.0);
-        assert_eq!(first, LocoMode::BoostStart);
-
-        let mut modes = Vec::new();
-        for _ in 0..20 {
-            modes.push(st.decide(&cmd, &f, &cfg, 1.0 / 90.0));
-        }
-        assert_eq!(
-            modes[modes.len() - 1],
-            LocoMode::Walking,
-            "a failed launch hands the body to the gait controller"
-        );
-        assert!(
-            !modes.contains(&LocoMode::Standing),
-            "a held command must not flap Standing↔BoostStart, got {modes:?}"
-        );
-        assert!(st.boost_failed, "the latch stops the boost re-arming");
-    }
-
-    #[test]
-    fn withdrawing_then_reissuing_the_command_re_arms_the_launch_assist() {
-        let cfg = ControlConfig {
-            walk_ready: true,
-            boost_timeout: 0.05,
-            ..ControlConfig::default()
-        };
-        let mut st = LocoState::new();
-        let f = centered();
-        let cmd = Command::walk(120.0);
-        st.decide(&cmd, &f, &cfg, 1.0 / 90.0);
-        for _ in 0..10 {
-            st.decide(&cmd, &f, &cfg, 1.0 / 90.0);
-        }
-        assert!(st.boost_failed);
-
-        // Release: the latch clears.
-        st.decide(&Command::default(), &f, &cfg, 1.0 / 90.0);
-        assert!(!st.boost_failed, "a released command re-arms the assist");
-
-        // Press again: a fresh launch gets a fresh assist.
-        let m = st.decide(&cmd, &f, &cfg, 1.0 / 90.0);
-        assert_eq!(m, LocoMode::BoostStart);
-    }
-
-    #[test]
-    fn withdrawing_the_command_drops_out_of_boost() {
-        let cfg = ControlConfig {
-            walk_ready: true,
-            ..ControlConfig::default()
-        };
-        let mut st = LocoState::new();
-        let f = centered();
-        st.decide(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0);
-        let m = st.decide(&Command::default(), &f, &cfg, 1.0 / 90.0);
-        assert_eq!(m, LocoMode::Standing);
     }
 
     #[test]

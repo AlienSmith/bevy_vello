@@ -264,12 +264,12 @@ mod tests {
             v_com: Vec2::ZERO,
             feet: [
                 FootState {
-                    pos: Vec2::new(-20.0, -90.0),
+                    pos: Vec2::new(-10.0, -90.0),
                     vel: Vec2::ZERO,
                     touching: true,
                 },
                 FootState {
-                    pos: Vec2::new(20.0, -90.0),
+                    pos: Vec2::new(10.0, -90.0),
                     vel: Vec2::ZERO,
                     touching: true,
                 },
@@ -291,80 +291,30 @@ mod tests {
     }
 
     #[test]
-    fn control_stage_produces_one_output_per_tick_and_holds_standing() {
+    fn control_stage_produces_one_rigid_frame_output_per_tick() {
         let mut w = Walker::new(WalkerConfig::default(), 1.0);
         w.observer.fiction = standing_fiction();
         control_stage(&mut w);
         let out = w.out().expect("control must produce an output");
         assert_eq!(out.mode, LocoMode::Standing);
-        assert_eq!(out.pose.hip, w.observer.fiction.hip);
+        // The stand frame is anchored at the measured hip: feet `spread`
+        // fore/aft along facing and `stand_height` below it, every tick.
+        let hip = w.observer.fiction.hip;
+        let stand_h = 55.0 + 55.0 - 20.0;
+        assert_eq!(out.pose.hip, hip);
+        assert_eq!(
+            out.pose.left_foot.pos,
+            Vec2::new(hip.x - 10.0, hip.y + stand_h)
+        );
+        assert_eq!(
+            out.pose.right_foot.pos,
+            Vec2::new(hip.x + 10.0, hip.y + stand_h)
+        );
         assert_eq!(out.pose.facing, w.facing);
-        // A second tick with no command keeps standing; the mailbox is replaced
-        // (not accumulated) so state cannot drift between stages.
-        control_stage(&mut w);
-        assert_eq!(w.out().unwrap().mode, LocoMode::Standing);
-    }
-
-    #[test]
-    fn control_stage_swaps_the_controller_slot_when_the_mode_changes() {
-        let mut cfg = WalkerConfig::default();
-        cfg.control.walk_ready = true;
-        cfg.control.boost_exit_speed = 1.0e9; // always slow ⇒ boost
-        let mut w = Walker::new(cfg, 1.0);
-        w.observer.fiction = standing_fiction();
+        // A second tick with a move command keeps standing (machine pinned);
+        // the mailbox is replaced, not accumulated.
         set_command(&mut w, Vec2::new(1.0, 0.0), 120.0, false);
         control_stage(&mut w);
-        assert_eq!(w.state.mode, LocoMode::BoostStart);
-        assert_eq!(
-            w.controller.mode(),
-            LocoMode::BoostStart,
-            "slot swapped in-tick"
-        );
-        assert_eq!(w.out().unwrap().mode, LocoMode::BoostStart);
-    }
-
-    #[test]
-    fn control_stage_hands_boost_over_to_walking_without_a_dead_tick() {
-        let mut cfg = WalkerConfig::default();
-        cfg.control.walk_ready = true;
-        cfg.control.boost_exit_speed = 90.0;
-        cfg.control.boost_timeout = 10.0;
-        let mut w = Walker::new(cfg, 1.0);
-        w.observer.fiction = standing_fiction();
-        set_command(&mut w, Vec2::new(1.0, 0.0), 120.0, false);
-
-        // Rest ⇒ boost.
-        control_stage(&mut w);
-        assert_eq!(w.controller.mode(), LocoMode::BoostStart);
-
-        // The body accelerates (measured velocity) ⇒ walking in the SAME tick.
-        w.observer.fiction.v_hip = Vec2::new(95.0, 0.0);
-        control_stage(&mut w);
-        assert_eq!(w.state.mode, LocoMode::Walking);
-        assert_eq!(w.controller.mode(), LocoMode::Walking);
-        assert_eq!(
-            w.out().unwrap().mode,
-            LocoMode::Walking,
-            "the handover happens before control runs, so no tick of dead pose"
-        );
-    }
-
-    #[test]
-    fn withdrawing_the_command_returns_to_standing_and_swaps_back() {
-        let mut cfg = WalkerConfig::default();
-        cfg.control.walk_ready = true;
-        cfg.control.boost_exit_speed = 90.0;
-        cfg.control.boost_timeout = 10.0;
-        let mut w = Walker::new(cfg, 1.0);
-        w.observer.fiction = standing_fiction();
-        set_command(&mut w, Vec2::new(1.0, 0.0), 120.0, false);
-        w.observer.fiction.v_hip = Vec2::new(95.0, 0.0);
-        control_stage(&mut w);
-        assert_eq!(w.controller.mode(), LocoMode::Walking);
-
-        set_command(&mut w, Vec2::ZERO, 0.0, false);
-        control_stage(&mut w);
-        assert_eq!(w.controller.mode(), LocoMode::Standing);
         assert_eq!(w.out().unwrap().mode, LocoMode::Standing);
     }
 

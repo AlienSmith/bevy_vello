@@ -549,12 +549,12 @@ mod tests {
             v_com: Vec2::new(vx, 0.0),
             feet: [
                 FootState {
-                    pos: Vec2::new(-20.0, -90.0),
+                    pos: Vec2::new(-10.0, -90.0),
                     vel: Vec2::ZERO,
                     touching: touching[0],
                 },
                 FootState {
-                    pos: Vec2::new(20.0, -90.0),
+                    pos: Vec2::new(10.0, -90.0),
                     vel: Vec2::ZERO,
                     touching: touching[1],
                 },
@@ -564,7 +564,7 @@ mod tests {
     }
 
     fn standing_out() -> ControlOut {
-        StandingCtrl::new().step(
+        StandingCtrl::new(&walker_math::LowerBodyConfig::default()).step(
             &Command::default(),
             &fiction(0.0, 0.0, true, [true, true]),
             &ControlConfig::default(),
@@ -628,9 +628,9 @@ mod tests {
         assert_eq!(value(&rows, "P3x"), "0.00");
         assert_eq!(value(&rows, "P3y"), "-140.00");
         assert_eq!(value(&rows, "P3vx"), "7.50", "raw pre-filter hip velocity");
-        assert_eq!(value(&rows, "PLLLx"), "-20.00");
+        assert_eq!(value(&rows, "PLLLx"), "-10.00");
         assert_eq!(value(&rows, "PLLLy"), "-90.00");
-        assert_eq!(value(&rows, "PRLLx"), "20.00");
+        assert_eq!(value(&rows, "PRLLx"), "10.00");
         assert_eq!(value(&rows, "P1x"), "0.00", "absent particle ⇒ zero-fill");
         assert_eq!(value(&rows, "P40vy"), "0.00");
     }
@@ -648,8 +648,8 @@ mod tests {
         // `{:.2}` of a +0.0 has no sign to print; `-0.00` only appears if the
         // signal itself is negative zero, which standing never produces.
         assert_eq!(value(&rows, "tP3x"), "0.00");
-        assert_eq!(value(&rows, "tPLLLx"), "-20.00");
-        assert_eq!(value(&rows, "tPRLLx"), "20.00");
+        assert_eq!(value(&rows, "tPLLLx"), "-10.00");
+        assert_eq!(value(&rows, "tPRLLx"), "10.00");
         assert_eq!(value(&rows, "gait_l"), "0");
         assert_eq!(value(&rows, "v_des"), "120.00");
     }

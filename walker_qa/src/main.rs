@@ -51,13 +51,21 @@ const BP_PATH: &str = "character/v10.character.json";
 const GRAVITY: Vec2 = Vec2::new(0.0, 980.0);
 
 /// Spawn pose. The root's scale is baked into the particle positions by
-/// `assemble_character`, so the hip lands near world origin.
-const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, 0.0, 100.0);
+/// `assemble_character`, so the hip lands near world origin. The y-lift
+/// matters: the foot collider wraps the knee→foot segment and reaches ~10 px
+/// BELOW the foot particle, so spawning flush starts the colliders inside the
+/// floor and the XPBD penetration kick topples the body. A small lift clears
+/// that pre-penetration without a big impact speed; [`StandingCtrl`] spreads
+/// the feet throughout the drop.
+const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, 10.0, 100.0);
 const SPAWN_SCALE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
 
-/// Foot collider line in physics space (y-down): the seed feet rest at Vello
-/// y = +279 (matching the headless walk — see `character_tuning_main.rs`).
-const FOOT_SURFACE_Y: f32 = 279.0;
+/// Floor surface line in physics space (y-down, below the origin). The v10
+/// seed pose at scale 0.5 puts the foot particles near y = +310; with the
+/// 30 px spawn lift the colliders clear the floor on spawn and land after a
+/// short drop. Collider Transforms are in Bevy y-up space: the floor spawns
+/// at y = −(this + half thickness).
+const FOOT_SURFACE_Y: f32 = 312.0;
 /// The floor collider's half thickness (40 px rect, same as the harness).
 const FLOOR_HALF_THICKNESS: f32 = 20.0;
 /// Half-length of the floor rect (4800 px total).
@@ -76,7 +84,17 @@ const CSV_PATH: &str = "tmp/walker_qa/walk.csv";
 /// buffer stays whole while the app runs.
 const FLUSH_EVERY_ROWS: usize = 90;
 
+/// `WIN_HIDDEN=1` runs the full pipeline (render + physics + walker) with no
+/// OS window — the same idiom as `visual_arm_pd`. Only the surface is
+/// suppressed; every system still runs on the fixed clock.
+fn win_hidden() -> bool {
+    std::env::var("WIN_HIDDEN")
+        .map(|v| !v.trim().is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
 fn main() {
+    let hidden = win_hidden();
     App::default()
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
@@ -85,6 +103,7 @@ fn main() {
                     primary_window: Some(Window {
                         title: "Walker QA".into(),
                         present_mode: PresentMode::AutoNoVsync,
+                        visible: !hidden,
                         ..default()
                     }),
                     ..default()
@@ -160,8 +179,9 @@ fn setup_scene(mut commands: Commands) {
     });
 
     // Static floor: a 40 px-thick rect whose TOP surface sits on the live foot
-    // line. Physics space is y-down, so "below the feet" = larger y ⇒ the center
-    // is one half-thickness below the surface.
+    // line. Collider transforms are Bevy y-up, so "below the feet" (physics
+    // y-down, larger y) = more negative Bevy y; the center is one
+    // half-thickness below the surface (same convention as the headless harness).
     let rect = Rect::new(
         -FLOOR_HALF_LEN,
         -(FLOOR_HALF_THICKNESS as f64),
@@ -169,7 +189,7 @@ fn setup_scene(mut commands: Commands) {
         FLOOR_HALF_THICKNESS as f64,
     );
     let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
-    let floor_y = FOOT_SURFACE_Y + FLOOR_HALF_THICKNESS;
+    let floor_y = -(FOOT_SURFACE_Y + FLOOR_HALF_THICKNESS);
     let transform = Transform::from_xyz(0.0, floor_y, 0.0);
     commands.spawn((
         VelloCollider::new(
@@ -330,9 +350,17 @@ fn attach_walker(
             knee_joint: right.joints[1],
             strut: right.strut,
         };
+        // QA stiffness override: the default actuator compliance lets the
+        // stance collapse under the body weight (measured: hip sinks to the
+        // floor while feet hover ~60 px above it). Stiffer joints + strut,
+        // slightly under-damped so the pose can still track.
+        let mut config = WalkerConfig::default();
+        config.actuator.leg_compliance = 1e-9;
+        config.actuator.zeta = 0.7;
+        config.actuator.strut_active = 2e-7;
         commands.trigger_targets(
             AttachWalker {
-                config: WalkerConfig::default(),
+                config,
                 facing: 1.0,
                 handles,
                 left: left_handles,

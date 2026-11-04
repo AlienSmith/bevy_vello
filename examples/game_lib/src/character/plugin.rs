@@ -5,7 +5,7 @@ use bevy_vello::integrations::physics::systems::update_constraint_world;
 use crate::{
     character::{
         observers::{on_remove_connectivity, on_remove_connectivity_root},
-        systems::{reset_limb_constraint_event, tick_spine_drive, update_character_movement},
+        systems::{reset_limb_constraint_event, tick_spine_drive},
         StringPool,
     },
     ResetLimbControlConstraintsEvent,
@@ -24,8 +24,14 @@ impl Plugin for GameCharacterPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    tick_spine_drive.before(update_character_movement),
-                    update_character_movement.before(update_constraint_world),
+                    // TODO(walker-control): `update_character_movement` (the old
+                    // limb PD driver) commands the same leg joints as the
+                    // walker_control actuator and overwrites its stance targets —
+                    // commented out for the walker_qa QA phase; it will move to an
+                    // opt-in plugin or be removed. `tick_spine_drive` keeps its
+                    // ordering against the constraint world directly.
+                    // update_character_movement.before(update_constraint_world),
+                    tick_spine_drive.before(update_constraint_world),
                 ),
             );
         //we would intensionally make the reset event being resolved frame later so it won't got mixed with control event.
