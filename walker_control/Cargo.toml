@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 glam = "0.29"
 bevy = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
 walker_math = { path = "../walker_math" }
 bevy_vello = { path = ".." }
 vello_physics = { workspace = true }

@@ -44,32 +44,53 @@ use crate::observe::Fiction;
 // ---------------------------------------------------------------------------
 
 /// Player/script intent, written by the input system. Units are px/s and
-/// Vello y-down; `jump` is **edge-triggered** by the input stage (a held key
-/// must not re-arm a hop on every landing).
+/// Vello y-down. A `Command` is a **held move** (a script cell's duration);
+/// "no command" is `None` in [`crate::walker::Walker::command`], which is what
+/// ends a run and returns the machine to standing.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Command {
     /// Commanded horizontal direction, unit-ish (`+x` = travel right).
     pub dir: Vec2,
     /// Commanded speed magnitude, px/s. `0` = stop / stay put.
     pub speed: f32,
-    /// One-tick jump request.
-    pub jump: bool,
+    /// This move is a **launch**: start it through [`LocoMode::BoostStart`]
+    /// instead of entering the gait directly. The boost kicks the body up to
+    /// speed; the machine hands over to [`LocoMode::Walking`] once the
+    /// *measured* velocity clears [`ControlConfig::boost_exit_speed`].
+    pub boost: bool,
 }
 
 impl Command {
-    /// Convenience: a pure horizontal move command.
+    /// Convenience: a pure horizontal move command (no launch boost).
     pub fn walk(speed: f32) -> Self {
         let dir = Vec2::new(speed.signum(), 0.0);
         Self {
             dir,
             speed,
-            jump: false,
+            boost: false,
+        }
+    }
+
+    /// Convenience: a boosted launch move — the kick start of the gait.
+    pub fn boost(speed: f32) -> Self {
+        let dir = Vec2::new(speed.signum(), 0.0);
+        Self {
+            dir,
+            speed,
+            boost: true,
         }
     }
 
     /// Signed horizontal command speed (`dir.x · speed`).
     pub fn vx(&self) -> f32 {
         self.dir.x * self.speed
+    }
+
+    /// True when this command actually asks for locomotion: a nonzero signed
+    /// speed above `threshold`. A command below it counts as *ended* — the
+    /// machine treats it exactly like no command (return to standing).
+    pub fn is_move(&self, threshold: f32) -> bool {
+        self.vx().abs() > threshold
     }
 }
 
@@ -148,10 +169,6 @@ pub struct ControlConfig {
     /// Hard cap on the boost window, seconds (fallback if physics never
     /// accelerates — the boost cannot fake its exit, so it must time out).
     pub boost_timeout: f32,
-    /// Wiring switch for the walking controller. `false` until
-    /// [`WalkingCtrl`]'s `step` body is implemented; the state machine still
-    /// computes the transition, it just cannot be entered.
-    pub walk_ready: bool,
 }
 
 impl Default for ControlConfig {
@@ -161,7 +178,6 @@ impl Default for ControlConfig {
             move_threshold: 5.0,
             boost_exit_speed: 90.0,
             boost_timeout: 1.0,
-            walk_ready: false,
         }
     }
 }
@@ -460,9 +476,27 @@ impl Default for Controller {
 // State machine: decides only WHICH controller runs
 // ---------------------------------------------------------------------------
 
-/// The mode machine. It owns no gait state — only the current mode, how
-/// long it has held, and a launch-assist latch; it reads nothing but the
-/// command and the fiction.
+/// The mode machine. It owns no gait state — only the current mode and how
+/// long it has held; it reads nothing but the command and the fiction.
+///
+/// Three states, one per controller:
+///
+/// ```text
+///               move + boost flag
+///  Standing ────────────────────────► BoostStart
+///    ▲  ▲                                  │  measured speed ≥ boost_exit_speed
+///    │  │  command ended (None / stop)     │  or boost_timeout
+///    │  │                                  ▼
+///    │  └──────────── Walking ◄───────── (handover)
+///    │                 ▲   │
+///    └─────────────────┘   └── command ended → Standing
+///               plain move (no boost) goes Standing → Walking directly
+/// ```
+///
+/// The boost exit reads **fiction** (`v_hip.x`, measured), so the launch cannot
+/// fake its own completion (plan §5). Command end — `None`, or a command whose
+/// signed speed is under [`ControlConfig::move_threshold`] — always returns to
+/// Standing from any mode.
 #[derive(Debug, Clone, Copy)]
 pub struct LocoState {
     pub mode: LocoMode,
@@ -484,19 +518,43 @@ impl LocoState {
         Self::default()
     }
 
-    /// Decide the mode for this tick. The machine still *owns* the decision —
-    /// this is the seam the walking/boost work will fill — but for the QA
-    /// phase it is pinned to standing: the stand pose is the only controller
-    /// whose actuation is validated end-to-end.
+    /// Decide the mode for this tick.
     pub fn decide(
         &mut self,
-        _cmd: &Command,
-        _fiction: &Fiction,
-        _cfg: &ControlConfig,
+        cmd: Option<Command>,
+        fiction: &Fiction,
+        cfg: &ControlConfig,
         dt: f32,
     ) -> LocoMode {
         self.since += dt.max(0.0);
-        self.mode = LocoMode::Standing;
+        // A held move command; anything else counts as no command at all.
+        let active = cmd.filter(|c| c.is_move(cfg.move_threshold));
+
+        let next = match (self.mode, active) {
+            // Command ended (or never started): stand, from any mode.
+            (_, None) => LocoMode::Standing,
+            // Launch: a boosted move kicks the gait through BoostStart.
+            (LocoMode::Standing, Some(c)) if c.boost => LocoMode::BoostStart,
+            // A plain move enters the gait directly (already up to speed).
+            (LocoMode::Standing, Some(_)) => LocoMode::Walking,
+            (LocoMode::BoostStart, Some(_)) => {
+                // Exit on measured speed, with a timeout backstop so a stuck
+                // physics can never hold the launch mode forever.
+                let boosted = fiction.v_hip.x.abs() >= cfg.boost_exit_speed;
+                let expired = self.since >= cfg.boost_timeout;
+                if boosted || expired {
+                    LocoMode::Walking
+                } else {
+                    LocoMode::BoostStart
+                }
+            }
+            (LocoMode::Walking, Some(_)) => LocoMode::Walking,
+        };
+
+        if next != self.mode {
+            self.mode = next;
+            self.since = 0.0;
+        }
         self.mode
     }
 }
@@ -650,10 +708,101 @@ mod tests {
         let mut st = LocoState::new();
         let f = centered();
         for _ in 0..50 {
-            let m = st.decide(&Command::default(), &f, &cfg, 1.0 / 90.0);
+            let m = st.decide(None, &f, &cfg, 1.0 / 90.0);
             assert_eq!(m, LocoMode::Standing);
         }
         assert!(st.since > 0.5, "since accumulates while standing");
+    }
+
+    #[test]
+    fn a_plain_move_starts_the_gait_directly() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        let m = st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Walking, "no boost flag ⇒ no launch window");
+    }
+
+    #[test]
+    fn a_boosted_move_launches_through_booststart_and_exits_on_measured_speed() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let rest = centered();
+        let m = st.decide(Some(Command::boost(120.0)), &rest, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::BoostStart);
+
+        // Still at rest: the launch continues (fiction says nothing yet).
+        let dt = 1.0 / 90.0;
+        for _ in 0..20 {
+            let m = st.decide(Some(Command::boost(120.0)), &rest, &cfg, dt);
+            assert_eq!(m, LocoMode::BoostStart);
+        }
+
+        // The body MEASURABLY reaches the exit speed: hand over to the gait.
+        let moving = fiction(
+            rest.hip,
+            [Vec2::ZERO, Vec2::ZERO],
+            [true, true],
+            0.0,
+            Vec2::new(cfg.boost_exit_speed + 1.0, 0.0),
+        );
+        let m = st.decide(Some(Command::boost(120.0)), &moving, &cfg, dt);
+        assert_eq!(m, LocoMode::Walking, "boost exits on measured speed");
+    }
+
+    #[test]
+    fn the_boost_times_out_when_physics_never_delivers() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        st.decide(Some(Command::boost(120.0)), &f, &cfg, 1.0 / 90.0);
+        // Hold the launch past `boost_timeout` without gaining any speed.
+        let mut m = LocoMode::BoostStart;
+        let ticks = (cfg.boost_timeout * 90.0) as usize + 2;
+        for _ in 0..ticks {
+            m = st.decide(Some(Command::boost(120.0)), &f, &cfg, 1.0 / 90.0);
+        }
+        assert_eq!(m, LocoMode::Walking, "timeout is the backstop exit");
+    }
+
+    #[test]
+    fn command_end_returns_any_mode_to_standing() {
+        let cfg = ControlConfig::default();
+        let f = centered();
+        // From Walking: command gone ⇒ Standing.
+        let mut st = LocoState::new();
+        st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(st.mode, LocoMode::Walking);
+        assert_eq!(st.decide(None, &f, &cfg, 1.0 / 90.0), LocoMode::Standing);
+
+        // A sub-threshold command counts as ended, not held.
+        let mut st = LocoState::new();
+        st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        let stop = Command {
+            dir: Vec2::X,
+            speed: cfg.move_threshold * 0.5,
+            boost: false,
+        };
+        assert_eq!(
+            st.decide(Some(stop), &f, &cfg, 1.0 / 90.0),
+            LocoMode::Standing,
+            "speed under the threshold = command ended"
+        );
+    }
+
+    #[test]
+    fn mode_entry_resets_since() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        for _ in 0..10 {
+            st.decide(None, &f, &cfg, 1.0 / 90.0);
+        }
+        st.decide(Some(Command::boost(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert!(
+            st.since < 0.02,
+            "entering BoostStart restarts the timeout clock"
+        );
     }
 
     #[test]
@@ -680,10 +829,7 @@ mod tests {
 
     #[test]
     fn control_is_deterministic_for_identical_input_streams() {
-        let cfg = ControlConfig {
-            walk_ready: true,
-            ..ControlConfig::default()
-        };
+        let cfg = ControlConfig::default();
         let low = LowerBodyConfig::default();
         let run = || {
             let mut c = Controller::for_mode(LocoMode::Standing, &low);
@@ -699,15 +845,17 @@ mod tests {
                     v,
                 );
                 let cmd = if i % 3 == 0 {
-                    Command::default()
+                    None
+                } else if i < 20 {
+                    Some(Command::boost(100.0))
                 } else {
-                    Command::walk(100.0)
+                    Some(Command::walk(100.0))
                 };
-                let mode = st.decide(&cmd, &f, &cfg, 1.0 / 90.0);
+                let mode = st.decide(cmd, &f, &cfg, 1.0 / 90.0);
                 if mode != c.mode() {
                     c = Controller::for_mode(mode, &low);
                 }
-                let out = c.step(&cmd, &f, &cfg, 1.0 / 90.0, 1.0);
+                let out = c.step(&cmd.unwrap_or_default(), &f, &cfg, 1.0 / 90.0, 1.0);
                 outs.push((
                     out.mode,
                     (out.pose.hip.x * 1000.0).round() as i64,

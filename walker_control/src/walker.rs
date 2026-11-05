@@ -67,8 +67,10 @@ impl Actuator {
 #[derive(Component)]
 pub struct Walker {
     pub config: WalkerConfig,
-    /// Written by the input system (`view.input.command`).
-    pub command: Command,
+    /// The held move command, `None` when no command is active. The state
+    /// machine treats `None` — and any sub-threshold command — as "ended":
+    /// exit-on-command-end returns the machine to Standing.
+    pub command: Option<Command>,
     /// The mode machine — decides only which controller is active.
     pub state: LocoState,
     /// The one observer type (holds the fiction).
@@ -92,7 +94,7 @@ impl Walker {
         let controller = Controller::for_mode(LocoMode::Standing, &config.lower);
         Self {
             config,
-            command: Command::default(),
+            command: None,
             state: LocoState::new(),
             observer: Observer::new(),
             controller,
@@ -118,19 +120,15 @@ impl Walker {
 // ---------------------------------------------------------------------------
 
 /// Input → command. One line of translation so the source (keyboard, script
-/// playhead, AI) stays outside this crate: callers write `Walker::command`;
-/// this helper only documents the edge-trigger rule for `jump`.
+/// playhead, AI) stays outside this crate: callers write `Walker::command`
+/// through this helper.
 ///
-/// Expected usage from the game/harness input system:
-/// ```ignore
-/// w.command = Command { dir, speed, jump: jump_edge };
-/// ```
-pub fn set_command(w: &mut Walker, dir: Vec2, speed: f32, jump_edge: bool) {
-    w.command = Command {
-        dir,
-        speed,
-        jump: jump_edge,
-    };
+/// `Some` is a **held** move command (the harness's script cell / key press
+/// keeps it active); `None` means the command has ended and the state machine
+/// returns to standing. `boost` marks the launch move that runs through
+/// [`LocoMode::BoostStart`] before the gait takes over.
+pub fn set_command(w: &mut Walker, dir: Vec2, speed: f32, boost: bool) {
+    w.command = Some(Command { dir, speed, boost });
 }
 
 /// Observe stage (runs first): gather physics reality, filter it, and update
@@ -174,7 +172,7 @@ pub fn control_stage(w: &mut Walker) {
     let dt = w.observer.fiction.dt;
     let mode = w
         .state
-        .decide(&w.command, &w.observer.fiction, &w.config.control, dt);
+        .decide(w.command, &w.observer.fiction, &w.config.control, dt);
 
     if mode != w.controller.mode() {
         w.controller = Controller::for_mode(mode, &w.config.lower);
@@ -182,7 +180,7 @@ pub fn control_stage(w: &mut Walker) {
 
     // Borrow split: the controller mutates its own schedule state; fiction,
     // command, and facing are read-only for this call.
-    let command = w.command;
+    let command = w.command.unwrap_or_default();
     let fiction = w.observer.fiction;
     let facing = w.facing;
     let out = w
@@ -286,7 +284,7 @@ mod tests {
         assert!(w.actuator.out.is_none(), "no control tick has run yet");
         assert!(w.actuator.pose().is_none());
         assert_eq!(w.facing, 1.0);
-        assert_eq!(w.command, Command::default());
+        assert!(w.command.is_none(), "no command until one is held");
         assert!(w.out().is_none());
     }
 
@@ -312,21 +310,30 @@ mod tests {
             "right foot: the v10 P3→PRLL rest offset"
         );
         assert_eq!(out.pose.facing, w.facing);
-        // A second tick with a move command keeps standing (machine pinned);
-        // the mailbox is replaced, not accumulated.
+        // A plain (non-boost) move command goes straight to the gait
+        // controller; the mailbox is replaced, not accumulated.
         set_command(&mut w, Vec2::new(1.0, 0.0), 120.0, false);
         control_stage(&mut w);
-        assert_eq!(w.out().unwrap().mode, LocoMode::Standing);
+        assert_eq!(w.out().unwrap().mode, LocoMode::Walking);
+        // `None` is a held command too — the machine exits to Standing.
+        set_command(&mut w, Vec2::ZERO, 0.0, false);
+        control_stage(&mut w);
+        assert_eq!(
+            w.out().unwrap().mode,
+            LocoMode::Standing,
+            "sub-threshold command = ended"
+        );
     }
 
     #[test]
     fn set_command_replaces_rather_than_accumulates() {
         let mut w = Walker::new(WalkerConfig::default(), 1.0);
         set_command(&mut w, Vec2::new(1.0, 0.0), 120.0, true);
-        assert_eq!(w.command.vx(), 120.0);
+        assert_eq!(w.command.unwrap().vx(), 120.0);
+        assert!(w.command.unwrap().boost, "boost is held, not an edge");
         set_command(&mut w, Vec2::new(-1.0, 0.0), 80.0, false);
-        assert_eq!(w.command.vx(), -80.0, "direction flips cleanly");
-        assert!(!w.command.jump, "jump is an edge, not a latch");
+        assert_eq!(w.command.unwrap().vx(), -80.0, "direction flips cleanly");
+        assert!(!w.command.unwrap().boost);
     }
 
     #[test]

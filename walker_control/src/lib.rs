@@ -10,5 +10,6 @@ pub mod control;
 pub mod emit;
 pub mod observe;
 pub mod plugin;
+pub mod script;
 pub mod telemetry;
 pub mod walker;

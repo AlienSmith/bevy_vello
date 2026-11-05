@@ -35,7 +35,10 @@ use game_lib::{
 use walker_control::{
     emit::LegHandles,
     observe::ObserveHandles,
-    plugin::{AttachWalker, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer},
+    plugin::{
+        AttachWalker, ScriptResource, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer,
+    },
+    script::ScriptTrack,
     walker::WalkerConfig,
 };
 
@@ -73,6 +76,9 @@ const FLOOR_HALF_LEN: f64 = 2400.0;
 
 /// Commanded speed for a held direction key (px/s).
 const WALK_SPEED: f32 = 120.0;
+
+/// Commanded speed when the boost key (Shift) is held with a direction.
+const BOOST_SPEED: f32 = 120.0;
 
 /// Where the telemetry CSV lands (relative to the working directory; the
 /// repo's QA tools read e.g. `python3 tools/physics-qa/plot_p3.py
@@ -119,6 +125,9 @@ fn main() {
         // The walk control: AttachWalker observer + the
         // Input→Observe→Control→Actuate→Assemble chain (before the solver).
         .add_plugins(WalkerControlPlugin)
+        // Optional scripted command track: `SCRIPT=path.json` drives the state
+        // machine through the JSON cells (boost/move/wait). Absent ⇒ keyboard.
+        .init_resource::<ScriptSlot>()
         // Physics + collision (owns the XPBD step, GPU collision, 90 Hz clock).
         .add_plugins(VelloPlugin)
         .add_plugins(VelloCollisionResponsePlugin)
@@ -134,8 +143,10 @@ fn main() {
                 mark_assets_loaded,
                 check_character_loaded.run_if(in_state(WalkerState::Loading)),
                 attach_walker,
+                install_script,
                 keyboard_intent,
                 flush_telemetry,
+                script_exit,
             ),
         )
         .add_systems(OnEnter(WalkerState::Game), spawn_character)
@@ -161,6 +172,37 @@ enum WalkerState {
 /// The physics world boots at zero gravity; open it.
 fn apply_gravity(mut world: ResMut<VelloConstraintWorld>) {
     world.set_gravity(GRAVITY);
+}
+
+/// Marker: the script (if any) has been installed (or declined).
+#[derive(Resource, Default)]
+struct ScriptSlot {
+    decided: bool,
+}
+
+/// Install the `SCRIPT=path.json` command track once, before any walker tick
+/// needs it. An unreadable/broken script logs and falls back to keyboard.
+fn install_script(mut commands: Commands, mut slot: ResMut<ScriptSlot>) {
+    if slot.decided {
+        return;
+    }
+    slot.decided = true;
+    let Some(path) = std::env::var("SCRIPT")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+    else {
+        info!("walker_qa: no SCRIPT set; keyboard intent drives the walker");
+        return;
+    };
+    match ScriptTrack::from_path(&path) {
+        Ok(track) => {
+            info!("walker_qa: script '{}' loaded", path);
+            commands.insert_resource(ScriptResource(track));
+        }
+        Err(e) => {
+            warn!("walker_qa: SCRIPT '{e}'; falling back to keyboard intent");
+        }
+    }
 }
 
 fn setup_scene(mut commands: Commands) {
@@ -380,8 +422,30 @@ fn flush_telemetry(buf: Res<WalkerTelemetryBuffer>, mut last: Local<usize>) {
     }
 }
 
-/// Key → intent. No keys ⇒ standing (a valid command); the mode machine holds
-/// the measured pose through the actuator.
+/// The scripted run ends when the command track runs out: flush every row,
+/// then close the app. Without a script this system never fires (the keyboard
+/// run is interactive until the window closes).
+fn script_exit(
+    script: Option<Res<ScriptResource>>,
+    buf: Res<WalkerTelemetryBuffer>,
+    mut exit: EventWriter<AppExit>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let Some(script) = script else { return };
+    if script.0.done() {
+        *done = true;
+        flush_rows(CSV_PATH, &buf.header, &buf.rows);
+        info!("walker_qa: script finished — exiting");
+        exit.write(AppExit::Success);
+    }
+}
+
+/// Key → intent. No keys ⇒ no command (standing); a direction key holds a
+/// move, and holding Shift with it marks the move as a boost launch. This
+/// path is inert while a `ScriptResource` is installed (the plugin gates it).
 fn keyboard_intent(keys: Res<ButtonInput<KeyCode>>, mut intents: Query<&mut WalkerIntent>) {
     for mut intent in &mut intents {
         let mut dir = Vec2::ZERO;
@@ -391,8 +455,17 @@ fn keyboard_intent(keys: Res<ButtonInput<KeyCode>>, mut intents: Query<&mut Walk
         if keys.pressed(KeyCode::ArrowLeft) || keys.pressed(KeyCode::KeyA) {
             dir.x -= 1.0;
         }
+        let boost = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
         intent.dir = dir;
-        intent.speed = if dir.length() > 0.0 { WALK_SPEED } else { 0.0 };
-        intent.jump_edge = keys.just_pressed(KeyCode::Space);
+        intent.speed = if dir.length() > 0.0 {
+            if boost {
+                BOOST_SPEED
+            } else {
+                WALK_SPEED
+            }
+        } else {
+            0.0
+        };
+        intent.boost = boost && dir.length() > 0.0;
     }
 }

@@ -46,10 +46,9 @@ use bevy_vello::VelloCollider;
 
 use crate::emit::LegHandles;
 use crate::observe::ObserveHandles;
+use crate::script::ScriptTrack;
 use crate::telemetry::legacy_header;
-use crate::walker::{
-    actuate_stage, control_stage, observe_stage, set_command, Walker, WalkerConfig,
-};
+use crate::walker::{actuate_stage, control_stage, observe_stage, Walker, WalkerConfig};
 
 /// Spawn-time payload for one character. Trigger it on the character root.
 ///
@@ -82,16 +81,16 @@ pub struct WalkerRig {
 }
 
 /// Desired movement for one character this tick. Written by the host (keyboard,
-/// scripted playhead, AI) and consumed by [`intent_system`], which turns it into
-/// a [`Command`]. Absent ⇒ the walker keeps whatever command it last had.
+/// AI) and consumed by [`intent_system`], which turns it into a held
+/// [`Command`]. Absent ⇒ [`intent_system`] leaves the walker alone.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct WalkerIntent {
     /// Travel direction (only `x` matters on the loop-3 model).
     pub dir: Vec2,
     /// Desired speed, world units per second.
     pub speed: f32,
-    /// One-frame jump request; consumed and cleared by [`intent_system`].
-    pub jump_edge: bool,
+    /// Launch this move through BoostStart before the gait takes over.
+    pub boost: bool,
 }
 
 /// The fixed-tick chain, in order. Observe must see the physics world before
@@ -105,6 +104,16 @@ pub enum WalkerControlSet {
     Actuate,
     Assemble,
 }
+
+/// The command-track resource: a JSON [`ScriptTrack`] playhead the host loads
+/// at startup. When present, [`script_system`] advances it once per fixed tick
+/// and writes the active command onto every [`Walker`], exactly like keyboard
+/// intent — but scripted, so the harness runs deterministic, replayable moves
+/// and a `wait` cell cleanly ends a command (the machine returns to Standing).
+/// Absent ⇒ the walkers keep whatever the [`WalkerIntent`] path (or callers)
+/// set.
+#[derive(Resource, Debug)]
+pub struct ScriptResource(pub ScriptTrack);
 
 /// The formatted CSV stream. `assemble_system` appends rows; the host writes the
 /// file at teardown (never per tick). The header is this crate's because only it
@@ -157,16 +166,47 @@ pub fn on_attach_walker(trigger: Trigger<AttachWalker>, mut commands: Commands) 
         });
 }
 
-/// Turn the optional [`WalkerIntent`] into a [`Command`]. No intent ⇒ no
-/// change, so a character with no controller still holds its last command
-/// instead of decaying to a stop nobody asked for.
-pub fn intent_system(mut walkers: Query<(&mut Walker, Option<&mut WalkerIntent>)>) {
+/// Advance the [`ScriptResource`] playhead and write the active command onto
+/// every walker. Runs only when the host inserted a script **and** at least
+/// one walker is attached — the playhead must not burn cells while the rig is
+/// still assembling. The command is *held* for the cell's duration and
+/// becomes `None` after the script ends (the command-end that parks the
+/// machine in Standing; a done track keeps returning `None`).
+pub fn script_system(
+    time: Res<Time<Fixed>>,
+    mut script: ResMut<ScriptResource>,
+    mut walkers: Query<&mut Walker>,
+) {
+    let dt = time.delta_secs();
+    let cmd = script.0.tick(dt);
+    for mut walker in walkers.iter_mut() {
+        walker.command = cmd;
+    }
+}
+
+/// Turn the optional [`WalkerIntent`] into a held [`Command`]. While a
+/// [`ScriptResource`] is loaded the script owns the command slot, so this
+/// system no-ops (exactly one command source per tick). No intent component ⇒
+/// no change, so a character with no controller still holds its last command.
+pub fn intent_system(
+    script: Option<Res<ScriptResource>>,
+    mut walkers: Query<(&mut Walker, Option<&mut WalkerIntent>)>,
+) {
+    use crate::control::Command;
+    if script.is_some() {
+        return;
+    }
     for (mut walker, intent) in walkers.iter_mut() {
-        if let Some(mut intent) = intent {
-            set_command(&mut walker, intent.dir, intent.speed, intent.jump_edge);
-            // The edge is one tick by contract; leaving it set would make a held
-            // key re-trigger forever.
-            intent.jump_edge = false;
+        if let Some(intent) = intent {
+            if intent.dir.length() > 0.0 || intent.speed > 0.0 {
+                walker.command = Some(Command {
+                    dir: intent.dir,
+                    speed: intent.speed,
+                    boost: intent.boost,
+                });
+            } else {
+                walker.command = None;
+            }
         }
     }
 }
@@ -269,7 +309,18 @@ impl Plugin for WalkerControlPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    intent_system.in_set(WalkerControlSet::Input),
+                    // Exactly one command source writes `Walker::command` per
+                    // tick: the script track when the host loaded one, else
+                    // the keyboard/AI path via `WalkerIntent` (`intent_system`
+                    // no-ops while a `ScriptResource` exists).
+                    (
+                        script_system
+                            .run_if(resource_exists::<ScriptResource>)
+                            .run_if(any_with_component::<Walker>),
+                        intent_system,
+                    )
+                        .chain()
+                        .in_set(WalkerControlSet::Input),
                     observe_system.in_set(WalkerControlSet::Observe),
                     control_system.in_set(WalkerControlSet::Control),
                     actuate_system.in_set(WalkerControlSet::Actuate),
@@ -328,8 +379,15 @@ mod tests {
     #[test]
     fn a_walker_starts_standing_and_intentless() {
         let walker = Walker::new(WalkerConfig::default(), 1.0);
-        assert_eq!(walker.command, Command::default());
+        assert!(walker.command.is_none());
         assert_eq!(walker.facing, 1.0);
         assert!(walker.out().is_none(), "no control tick has run yet");
+    }
+
+    #[test]
+    fn walker_intent_launch_flag_reaches_the_command() {
+        let mut w = Walker::new(WalkerConfig::default(), 1.0);
+        w.command = Some(Command::boost(120.0));
+        assert!(w.command.unwrap().boost);
     }
 }

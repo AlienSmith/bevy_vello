@@ -8,11 +8,13 @@
 #   TAG                 artifact name under tmp/walker_qa/ (default: "run")
 #   KEY=VALUE           env overrides forwarded to walker_qa. Known levers:
 #                       WIN_HIDDEN (default 1 — no OS window; the whole
-#                       pipeline still runs), ASSET_ROOT, CSV_PATH is fixed by
-#                       the binary to tmp/walker_qa/<no external override yet>.
-#   RUN_SECS            seconds of sim to capture before killing the app
-#                       (default 8). The app has no script-end self-exit yet;
-#                       timeout is the stop condition.
+#                       pipeline still runs), ASSET_ROOT,
+#                       SCRIPT=path.json — a command track that drives the
+#                       walker and self-exits the app when the track ends.
+#                       CSV_PATH is fixed by the binary.
+#   RUN_SECS            hard backstop kill, seconds (default 600). A scripted
+#                       run exits on its own; RUN_SECS only guards a hung
+#                       keyboard run.
 #
 # Artifacts:
 #   tmp/walker_qa/<TAG>.csv            telemetry (legacy header: scalars + P-channels)
@@ -44,7 +46,7 @@ BIN=$REPO/target/debug/walker_qa
 echo "== build walker_qa"
 cargo build -p walker_qa 2>&1 | tail -1
 
-echo "== run ${RUN_SECS}s: $TAG (${ENVARGS[*]:-<defaults>})"
+echo "== run: $TAG (${ENVARGS[*]:-<defaults>}) — backstop ${RUN_SECS}s"
 # walker_qa writes its telemetry to tmp/walker_qa/walk.csv; move it to the tag.
 rm -f tmp/walker_qa/walk.csv
 env WIN_HIDDEN=1 ${ENVARGS[@]+"${ENVARGS[@]}"} timeout "$RUN_SECS" "$BIN" \
