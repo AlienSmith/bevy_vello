@@ -1,0 +1,7 @@
+{
+    "script": [
+        { "stand": { "dur": 1.0 } },
+        { "boost": { "dir": [1, 0], "speed": 120, "dur": 2.0 } },
+        { "move": { "dir": [1, 0], "speed": 120, "dur": 5.0 } }
+    ]
+}

@@ -432,6 +432,13 @@ fn attach_walker(
         // tighten the leg/strut until a commanded foot actually tracks.
         let mut config = WalkerConfig::default();
         apply_actuator_env(&mut config.actuator);
+        // Rig geometry for the gait math (v10 at scale 0.5): the bones
+        // measure ~55 px (matching walker_math's defaults), but the STANDING
+        // hip height is the measured hip→floor distance (~104 px: hip y≈203,
+        // foot line ≈307), not the sandbox's crouched 90. The walking
+        // controller's floor line is anchored from `hip_height`, so this must
+        // match the rig or the commanded feet float above the ground.
+        config.lower.hip_height = 104.0;
         commands.trigger_targets(
             AttachWalker {
                 config,

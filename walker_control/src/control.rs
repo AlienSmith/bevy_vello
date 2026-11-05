@@ -10,9 +10,8 @@
 //! - **[`LocoState`]** — the state machine whose *only* job is deciding which
 //!   controller is active. It reads command + fiction and nothing else.
 //! - **[`Controller`]** — an enum of three controllers sharing one slot:
-//!   [`StandingCtrl`] (implemented), [`WalkingCtrl`] (the `walker_math` seam,
-//!   currently a documented hold-pose stub), [`BoostStartCtrl`] (ditto, plan
-//!   §5).
+//!   [`StandingCtrl`] (rest-pose hold), [`WalkingCtrl`] (the `walker_math`
+//!   gait seam), [`BoostStartCtrl`] (the skate-push launch, plan §5).
 //!
 //! # Law 2 — controller state is schedule + reference only
 //! Every *body* field the controller needs arrives in [`Fiction`] (measured by
@@ -358,21 +357,63 @@ impl Step for StandingCtrl {
     }
 }
 
-/// The gait controller (`walker_math::ResolverState` behind the seam).
+/// The gait controller: [`walker_math::step_lower_body`] behind the seam.
 ///
-/// **Stub status**: the state is constructed (so the seam's types are proven
-/// real) and `step` currently returns [`hold_pose`]. Filling in the body is
-/// the next build step (plan §8.3); nothing else in this crate changes when it
-/// lands.
+/// # The seed frame (why an anchor, not absolute coords)
+/// `walker_math` runs in its own **y-up** fiction space: floor at `y = 0`, hip
+/// seeded at `(0, hip_height)`. Vello is y-down and the absolute world origin
+/// is meaningless to the legs (the pose is translation-invariant — only the
+/// hip→foot chord and lean actuate). So this controller keeps a one-time
+/// *anchor* pair recorded on its first tick: the measured vello hip and the
+/// solver's seed hip. Every tick:
+///
+/// - **stamp (Law 2, position-only)**: the solver's fiction `hip_pos.x` is
+///   re-anchored to the measured horizontal displacement, exactly the old
+///   `FEEDBACK=1` path. `hip_vel` is deliberately NOT overwritten — the
+///   measured-velocity hard feedback is documented (old drive.rs) to stop the
+///   body dead by cancelling the command-vs-realized lead; the solver owns
+///   that fiction integrator.
+/// - **measured CoM**: `Fiction.com/v_com` enter `CaptureMeasure` through the
+///   same seed-relative x-map, with `z_com` = height above the anchor floor
+///   line (`anchor.y + hip_height` in vello y-down). With no measurement the
+///   solver falls back to its Raibert neutral point; we always have one.
+/// - **schedule state stays in the solver**: the vertical spring
+///   (`tick_vertical` owns `hip_pos.y`), the gait FSM timers, `v_ref`, and
+///   loop-3's pendulum are fiction the physics cannot replace. Attitude is
+///   *seeded once* from the fiction lean so the handover from BoostStart is
+///   continuous, then solver-owned.
+/// - **time-based only** (this build's simplification): `foot_contact` and
+///   `reality_v` are never stamped — both stay `None`, which selects the
+///   solver's `GaitAuthority::Timer` gait clock and open-loop vertical fiction.
+///   Stance/swing are decided by the schedule, not by measured touchdown.
+///
+/// The output pose is mapped back by hip-relative **offsets**: solver
+/// `(foot − hip)` with `y` negated, re-anchored at the measured hip — the same
+/// trick [`StandingCtrl`] uses, so a solver drift in absolute position can
+/// never detach a leg. All solver→vello vector mappings mirror x by `facing`
+/// (the solver's +x is the TRAVEL direction) and negate y (y-up → y-down).
 #[derive(Debug, Clone)]
 pub struct WalkingCtrl {
     pub state: ResolverState,
+    /// Working copy of the rig/gait config: `target_speed` is written from the
+    /// held command each tick (the old `MoveSpeed` resource pattern, now a
+    /// field of the controller that owns the gait).
+    cfg: LowerBodyConfig,
+    /// Measured vello hip at seed time (first tick). `None` until then.
+    anchor: Option<Vec2>,
+    /// Solver seed hip at the same moment (`ResolverState::new`'s position).
+    seed_hip: Vec2,
 }
 
 impl WalkingCtrl {
     pub fn new(cfg: &LowerBodyConfig) -> Self {
+        let state = ResolverState::new(cfg);
+        let seed_hip = state.hip_pos;
         Self {
-            state: ResolverState::new(cfg),
+            state,
+            cfg: cfg.clone(),
+            anchor: None,
+            seed_hip,
         }
     }
 }
@@ -380,15 +421,100 @@ impl WalkingCtrl {
 impl Step for WalkingCtrl {
     fn step(
         &mut self,
-        _cmd: &Command,
+        cmd: &Command,
         fiction: &Fiction,
-        cfg: &ControlConfig,
-        _dt: f32,
+        _cfg: &ControlConfig,
+        dt: f32,
         facing: f32,
     ) -> ControlOut {
-        // TODO(walk-seam): stamp fiction body fields, call
-        // `walker_math::step_lower_body`, map the pose back to y-down.
-        hold_pose(fiction, cfg, LocoMode::Walking, facing)
+        let anchor = match self.anchor {
+            Some(a) => a,
+            None => {
+                // First tick: anchor the seed frame at the measured hip and
+                // carry the REAL state across the handover — the BoostStart
+                // exit fires because the body measurably moves, so the gait
+                // fiction must start at that speed, not at zero (a fiction
+                // ramping from 0 would plan its first steps blind to the
+                // seeded velocity; the deadbeat lead `v_law` is fiction-owned).
+                self.anchor = Some(fiction.hip);
+                self.state.hip_vel.x = fiction.v_hip.x * facing;
+                self.state.attitude.theta = fiction.lean * facing;
+                self.state.attitude.omega = fiction.lean_rate * facing;
+                // Seed the stance plants from the MEASURED feet. Without this
+                // the solver's default `seed_hip ± 30` plants disagree with
+                // reality (after the skate-push both feet trail the hip by
+                // 50-70 px): the first gait tick yanks the planted feet ~80 px
+                // forward, the legs stop dead and the body trips over them
+                // (measured: lean jumped 0.48 -> 1.06 rad in one tick). With
+                // the plants seeded, tick 1 commands the feet where they
+                // actually are and the capture-point law owns the catch.
+                for (leg, foot) in [
+                    (&mut self.state.left, &fiction.feet[0]),
+                    (&mut self.state.right, &fiction.feet[1]),
+                ] {
+                    let off = Vec2::new(
+                        (foot.pos.x - fiction.hip.x) * facing,
+                        -(foot.pos.y - fiction.hip.y),
+                    );
+                    let p = self.state.hip_pos + off;
+                    leg.plant_pos = p;
+                    leg.foot_pos = p;
+                    leg.swing_from = p;
+                    leg.swing_to = p;
+                }
+                fiction.hip
+            }
+        };
+
+        // --- Stamp: measured horizontal displacement into the fiction ---
+        // The solver's x axis is the TRAVEL frame (+x = facing), so vello
+        // displacements enter multiplied by `facing`.
+        let dx = (fiction.hip.x - anchor.x) * facing;
+        self.state.hip_pos.x = self.seed_hip.x + dx;
+
+        // --- Stamp: whole-body capture measure (DCM's reality input) ---
+        // Floor line in the vello frame, implied by the seed anchor.
+        let floor_vello_y = anchor.y + self.cfg.hip_height;
+        self.state.measured = Some(walker_math::CaptureMeasure {
+            com_x: self.state.hip_pos.x + (fiction.com.x - fiction.hip.x) * facing,
+            v_com: fiction.v_com.x * facing,
+            z_com: (floor_vello_y - fiction.com.y).max(1.0),
+        });
+
+        // --- One solver tick ---
+        self.cfg.target_speed = cmd.speed.abs();
+        // Command dir in the solver travel frame (+x = facing direction).
+        let dir = Vec2::new((cmd.vx() * facing).signum(), 0.0);
+        let (pose, debug) = walker_math::step_lower_body(dir, &self.cfg, &mut self.state, dt);
+
+        // --- Map back: measured hip + travel-frame offsets to vello ---
+        // The stance gate for the hip-foot strut is the gait FSM's own phase
+        // (time-based this build): a Stance leg holds its pinned plant.
+        let hip = fiction.hip;
+        let upper_angle = debug.theta * facing;
+        let left_stance = self.state.left.phase == walker_math::GaitPhase::Stance;
+        let right_stance = self.state.right.phase == walker_math::GaitPhase::Stance;
+        let to_vello = |off: Vec2| Vec2::new(off.x * facing, -off.y);
+        ControlOut {
+            pose: Pose {
+                hip,
+                left_foot: FootPose {
+                    pos: hip + to_vello(pose.left_foot - pose.hip),
+                    stance: left_stance,
+                },
+                right_foot: FootPose {
+                    pos: hip + to_vello(pose.right_foot - pose.hip),
+                    stance: right_stance,
+                },
+                facing,
+                upper_angle,
+            },
+            // The solver's own integrated hip velocity, travel frame → vello
+            // (x mirrored by facing, y negated for y-down).
+            hip_vel: Vec2::new(pose.hip_vel.x * facing, -pose.hip_vel.y),
+            mode: LocoMode::Walking,
+            debug: Some(debug),
+        }
     }
 
     fn mode(&self) -> LocoMode {
@@ -971,6 +1097,126 @@ mod tests {
             (out.pose.right_foot.pos.x - (f.hip.x + (-REST_RIGHT_FOOT.x + slide1))).abs() < 1e-3,
             "right foot closes toward under-hip from the -x rest offset"
         );
+    }
+
+    // --- WalkingCtrl: the walker_math seam ---
+
+    /// A fiction with the hip at the solver's standing height, feet planted on
+    /// the implied floor line (vello y-down: below the hip by +hip_height).
+    fn standing_fiction(hip_x: f32, v: Vec2) -> Fiction {
+        let hip = Vec2::new(hip_x, -140.0);
+        fiction(
+            hip,
+            [hip + Vec2::new(-33.0, 106.0), hip + Vec2::new(39.5, 103.0)],
+            [true, true],
+            0.0,
+            v,
+        )
+    }
+
+    #[test]
+    fn walking_anchors_the_pose_at_the_measured_hip() {
+        // The solver runs in its own seed frame; the emitted pose rides on the
+        // MEASURED hip (translation-invariant, like StandingCtrl), and the
+        // feet land BELOW the hip (vello +y) within leg reach.
+        let low = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = WalkingCtrl::new(&low);
+        let f = standing_fiction(0.0, Vec2::new(90.0, 0.0));
+        let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
+        assert_eq!(out.mode, LocoMode::Walking);
+        assert_eq!(out.pose.hip, f.hip, "pose anchored at measured hip");
+        assert!(out.debug.is_some(), "the gait tick carries solver debug");
+        let l = out.pose.left_foot.pos - f.hip;
+        let r = out.pose.right_foot.pos - f.hip;
+        assert!(l.y > 0.0 && r.y > 0.0, "feet below the hip in y-down");
+        let leg = low.thigh_len + low.calf_len;
+        assert!(
+            l.length() <= leg + 1.0 && r.length() <= leg + 1.0,
+            "chords within reach: {l:?}, {r:?}"
+        );
+    }
+
+    #[test]
+    fn walking_seeds_the_fiction_velocity_from_the_measured_hip() {
+        // The BoostStart handover fires at a real 90+ px/s. The solver's
+        // integrator must START there, not at 0 (the deadbeat lead is
+        // fiction-owned; a fiction-blind first plan re-creates the stall).
+        let low = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = WalkingCtrl::new(&low);
+        let v = Vec2::new(95.0, 0.0);
+        let f = standing_fiction(0.0, v);
+        c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
+        // hip_vel.x is solver-owned after the seed: it may only have been
+        // shaped toward the plan cap this tick, never reset to zero.
+        assert!(
+            c.state.hip_vel.x > 50.0,
+            "the seeded velocity survives the first tick: {}",
+            c.state.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn walking_opens_the_gait_once_the_fiction_passes_the_trigger() {
+        // Time-based schedule: with a steady command the fiction ramps
+        // `v_ref`, the trigger fires, and a leg lifts. Direction is not
+        // assumed: from rest the deadbeat law plants BEHIND the CoM to speed
+        // up, so the check is "a foot left its seed plant", not "reached
+        // ahead". Every pose stays finite and within leg reach.
+        let low = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = WalkingCtrl::new(&low);
+        let f = standing_fiction(0.0, Vec2::ZERO);
+        let leg = low.thigh_len + low.calf_len;
+        let mut saw_swing = false;
+        let mut moved = 0.0f32;
+        for _ in 0..90 {
+            let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
+            let l = out.pose.left_foot.pos - f.hip;
+            let r = out.pose.right_foot.pos - f.hip;
+            assert!(l.is_finite() && r.is_finite());
+            assert!(
+                l.length() <= leg + 1.0 && r.length() <= leg + 1.0,
+                "chords within reach: {l:?}, {r:?}"
+            );
+            if !out.pose.left_foot.stance || !out.pose.right_foot.stance {
+                saw_swing = true;
+            }
+            // Displacement from the seeded plants (±30 at hip_height 90).
+            moved = moved.max((l.x + 30.0).abs()).max((r.x - 30.0).abs());
+        }
+        assert!(saw_swing, "the gait clock opened a swing within 1 s");
+        assert!(
+            moved > 10.0,
+            "a plant moved under the placement law: {moved}"
+        );
+    }
+
+    #[test]
+    fn walking_mirrors_the_travel_frame_into_vello_space() {
+        // facing = -1: the solver's +x TRAVEL is vello −x. A −x command on a
+        // body measurably moving −x seeds +95 in the travel frame; the mapped
+        // `hip_vel` must keep reporting vello −x travel.
+        let low = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = WalkingCtrl::new(&low);
+        let f = standing_fiction(0.0, Vec2::new(-95.0, 0.0));
+        let cmd = Command {
+            dir: Vec2::new(-1.0, 0.0),
+            speed: 120.0,
+            boost: false,
+        };
+        let mut out = hold_pose(&f, &cfg, LocoMode::Walking, -1.0);
+        for _ in 0..20 {
+            out = c.step(&cmd, &f, &cfg, 1.0 / 90.0, -1.0);
+        }
+        assert!(
+            out.hip_vel.x < -20.0,
+            "facing -1 travel maps to vello -x: {}",
+            out.hip_vel.x
+        );
+        assert!(out.pose.left_foot.pos.is_finite() && out.pose.right_foot.pos.is_finite());
     }
 
     #[test]
