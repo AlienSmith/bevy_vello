@@ -15,7 +15,7 @@
 
 use bevy::{asset::AssetMetaCheck, input::keyboard::KeyCode, prelude::*, window::PresentMode};
 use bevy_vello::{
-    collision::{path_to_ccw_quad_path, VELLO_COLLISION_COOL_DOWN_TIME},
+    collision::{path_to_ccw_quad_path, VelloCollisionWorld, VELLO_COLLISION_COOL_DOWN_TIME},
     integrations::physics::VelloConstraintWorld,
     prelude::*,
     vello::{
@@ -60,7 +60,7 @@ const GRAVITY: Vec2 = Vec2::new(0.0, 980.0);
 /// floor and the XPBD penetration kick topples the body. A small lift clears
 /// that pre-penetration without a big impact speed; [`StandingCtrl`] spreads
 /// the feet throughout the drop.
-const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, 10.0, 100.0);
+const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, -10.0, 100.0);
 const SPAWN_SCALE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
 
 /// Floor surface line in physics space (y-down, below the origin). The v10
@@ -135,7 +135,7 @@ fn main() {
         // it cannot fight the actuator (same rule as the hip-pin tuning app).
         .insert_resource(SpineDriveEnabled(false))
         .init_state::<WalkerState>()
-        .add_systems(Startup, (setup_scene, apply_gravity).chain())
+        .add_systems(Startup, (setup_scene, apply_gravity, pause_physics).chain())
         .add_systems(
             Update,
             (
@@ -172,6 +172,14 @@ enum WalkerState {
 /// The physics world boots at zero gravity; open it.
 fn apply_gravity(mut world: ResMut<VelloConstraintWorld>) {
     world.set_gravity(GRAVITY);
+}
+
+/// Freeze the XPBD step until the walker is attached. Assembly takes a handful
+/// of frames; without the pause the body falls (and the CSV's first row is a
+/// few ticks into the fall) before the actuator loop ever opens. With it, the
+/// very first physics tick is the first walker tick — row 1 is the spawn pose.
+fn pause_physics(mut collision: ResMut<VelloCollisionWorld>) {
+    collision.paused = true;
 }
 
 /// Marker: the script (if any) has been installed (or declined).
@@ -342,6 +350,7 @@ fn check_character_loaded(
 /// `Connectivity` name. Runs once per character (tracked in `attached`).
 fn attach_walker(
     mut commands: Commands,
+    mut collision: ResMut<VelloCollisionWorld>,
     roots: Query<(
         Entity,
         &SpineController,
@@ -408,6 +417,8 @@ fn attach_walker(
             root,
         );
         attached.insert(root);
+        // Rig is complete — let physics run from the frozen spawn pose.
+        collision.paused = false;
         info!("attached walker to character {root:?}");
     }
 }
