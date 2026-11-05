@@ -136,13 +136,15 @@ pub struct ActuatorConfig {
 impl Default for ActuatorConfig {
     fn default() -> Self {
         Self {
-            // Bend, don't fold: a soft, load-bearing spring with matching bone
-            // lengths on either side. The v10 rig stands on 5e-8 / 5e-7 with
-            // ζ=1, so the stand pose is kept there too — any stiffer value
-            // makes the knee fight the two rigid distance bones of the leg.
-            hip_compliance: 5e-8,
-            knee_compliance: 5e-7,
+            // Stiff angular rest targets: the boost QA sweep showed a planted
+            // foot only TRACKS a commanded position under the hip when the hip
+            // and knee joints are near-rigid (5e-8 / 5e-7 let the leg fold in
+            // place instead of dragging the foot along the floor).
+            hip_compliance: 1e-9,
+            knee_compliance: 1e-8,
             zeta: 1.0,
+            // The strut keeps the softer 1e-6: hip↔foot distance authority is
+            // already adequate, the foot-drag was an angular-stiffness limit.
             strut_active: 1e-6,
             strut_idle: 1e-2,
         }

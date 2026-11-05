@@ -169,6 +169,14 @@ pub struct ControlConfig {
     /// Hard cap on the boost window, seconds (fallback if physics never
     /// accelerates — the boost cannot fake its exit, so it must time out).
     pub boost_timeout: f32,
+    /// Boost: rate the **right foot's** x-offset slides back toward under-hip,
+    /// px/s — the "skate push" that drags the hip forward. Only this one foot
+    /// moves; the left foot stays on its standing rest offset.
+    pub boost_slide_speed: f32,
+    /// Boost: how far (px) the right foot's x-offset slides toward under-hip
+    /// before it stops. The foot only ever moves CLOSER to the hip, so the leg
+    /// stays within reach and never detaches.
+    pub boost_slide_limit: f32,
 }
 
 impl Default for ControlConfig {
@@ -178,6 +186,10 @@ impl Default for ControlConfig {
             move_threshold: 5.0,
             boost_exit_speed: 90.0,
             boost_timeout: 1.0,
+            boost_slide_speed: 260.0,
+            // Slide the right foot all the way to directly under the hip
+            // (its rest x-offset at scale 0.5 is +39.5).
+            boost_slide_limit: 39.5,
         }
     }
 }
@@ -381,12 +393,20 @@ impl Step for WalkingCtrl {
     }
 }
 
-/// The swappable launch (plan §5).
+/// The swappable launch (plan §5) — the stand→walk bridge.
 ///
-/// **Stub status**: returns [`hold_pose`] until its accel/lean command lands.
-/// Its *exit* rule is wired in [`LocoState`] and reads **measured** fiction
-/// velocity — the boost cannot fake its own completion, which is the whole
-/// reason it is a control-module swap rather than a position kick.
+/// # The idea: one particle moves, the IK solves the rest
+/// The deadbeat gait needs COM velocity at handover; standing has zero. So the
+/// boost is a **skate push** in the simplest possible frame: exactly like
+/// [`StandingCtrl`] it anchors at the *measured* hip and holds the v10 rest
+/// geometry, but **only the right foot's x-offset moves** — it slides toward
+/// `0` (directly under the hip) at `boost_slide_speed`, clamped to
+/// `boost_slide_limit` px, y held. The left foot keeps its standing rest offset
+/// untouched, so that leg can never leave reach; the right foot only ever moves
+/// *closer* to the hip, so it never detaches either. Actuate's IK derives the
+/// right knee from that single moving target, and the trailing leg pressing
+/// under the hip is what drives the body forward. Whether it propels without
+/// toppling is what the stand-then-boost QA script measures.
 #[derive(Debug, Clone, Copy)]
 pub struct BoostStartCtrl {
     pub since: f32,
@@ -407,14 +427,49 @@ impl Default for BoostStartCtrl {
 impl Step for BoostStartCtrl {
     fn step(
         &mut self,
-        _cmd: &Command,
+        cmd: &Command,
         fiction: &Fiction,
         cfg: &ControlConfig,
         dt: f32,
         facing: f32,
     ) -> ControlOut {
         self.since += dt.max(0.0);
-        hold_pose(fiction, cfg, LocoMode::BoostStart, facing)
+        // Travel sign: command direction if moving, else facing (a boost
+        // always carries a nonzero vx through the machine's entry gate).
+        let s = if cmd.vx() != 0.0 {
+            cmd.vx().signum()
+        } else if facing < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        // One moving particle: only the RIGHT foot's x-offset slides toward
+        // under-hip (x -> 0), y held. It only ever closes the gap to the hip,
+        // so it stays within reach. The left foot keeps its standing rest
+        // offset untouched; the IK solves the right knee from the new chord.
+        let slide = (self.since * cfg.boost_slide_speed).min(cfg.boost_slide_limit);
+        let rest_right = REST_RIGHT_FOOT * Vec2::new(s, 1.0); // mirror for -x travel
+        let right_offset = rest_right - Vec2::new(s * slide, 0.0);
+
+        let hip = fiction.hip;
+        ControlOut {
+            pose: Pose {
+                hip,
+                left_foot: FootPose {
+                    pos: hip + REST_LEFT_FOOT,
+                    stance: fiction.feet[0].touching,
+                },
+                right_foot: FootPose {
+                    pos: hip + right_offset,
+                    stance: fiction.feet[1].touching,
+                },
+                facing,
+                upper_angle: 0.0,
+            },
+            hip_vel: Vec2::new(s * cmd.speed.abs().min(cfg.boost_exit_speed * 1.5), 0.0),
+            mode: LocoMode::BoostStart,
+            debug: None,
+        }
     }
 
     fn mode(&self) -> LocoMode {
@@ -825,6 +880,94 @@ mod tests {
         assert_eq!(c.mode(), LocoMode::Walking);
         let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
         assert_eq!(out.mode, LocoMode::Walking);
+    }
+
+    #[test]
+    fn boost_holds_left_rest_offset_and_slides_right_toward_under_hip() {
+        // One moving particle: the left foot is EXACTLY the standing rest
+        // offset (never touched, so it cannot detach); only the right foot's
+        // x-offset closes toward the hip, y held.
+        let cfg = ControlConfig::default();
+        let dt = 1.0 / 90.0;
+        let f = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        let mut c = BoostStartCtrl::new();
+        let out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        assert_eq!(out.mode, LocoMode::BoostStart);
+        assert_eq!(out.pose.hip, f.hip, "frame anchored at measured hip");
+        // Left foot pinned to the rest offset, independent of the slide.
+        assert_eq!(
+            out.pose.left_foot.pos,
+            f.hip + REST_LEFT_FOOT,
+            "left foot = standing rest offset, untouched"
+        );
+        // Right foot: x slides toward the hip by one dt's worth, y = rest.
+        let slide1 = dt * cfg.boost_slide_speed;
+        assert_eq!(
+            out.pose.right_foot.pos,
+            f.hip + Vec2::new(REST_RIGHT_FOOT.x - slide1, REST_RIGHT_FOOT.y),
+            "right foot x closes toward under-hip, y held"
+        );
+        assert_eq!(out.pose.upper_angle, 0.0, "simple boost: no lean");
+
+        // Long run: the right foot stops at boost_slide_limit (directly under
+        // the hip when limit == rest x) and never crosses to the far side.
+        let ticks = ((cfg.boost_slide_limit / cfg.boost_slide_speed) / dt) as usize + 10;
+        for _ in 0..ticks {
+            c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        assert!(
+            (out.pose.right_foot.pos.x - (f.hip.x + REST_RIGHT_FOOT.x - cfg.boost_slide_limit))
+                .abs()
+                < 1e-3,
+            "right slide stops at the limit"
+        );
+        assert!(
+            (out.pose.right_foot.pos.y - (f.hip.y + REST_RIGHT_FOOT.y)).abs() < 1e-3,
+            "right slide is horizontal only"
+        );
+    }
+
+    #[test]
+    fn boost_uses_the_command_travel_sign() {
+        // A -x boost mirrors the right foot to the -x rest offset and closes it
+        // toward the hip; the left foot still pins to its standing rest offset.
+        let cfg = ControlConfig::default();
+        let dt = 1.0 / 90.0;
+        let f = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        let mut c = BoostStartCtrl::new();
+        let west = Command {
+            dir: Vec2::new(-1.0, 0.0),
+            speed: 120.0,
+            boost: true,
+        };
+        let out = c.step(&west, &f, &cfg, dt, 1.0);
+        let slide1 = dt * cfg.boost_slide_speed;
+        assert_eq!(
+            out.pose.left_foot.pos,
+            f.hip + REST_LEFT_FOOT,
+            "left foot is the rest offset for any travel sign"
+        );
+        assert!(
+            out.pose.right_foot.pos.x < f.hip.x,
+            "traveling -x ⇒ right foot on the -x side"
+        );
+        assert!(
+            (out.pose.right_foot.pos.x - (f.hip.x + (-REST_RIGHT_FOOT.x + slide1))).abs() < 1e-3,
+            "right foot closes toward under-hip from the -x rest offset"
+        );
     }
 
     #[test]

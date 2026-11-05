@@ -162,6 +162,31 @@ fn asset_root() -> String {
         })
 }
 
+/// Optional env override of an f32 (empty/invalid ⇒ `None`).
+fn env_f32(key: &str) -> Option<f32> {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| v.trim().parse::<f32>().ok())
+}
+
+/// Tune the actuator stiffness from env so a sweep can test whether a
+/// commanded foot tracks (vs. the leg simply folding). Unknown keys ignored.
+fn apply_actuator_env(cfg: &mut walker_control::actuate::ActuatorConfig) {
+    if let Some(v) = env_f32("HIP_COMPLIANCE") {
+        cfg.hip_compliance = v;
+    }
+    if let Some(v) = env_f32("KNEE_COMPLIANCE") {
+        cfg.knee_compliance = v;
+    }
+    if let Some(v) = env_f32("ZETA") {
+        cfg.zeta = v;
+    }
+    if let Some(v) = env_f32("STRUT_ACTIVE") {
+        cfg.strut_active = v;
+    }
+}
+
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 enum WalkerState {
     #[default]
@@ -403,9 +428,10 @@ fn attach_walker(
         };
         // QA stiffness override: the default actuator compliance lets the
         // stance collapse under the body weight (measured: hip sinks to the
-        // floor while feet hover ~60 px above it). Stiffer joints + strut,
-        // slightly under-damped so the pose can still track.
+        // floor while feet hover ~60 px above it). Env levers let a sweep
+        // tighten the leg/strut until a commanded foot actually tracks.
         let mut config = WalkerConfig::default();
+        apply_actuator_env(&mut config.actuator);
         commands.trigger_targets(
             AttachWalker {
                 config,
