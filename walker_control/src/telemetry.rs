@@ -648,8 +648,9 @@ mod tests {
         // `{:.2}` of a +0.0 has no sign to print; `-0.00` only appears if the
         // signal itself is negative zero, which standing never produces.
         assert_eq!(value(&rows, "tP3x"), "0.00");
-        assert_eq!(value(&rows, "tPLLLx"), "-10.00");
-        assert_eq!(value(&rows, "tPRLLx"), "10.00");
+        // The v10 rest offsets under `P3` (hip at the origin in this fixture).
+        assert_eq!(value(&rows, "tPLLLx"), "-33.00");
+        assert_eq!(value(&rows, "tPRLLx"), "39.50");
         assert_eq!(value(&rows, "gait_l"), "0");
         assert_eq!(value(&rows, "v_des"), "120.00");
     }

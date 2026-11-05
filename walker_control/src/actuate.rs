@@ -104,17 +104,30 @@ impl LegLive {
 /// Tuning for the actuation tick. Fixed compliance + damping per the design
 /// above — the solver's implicit spring-damper is the entire leg actuation
 /// dynamics.
+///
+/// There is **no rest-angle blend**: the emitted rest *is* the target angle.
+/// Blending from the live measured angle (`current + α·(target − current)`)
+/// makes the constraint permanently a fraction of a step behind the pose, and
+/// because the pose frame rides on the measured hip it turns a sag into a
+/// one-way feedback loop — the hip drops, the foot targets drop with it, the
+/// leg folds, the hip drops further.
 #[derive(Debug, Clone, Copy)]
 pub struct ActuatorConfig {
-    /// Fixed angular compliance for all leg joints (the solver's `Kp = 1/c`).
-    pub leg_compliance: f32,
-    /// Fixed damping ratio `ζ` forwarded to every angular constraint.
+    /// Fixed hip-joint (`P2-P3-knee`) compliance, the solver's `Kp = 1/c`.
+    /// Defaults to the v10 blueprint's own `P2_P3_P40` value.
+    pub hip_compliance: f32,
+    /// Fixed knee-joint (`P3-knee-foot`) compliance. Defaults to the v10
+    /// blueprint's own `P3_P40_PLLL` value — one decade softer than the hip,
+    /// which is what lets the knee absorb load without folding.
+    pub knee_compliance: f32,
+    /// Fixed damping ratio `ζ` forwarded to every angular constraint. The
+    /// solver derives `Kd = 2·ζ·sqrt(Kp·m)`; the blueprint leaves it at its
+    /// serde default of `1.0` (critical damping), so that is the default here.
     pub zeta: f32,
-    /// Rest-angle chase gain (blend toward the target per tick).
-    pub rest_chase_alpha: f32,
-    /// Max rest-angle slew, rad/s.
-    pub max_angle_rate: f32,
-    /// Hip↔stance-foot strut compliance while the foot is the support.
+    /// Hip↔stance-foot strut compliance while the foot is the support. The
+    /// blueprint's `P3_PLLL`/`P3_PRLL` distance joints use `1e-6`, and the
+    /// stand pose depends on that: the strut is what holds the hip off the
+    /// foot at the leg's full reach.
     pub strut_active: f32,
     /// Strut compliance while the leg swings (tether rides along, no authority).
     pub strut_idle: f32,
@@ -123,10 +136,13 @@ pub struct ActuatorConfig {
 impl Default for ActuatorConfig {
     fn default() -> Self {
         Self {
-            leg_compliance: 5e-8,
+            // Bend, don't fold: a soft, load-bearing spring with matching bone
+            // lengths on either side. The v10 rig stands on 5e-8 / 5e-7 with
+            // ζ=1, so the stand pose is kept there too — any stiffer value
+            // makes the knee fight the two rigid distance bones of the leg.
+            hip_compliance: 5e-8,
+            knee_compliance: 5e-7,
             zeta: 1.0,
-            rest_chase_alpha: 0.5,
-            max_angle_rate: std::f32::consts::TAU,
             strut_active: 1e-6,
             strut_idle: 1e-2,
         }
@@ -175,18 +191,20 @@ pub struct Actuation {
 /// Matches the reference `FOREARM_ANGULAR_EPSILON`.
 const ANGLE_EPSILON: f32 = 1e-4;
 
-/// One tick of the pure actuate core. `dt` scales the rest-angle slew clamp.
+/// One tick of the pure actuate core.
+///
+/// `dt` is accepted for signature stability (and so callers do not branch on
+/// it) but no longer scales anything: the emitted rest angle is the target.
 pub fn actuate_tick(
     left: &LegLive,
     right: &LegLive,
     pose: &Pose,
     cfg: &ActuatorConfig,
-    dt: f32,
+    _dt: f32,
 ) -> Actuation {
-    let slew = cfg.max_angle_rate * dt.max(0.0);
     Actuation {
-        left: leg_commands(left, pose, pose.left_foot, cfg, slew),
-        right: leg_commands(right, pose, pose.right_foot, cfg, slew),
+        left: leg_commands(left, pose, pose.left_foot, cfg),
+        right: leg_commands(right, pose, pose.right_foot, cfg),
     }
 }
 
@@ -223,7 +241,6 @@ fn leg_commands(
     pose: &Pose,
     foot_pose: FootPose,
     cfg: &ActuatorConfig,
-    slew: f32,
 ) -> LegCommands {
     let mut out = LegCommands::default();
 
@@ -267,9 +284,9 @@ fn leg_commands(
     let target_hip = angle_at(a_t, pose.hip, knee);
     let target_knee = angle_at(pose.hip, knee, foot_pose.pos);
 
-    // ---- Emit (dead zone + rest chase, fixed compliance/zeta) ----
-    out.hip_joint = joint_command(theta_hip, target_hip, cfg, slew);
-    out.knee_joint = joint_command(theta_knee, target_knee, cfg, slew);
+    // ---- Emit (dead zone, fixed compliance/zeta, rest = target) ----
+    out.hip_joint = joint_command(theta_hip, target_hip, cfg.hip_compliance, cfg);
+    out.knee_joint = joint_command(theta_knee, target_knee, cfg.knee_compliance, cfg);
 
     out
 }
@@ -310,32 +327,26 @@ fn wrap_angle(a: f32) -> f32 {
     (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
-/// Interpolate-then-clamp angle chase (reference `rotate_toward` scheme):
-/// blend `from` toward `to` by `alpha`, capped at `max_delta` radians.
-#[inline]
-fn chase(from: f32, to: f32, alpha: f32, max_delta: f32) -> f32 {
-    let d = wrap_angle(to - from);
-    from + (d * alpha).clamp(-max_delta, max_delta)
-}
-
-/// Blend one joint's rest angle toward the target and pack the command with
-/// the fixed compliance/damping.
+/// Pack one joint's **target** angle as the constraint rest, with the fixed
+/// compliance/damping.
+///
+/// No interpolation: `rest` is what the pose asked for. `current` is used only
+/// for the dead zone (already at the target ⇒ emit nothing).
 fn joint_command(
     current: f32,
     target: f32,
+    compliance: f32,
     cfg: &ActuatorConfig,
-    slew: f32,
 ) -> Option<AngularCommand> {
     let err = wrap_angle(target - current).abs();
     if err <= ANGLE_EPSILON {
         return None;
     }
-    let blended = chase(current, target, cfg.rest_chase_alpha, slew);
-    let (s, c) = blended.sin_cos();
+    let (s, c) = target.sin_cos();
     Some(AngularCommand {
         rest_cos: c,
         rest_sin: s,
-        compliance: cfg.leg_compliance,
+        compliance,
         zeta: cfg.zeta,
     })
 }
@@ -423,7 +434,8 @@ mod tests {
         // Simplification law: every emitted angular command carries exactly
         // the configured compliance and zeta — no ω-schedule, no projection.
         let cfg = ActuatorConfig {
-            leg_compliance: 3.3e-7,
+            hip_compliance: 3.3e-7,
+            knee_compliance: 9.1e-7,
             zeta: 0.8,
             ..Default::default()
         };
@@ -441,16 +453,18 @@ mod tests {
             0.2,
         );
         let a = actuate_tick(&l, &r, &pose, &cfg, 1.0 / 90.0);
-        for cmd in [
-            a.left.hip_joint,
-            a.left.knee_joint,
-            a.right.hip_joint,
-            a.right.knee_joint,
+        // Hip and knee carry their OWN compliance (the blueprint's two values
+        // differ by a decade); both carry the one shared ζ.
+        for (cmd, want) in [
+            (a.left.hip_joint, cfg.hip_compliance),
+            (a.left.knee_joint, cfg.knee_compliance),
+            (a.right.hip_joint, cfg.hip_compliance),
+            (a.right.knee_joint, cfg.knee_compliance),
         ]
         .into_iter()
-        .flatten()
+        .filter_map(|(cmd, want)| cmd.map(|cmd| (cmd, want)))
         {
-            assert_eq!(cmd.compliance, cfg.leg_compliance);
+            assert_eq!(cmd.compliance, want);
             assert_eq!(cmd.zeta, cfg.zeta);
         }
     }
@@ -657,34 +671,40 @@ mod tests {
     }
 
     #[test]
-    fn zero_dt_freezes_the_rest_chase() {
-        // slew = 0 ⇒ the blended rest angle stays exactly at the current angle.
+    fn rest_is_the_target_angle_not_a_blend_toward_it() {
+        // The emitted rest must be the IK target angle itself. A 50 % blend
+        // (the retired `chase` behaviour) would land halfway between the live
+        // angle and the target, which is what let the stance sag.
         let cfg = ActuatorConfig::default();
         let hip = Vec2::new(0.0, -140.0);
         let foot = Vec2::new(0.0, -60.0);
         let l = leg_from_pose(hip, foot, 1.0);
+        let target_foot = Vec2::new(60.0, -60.0);
         let pose = pose_with(
             FootPose {
                 pos: foot,
                 stance: true,
             },
             FootPose {
-                pos: Vec2::new(60.0, -60.0),
+                pos: target_foot,
                 stance: true,
             },
             0.0,
         );
-        let a = actuate_tick(&l, &l, &pose, &cfg, 0.0);
-        if let Some(c) = a.right.knee_joint {
-            let cur = angle_at(l.hip, l.knee, l.foot);
-            let cmd = c.rest_sin.atan2(c.rest_cos);
-            assert!(
-                wrap_angle(cmd - cur).abs() < 1e-4,
-                "zero dt must not move the rest angle: {cmd} vs {cur}"
-            );
-        } else {
-            panic!("target differs from current: knee command must exist");
-        }
+        let a = actuate_tick(&l, &l, &pose, &cfg, 1.0 / 90.0);
+        let c = a.right.knee_joint.expect("target differs from current");
+        let cmd = c.rest_sin.atan2(c.rest_cos);
+        let (knee, _) = walker_math::solve_leg_ik(hip, target_foot, L, L, 1.0);
+        let knee = walker_math::select_anterior_knee(hip, target_foot, knee, 1.0);
+        let want = angle_at(hip, knee, target_foot);
+        assert!(
+            wrap_angle(cmd - want).abs() < 1e-4,
+            "rest must equal the target angle: {cmd} vs {want}"
+        );
+        // And it must differ from the live angle by the full error, not half.
+        let cur = angle_at(l.hip, l.knee, l.foot);
+        let half = wrap_angle(cur + 0.5 * wrap_angle(want - cur) - cmd).abs();
+        assert!(half > 1e-3, "rest is a blend, not the target");
     }
 
     #[test]

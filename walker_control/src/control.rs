@@ -224,52 +224,58 @@ pub trait Step {
     fn mode(&self) -> LocoMode;
 }
 
-/// Balanced quiet stance: a **rigid pose anchored at the hip**, commanded
-/// every frame, no conditions.
+/// Balanced quiet stance: the **v10 rest pose**, hardcoded.
 ///
-/// The frame: hip = the measured hip (no vertical authority — the frame is
-/// the legs, gravity and the floor do the rest); feet at `hip.x ∓ spread`
-/// along facing (one ahead, one behind, the sagittal support base) and
-/// `stand_height = leg_len − drop` below the hip. It is the *default stand
-/// pose*: the same frame is commanded while airborne and while grounded, so
-/// the legs are already standing before the feet ever meet the floor.
+/// # The pose is translation-invariant, so only offsets matter
+/// The actuate layer never reads a world position: it consumes only the
+/// hip→foot chord (IK knee), the hip→knee→foot angle (knee joint), and the
+/// `P3→P2` axis rotated by `upper_angle` (hip joint). The hip particle is free
+/// (no position constraint). So `pose.hip` can be anything — moving it in world
+/// space changes *nothing*. What actuates the legs is the **shape**: the two
+/// hip→foot offset vectors and the lean.
+///
+/// That is why this controller feeds **no physics feedback**: every value it
+/// emits is a constant offset from the blueprint's rest pose. Reading the
+/// measured hip or feet here would close a loop and let a sag walk away.
+///
+/// # The constants
+/// Taken from `v10.character.json` (SVG units, then × 0.5 spawn scale), all
+/// measured from `P3` (the hip):
+///
+/// | particle | SVG offset from `P3` | scale-0.5 px |
+/// |---|---|---|
+/// | `P2` (waist ref) | `( 0.0, −70.0)` | `( 0.0, −35.0)` |
+/// | `P40` (L knee) | `(−33.0, 106.0)` | `(−16.5, 53.0)` |
+/// | `P41` (R knee) | `( 39.0, 103.0)` | `( 19.5, 51.5)` |
+/// | `PLLL` (L foot) | `(−66.0, 212.0)` | `(−33.0, 106.0)` |
+/// | `PRLL` (R foot) | `( 79.0, 206.0)` | `( 39.5, 103.0)` |
+///
+/// Note the rest leg is **fully extended** (hip→foot ≈ 111 px ≈
+/// `thigh + calf`), not a bent-knee drop pose: that is what the rig stands on
+/// with no actuation at all. Commanding any shorter chord asks the knee to fold
+/// against two rigid distance bones, which is what collapsed the stance.
 #[derive(Debug, Clone, Copy)]
 pub struct StandingCtrl {
     /// Seconds spent standing (telemetry; also lets later hysteresis gates read
     /// a settle time).
     pub since: f32,
-    /// Full leg reach: `thigh_len + calf_len`, px (rig geometry, from config).
-    leg_len: f32,
-    /// How far the stance hip drops below full reach, px — bent-knee comfort
-    /// plus reach margin so the IK is never near-degenerate.
-    drop: f32,
-    /// Fore/aft offset of each foot from the hip, px: one foot ahead, one
-    /// behind, along `facing`. The sagittal support base.
-    spread: f32,
+    /// Hardcoded `P3 → PLLL` offset, px, vello y-down. Left foot.
+    left_foot_offset: Vec2,
+    /// Hardcoded `P3 → PRLL` offset, px, vello y-down. Right foot.
+    right_foot_offset: Vec2,
 }
 
-/// The default stance geometry (px). Sized for the v10 rig at scale 0.5
-/// (leg reach ≈ 110 ⇒ hip height ≈ 90, feet straddling the hip by ±10 along
-/// facing). A wider stance cannot be settled in the ~0.2 s drop before
-/// touchdown, and 10 px of fore/aft base is enough to break the topple.
-const STANCE_DROP: f32 = 20.0;
-const STANCE_SPREAD: f32 = 10.0;
+/// v10 rest offsets under `P3`, px at spawn scale 0.5 (y-down: +y is below).
+const REST_LEFT_FOOT: Vec2 = Vec2::new(-33.0, 106.0);
+const REST_RIGHT_FOOT: Vec2 = Vec2::new(39.5, 103.0);
 
 impl StandingCtrl {
-    pub fn new(lower: &walker_math::LowerBodyConfig) -> Self {
+    pub fn new(_lower: &walker_math::LowerBodyConfig) -> Self {
         Self {
             since: 0.0,
-            leg_len: lower.thigh_len + lower.calf_len,
-            drop: STANCE_DROP,
-            spread: STANCE_SPREAD,
+            left_foot_offset: REST_LEFT_FOOT,
+            right_foot_offset: REST_RIGHT_FOOT,
         }
-    }
-
-    /// Commanded hip height above the ground line: full reach minus the drop,
-    /// floored so the stance triangle (`stand_h`, `spread`) stays solvable.
-    #[inline]
-    fn stand_height(&self) -> f32 {
-        (self.leg_len - self.drop).max(self.spread + 5.0)
     }
 }
 
@@ -285,13 +291,14 @@ impl Step for StandingCtrl {
         if dt > 0.0 {
             self.since += dt;
         }
-        // The rigid frame, every tick: hip measured, feet `spread` fore/aft
-        // of it and `stand_height` below it. No rate limits, no branches.
+        // Anchor the frame at the measured hip so the *world* pose is right, but
+        // emit only hardcoded offsets: the shape is constant, so the emitted
+        // joint rests coincide with the v10 rest pose and land in actuate's dead
+        // zone. The body then stands on its own rigid bones, exactly as it does
+        // with no actuation at all.
         let hip = fiction.hip;
-        let front = facing.signum() * self.spread;
-        let foot_y = hip.y + self.stand_height();
-        let left_foot = Vec2::new(hip.x - front, foot_y);
-        let right_foot = Vec2::new(hip.x + front, foot_y);
+        let left_foot = hip + self.left_foot_offset;
+        let right_foot = hip + self.right_foot_offset;
 
         ControlOut {
             pose: Pose {
@@ -305,8 +312,8 @@ impl Step for StandingCtrl {
                     stance: fiction.feet[1].touching,
                 },
                 facing,
-                // Upright: the reference pose. Loop 3 delivers this through the
-                // leg hip joints (actuate), never through the waist.
+                // The rest pose's `P3→P2` axis is straight up (offset
+                // `(0, −35)`), so the attitude command is upright.
                 upper_angle: 0.0,
             },
             hip_vel: Vec2::ZERO,
@@ -541,10 +548,11 @@ mod tests {
     }
 
     #[test]
-    fn standing_is_a_rigid_frame_anchored_at_the_measured_hip() {
-        // The frame is hip-centered and always active: feet at `hip.x ∓
-        // spread·facing` and `stand_height` below the measured hip, whatever
-        // the fiction's feet look like (grounded or airborne — no branch).
+    fn standing_emits_the_hardcoded_v10_rest_offsets() {
+        // The frame is the v10 rest pose: constant offsets under the measured
+        // `P3`, identical whatever the measured feet do and whether grounded.
+        // This is what makes the emitted joint rests land in actuate's dead
+        // zone — no feedback, no sag walk-away.
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
         for touching in [[true, true], [false, false]] {
@@ -557,38 +565,35 @@ mod tests {
             );
             let mut c = StandingCtrl::new(&walker_math::LowerBodyConfig::default());
             let out = c.step(&Command::default(), &f, &cfg, dt, 1.0);
-            let stand_h = 55.0 + 55.0 - STANCE_DROP;
             assert_eq!(out.mode, LocoMode::Standing);
-            assert_eq!(out.pose.hip, f.hip, "the frame is anchored at the hip");
+            assert_eq!(
+                out.pose.hip, f.hip,
+                "anchor: measured hip (world placement)"
+            );
             assert_eq!(
                 out.pose.left_foot.pos,
-                Vec2::new(3.0 - 10.0, -120.0 + stand_h),
-                "left foot behind the hip at full stand height"
+                f.hip + REST_LEFT_FOOT,
+                "left foot is the hardcoded P3→PLLL offset"
             );
             assert_eq!(
                 out.pose.right_foot.pos,
-                Vec2::new(3.0 + 10.0, -120.0 + stand_h),
-                "right foot ahead of the hip at full stand height"
+                f.hip + REST_RIGHT_FOOT,
+                "right foot is the hardcoded P3→PRLL offset"
             );
             assert_eq!(out.pose.left_foot.stance, touching[0]);
             assert_eq!(out.pose.right_foot.stance, touching[1]);
-            assert_eq!(out.pose.upper_angle, 0.0, "standing commands upright");
+            assert_eq!(out.pose.upper_angle, 0.0, "the rest P3→P2 axis is upright");
             assert_eq!(out.pose.facing, 1.0);
             assert!(out.debug.is_none(), "no gait internals in standing");
         }
     }
 
     #[test]
-    fn the_frame_spreads_opposite_to_facing() {
-        // facing −1 flips which foot leads, but the frame stays one ahead and
-        // one behind the hip.
-        let cfg = ControlConfig::default();
-        let f = centered();
-        let mut c = StandingCtrl::new(&walker_math::LowerBodyConfig::default());
-        let out = c.step(&Command::default(), &f, &cfg, 1.0 / 90.0, -1.0);
-        let stand_h = 55.0 + 55.0 - STANCE_DROP;
-        assert_eq!(out.pose.left_foot.pos, Vec2::new(10.0, -140.0 + stand_h));
-        assert_eq!(out.pose.right_foot.pos, Vec2::new(-10.0, -140.0 + stand_h));
+    fn the_rest_offsets_match_the_v10_blueprint_at_scale_half() {
+        // Regression guard on the hardcoded numbers: blueprint SVG offsets
+        // scaled by the 0.5 spawn factor.
+        assert_eq!(REST_LEFT_FOOT, Vec2::new(-33.0, 106.0));
+        assert_eq!(REST_RIGHT_FOOT, Vec2::new(39.5, 103.0));
     }
 
     #[test]

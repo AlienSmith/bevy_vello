@@ -297,18 +297,19 @@ mod tests {
         control_stage(&mut w);
         let out = w.out().expect("control must produce an output");
         assert_eq!(out.mode, LocoMode::Standing);
-        // The stand frame is anchored at the measured hip: feet `spread`
-        // fore/aft along facing and `stand_height` below it, every tick.
+        // The stand frame is anchored at the measured hip and emits the
+        // hardcoded v10 rest offsets under it, every tick.
         let hip = w.observer.fiction.hip;
-        let stand_h = 55.0 + 55.0 - 20.0;
         assert_eq!(out.pose.hip, hip);
         assert_eq!(
             out.pose.left_foot.pos,
-            Vec2::new(hip.x - 10.0, hip.y + stand_h)
+            hip + Vec2::new(-33.0, 106.0),
+            "left foot: the v10 P3→PLLL rest offset"
         );
         assert_eq!(
             out.pose.right_foot.pos,
-            Vec2::new(hip.x + 10.0, hip.y + stand_h)
+            hip + Vec2::new(39.5, 103.0),
+            "right foot: the v10 P3→PRLL rest offset"
         );
         assert_eq!(out.pose.facing, w.facing);
         // A second tick with a move command keeps standing (machine pinned);
