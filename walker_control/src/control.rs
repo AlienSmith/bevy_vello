@@ -185,7 +185,10 @@ impl Default for ControlConfig {
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
             boost_exit_speed: 90.0,
-            boost_timeout: 1.0,
+            // Pure stuck-physics guard: the real boost exits are the velocity
+            // gate and command end, so this must stay looser than any script
+            // track and never decide the handover itself.
+            boost_timeout: 10.0,
             boost_slide_speed: 260.0,
             // Slide the right foot all the way to directly under the hip
             // (its rest x-offset at scale 0.5 is +39.5).
