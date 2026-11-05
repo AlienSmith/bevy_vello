@@ -355,9 +355,6 @@ fn attach_walker(
         // floor while feet hover ~60 px above it). Stiffer joints + strut,
         // slightly under-damped so the pose can still track.
         let mut config = WalkerConfig::default();
-        config.actuator.leg_compliance = 1e-9;
-        config.actuator.zeta = 0.7;
-        config.actuator.strut_active = 2e-7;
         commands.trigger_targets(
             AttachWalker {
                 config,
