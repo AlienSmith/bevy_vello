@@ -8,11 +8,13 @@
 #   TAG                 artifact name under tmp\walker_qa\ (default: "run")
 #   KEY=VALUE           env overrides forwarded to walker_qa. Known levers:
 #                       WIN_HIDDEN (default 1 - no OS window; the whole
-#                       pipeline still runs), ASSET_ROOT, RUN_SECS.
-#   RUN_SECS=N          seconds of sim to capture before killing the app
-#                       (default 8; also honors a pre-set $env:RUN_SECS).
-#                       The app has no script-end self-exit yet; timeout is
-#                       the stop condition.
+#                       pipeline still runs), ASSET_ROOT,
+#                       SCRIPT=path.json - a command track that drives the
+#                       walker and self-exits the app when the track ends.
+#                       CSV_PATH is fixed by the binary.
+#   RUN_SECS=N          hard backstop kill, seconds (default 600; also honors
+#                       a pre-set $env:RUN_SECS). A scripted run exits on its
+#                       own; RUN_SECS only guards a hung keyboard run.
 #
 # Artifacts:
 #   tmp\walker_qa\<TAG>.csv            telemetry (legacy header: scalars + P-channels)
@@ -50,7 +52,7 @@ Set-Location $Repo
 # --- parse args: first non KEY=VALUE token is the tag ------------------------
 $Tag = 'run'
 $EnvOver = @{}
-$RunSecs = if ($env:RUN_SECS) { [double]$env:RUN_SECS } else { 8 }
+$RunSecs = if ($env:RUN_SECS) { [double]$env:RUN_SECS } else { 600 }
 foreach ($a in $Rest) {
     if ($a -match '^[A-Za-z_][A-Za-z0-9_]*=') {
         $k, $v = $a -split '=', 2
@@ -101,7 +103,12 @@ if (-not (Test-Path $Bin)) { Fail "missing $Bin" }
 
 # --- env for the child process --------------------------------------------------
 # WIN_HIDDEN defaults to 1; a WIN_HIDDEN=... override wins (later assignment).
-$EnvSet = @{ WIN_HIDDEN = '1' }
+# ASSET_ROOT must be pinned on Windows: walker_qa's fallback is a hardcoded
+# /home/ubuntu path (see run_walk.ps1 for the same idiom).
+$EnvSet = @{
+    WIN_HIDDEN = '1'
+    ASSET_ROOT = (Join-Path $Repo 'examples\collision_detection\assets')
+}
 foreach ($k in $EnvOver.Keys) { $EnvSet[$k] = $EnvOver[$k] }
 
 $saved = @{}
@@ -122,12 +129,13 @@ $shown = if ($EnvOver.Count) {
     ($EnvOver.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
 }
 else { '<defaults>' }
-Write-Host "== run ${RunSecs}s: $Tag ($shown)"
+Write-Host "== run: $Tag ($shown) - backstop ${RunSecs}s"
 
 if (Test-Path $RawCsv) { Remove-Item $RawCsv -Force }
 
-# Run the binary, capture combined stdout+stderr to the log, kill after RUN_SECS
-# (the timeout is the stop condition; walker_qa has no self-exit yet).
+# Run the binary, capture combined stdout+stderr to the log. A SCRIPT track
+# self-exits the app when it ends; RUN_SECS is only the backstop kill for a
+# hung keyboard run (matching the bash `timeout`).
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'  # native stderr must not throw under Stop
 try {
