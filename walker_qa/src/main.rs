@@ -60,7 +60,7 @@ const GRAVITY: Vec2 = Vec2::new(0.0, 980.0);
 /// floor and the XPBD penetration kick topples the body. A small lift clears
 /// that pre-penetration without a big impact speed; [`StandingCtrl`] spreads
 /// the feet throughout the drop.
-const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, -10.0, 100.0);
+const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, -30.0, 100.0);
 const SPAWN_SCALE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
 
 /// Floor surface line in physics space (y-down, below the origin). The v10
