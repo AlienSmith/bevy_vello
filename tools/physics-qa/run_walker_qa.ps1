@@ -175,7 +175,11 @@ if (-not (Test-Path $RawCsv)) {
     Get-Content $Log -Tail 5
     exit 1
 }
-Move-Item $RawCsv $Csv -Force
+# Tag 'walk' names the tag file onto the raw one: move would be same-file and
+# die. Skip it when source and destination resolve to the same path.
+if ((Resolve-Path $RawCsv).Path -ne [System.IO.Path]::GetFullPath($Csv)) {
+    Move-Item $RawCsv $Csv -Force
+}
 Select-String -Path $Log -Pattern 'attached|floor|wrote' |
     Select-Object -Last 3 | ForEach-Object { $_.Line }
 

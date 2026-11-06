@@ -19,6 +19,7 @@
 # Artifacts:
 #   tmp/walker_qa/<TAG>.csv            telemetry (legacy header: scalars + P-channels)
 #   tmp/walker_qa/<TAG>.hips_feet.png  plot_p3.py output (hip + feet, gait bands)
+#   tmp/walker_qa/<TAG>.log            app stdout/stderr
 #   stdout summary                     grounded fraction + hip/feet settle table
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -26,12 +27,12 @@ REPO=$PWD
 
 TAG="run"
 ENVARGS=()
-RUN_SECS="${RUN_SECS:-8}"
+RUN_SECS="${RUN_SECS:-600}"
 for a in "$@"; do
-  if [[ "$a" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-    ENVARGS+=("$a")
-  elif [[ "$a" =~ ^RUN_SECS= ]]; then
+  if [[ "$a" =~ ^RUN_SECS= ]]; then
     RUN_SECS="${a#RUN_SECS=}"
+  elif [[ "$a" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+    ENVARGS+=("$a")
   else
     TAG="$a"
   fi
@@ -48,15 +49,22 @@ cargo build -p walker_qa 2>&1 | tail -1
 
 echo "== run: $TAG (${ENVARGS[*]:-<defaults>}) — backstop ${RUN_SECS}s"
 # walker_qa writes its telemetry to tmp/walker_qa/walk.csv; move it to the tag.
-rm -f tmp/walker_qa/walk.csv
-env WIN_HIDDEN=1 ${ENVARGS[@]+"${ENVARGS[@]}"} timeout "$RUN_SECS" "$BIN" \
+RAW_CSV=$OUTDIR/walk.csv
+rm -f "$RAW_CSV"
+# WIN_HIDDEN defaults to 1; ASSET_ROOT is pinned repo-relative (the binary's
+# fallback is a hardcoded path). Env overrides come later, so a KEY=VALUE
+# argument wins over these defaults.
+env WIN_HIDDEN=1 ASSET_ROOT="$REPO/examples/collision_detection/assets" \
+  ${ENVARGS[@]+"${ENVARGS[@]}"} timeout "$RUN_SECS" "$BIN" \
   > "$OUTDIR/$TAG.log" 2>&1 || true
-if [ ! -f tmp/walker_qa/walk.csv ]; then
-  echo "no telemetry written: tmp/walker_qa/walk.csv (see $OUTDIR/$TAG.log)" >&2
+if [ ! -f "$RAW_CSV" ]; then
+  echo "no telemetry written: $RAW_CSV (see $OUTDIR/$TAG.log)" >&2
   tail -5 "$OUTDIR/$TAG.log" >&2
   exit 1
 fi
-mv tmp/walker_qa/walk.csv "$CSV"
+# TAG=walk names the tag file onto the raw one: mv would be "same file" and
+# die non-zero under set -e. Skip the move when source and dest are the same.
+[ "$RAW_CSV" -ef "$CSV" ] || mv "$RAW_CSV" "$CSV"
 grep -E 'attached|floor|wrote' "$OUTDIR/$TAG.log" | tail -3
 
 echo "== plot"
