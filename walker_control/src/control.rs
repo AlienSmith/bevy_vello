@@ -11,7 +11,7 @@
 //!   controller is active. It reads command + fiction and nothing else.
 //! - **[`Controller`]** — an enum of three controllers sharing one slot:
 //!   [`StandingCtrl`] (rest-pose hold), [`WalkingCtrl`] (the `walker_math`
-//!   gait seam), [`BoostStartCtrl`] (the skate-push launch, plan §5).
+//!   gait seam), [`BoostStartCtrl`] (the leaned-stance launch, plan §5).
 //!
 //! # Law 2 — controller state is schedule + reference only
 //! Every *body* field the controller needs arrives in [`Fiction`] (measured by
@@ -53,9 +53,12 @@ pub struct Command {
     /// Commanded speed magnitude, px/s. `0` = stop / stay put.
     pub speed: f32,
     /// This move is a **launch**: start it through [`LocoMode::BoostStart`]
-    /// instead of entering the gait directly. The boost kicks the body up to
-    /// speed; the machine hands over to [`LocoMode::Walking`] once the
-    /// *measured* velocity clears [`ControlConfig::boost_exit_speed`].
+    /// instead of entering the gait directly. The boost is a static leaned
+    /// stance ([`ControlConfig::boost_lean`]) held **while this flag is set**
+    /// — for a script, the `boost` cell's duration is the lean window; the
+    /// machine hands over to [`LocoMode::Walking`] the moment the flag drops
+    /// (typically a following `move` cell), whose first steps place the feet
+    /// under the tilted CoM and start the fall forward.
     pub boost: bool,
 }
 
@@ -162,20 +165,13 @@ pub struct ControlConfig {
     pub stand_settle_rate: f32,
     /// Speed magnitude (px/s) below which a move command means "stop".
     pub move_threshold: f32,
-    /// Measured speed above which the boost hands over to the gait controller,
-    /// px/s (plan §7 gate 4: 90 px/s in the boot window).
-    pub boost_exit_speed: f32,
-    /// Hard cap on the boost window, seconds (fallback if physics never
-    /// accelerates — the boost cannot fake its exit, so it must time out).
-    pub boost_timeout: f32,
-    /// Boost: rate the **right foot's** x-offset slides back toward under-hip,
-    /// px/s — the "skate push" that drags the hip forward. Only this one foot
-    /// moves; the left foot stays on its standing rest offset.
-    pub boost_slide_speed: f32,
-    /// Boost: how far (px) the right foot's x-offset slides toward under-hip
-    /// before it stops. The foot only ever moves CLOSER to the hip, so the leg
-    /// stays within reach and never detaches.
-    pub boost_slide_limit: f32,
+    /// Boost: commanded upper-body forward lean, rad (vello frame: `+` leans
+    /// toward `+x`). The boost pose holds both feet at their standing rest
+    /// offsets, exactly like [`StandingCtrl`], so this is a *static* lean: the
+    /// CoM shift (~6 px at 0.25 rad, given the P3-heavy mass budget) stays
+    /// well inside the ~30 px support margin and nothing falls until the gait
+    /// lifts a foot.
+    pub boost_lean: f32,
 }
 
 impl Default for ControlConfig {
@@ -183,15 +179,11 @@ impl Default for ControlConfig {
         Self {
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
-            boost_exit_speed: 90.0,
-            // Pure stuck-physics guard: the real boost exits are the velocity
-            // gate and command end, so this must stay looser than any script
-            // track and never decide the handover itself.
-            boost_timeout: 10.0,
-            boost_slide_speed: 260.0,
-            // Slide the right foot all the way to directly under the hip
-            // (its rest x-offset at scale 0.5 is +39.5).
-            boost_slide_limit: 39.5,
+            // Inside the static margin, but past the gait's own cruise lean
+            // (~0.15 rad at 120 px/s), so WalkingCtrl's attitude PD inherits a
+            // body already committed forward — its first steps place the feet
+            // under (behind) the tilted CoM and the fall starts.
+            boost_lean: 0.25,
         }
     }
 }
@@ -442,11 +434,12 @@ impl Step for WalkingCtrl {
                 self.state.attitude.omega = fiction.lean_rate * facing;
                 // Seed the stance plants from the MEASURED feet. Without this
                 // the solver's default `seed_hip ± 30` plants disagree with
-                // reality (after the skate-push both feet trail the hip by
-                // 50-70 px): the first gait tick yanks the planted feet ~80 px
-                // forward, the legs stop dead and the body trips over them
-                // (measured: lean jumped 0.48 -> 1.06 rad in one tick). With
-                // the plants seeded, tick 1 commands the feet where they
+                // reality (the boost leans the body ~0.25 rad without moving
+                // its feet; any handover where the measured offsets differ
+                // from ±30 is worse): the first gait tick yanks the planted
+                // feet forward, the legs stop dead and the body trips over
+                // them (measured: lean jumped 0.48 -> 1.06 rad in one tick).
+                // With the plants seeded, tick 1 commands the feet where they
                 // actually are and the capture-point law owns the catch.
                 for (leg, foot) in [
                     (&mut self.state.left, &fiction.feet[0]),
@@ -522,20 +515,32 @@ impl Step for WalkingCtrl {
     }
 }
 
-/// The swappable launch (plan §5) — the stand→walk bridge.
+/// The launch (plan §5) — the stand→walk bridge: a **static leaned stance**,
+/// the standing pose with the stick tilted forward.
 ///
-/// # The idea: one particle moves, the IK solves the rest
-/// The deadbeat gait needs COM velocity at handover; standing has zero. So the
-/// boost is a **skate push** in the simplest possible frame: exactly like
-/// [`StandingCtrl`] it anchors at the *measured* hip and holds the v10 rest
-/// geometry, but **only the right foot's x-offset moves** — it slides toward
-/// `0` (directly under the hip) at `boost_slide_speed`, clamped to
-/// `boost_slide_limit` px, y held. The left foot keeps its standing rest offset
-/// untouched, so that leg can never leave reach; the right foot only ever moves
-/// *closer* to the hip, so it never detaches either. Actuate's IK derives the
-/// right knee from that single moving target, and the trailing leg pressing
-/// under the hip is what drives the body forward. Whether it propels without
-/// toppling is what the stand-then-boost QA script measures.
+/// # Why lean instead of push
+/// The deadbeat DCM cannot bootstrap from a dead stop with an upright body:
+/// ξ ≈ x_CoM sits under the hip, its first steps merely re-place the feet
+/// under the CoM, and nothing falls. The old boost tried to create speed with
+/// a skate push (sliding one foot toward under-hip), but at rest both legs are
+/// fully extended chords — a held foot can only move by *dragging* against
+/// floor friction, and the measured result was a squatting hip and a 0.6 rad
+/// topple at handover that the gait could not catch. So the boost stops
+/// pushing: it holds the exact [`StandingCtrl`] foot targets (both legs stay
+/// in actuate's dead zone, a pose as stable as standing) and commands only a
+/// forward `upper_angle`. The tilt moves the CoM ahead of the foot line by
+/// `boost_lean`·lever, still inside the support margin, so nothing moves yet.
+/// The fall is the gait's own job: at handover [`WalkingCtrl`] seeds its
+/// attitude from the measured lean, and its first steps place the feet near ξ
+/// — *under* the tilted CoM — shrinking the support polygon around it. The
+/// lean converts to forward velocity exactly when the DCM law is ready to
+/// regulate it.
+///
+/// Handover is **command-driven**: the pose holds while the command carries
+/// the `boost` flag, so for a script the `boost` cell's duration *is* the lean
+/// window, and a plain `move` cell (or a released keyboard modifier) is what
+/// ends it. The pose is as stable as standing, so there is nothing to time
+/// out: holding boost forever is as safe as standing forever.
 #[derive(Debug, Clone, Copy)]
 pub struct BoostStartCtrl {
     pub since: f32,
@@ -572,30 +577,36 @@ impl Step for BoostStartCtrl {
         } else {
             1.0
         };
-        // One moving particle: only the RIGHT foot's x-offset slides toward
-        // under-hip (x -> 0), y held. It only ever closes the gap to the hip,
-        // so it stays within reach. The left foot keeps its standing rest
-        // offset untouched; the IK solves the right knee from the new chord.
-        let slide = (self.since * cfg.boost_slide_speed).min(cfg.boost_slide_limit);
-        let rest_right = REST_RIGHT_FOOT * Vec2::new(s, 1.0); // mirror for -x travel
-        let right_offset = rest_right - Vec2::new(s * slide, 0.0);
-
+        // Static pose: feet hold the standing rest offsets exactly like
+        // StandingCtrl (no slide, no drag — both legs stay inside actuate's
+        // dead zone), anchored at the measured hip. Only the stick tilts,
+        // toward the commanded travel.
+        //
+        // Both feet are commanded as STANCE (strut active), regardless of the
+        // measured touch: the lean puts the CoM past the static margin, and a
+        // foot flagged swing rides the idle tether (1e-2 = no authority), so
+        // the measured lean crept through a self-reinforcing forward rock
+        // (0.25 -> 0.70 rad over 2 s, left foot peeling at ~1.7 s). The active
+        // strut holds the rest chord planted: the boost stays as stable as
+        // standing and the fall-forward begins only at the walking handover.
         let hip = fiction.hip;
         ControlOut {
             pose: Pose {
                 hip,
                 left_foot: FootPose {
                     pos: hip + REST_LEFT_FOOT,
-                    stance: fiction.feet[0].touching,
+                    stance: true,
                 },
                 right_foot: FootPose {
-                    pos: hip + right_offset,
-                    stance: fiction.feet[1].touching,
+                    pos: hip + REST_RIGHT_FOOT,
+                    stance: true,
                 },
                 facing,
-                upper_angle: 0.0,
+                upper_angle: s * cfg.boost_lean,
             },
-            hip_vel: Vec2::new(s * cmd.speed.abs().min(cfg.boost_exit_speed * 1.5), 0.0),
+            // The boost commands no velocity: it is a held pose. Telemetry
+            // reads the real forward creep only after the walking handover.
+            hip_vel: Vec2::ZERO,
             mode: LocoMode::BoostStart,
             debug: None,
         }
@@ -668,19 +679,21 @@ impl Default for Controller {
 /// ```text
 ///               move + boost flag
 ///  Standing ────────────────────────► BoostStart
-///    ▲  ▲                                  │  measured speed ≥ boost_exit_speed
-///    │  │  command ended (None / stop)     │  or boost_timeout
+///    ▲  ▲                                  │  boost flag dropped
+///    │  │  command ended (None / stop)     │  (plain move still held)
 ///    │  │                                  ▼
-///    │  └──────────── Walking ◄───────── (handover)
+///    │  └──────────── Walking ◄───────── (leaned stance → gait)
 ///    │                 ▲   │
 ///    └─────────────────┘   └── command ended → Standing
 ///               plain move (no boost) goes Standing → Walking directly
 /// ```
 ///
-/// The boost exit reads **fiction** (`v_hip.x`, measured), so the launch cannot
-/// fake its own completion (plan §5). Command end — `None`, or a command whose
-/// signed speed is under [`ControlConfig::move_threshold`] — always returns to
-/// Standing from any mode.
+/// The boost exit is **command-driven**: the launch pose is static (see
+/// [`BoostStartCtrl`]), so the `boost` flag itself is the window — a script's
+/// `boost` cell duration holds the lean, the next `move` cell hands over.
+/// Command end — `None`, or a command whose signed speed is under
+/// [`ControlConfig::move_threshold`] — always returns to Standing from any
+/// mode.
 #[derive(Debug, Clone, Copy)]
 pub struct LocoState {
     pub mode: LocoMode,
@@ -721,15 +734,15 @@ impl LocoState {
             (LocoMode::Standing, Some(c)) if c.boost => LocoMode::BoostStart,
             // A plain move enters the gait directly (already up to speed).
             (LocoMode::Standing, Some(_)) => LocoMode::Walking,
-            (LocoMode::BoostStart, Some(_)) => {
-                // Exit on measured speed, with a timeout backstop so a stuck
-                // physics can never hold the launch mode forever.
-                let boosted = fiction.v_hip.x.abs() >= cfg.boost_exit_speed;
-                let expired = self.since >= cfg.boost_timeout;
-                if boosted || expired {
-                    LocoMode::Walking
-                } else {
+            (LocoMode::BoostStart, Some(c)) => {
+                // Command-driven handover: the leaned stance holds while the
+                // boost flag is set (the script cell that launched it owns the
+                // window); the first plain move lifts it to the gait, which
+                // starts the fall-forward by placing feet under the tilted CoM.
+                if c.boost {
                     LocoMode::BoostStart
+                } else {
+                    LocoMode::Walking
                 }
             }
             (LocoMode::Walking, Some(_)) => LocoMode::Walking,
@@ -908,45 +921,49 @@ mod tests {
     }
 
     #[test]
-    fn a_boosted_move_launches_through_booststart_and_exits_on_measured_speed() {
+    fn a_boosted_move_hands_over_when_the_boost_flag_drops() {
+        // The script (or keyboard) owns the lean window: BoostStart holds the
+        // pose exactly while the command carries `boost`; the first plain move
+        // — same speed, same direction, flag gone — is the handover tick.
         let cfg = ControlConfig::default();
         let mut st = LocoState::new();
         let rest = centered();
-        let m = st.decide(Some(Command::boost(120.0)), &rest, &cfg, 1.0 / 90.0);
+        let dt = 1.0 / 90.0;
+        let m = st.decide(Some(Command::boost(120.0)), &rest, &cfg, dt);
         assert_eq!(m, LocoMode::BoostStart);
 
-        // Still at rest: the launch continues (fiction says nothing yet).
-        let dt = 1.0 / 90.0;
-        for _ in 0..20 {
+        // Held boost keeps holding, however long (the pose is as stable as
+        // standing; there is no timer to expire).
+        for i in 0..900 {
             let m = st.decide(Some(Command::boost(120.0)), &rest, &cfg, dt);
-            assert_eq!(m, LocoMode::BoostStart);
+            assert_eq!(m, LocoMode::BoostStart, "tick {i} still leaning");
         }
 
-        // The body MEASURABLY reaches the exit speed: hand over to the gait.
-        let moving = fiction(
-            rest.hip,
-            [Vec2::ZERO, Vec2::ZERO],
-            [true, true],
-            0.0,
-            Vec2::new(cfg.boost_exit_speed + 1.0, 0.0),
-        );
-        let m = st.decide(Some(Command::boost(120.0)), &moving, &cfg, dt);
-        assert_eq!(m, LocoMode::Walking, "boost exits on measured speed");
+        // The plain move cell takes over on its very first tick.
+        let m = st.decide(Some(Command::walk(120.0)), &rest, &cfg, dt);
+        assert_eq!(m, LocoMode::Walking, "boost flag dropped => gait");
     }
 
     #[test]
-    fn the_boost_times_out_when_physics_never_delivers() {
+    fn the_boost_never_exits_on_measured_speed() {
+        // The old speed-gate is gone: a body that (spuriously) reads fast
+        // mid-boost must not shorten the leaned stance; only the command's
+        // boost flag decides the handover.
         let cfg = ControlConfig::default();
         let mut st = LocoState::new();
-        let f = centered();
-        st.decide(Some(Command::boost(120.0)), &f, &cfg, 1.0 / 90.0);
-        // Hold the launch past `boost_timeout` without gaining any speed.
-        let mut m = LocoMode::BoostStart;
-        let ticks = (cfg.boost_timeout * 90.0) as usize + 2;
-        for _ in 0..ticks {
-            m = st.decide(Some(Command::boost(120.0)), &f, &cfg, 1.0 / 90.0);
+        let zooming = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::ZERO, Vec2::ZERO],
+            [true, true],
+            0.0,
+            Vec2::new(400.0, 0.0),
+        );
+        for _ in 0..300 {
+            assert_eq!(
+                st.decide(Some(Command::boost(120.0)), &zooming, &cfg, 1.0 / 90.0),
+                LocoMode::BoostStart
+            );
         }
-        assert_eq!(m, LocoMode::Walking, "timeout is the backstop exit");
     }
 
     #[test]
@@ -1012,10 +1029,11 @@ mod tests {
     }
 
     #[test]
-    fn boost_holds_left_rest_offset_and_slides_right_toward_under_hip() {
-        // One moving particle: the left foot is EXACTLY the standing rest
-        // offset (never touched, so it cannot detach); only the right foot's
-        // x-offset closes toward the hip, y held.
+    fn boost_holds_the_standing_pose_and_just_the_lean_differs() {
+        // Static launch: identical foot targets to StandingCtrl (both legs in
+        // the dead zone — no slide, no drag), anchored at the measured hip,
+        // with ONLY `upper_angle` commanding the forward lean. Holding it for
+        // the full duration changes nothing but the timer.
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
         let f = fiction(
@@ -1029,44 +1047,34 @@ mod tests {
         let out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
         assert_eq!(out.mode, LocoMode::BoostStart);
         assert_eq!(out.pose.hip, f.hip, "frame anchored at measured hip");
-        // Left foot pinned to the rest offset, independent of the slide.
         assert_eq!(
             out.pose.left_foot.pos,
             f.hip + REST_LEFT_FOOT,
-            "left foot = standing rest offset, untouched"
+            "left foot = standing rest offset"
         );
-        // Right foot: x slides toward the hip by one dt's worth, y = rest.
-        let slide1 = dt * cfg.boost_slide_speed;
         assert_eq!(
             out.pose.right_foot.pos,
-            f.hip + Vec2::new(REST_RIGHT_FOOT.x - slide1, REST_RIGHT_FOOT.y),
-            "right foot x closes toward under-hip, y held"
+            f.hip + REST_RIGHT_FOOT,
+            "right foot = standing rest offset (never slides)"
         );
-        assert_eq!(out.pose.upper_angle, 0.0, "simple boost: no lean");
+        assert_eq!(out.pose.upper_angle, cfg.boost_lean, "the stick tilts");
+        assert_eq!(out.pose.facing, 1.0);
+        assert_eq!(out.hip_vel, Vec2::ZERO, "a held pose commands no velocity");
 
-        // Long run: the right foot stops at boost_slide_limit (directly under
-        // the hip when limit == rest x) and never crosses to the far side.
-        let ticks = ((cfg.boost_slide_limit / cfg.boost_slide_speed) / dt) as usize + 10;
-        for _ in 0..ticks {
-            c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        // Held for seconds (the script cell owns the window): the pose never
+        // changes — there is no slide, no timer, no drift.
+        for _ in 0..300 {
+            let o = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+            assert_eq!(o.pose.left_foot.pos, out.pose.left_foot.pos);
+            assert_eq!(o.pose.right_foot.pos, out.pose.right_foot.pos);
+            assert_eq!(o.pose.upper_angle, out.pose.upper_angle);
         }
-        let out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
-        assert!(
-            (out.pose.right_foot.pos.x - (f.hip.x + REST_RIGHT_FOOT.x - cfg.boost_slide_limit))
-                .abs()
-                < 1e-3,
-            "right slide stops at the limit"
-        );
-        assert!(
-            (out.pose.right_foot.pos.y - (f.hip.y + REST_RIGHT_FOOT.y)).abs() < 1e-3,
-            "right slide is horizontal only"
-        );
     }
 
     #[test]
-    fn boost_uses_the_command_travel_sign() {
-        // A -x boost mirrors the right foot to the -x rest offset and closes it
-        // toward the hip; the left foot still pins to its standing rest offset.
+    fn boost_leans_toward_the_command_travel_sign() {
+        // A -x boost mirrors ONLY the lean (the feet keep the standing rest
+        // offsets for any travel sign — the pose is the v10 stance itself).
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
         let f = fiction(
@@ -1083,20 +1091,17 @@ mod tests {
             boost: true,
         };
         let out = c.step(&west, &f, &cfg, dt, 1.0);
-        let slide1 = dt * cfg.boost_slide_speed;
         assert_eq!(
             out.pose.left_foot.pos,
             f.hip + REST_LEFT_FOOT,
             "left foot is the rest offset for any travel sign"
         );
-        assert!(
-            out.pose.right_foot.pos.x < f.hip.x,
-            "traveling -x ⇒ right foot on the -x side"
+        assert_eq!(
+            out.pose.right_foot.pos,
+            f.hip + REST_RIGHT_FOOT,
+            "right foot is the rest offset for any travel sign"
         );
-        assert!(
-            (out.pose.right_foot.pos.x - (f.hip.x + (-REST_RIGHT_FOOT.x + slide1))).abs() < 1e-3,
-            "right foot closes toward under-hip from the -x rest offset"
-        );
+        assert_eq!(out.pose.upper_angle, -cfg.boost_lean, "lean mirrors travel");
     }
 
     // --- WalkingCtrl: the walker_math seam ---
