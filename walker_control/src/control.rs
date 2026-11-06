@@ -187,10 +187,13 @@ impl Default for ControlConfig {
         Self {
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
-            // Past the gait's own cruise lean (~0.15 rad at 120 px/s): with
-            // the feet gathered under the hip, ξ = CoM + v/ω₀ ≈ hip + 20 px
-            // ahead of both plants at handover — the first step falls FORWARD.
-            boost_lean: 0.25,
+            // Deliberately BELOW the gait's own cruise lean (~0.15 rad): the
+            // gathered feet already put ξ ahead of both plants at handover, so
+            // the lean only needs to nudge, not launch. A hard tilt (0.25)
+            // overshoots 120 px/s, sags z_com, and ω₀ = √(g/z_com) inflates
+            // x_max — the runaway that collapsed the hip ~100 px. Measured
+            // lean 0.05: symmetric steps, bounded sag, avg ~94 px/s.
+            boost_lean: 0.05,
             // Front foot sweeps 39.5 px inward over this window; the handover
             // event fires partway through it (~0.3 s), so the gather only has
             // to be fast enough to MEET ξ, never overshoot past it.

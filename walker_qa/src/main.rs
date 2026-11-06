@@ -170,6 +170,17 @@ fn env_f32(key: &str) -> Option<f32> {
         .and_then(|v| v.trim().parse::<f32>().ok())
 }
 
+/// Tune the boost shape from env so a lean sweep can test how much stored
+/// fall-energy the handover inherits. Unknown keys ignored.
+fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
+    if let Some(v) = env_f32("BOOST_LEAN") {
+        cfg.boost_lean = v;
+    }
+    if let Some(v) = env_f32("BOOST_GATHER_TS") {
+        cfg.boost_gather_ts = v;
+    }
+}
+
 /// Tune the actuator stiffness from env so a sweep can test whether a
 /// commanded foot tracks (vs. the leg simply folding). Unknown keys ignored.
 fn apply_actuator_env(cfg: &mut walker_control::actuate::ActuatorConfig) {
@@ -432,6 +443,7 @@ fn attach_walker(
         // tighten the leg/strut until a commanded foot actually tracks.
         let mut config = WalkerConfig::default();
         apply_actuator_env(&mut config.actuator);
+        apply_control_env(&mut config.control);
         // Rig geometry for the gait math (v10 at scale 0.5): the bones
         // measure ~55 px (matching walker_math's defaults), but the STANDING
         // hip height is the measured hip→floor distance (~104 px: hip y≈203,
