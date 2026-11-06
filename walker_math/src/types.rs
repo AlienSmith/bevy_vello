@@ -440,14 +440,19 @@ pub enum GaitAuthority {
     /// x, so the resolver draws the foot where it actually is instead of where
     /// it asked. Fixes the stance-slide feedback error; touches no timing.
     Contact,
-    /// **Full authority** (`Contact` + the two timing mechanisms). A stance
-    /// ends early if its loaded foot has left the ground, and a swing extends
-    /// until its foot really lands.
+    /// **Full authority** (`Contact` + the timing mechanisms — and the
+    /// stance stopwatch is REPLACED, not merely capped): liftoff fires only
+    /// when the DCM crosses the stance toe (or the emergency CoM-past-plant
+    /// condition, or brake intent); a swing extends until the foot really
+    /// lands, bounded by `max_swing_wait`; a stance ends early if its loaded
+    /// foot leaves the ground.
     ///
-    /// This is the level that regressed, and the reason is documented in
-    /// `physics_tuning_progress.md` §11: the mechanisms are individually
-    /// sound but the *timing* ones fight each other through the anti-phase
-    /// interlock, which only lets one foot swing at a time.
+    /// The earlier §11 regression came from *capping* the timer with these
+    /// mechanisms — the clock still fired steps physics did not ask for, and
+    /// the both-feet-airborne window stayed open. As the sole liftoff source
+    /// the gait cannot lift a stance leg before its partner is
+    /// contact-confirmed (or ξ past its toe), which is the failure mode this
+    /// level exists to eliminate.
     Full,
 }
 

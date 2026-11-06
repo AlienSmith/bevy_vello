@@ -239,11 +239,14 @@ fn test_contact_stance_holds_while_grounded() {
 fn test_contact_swing_extends_until_real_touchdown() {
     // Plan §6 (`Full`): the swing must not land the pose while the foot is
     // still in the air. Hold the final profile point until contact (or the
-    // wait cap).
+    // wait cap). `Full` liftoff is the DCM crossing — the stance stopwatch no
+    // longer fires (event-only gait) — so enter the swing through the event.
     let cfg = default_config();
     let v = cfg.target_speed;
-    let plan = cruise_plan(&cfg);
+    let plan = dcm_event_plan(&cfg);
     let (mut leg, _) = stance_about_to_step(&cfg);
+    // Loaded foot on the liftoff tick: this stance began with real touchdown,
+    // so `hovered_in` is clear and the wait logic is the subject under test.
     let dt = 1e-3;
     let loaded = Some(LegContactInput {
         touching: true,
@@ -298,10 +301,11 @@ fn test_contact_swing_extends_until_real_touchdown() {
 #[test]
 fn test_contact_swing_wait_is_capped() {
     // A foot that never reports contact must eventually land anyway, or the
-    // gait hangs forever.
+    // gait hangs forever. (Entered through the DCM event — `Full` has no
+    // stance-stopwatch liftoff.)
     let cfg = default_config();
     let v = cfg.target_speed;
-    let plan = cruise_plan(&cfg);
+    let plan = dcm_event_plan(&cfg);
     let (mut leg, _) = stance_about_to_step(&cfg);
     let loaded = Some(LegContactInput {
         touching: true,
@@ -578,6 +582,22 @@ fn test_compute_x_max_pythagorean() {
 }
 
 /// Non-stopping plan context for the direct `step_leg` unit tests.
+/// [`cruise_plan`] plus a measurement whose DCM has CROSSED the stance plant
+/// (plant at 0, `xi` ahead past the toe): under `Full` (event-only liftoff)
+/// this is the trigger that replaced the stance stopwatch.
+fn dcm_event_plan(cfg: &LowerBodyConfig) -> StepPlan {
+    StepPlan {
+        measured: Some(CaptureMeasure {
+            com_x: 10.0,
+            v_com: 60.0,
+            z_com: cfg.hip_height,
+        }),
+        xi: Some(50.0),
+        omega0: omega0(cfg.hip_height, cfg.gravity).unwrap_or(3.0),
+        ..cruise_plan(cfg)
+    }
+}
+
 fn cruise_plan(cfg: &LowerBodyConfig) -> StepPlan {
     StepPlan {
         x_max: compute_x_max(

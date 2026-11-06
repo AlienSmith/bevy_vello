@@ -33,7 +33,7 @@
 //! behaviour for a body at rest.
 
 use glam::Vec2;
-use walker_math::{DebugInfo, LowerBodyConfig, ResolverState};
+use walker_math::{DebugInfo, GaitAuthority, LegContactInput, LowerBodyConfig, ResolverState};
 
 use crate::actuate::{FootPose, Pose};
 use crate::observe::Fiction;
@@ -166,12 +166,20 @@ pub struct ControlConfig {
     /// Speed magnitude (px/s) below which a move command means "stop".
     pub move_threshold: f32,
     /// Boost: commanded upper-body forward lean, rad (vello frame: `+` leans
-    /// toward `+x`). The boost pose holds both feet at their standing rest
-    /// offsets, exactly like [`StandingCtrl`], so this is a *static* lean: the
-    /// CoM shift (~6 px at 0.25 rad, given the P3-heavy mass budget) stays
-    /// well inside the ~30 px support margin and nothing falls until the gait
-    /// lifts a foot.
+    /// toward `+x`), held against the gathered feet — the CoM (and with it ξ)
+    /// ends the boost cell AHEAD of both plants, so the first handover step
+    /// commits the fall forward.
     pub boost_lean: f32,
+    /// Boost: seconds to slide the FRONT foot (the one ahead of the hip in
+    /// travel) to directly under the hip, then hold. The gather only needs to
+    /// outlast the handover event (see [`boost_handover_due`]). The back foot
+    /// stays planted: support is always BEHIND ξ while walking (see
+    /// [`BoostStartCtrl`]).
+    pub boost_gather_ts: f32,
+    /// Boost→Walking handover lead, seconds: the DCM approximation
+    /// `ξ ≈ com + v_com·τ` (τ ≈ 1/ω₀ at standing height). The launch releases
+    /// when this leads past the frontmost foot — [`boost_handover_due`].
+    pub boost_lead_tau: f32,
 }
 
 impl Default for ControlConfig {
@@ -179,11 +187,17 @@ impl Default for ControlConfig {
         Self {
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
-            // Inside the static margin, but past the gait's own cruise lean
-            // (~0.15 rad at 120 px/s), so WalkingCtrl's attitude PD inherits a
-            // body already committed forward — its first steps place the feet
-            // under (behind) the tilted CoM and the fall starts.
+            // Past the gait's own cruise lean (~0.15 rad at 120 px/s): with
+            // the feet gathered under the hip, ξ = CoM + v/ω₀ ≈ hip + 20 px
+            // ahead of both plants at handover — the first step falls FORWARD.
             boost_lean: 0.25,
+            // Front foot sweeps 39.5 px inward over this window; the handover
+            // event fires partway through it (~0.3 s), so the gather only has
+            // to be fast enough to MEET ξ, never overshoot past it.
+            boost_gather_ts: 0.4,
+            // 1/ω₀ at hip_height ≈ 104 (ω₀ = √(980/104) ≈ 3.07): the DCM's
+            // velocity lead over the CoM.
+            boost_lead_tau: 0.33,
         }
     }
 }
@@ -374,10 +388,17 @@ impl Step for StandingCtrl {
 ///   loop-3's pendulum are fiction the physics cannot replace. Attitude is
 ///   *seeded once* from the fiction lean so the handover from BoostStart is
 ///   continuous, then solver-owned.
-/// - **time-based only** (this build's simplification): `foot_contact` and
-///   `reality_v` are never stamped — both stay `None`, which selects the
-///   solver's `GaitAuthority::Timer` gait clock and open-loop vertical fiction.
-///   Stance/swing are decided by the schedule, not by measured touchdown.
+/// - **event-driven gait** (`GaitAuthority::Full`, no stance stopwatch):
+///   `reality_v` stays `None` (open-loop vertical fiction), but `foot_contact`
+///   is stamped every tick from the RAW one-tick `Fiction.feet[i].touching`
+///   flags — no hysteresis, exactly what [`LegContactInput`] asks for — with
+///   `foot_x` riding the same seed-relative map as the plants. The solver
+///   lifts off only when the DCM crosses the stance toe (never because a
+///   stopwatch expired), and ends a swing only on measured touchdown (bounded
+///   by `max_swing_wait`, whose overrun plants with `hovered_in`). The Timer
+///   build's measured failure — the clock claiming stance while both feet
+///   floated (`plans/vertical-stabilizer.md` §0) — is gone by construction:
+///   a leg cannot leave the ground before its partner is contact-confirmed.
 ///
 /// The output pose is mapped back by hip-relative **offsets**: solver
 /// `(foot − hip)` with `y` negated, re-anchored at the measured hip — the same
@@ -399,7 +420,20 @@ pub struct WalkingCtrl {
 
 impl WalkingCtrl {
     pub fn new(cfg: &LowerBodyConfig) -> Self {
-        let state = ResolverState::new(cfg);
+        let mut state = ResolverState::new(cfg);
+        // Event-driven gait: liftoff on the DCM crossing, landing on measured
+        // touchdown (`step_leg`'s `Full` branch). `step` stamps
+        // `state.foot_contact` every tick; without a stamp (`None`) the solver
+        // behaves like `Timer`.
+        state.gait_authority = GaitAuthority::Full;
+        // The default (0.05) only rides out report latency. Measured: a swing
+        // foot needs up to ~0.2 s of leg dynamics to close the last px to the
+        // floor (base.csv t=2.3-2.5), so give the wait a nominal-swing budget.
+        // A genuinely stuck foot still lands after the cap (hovered_in), and
+        // under the event-only liftoff a wait overrun is SAFE: the stance leg
+        // simply does not lift until the partner is down or its own DCM
+        // crosses — the both-feet-airborne window cannot open.
+        state.max_swing_wait = cfg.swing_duration_ts;
         let seed_hip = state.hip_pos;
         Self {
             state,
@@ -474,6 +508,24 @@ impl Step for WalkingCtrl {
             z_com: (floor_vello_y - fiction.com.y).max(1.0),
         });
 
+        // --- Stamp: per-foot contact truth (the gait's landing event) ---
+        // Measured foot x enters through the same hip-relative seed map as the
+        // plants on the first tick, so `foot_x` re-anchors the stance plant in
+        // the frame the solver actually draws in.
+        let solver_hip_x = self.state.hip_pos.x;
+        let to_solver_foot_x =
+            |foot: &crate::observe::FootState| (foot.pos.x - fiction.hip.x) * facing + solver_hip_x;
+        self.state.foot_contact = Some([
+            LegContactInput {
+                touching: fiction.feet[0].touching,
+                foot_x: Some(to_solver_foot_x(&fiction.feet[0])),
+            },
+            LegContactInput {
+                touching: fiction.feet[1].touching,
+                foot_x: Some(to_solver_foot_x(&fiction.feet[1])),
+            },
+        ]);
+
         // --- One solver tick ---
         self.cfg.target_speed = cmd.speed.abs();
         // Command dir in the solver travel frame (+x = facing direction).
@@ -482,7 +534,8 @@ impl Step for WalkingCtrl {
 
         // --- Map back: measured hip + travel-frame offsets to vello ---
         // The stance gate for the hip-foot strut is the gait FSM's own phase
-        // (time-based this build): a Stance leg holds its pinned plant.
+        // (now event-driven: stance begins on real touchdown, ends on the DCM
+        // crossing): a Stance leg holds its pinned plant.
         let hip = fiction.hip;
         let upper_angle = debug.theta * facing;
         let left_stance = self.state.left.phase == walker_math::GaitPhase::Stance;
@@ -515,40 +568,55 @@ impl Step for WalkingCtrl {
     }
 }
 
-/// The launch (plan §5) — the stand→walk bridge: a **static leaned stance**,
-/// the standing pose with the stick tilted forward.
+/// The launch (plan §5) — the stand→walk bridge: **tilt forward and gather
+/// the feet under the hip.** Two jobs, in parallel, inside the boost cell.
 ///
 /// # Why lean instead of push
 /// The deadbeat DCM cannot bootstrap from a dead stop with an upright body:
 /// ξ ≈ x_CoM sits under the hip, its first steps merely re-place the feet
 /// under the CoM, and nothing falls. The old boost tried to create speed with
-/// a skate push (sliding one foot toward under-hip), but at rest both legs are
-/// fully extended chords — a held foot can only move by *dragging* against
-/// floor friction, and the measured result was a squatting hip and a 0.6 rad
-/// topple at handover that the gait could not catch. So the boost stops
-/// pushing: it holds the exact [`StandingCtrl`] foot targets (both legs stay
-/// in actuate's dead zone, a pose as stable as standing) and commands only a
-/// forward `upper_angle`. The tilt moves the CoM ahead of the foot line by
-/// `boost_lean`·lever, still inside the support margin, so nothing moves yet.
-/// The fall is the gait's own job: at handover [`WalkingCtrl`] seeds its
-/// attitude from the measured lean, and its first steps place the feet near ξ
-/// — *under* the tilted CoM — shrinking the support polygon around it. The
-/// lean converts to forward velocity exactly when the DCM law is ready to
-/// regulate it.
+/// a skate push (sliding one foot toward under-hip), and the boost stopped
+/// pushing entirely once it became a static leaned stance. But the measured
+/// handover (`evt104.csv`) exposed the rest-pose geometry: the v10 blueprint
+/// stands asymmetric (left foot 33 px BEHIND the hip, right foot 39.5 px
+/// AHEAD of it). At handover ξ ≈ hip, so the DCM event lifts the *left*
+/// (behind-ξ) foot — and the remaining support is the right foot, 39.5 px
+/// AHEAD of ξ: a foot ahead of the capture point tips the body BACKWARD. The
+/// first step was committed the wrong way, and the gait fell before it ever
+/// had forward velocity.
+///
+/// # The gather
+/// So the boost cell does two things: it tilts the stick AND slides the
+/// FRONT foot — the one ahead of the hip in travel, right at +39.5 for an
+/// eastward boost — inward to directly under the hip (`boost_gather_ts`
+/// seconds, then holds). The back foot never moves (it is already behind the
+/// hip, zero drag). At handover the lean has put ξ ahead of BOTH plants, and
+/// the gathered front foot is the one ξ crossed most recently — so the DCM
+/// event lifts *it* first, a step-in-place, and the remaining support is the
+/// back foot 33 px BEHIND ξ: the body is planted to fall FORWARD. Gathering
+/// both feet instead would leave ξ near-center on lift, inviting the
+/// backward-tip / negative-velocity window the `evt104` trace showed; with
+/// the back foot held, a foot is always strictly behind ξ while walking.
 ///
 /// Handover is **command-driven**: the pose holds while the command carries
-/// the `boost` flag, so for a script the `boost` cell's duration *is* the lean
-/// window, and a plain `move` cell (or a released keyboard modifier) is what
-/// ends it. The pose is as stable as standing, so there is nothing to time
-/// out: holding boost forever is as safe as standing forever.
+/// the `boost` flag, so for a script the `boost` cell's duration *is* the
+/// gather+lean window (it must exceed `boost_gather_ts`), and a plain `move`
+/// cell (or a released keyboard modifier) ends it.
 #[derive(Debug, Clone, Copy)]
 pub struct BoostStartCtrl {
     pub since: f32,
+    /// Front-foot gather progress 0..1: 0 = rest offset, 1 = directly under
+    /// the hip (x offset 0, rest depth). Ramps over `boost_gather_ts`. The
+    /// back foot holds its rest offset throughout.
+    pub gather: f32,
 }
 
 impl BoostStartCtrl {
     pub fn new() -> Self {
-        Self { since: 0.0 }
+        Self {
+            since: 0.0,
+            gather: 0.0,
+        }
     }
 }
 
@@ -577,28 +645,35 @@ impl Step for BoostStartCtrl {
         } else {
             1.0
         };
-        // Static pose: feet hold the standing rest offsets exactly like
-        // StandingCtrl (no slide, no drag — both legs stay inside actuate's
-        // dead zone), anchored at the measured hip. Only the stick tilts,
-        // toward the commanded travel.
+        // Gather only the FRONT foot (offset pointing along travel) to under
+        // the hip — x offset 0, rest depth, chord 103-106 of a 110 leg, a
+        // slight fold off the full-extension singularity — then hold. The
+        // back foot stays planted at its rest offset; the tilt is unchanged.
+        self.gather = (self.since / cfg.boost_gather_ts.max(1e-3)).clamp(0.0, 1.0);
+        let gather = |off: Vec2| {
+            if off.x * s > 0.0 {
+                Vec2::new(off.x * (1.0 - self.gather), off.y)
+            } else {
+                off
+            }
+        };
         //
         // Both feet are commanded as STANCE (strut active), regardless of the
         // measured touch: the lean puts the CoM past the static margin, and a
         // foot flagged swing rides the idle tether (1e-2 = no authority), so
         // the measured lean crept through a self-reinforcing forward rock
         // (0.25 -> 0.70 rad over 2 s, left foot peeling at ~1.7 s). The active
-        // strut holds the rest chord planted: the boost stays as stable as
-        // standing and the fall-forward begins only at the walking handover.
+        // strut holds the chord planted through the pull-in.
         let hip = fiction.hip;
         ControlOut {
             pose: Pose {
                 hip,
                 left_foot: FootPose {
-                    pos: hip + REST_LEFT_FOOT,
+                    pos: hip + gather(REST_LEFT_FOOT),
                     stance: true,
                 },
                 right_foot: FootPose {
-                    pos: hip + REST_RIGHT_FOOT,
+                    pos: hip + gather(REST_RIGHT_FOOT),
                     stance: true,
                 },
                 facing,
@@ -688,10 +763,16 @@ impl Default for Controller {
 ///               plain move (no boost) goes Standing → Walking directly
 /// ```
 ///
-/// The boost exit is **command-driven**: the launch pose is static (see
-/// [`BoostStartCtrl`]), so the `boost` flag itself is the window — a script's
-/// `boost` cell duration holds the lean, the next `move` cell hands over.
-/// Command end — `None`, or a command whose signed speed is under
+/// The boost exit is **event-driven**: the launch holds while the `boost`
+/// flag is set AND the DCM has not yet reached the gathered front foot
+/// ([`boost_handover_due`]). The handover fires the instant ξ crosses the
+/// frontmost foot — the very condition WalkingCtrl's own first `dcm_crossed`
+/// liftoff waits for — so the gait opens with a step in place. A timer
+/// handover (the old cell-end release) overshoots: the gather sweeps the foot
+/// *past* ξ, storing a gap the first step must spend as a giant leap (measured
+/// v_filt ran to 220 px/s against a 120 command, past the reach envelope).
+/// A plain `move` cell (flag drop) still releases as a fallback when the
+/// event never fires. Command end — `None`, or a signed speed under
 /// [`ControlConfig::move_threshold`] — always returns to Standing from any
 /// mode.
 #[derive(Debug, Clone, Copy)]
@@ -735,11 +816,10 @@ impl LocoState {
             // A plain move enters the gait directly (already up to speed).
             (LocoMode::Standing, Some(_)) => LocoMode::Walking,
             (LocoMode::BoostStart, Some(c)) => {
-                // Command-driven handover: the leaned stance holds while the
-                // boost flag is set (the script cell that launched it owns the
-                // window); the first plain move lifts it to the gait, which
-                // starts the fall-forward by placing feet under the tilted CoM.
-                if c.boost {
+                // Event handover: hold the launch while the boost flag is
+                // set, until the DCM crosses the gathered front foot; the
+                // first plain move releases it even if the event never fires.
+                if c.boost && !boost_handover_due(&c, fiction, cfg) {
                     LocoMode::BoostStart
                 } else {
                     LocoMode::Walking
@@ -754,6 +834,20 @@ impl LocoState {
         }
         self.mode
     }
+}
+
+/// The boost release event: has the DCM `ξ ≈ com + v_com·boost_lead_tau`
+/// (vello x; the boost body is barely moving, so the CoM term dominates) led
+/// past the FRONTMOST foot in travel? Walking's gather sweeps that foot to
+/// meet ξ; at the crossing both feet are behind ξ — the state in which the
+/// walking gait wants to liftoff the front foot *now* — and the launch
+/// converts to the fall.
+fn boost_handover_due(cmd: &Command, fiction: &Fiction, cfg: &ControlConfig) -> bool {
+    // Travel sign: a boost always carries a nonzero vx through the entry gate.
+    let s = cmd.vx().signum();
+    let xi = fiction.com.x + fiction.v_com.x * cfg.boost_lead_tau;
+    // No foot may remain ahead of ξ in the travel direction.
+    fiction.feet.iter().all(|f| (f.pos.x - xi) * s <= 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -945,25 +1039,62 @@ mod tests {
     }
 
     #[test]
-    fn the_boost_never_exits_on_measured_speed() {
-        // The old speed-gate is gone: a body that (spuriously) reads fast
-        // mid-boost must not shorten the leaned stance; only the command's
-        // boost flag decides the handover.
+    fn the_boost_holds_until_the_dcm_passes_the_front_foot() {
+        // Event handover: a foot still AHEAD of ξ = com + v·τ keeps the
+        // launch; the instant the frontmost foot falls behind ξ (the gather
+        // swept it under, or the body raced past it) the gait takes over —
+        // that crossing is exactly WalkingCtrl's first `dcm_crossed` liftoff.
         let cfg = ControlConfig::default();
+        let dt = 1.0 / 90.0;
+        // Rest-like pose: front (right) foot 39.5 AHEAD of the hip/CoM.
+        let holding = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
         let mut st = LocoState::new();
+        st.decide(Some(Command::boost(120.0)), &holding, &cfg, dt);
+        for i in 0..300 {
+            assert_eq!(
+                st.decide(Some(Command::boost(120.0)), &holding, &cfg, dt),
+                LocoMode::BoostStart,
+                "tick {i}: a foot ahead of ξ must keep the launch"
+            );
+        }
+        // The gathered front foot sits under the hip — right with ξ: released.
+        let arrived = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(0.0, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        assert_eq!(
+            st.decide(Some(Command::boost(120.0)), &arrived, &cfg, dt),
+            LocoMode::Walking,
+            "ξ past every foot => the fall converts to the gait"
+        );
+        // A zooming body (ξ = 400·0.33 = 132) releases even with feet at hip:
+        let mut st = LocoState::new();
+        st.decide(Some(Command::boost(120.0)), &holding, &cfg, dt);
         let zooming = fiction(
             Vec2::new(0.0, -140.0),
-            [Vec2::ZERO, Vec2::ZERO],
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
             [true, true],
             0.0,
             Vec2::new(400.0, 0.0),
         );
-        for _ in 0..300 {
-            assert_eq!(
-                st.decide(Some(Command::boost(120.0)), &zooming, &cfg, 1.0 / 90.0),
-                LocoMode::BoostStart
-            );
-        }
+        assert_eq!(
+            st.decide(Some(Command::boost(120.0)), &zooming, &cfg, dt),
+            LocoMode::Walking,
+            "velocity feeds the event through ξ"
+        );
+        // The flag-drop fallback still releases even when the event never
+        // fires (front foot stays ahead of ξ):
+        let m = st.decide(Some(Command::walk(120.0)), &holding, &cfg, dt);
+        assert_eq!(m, LocoMode::Walking, "plain move lifts the flag anyway");
     }
 
     #[test]
@@ -1029,11 +1160,11 @@ mod tests {
     }
 
     #[test]
-    fn boost_holds_the_standing_pose_and_just_the_lean_differs() {
-        // Static launch: identical foot targets to StandingCtrl (both legs in
-        // the dead zone — no slide, no drag), anchored at the measured hip,
-        // with ONLY `upper_angle` commanding the forward lean. Holding it for
-        // the full duration changes nothing but the timer.
+    fn boost_tilts_and_gathers_the_feet_under_the_hip() {
+        // Two jobs in the boost cell: the stick tilts toward travel AND both
+        // feet slide from their rest offsets to directly under the hip over
+        // `boost_gather_ts`, then hold. Feet stay stance:true (strut active)
+        // throughout; a held pose commands no hip velocity.
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
         let f = fiction(
@@ -1047,34 +1178,67 @@ mod tests {
         let out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
         assert_eq!(out.mode, LocoMode::BoostStart);
         assert_eq!(out.pose.hip, f.hip, "frame anchored at measured hip");
-        assert_eq!(
-            out.pose.left_foot.pos,
-            f.hip + REST_LEFT_FOOT,
-            "left foot = standing rest offset"
-        );
-        assert_eq!(
-            out.pose.right_foot.pos,
-            f.hip + REST_RIGHT_FOOT,
-            "right foot = standing rest offset (never slides)"
-        );
         assert_eq!(out.pose.upper_angle, cfg.boost_lean, "the stick tilts");
-        assert_eq!(out.pose.facing, 1.0);
+        assert!(out.pose.left_foot.stance && out.pose.right_foot.stance);
         assert_eq!(out.hip_vel, Vec2::ZERO, "a held pose commands no velocity");
+        // Tick 1 starts from the rest offsets and the FRONT foot (right, +x
+        // travel) creeps inward; one more tick moves it <1 px toward hip x,
+        // depth unchanged. The BACK foot (left) never moves.
+        let o1 = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        let r0 = out.pose.right_foot.pos.x - f.hip.x;
+        let r1 = o1.pose.right_foot.pos.x - f.hip.x;
+        assert!(r0 < 40.0 && r0 > 38.0, "starts near the rest offset: {r0}");
+        assert!(
+            r1 < r0 && r0 - r1 < 1.5,
+            "front foot gathering inward ~1 px/tick: {r0} -> {r1}"
+        );
+        assert_eq!(
+            o1.pose.right_foot.pos.y,
+            f.hip.y + REST_RIGHT_FOOT.y,
+            "depth held at the rest depth"
+        );
+        assert_eq!(
+            o1.pose.left_foot.pos,
+            f.hip + REST_LEFT_FOOT,
+            "back foot never moves"
+        );
 
-        // Held for seconds (the script cell owns the window): the pose never
-        // changes — there is no slide, no timer, no drift.
+        // Hold for the gather window + slack: the FRONT foot (right, +x travel)
+        // converges UNDER the hip (x offset 0, rest depth), the BACK foot stays
+        // at its rest offset, and the pose then never changes.
+        let mut last = out;
         for _ in 0..300 {
+            last = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        assert!(
+            (last.pose.right_foot.pos.x - f.hip.x).abs() < 0.01,
+            "front foot directly under the hip: {:?}",
+            last.pose.right_foot.pos.x
+        );
+        assert_eq!(
+            last.pose.right_foot.pos.y,
+            f.hip.y + REST_RIGHT_FOOT.y,
+            "gathered at the rest depth (chord 103 of 110: a fold, off the singularity)"
+        );
+        assert_eq!(
+            last.pose.left_foot.pos,
+            f.hip + REST_LEFT_FOOT,
+            "back foot never moves"
+        );
+        let settled = last;
+        for _ in 0..60 {
             let o = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
-            assert_eq!(o.pose.left_foot.pos, out.pose.left_foot.pos);
-            assert_eq!(o.pose.right_foot.pos, out.pose.right_foot.pos);
-            assert_eq!(o.pose.upper_angle, out.pose.upper_angle);
+            assert_eq!(o.pose.left_foot.pos, settled.pose.left_foot.pos);
+            assert_eq!(o.pose.right_foot.pos, settled.pose.right_foot.pos);
+            assert_eq!(o.pose.upper_angle, settled.pose.upper_angle);
         }
     }
 
     #[test]
-    fn boost_leans_toward_the_command_travel_sign() {
-        // A -x boost mirrors ONLY the lean (the feet keep the standing rest
-        // offsets for any travel sign — the pose is the v10 stance itself).
+    fn boost_lean_and_gather_toward_the_command_travel_sign() {
+        // A -x boost mirrors the lean AND gathers the other foot: the FRONT
+        // foot (the offset pointing along travel) moves under the hip, the
+        // back foot never does.
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
         let f = fiction(
@@ -1090,18 +1254,21 @@ mod tests {
             speed: 120.0,
             boost: true,
         };
-        let out = c.step(&west, &f, &cfg, dt, 1.0);
-        assert_eq!(
-            out.pose.left_foot.pos,
-            f.hip + REST_LEFT_FOOT,
-            "left foot is the rest offset for any travel sign"
+        let mut out = c.step(&west, &f, &cfg, dt, 1.0);
+        assert_eq!(out.pose.upper_angle, -cfg.boost_lean, "lean mirrors travel");
+        for _ in 0..300 {
+            out = c.step(&west, &f, &cfg, dt, 1.0);
+        }
+        assert!(
+            (out.pose.left_foot.pos.x - f.hip.x).abs() < 0.01,
+            "westward: the left foot is the front foot, it gathers: {:?}",
+            out.pose.left_foot.pos.x
         );
         assert_eq!(
             out.pose.right_foot.pos,
             f.hip + REST_RIGHT_FOOT,
-            "right foot is the rest offset for any travel sign"
+            "the back foot (right) never moves"
         );
-        assert_eq!(out.pose.upper_angle, -cfg.boost_lean, "lean mirrors travel");
     }
 
     // --- WalkingCtrl: the walker_math seam ---
@@ -1164,20 +1331,31 @@ mod tests {
 
     #[test]
     fn walking_opens_the_gait_once_the_fiction_passes_the_trigger() {
-        // Time-based schedule: with a steady command the fiction ramps
-        // `v_ref`, the trigger fires, and a leg lifts. Direction is not
-        // assumed: from rest the deadbeat law plants BEHIND the CoM to speed
-        // up, so the check is "a foot left its seed plant", not "reached
-        // ahead". Every pose stays finite and within leg reach.
+        // Event-driven schedule: a swing opens when the DCM ξ = CoM + v/ω₀
+        // reaches the stance toe — never because a stopwatch expired. So the
+        // fixture simulates a TRACKING body: each tick the fiction hip
+        // advances with the solver's own emitted velocity, letting v (and ξ's
+        // lead over the plants) build until each plant is crossed in turn.
+        // Direction is not assumed: from rest the deadbeat law plants behind
+        // the CoM to speed up, so the check is "a foot left its seed plant".
         let low = LowerBodyConfig::default();
         let cfg = ControlConfig::default();
         let mut c = WalkingCtrl::new(&low);
-        let f = standing_fiction(0.0, Vec2::ZERO);
         let leg = low.thigh_len + low.calf_len;
+        let dt = 1.0 / 90.0;
+        let mut hip = Vec2::new(0.0, -140.0);
+        let mut v = Vec2::ZERO;
         let mut saw_swing = false;
         let mut moved = 0.0f32;
         for _ in 0..90 {
-            let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
+            let f = fiction(
+                hip,
+                [hip + Vec2::new(-33.0, 106.0), hip + Vec2::new(39.5, 103.0)],
+                [true, true],
+                0.0,
+                v,
+            );
+            let out = c.step(&Command::walk(120.0), &f, &cfg, dt, 1.0);
             let l = out.pose.left_foot.pos - f.hip;
             let r = out.pose.right_foot.pos - f.hip;
             assert!(l.is_finite() && r.is_finite());
@@ -1190,8 +1368,11 @@ mod tests {
             }
             // Displacement from the seeded plants (±30 at hip_height 90).
             moved = moved.max((l.x + 30.0).abs()).max((r.x - 30.0).abs());
+            // Perfect-tracking plant: the body follows the solver's fiction.
+            v = out.hip_vel;
+            hip.x += v.x * dt;
         }
-        assert!(saw_swing, "the gait clock opened a swing within 1 s");
+        assert!(saw_swing, "a rolling body crossed its toe and swung");
         assert!(
             moved > 10.0,
             "a plant moved under the placement law: {moved}"

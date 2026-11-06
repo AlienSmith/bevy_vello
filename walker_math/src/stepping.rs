@@ -191,7 +191,14 @@ pub(crate) fn step_leg(
             // `wants_step` (move intent) is required so the settle motion
             // never triggers a phantom step with no input held.
             let dir_sign = if v_desired > 0.0 { 1.0 } else { -1.0 };
-            let dcm_crossed = if plan.mpc_trigger {
+            // Under `Full` the DCM event is always live (no `MPC_TRIGGER` env
+            // needed): the stance stopwatch is REPLACED by this crossing, so a
+            // step starts when the body actually falls over the foot, never
+            // because a clock felt like it. `margin` keeps the deadbeat
+            // stability lead (lift one swing early so the flight lands AHEAD
+            // of where ξ is going; without it a perfect deadbeat touchdown
+            // puts ξ on the plant and the gait locks).
+            let dcm_crossed = if plan.mpc_trigger || authority == GaitAuthority::Full {
                 match (plan.xi, plan.measured) {
                     (Some(xi), Some(m)) if v_desired.abs() > SWING_TRIGGER_SPEED => {
                         let margin = m.v_com * config.swing_duration_ts;
@@ -213,8 +220,17 @@ pub(crate) fn step_leg(
                 }
                 None => false,
             };
-            let stance_over =
-                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed;
+            // `Full`: event-only liftoff — the stopwatch is gone, so the timer
+            // may NOT fire a step the physics does not need (the measured
+            // both-feet-airborne window: a clocked step lifted the stance leg
+            // while the swing foot still hovered). The timer keeps counting
+            // (telemetry, `phase_timer` reset on landing) but gates nothing.
+            // Non-`Full` arms keep the timer verbatim: bit-identical A/B.
+            let stance_over = if authority == GaitAuthority::Full {
+                lost_contact_early || dcm_crossed || com_crossed
+            } else {
+                leg.phase_timer <= 0.0 || lost_contact_early || dcm_crossed || com_crossed
+            };
             // Boot FSM: the gait door. `boot_locked` vetoes every liftoff path
             // (trigger AND timer) — the character physically cannot walk while
             // Stand/Lunge is active, so the scripted lunge without the switch
