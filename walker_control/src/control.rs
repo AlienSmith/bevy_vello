@@ -180,6 +180,26 @@ pub struct ControlConfig {
     /// `ξ ≈ com + v_com·τ` (τ ≈ 1/ω₀ at standing height). The launch releases
     /// when this leads past the frontmost foot — [`boost_handover_due`].
     pub boost_lead_tau: f32,
+    /// Attitude-loop closure: position gain on the MEASURED lean error
+    /// (radians → radians). `0.0` keeps `upper_angle` a pure echo of the
+    /// solver's model lean — the open loop whose damper (`−kd·ω`) sees fiction
+    /// ω≈0 while the gait kicks the real torso, so the wobble grows until the
+    /// body falls. Nonzero routes the command through
+    /// [`walker_math::attitude_lean_pd`]: model lean = bias, correction PD on
+    /// the measured lean/rate. This keeps the model's integral memory;
+    /// hard-stamping θ/ω from reality instead is a gain-1 echo (zero restoring
+    /// force) and collapsed FASTER (sync120: clamp by t=2.5, down by t=3).
+    /// Gains are angle→angle, so they are ~450x smaller than the model's 45/11
+    /// acceleration-domain pair. Sweep on walk_in_120 (10s track, same rig):
+    /// (0,0) fell at ~9.5s with v_filt runaway 163→209; (0.4,0.2) fell at 5.5s
+    /// — hard position feedback destabilizes; (0,0.15) damped wobble but still
+    /// ran away to 202 and fell at 11.1s; (0.2,0.3) fell at 4.9s. The baked
+    /// (0.1,0.15): v_filt steady ~150 through t=3–11, lean sd 0.02 (10x the
+    /// baseline), survived the whole walk cell.
+    pub att_closure_kp: f32,
+    /// Attitude-loop closure: rate gain on the MEASURED lean rate (rad/s →
+    /// radians). Damps the real wobble the fiction damper cannot see.
+    pub att_closure_kd: f32,
 }
 
 impl Default for ControlConfig {
@@ -201,6 +221,10 @@ impl Default for ControlConfig {
             // 1/ω₀ at hip_height ≈ 104 (ω₀ = √(980/104) ≈ 3.07): the DCM's
             // velocity lead over the CoM.
             boost_lead_tau: 0.33,
+            // Validated on the 10s track (see the field docs): full-walk
+            // survival + 10x wobble damping vs the open loop.
+            att_closure_kp: 0.1,
+            att_closure_kd: 0.15,
         }
     }
 }
@@ -424,6 +448,15 @@ pub struct WalkingCtrl {
 impl WalkingCtrl {
     pub fn new(cfg: &LowerBodyConfig) -> Self {
         let mut state = ResolverState::new(cfg);
+        // Close the VELOCITY loop: the deadbeat's anchor ξ already uses the
+        // measured CoM speed, but its brake-lead term `v_law` defaults to the
+        // fiction integrator (`approach(v_prev, v_des)`) that never leaves the
+        // command setpoint — measured: fiction pinned at 120 while reality ran
+        // to 181, so the brake saw "no correction needed." `plan_meas_v` routes
+        // the filtered measured `v_com` into `v_law` (and the stop path), so an
+        // overspeeding body is braked against its TRUE speed.
+        let mut cfg = cfg.clone();
+        cfg.plan_meas_v = true;
         // Event-driven gait: liftoff on the DCM crossing, landing on measured
         // touchdown (`step_leg`'s `Full` branch). `step` stamps
         // `state.foot_contact` every tick; without a stamp (`None`) the solver
@@ -440,7 +473,7 @@ impl WalkingCtrl {
         let seed_hip = state.hip_pos;
         Self {
             state,
-            cfg: cfg.clone(),
+            cfg,
             anchor: None,
             seed_hip,
         }
@@ -452,7 +485,7 @@ impl Step for WalkingCtrl {
         &mut self,
         cmd: &Command,
         fiction: &Fiction,
-        _cfg: &ControlConfig,
+        cfg: &ControlConfig,
         dt: f32,
         facing: f32,
     ) -> ControlOut {
@@ -540,7 +573,26 @@ impl Step for WalkingCtrl {
         // (now event-driven: stance begins on real touchdown, ends on the DCM
         // crossing): a Stance leg holds its pinned plant.
         let hip = fiction.hip;
-        let upper_angle = debug.theta * facing;
+        // --- Attitude loop: close loop 3 against reality, or stay open ---
+        // Travel frame like the first-tick seed: measured lean/rate × facing.
+        // `attitude_lean_pd` commands `bias + kp·(bias−θ_meas) − kd·ω_meas`:
+        // the model lean rides along as the bias (its integral memory stays
+        // intact — no echo), and the PD term tilts the legs' reference axis
+        // BACK against a measured forward lean. With zero gains this is
+        // exactly the old `debug.theta * facing`.
+        let lean = if cfg.att_closure_kp != 0.0 || cfg.att_closure_kd != 0.0 {
+            walker_math::attitude_lean_pd(
+                fiction.lean * facing,
+                fiction.lean_rate * facing,
+                debug.theta,
+                cfg.att_closure_kp,
+                cfg.att_closure_kd,
+                self.cfg.theta_max,
+            )
+        } else {
+            debug.theta
+        };
+        let upper_angle = lean * facing;
         let left_stance = self.state.left.phase == walker_math::GaitPhase::Stance;
         let right_stance = self.state.right.phase == walker_math::GaitPhase::Stance;
         let to_vello = |off: Vec2| Vec2::new(off.x * facing, -off.y);
@@ -1329,6 +1381,65 @@ mod tests {
             c.state.hip_vel.x > 50.0,
             "the seeded velocity survives the first tick: {}",
             c.state.hip_vel.x
+        );
+    }
+
+    #[test]
+    fn the_attitude_closure_is_inert_at_zero_gains() {
+        // Zero gains must reproduce the old open-loop mapping exactly:
+        // `upper_angle = debug.theta * facing`, bit for bit.
+        let low = LowerBodyConfig::default();
+        let mut cfg = ControlConfig::default();
+        cfg.att_closure_kp = 0.0;
+        cfg.att_closure_kd = 0.0;
+        let mut c = WalkingCtrl::new(&low);
+        let f = standing_fiction(0.0, Vec2::new(90.0, 0.0));
+        let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
+        assert_eq!(
+            out.pose.upper_angle,
+            out.debug.unwrap().theta,
+            "zero gains echo the model lean exactly"
+        );
+    }
+
+    #[test]
+    fn the_attitude_closure_leans_the_command_back_from_a_measured_forward_lean() {
+        // The body is MEASURABLY at 0.5 rad forward lean while the model (no
+        // per-tick stamp) converges toward its own, smaller θ. The closure must
+        // command LESS lean than the model — negative feedback, not the gain-1
+        // echo that collapsed sync120. Identical streams keep `debug.theta`
+        // equal across both controllers: the closure only maps the output, it
+        // never perturbs the solver state.
+        let low = LowerBodyConfig::default();
+        let dt = 1.0 / 90.0;
+        let mut open = ControlConfig::default();
+        open.att_closure_kp = 0.0;
+        open.att_closure_kd = 0.0;
+        let mut closed = ControlConfig::default();
+        closed.att_closure_kp = 0.4;
+        closed.att_closure_kd = 0.0;
+        let f = Fiction {
+            lean: 0.5,
+            ..standing_fiction(0.0, Vec2::new(90.0, 0.0))
+        };
+        let mut co = WalkingCtrl::new(&low);
+        let mut cc = WalkingCtrl::new(&low);
+        let mut last_open = 0.0f32;
+        let mut last_closed = 0.0f32;
+        for _ in 0..30 {
+            let ao = co.step(&Command::walk(120.0), &f, &open, dt, 1.0);
+            let ac = cc.step(&Command::walk(120.0), &f, &closed, dt, 1.0);
+            assert_eq!(
+                ao.debug.unwrap().theta,
+                ac.debug.unwrap().theta,
+                "the closure must not perturb the solver state"
+            );
+            last_open = ao.pose.upper_angle;
+            last_closed = ac.pose.upper_angle;
+        }
+        assert!(
+            last_closed < last_open - 0.05,
+            "correction backs the command off the measured lean: open={last_open:.3}, closed={last_closed:.3}"
         );
     }
 

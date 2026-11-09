@@ -180,6 +180,12 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("BOOST_GATHER_TS") {
         cfg.boost_gather_ts = v;
     }
+    if let Some(v) = env_f32("ATT_KP") {
+        cfg.att_closure_kp = v;
+    }
+    if let Some(v) = env_f32("ATT_KD") {
+        cfg.att_closure_kd = v;
+    }
 }
 
 /// Tune the actuator stiffness from env so a sweep can test whether a
