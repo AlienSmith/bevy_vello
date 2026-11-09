@@ -34,9 +34,10 @@
 //! | `v_des` | `pin.state.v_ref` | `Command::vx()` |
 //! | `vphase` | `pin.state.vs.phase` | **0** — no vertical phase in the new control module |
 //! | `gait_l`,`gait_r` | resolver leg phase | `ControlOut.pose.*_foot.stance` (0 = stance, 1 = swing) |
-//! | `body_theta`,`body_omega`,`meas_theta` | pin attitude state | `Observer::raw.lean` / `raw.lean_rate` (pre-filter) |
-//! | `att_torque`,`hip_accel_x` | pin latched loop-3 internals | **0** — loop 3 is applied by actuate, not a torque |
-//! | `att_enabled` | `HipPinParams.attitude_enabled` | **0** — no on/off fork (Law 4) |
+//! | `body_theta`,`body_omega` | pin **designed** attitude state | `DebugInfo.theta/omega` × facing (the loop-3 model, vellos frame); `0` outside `WalkingCtrl` |
+//! | `meas_theta` | measured lean | `Observer::raw.lean` (pre-filter, vello frame) — `body_theta − meas_theta` is the tracking error |
+//! | `att_torque`,`hip_accel_x` | pin latched loop-3 internals | `DebugInfo.attitude_torque` (loop-3 input `u`, rad/s²) / `.hip_accel_x` (finite-differenced, px/s²); `0` when the gait is inactive |
+//! | `att_enabled` | `HipPinParams.attitude_enabled` | `1` while `ControlOut.debug` is `Some` (WalkingCtrl owns loop 3), else `0` — the loop is *always* on in a stride, so this reports "a gait tick ran" |
 //! | `ext_pin` | `pin.last_external_pin` | `false` — the pin is gone (Law 1) |
 //! | `att_target` | `pin.last_att_target` | `ControlOut.pose.upper_angle` |
 //! | `att_rest_cos`,`att_rest_sin` | emitted rest basis | **1.0 / 0.0** — no rest basis is emitted; the rest is upright |
@@ -268,6 +269,20 @@ pub struct TickRecord {
     /// Commanded foot positions.
     pub feet: [Vec2; 2],
 
+    // ---- written by `control_stage` from `ControlOut.debug` (loop-3 truth) ----
+    /// Designed attitude θ (the resolver's model state), mirrored into the vello
+    /// frame with `facing` so it lines up with `meas_theta`. `0` outside the gait.
+    pub designed_theta: f32,
+    /// Designed attitude rate (rad/s), same frame as [`Self::designed_theta`].
+    pub designed_omega: f32,
+    /// Loop-3 control input `u` (an angular acceleration), rad/s².
+    pub att_torque: f32,
+    /// Finite-differenced designed hip horizontal acceleration, px/s² — the
+    /// inertial tilt source the attitude PD fights.
+    pub hip_accel: f32,
+    /// `true` when this tick's control produced loop-3 debug (`WalkingCtrl`).
+    pub att_active: bool,
+
     // ---- written by `actuate_stage` (knees) ----
     /// IK knee targets; `None` when the bones were degenerate.
     pub knees: [Option<Vec2>; 2],
@@ -310,6 +325,11 @@ impl Default for TickRecord {
             hip: Vec2::ZERO,
             hip_vel: Vec2::ZERO,
             feet: [Vec2::ZERO; 2],
+            designed_theta: 0.0,
+            designed_omega: 0.0,
+            att_torque: 0.0,
+            hip_accel: 0.0,
+            att_active: false,
             knees: [None; 2],
             harness: HarnessSlice::default(),
             clock: 0.0,
@@ -351,6 +371,26 @@ impl TickRecord {
         self.hip = out.pose.hip;
         self.hip_vel = out.hip_vel;
         self.feet = [out.pose.left_foot.pos, out.pose.right_foot.pos];
+        // Loop-3 truth (only `WalkingCtrl` fills `debug`; the rest of the modes
+        // report zeros with `att_active = false`). Mirror θ/ω by facing into the
+        // vello frame so `body_theta − meas_theta` is a clean tracking error.
+        let facing = out.pose.facing;
+        match out.debug {
+            Some(d) => {
+                self.designed_theta = d.theta * facing;
+                self.designed_omega = d.omega * facing;
+                self.att_torque = d.attitude_torque;
+                self.hip_accel = d.hip_accel_x;
+                self.att_active = true;
+            }
+            None => {
+                self.designed_theta = 0.0;
+                self.designed_omega = 0.0;
+                self.att_torque = 0.0;
+                self.hip_accel = 0.0;
+                self.att_active = false;
+            }
+        }
     }
 
     /// Record the IK knee targets. Called by `actuate_stage`, which computes
@@ -384,6 +424,11 @@ impl TickRecord {
         self.hip = Vec2::ZERO;
         self.hip_vel = Vec2::ZERO;
         self.feet = [Vec2::ZERO; 2];
+        self.designed_theta = 0.0;
+        self.designed_omega = 0.0;
+        self.att_torque = 0.0;
+        self.hip_accel = 0.0;
+        self.att_active = false;
         self.knees = [None; 2];
     }
 
@@ -455,11 +500,14 @@ impl TickRecord {
         push("gait_r", gait_code(self.stance[1]));
 
         // ---- Loop 3 / attitude block ----
-        push("body_theta", format!("{:.4}", self.body_theta));
-        push("body_omega", format!("{:.4}", self.body_omega));
-        push("att_torque", "0.00".to_string()); // applied by actuate, not a torque
-        push("hip_accel_x", "0.00".to_string()); // not modelled
-        push("att_enabled", "0".to_string()); // no on/off fork (Law 4)
+        // `body_theta`/`body_omega` are the DESIGNED model state (control block);
+        // `meas_theta` is the MEASURED lean (reality block). They differ by the
+        // joint's compliance lag — the rigidity signal we could not see before.
+        push("body_theta", format!("{:.4}", self.designed_theta));
+        push("body_omega", format!("{:.4}", self.designed_omega));
+        push("att_torque", format!("{:.2}", self.att_torque)); // loop-3 input u, rad/s²
+        push("hip_accel_x", format!("{:.2}", self.hip_accel)); // designed hip accel
+        push("att_enabled", format!("{}", self.att_active as u8)); // gait tick ran
         push("ext_pin", "false".to_string()); // the pin is gone (Law 1)
         push("att_target", format!("{:.4}", self.att_target));
         push("att_rest_cos", "1.00000".to_string()); // fixed upright rest
@@ -656,6 +704,27 @@ mod tests {
     }
 
     #[test]
+    fn designed_and_measured_attitude_are_distinct_columns() {
+        // The refactor's diagnostic fix: `body_theta` (designed, control block)
+        // and `meas_theta` (measured, reality block) are no longer the same
+        // number. Their gap is the joint's compliance lag — the rigidity signal.
+        let mut rec = TickRecord::default();
+        rec.designed_theta = 0.05; // loop-3 model state, vello frame
+        rec.designed_omega = -0.2;
+        rec.att_torque = 2.5;
+        rec.hip_accel = -180.0;
+        rec.att_active = true;
+        rec.body_theta = 0.20; // MEASURED lean (reality block)
+        let rows = rec.format(1.0 / 90.0);
+        assert_eq!(value(&rows, "body_theta"), "0.0500", "designed (control)");
+        assert_eq!(value(&rows, "meas_theta"), "0.2000", "measured (reality)");
+        assert_eq!(value(&rows, "body_omega"), "-0.2000");
+        assert_eq!(value(&rows, "att_torque"), "2.50");
+        assert_eq!(value(&rows, "hip_accel_x"), "-180.00");
+        assert_eq!(value(&rows, "att_enabled"), "1", "a gait tick ran");
+    }
+
+    #[test]
     fn write_reality_records_the_observer_product() {
         let mut observer = Observer::new();
         let f = fiction(0.25, 88.0, true, [true, false]);
@@ -669,8 +738,18 @@ mod tests {
         rec.write_reality(&observer);
         let rows = rec.format(1.0 / 90.0);
         assert_eq!(value(&rows, "v_filt"), "88.00");
-        assert_eq!(value(&rows, "body_theta"), "0.2500");
-        assert_eq!(value(&rows, "meas_theta"), "0.2500");
+        // The reality block owns only the MEASURED lean; the designed column is
+        // a control-block field, so it stays 0 until `write_control` runs.
+        assert_eq!(
+            value(&rows, "meas_theta"),
+            "0.2500",
+            "measured lean (reality)"
+        );
+        assert_eq!(
+            value(&rows, "body_theta"),
+            "0.0000",
+            "designed lean (control) unset"
+        );
         assert_eq!(value(&rows, "grounded"), "1");
     }
 
