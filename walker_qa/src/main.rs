@@ -39,7 +39,7 @@ use walker_control::{
         AttachWalker, ScriptResource, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer,
     },
     script::ScriptTrack,
-    walker::WalkerConfig,
+    walker::{Walker, WalkerConfig},
 };
 
 /// Character asset ids (must match `CharacterRoot` and the blueprint controller
@@ -147,6 +147,7 @@ fn main() {
                 keyboard_intent,
                 flush_telemetry,
                 script_exit,
+                camera_follow,
             ),
         )
         .add_systems(OnEnter(WalkerState::Game), spawn_character)
@@ -250,7 +251,30 @@ fn install_script(mut commands: Commands, mut slot: ResMut<ScriptSlot>) {
 }
 
 fn setup_scene(mut commands: Commands) {
-    commands.spawn(Camera2d::default());
+    commands.spawn((
+        Camera2d::default(),
+        CamFollow {
+            pos: Vec2::ZERO,
+            vel: Vec2::ZERO,
+            live: false,
+        },
+    ));
+
+    // Static floor: a 40 px-thick rect whose TOP surface sits on the live foot
+    // line. Collider transforms are Bevy y-up, so "below the feet" (physics
+    // y-down, larger y) = more negative Bevy y; the center is one
+    // half-thickness below the surface (same convention as the headless harness).
+    let floor_y = -(FOOT_SURFACE_Y + FLOOR_HALF_THICKNESS);
+    let rect = Rect::new(
+        -FLOOR_HALF_LEN,
+        -(FLOOR_HALF_THICKNESS as f64),
+        FLOOR_HALF_LEN,
+        FLOOR_HALF_THICKNESS as f64,
+    );
+    let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
+    let transform = Transform::from_xyz(0.0, floor_y, 0.0);
+
+    // White backdrop at identity (covers the whole viewport).
     let mut bg = VelloScene::default();
     bg.fill(
         peniko::Fill::NonZero,
@@ -264,20 +288,26 @@ fn setup_scene(mut commands: Commands) {
         ..default()
     });
 
-    // Static floor: a 40 px-thick rect whose TOP surface sits on the live foot
-    // line. Collider transforms are Bevy y-up, so "below the feet" (physics
-    // y-down, larger y) = more negative Bevy y; the center is one
-    // half-thickness below the surface (same convention as the headless harness).
-    let rect = Rect::new(
-        -FLOOR_HALF_LEN,
-        -(FLOOR_HALF_THICKNESS as f64),
-        FLOOR_HALF_LEN,
-        FLOOR_HALF_THICKNESS as f64,
+    // The collider alone is invisible: `visualize_colliders` repaints the
+    // `VelloScene` of entities that carry BOTH a scene and a collider, and a
+    // scene-less collider entity is never drawn. The tuning app's static shapes
+    // co-spawn a scene authored in the collider's LOCAL frame (the same `rect`);
+    // do the same here so the engine paints this slab (red debug brush) every
+    // frame, and author one identical fill so frame 0 shows it too.
+    let mut floor_scene = VelloScene::default();
+    floor_scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::rgb(0.6, 0.6, 0.6),
+        None,
+        &rect,
     );
-    let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
-    let floor_y = -(FOOT_SURFACE_Y + FLOOR_HALF_THICKNESS);
-    let transform = Transform::from_xyz(0.0, floor_y, 0.0);
     commands.spawn((
+        VelloSceneBundle {
+            scene: floor_scene,
+            transform,
+            ..default()
+        },
         VelloCollider::new(
             &shape,
             None,
@@ -293,8 +323,6 @@ fn setup_scene(mut commands: Commands) {
             transform,
             VELLO_COLLISION_COOL_DOWN_TIME,
         ),
-        transform,
-        GlobalTransform::from(transform),
     ));
     info!("floor: surface y={FOOT_SURFACE_Y:.0}, center y={floor_y:.0}");
 }
@@ -523,5 +551,50 @@ fn keyboard_intent(keys: Res<ButtonInput<KeyCode>>, mut intents: Query<&mut Walk
             0.0
         };
         intent.boost = boost && dir.length() > 0.0;
+    }
+}
+
+/// Spring-follow camera state: position + velocity in Bevy world coords
+/// (y-up; the walker's measured hip lives in physics y-down, negated here).
+#[derive(Component)]
+struct CamFollow {
+    pos: Vec2,
+    vel: Vec2,
+    live: bool,
+}
+
+/// Keep the walker on screen: critically damped spring toward the measured
+/// hip (`fiction().hip`, the same observation the controller reads). `live`
+/// snaps the camera to the target on the first frame a Walker exists (the
+/// spawn pose), then springs: `a = k·(target−pos) − 2√k·vel` settles in
+/// ~0.3 s without overshoot, so a boost start pans smoothly instead of
+/// racing the character off the window edge.
+fn camera_follow(
+    mut cam_q: Query<(&mut CamFollow, &mut Transform)>,
+    walkers: Query<&Walker>,
+    time: Res<Time>,
+) {
+    let Some(walker) = walkers.iter().next() else {
+        return;
+    };
+    // Physics y-down → Bevy y-up (what the render pass shows for the particle).
+    let hip = walker.fiction().hip;
+    let target = Vec2::new(hip.x, -hip.y);
+    let dt = time.delta_secs().min(1.0 / 30.0);
+    for (mut cam, mut transform) in cam_q.iter_mut() {
+        if !cam.live {
+            cam.pos = target;
+            cam.vel = Vec2::ZERO;
+            cam.live = true;
+        } else {
+            let k = 12.0f32; // spring stiffness (1/s²); damping = critical
+            let (p0, v0) = (cam.pos, cam.vel);
+            let accel = (target - p0) * k - v0 * (2.0 * k.sqrt());
+            let v1 = v0 + accel * dt;
+            cam.pos = p0 + v1 * dt;
+            cam.vel = v1;
+        }
+        transform.translation.x = cam.pos.x;
+        transform.translation.y = cam.pos.y;
     }
 }
