@@ -188,6 +188,18 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     }
 }
 
+/// Tune the gait cadence from env so a sweep can test whether a slower-moving
+/// foot target (longer stance/swing) lets the leg catch up to its command.
+/// Unknown keys ignored.
+fn apply_lower_env(cfg: &mut walker_math::LowerBodyConfig) {
+    if let Some(v) = env_f32("STANCE_TS") {
+        cfg.stance_duration_ts = v;
+    }
+    if let Some(v) = env_f32("SWING_TS") {
+        cfg.swing_duration_ts = v;
+    }
+}
+
 /// Tune the actuator stiffness from env so a sweep can test whether a
 /// commanded foot tracks (vs. the leg simply folding). Unknown keys ignored.
 fn apply_actuator_env(cfg: &mut walker_control::actuate::ActuatorConfig) {
@@ -202,6 +214,9 @@ fn apply_actuator_env(cfg: &mut walker_control::actuate::ActuatorConfig) {
     }
     if let Some(v) = env_f32("STRUT_ACTIVE") {
         cfg.strut_active = v;
+    }
+    if let Some(v) = env_f32("STRUT_IDLE") {
+        cfg.strut_idle = v;
     }
 }
 
@@ -485,6 +500,7 @@ fn attach_walker(
         // controller's floor line is anchored from `hip_height`, so this must
         // match the rig or the commanded feet float above the ground.
         config.lower.hip_height = 104.0;
+        apply_lower_env(&mut config.lower);
         commands.trigger_targets(
             AttachWalker {
                 config,

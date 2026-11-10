@@ -217,6 +217,11 @@ pub fn actuate_stage(
         crate::actuate::ik_knee_target(&out.pose, out.pose.left_foot, &l),
         crate::actuate::ik_knee_target(&out.pose, out.pose.right_foot, &r),
     ]);
+    // Measured knees from the same live snapshot: `P40`/`P41` in the CSV.
+    // With both the IK target (`tP40`) and the real knee in one row, the
+    // analysis can separate "the command was wrong" from "physics did not
+    // follow the command".
+    w.telemetry.write_live_knees([l.knee, r.knee]);
     drive_legs(
         character,
         left,

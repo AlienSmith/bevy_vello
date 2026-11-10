@@ -250,6 +250,9 @@ pub struct TickRecord {
     pub real_feet: [Vec2; 2],
     /// Measured foot velocities `[left, right]`, unfiltered.
     pub real_feet_vel: [Vec2; 2],
+    /// Measured knee positions `[left (P40), right (P41)]`, live from the
+    /// particles at the actuate tick. Written by [`Self::write_live_knees`].
+    pub real_knees: [Vec2; 2],
 
     // ---- written by `control_stage` (command block) ----
     /// Commanded hip velocity x (the frozen `cmd_vx` / `tP3vx` signal).
@@ -317,6 +320,7 @@ impl Default for TickRecord {
             real_hip_vel: Vec2::ZERO,
             real_feet: [Vec2::ZERO; 2],
             real_feet_vel: [Vec2::ZERO; 2],
+            real_knees: [Vec2::ZERO; 2],
             cmd_vx: 0.0,
             v_des: 0.0,
             stance: [true; 2],
@@ -400,6 +404,13 @@ impl TickRecord {
         self.knees = knees;
     }
 
+    /// Record the MEASURED knee positions from the live particles. Called by
+    /// `actuate_stage` alongside [`Self::write_knees`] so the commanded and the
+    /// actual knees export from the same tick's leg snapshot.
+    pub fn write_live_knees(&mut self, knees: [Vec2; 2]) {
+        self.real_knees = knees;
+    }
+
     /// Clear the tick-scoped blocks so a stalled stage cannot report last tick's
     /// values. The harness slice and the FD history survive by design (the
     /// harness owns its lifetime; the history is the derivative's memory).
@@ -411,6 +422,7 @@ impl TickRecord {
         self.real_hip_vel = Vec2::ZERO;
         self.real_feet = [Vec2::ZERO; 2];
         self.real_feet_vel = [Vec2::ZERO; 2];
+        self.real_knees = [Vec2::ZERO; 2];
         self.v_filt = 0.0;
         self.body_theta = 0.0;
         self.body_omega = 0.0;
@@ -536,6 +548,8 @@ impl TickRecord {
         for name in REALITY_PARTICLES {
             let (pos, vel) = match name {
                 "P3" => (self.real_hip, self.real_hip_vel),
+                "P40" => (self.real_knees[0], Vec2::ZERO),
+                "P41" => (self.real_knees[1], Vec2::ZERO),
                 "PLLL" => (self.real_feet[0], self.real_feet_vel[0]),
                 "PRLL" => (self.real_feet[1], self.real_feet_vel[1]),
                 _ => (Vec2::ZERO, Vec2::ZERO),

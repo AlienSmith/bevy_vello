@@ -520,16 +520,39 @@ pub fn step_lower_body(
     // period-2 cruise sawtooth, `plans/hip-foot-strut.md` §3e/§3f).
     if config.td_solve && !airborne && v_desired_scalar != 0.0 && config.hip_v_mix < 0.0 {
         if let Some(delta) = left_td.or(right_td) {
-            v_support = compute_support_velocity(
-                delta,
-                config.kv,
-                config.stance_duration_ts,
-                v_desired_scalar,
-            );
-            let v_sup_eff = apply_support_floor(v_support, v_desired_scalar, config.td_solve_floor);
-            let beta = config.beta.clamp(0.0, 1.0);
-            v = (v + beta * (v_sup_eff - v)).clamp(-v_ceil, v_ceil);
-            state.hip_vel.x = v;
+            // Saturating-brake guard (`plans/walk-improvement-plan.md` §7): the
+            // Raibert inversion cannot represent brake intent. When the deadbeat
+            // plan is clamp-saturated (plant offset at `±x_max`) while the
+            // command asks for a SLOWER speed than the fiction carries, the foot
+            // was planted "as far ahead as the leg can reach to brake" — but the
+            // inversion reads the clamped offset as a cruise offset and rewrites
+            // the fiction UP to `(x_max + kv·v_des)/(Ts/2 + kv)` (measured:
+            // cmd_vx 243 at v_des = 120, Ts = 0.13; 145 at Ts = 0.28). That
+            // ratchet cancels every tick of `approach()` braking — the gait
+            // accelerates on command but can never slow down. Skip the rewrite
+            // in that regime: the placement is already the maximum available
+            // brake, and velocity error belongs to the command integrator.
+            // The fiction is blind to a coasting body (it sits at the command
+            // while reality runs past), so the over-speed test reads the
+            // measured EMA when it exceeds the fiction — same signal law as
+            // `brake_step`/`v_brake`.
+            let v_cap = v.abs().max(state.v_meas_filt.unwrap_or(0.0).abs());
+            let saturated_brake = delta.abs() >= x_max - 0.5
+                && v_desired_scalar * v_cap >= 0.0
+                && v_cap > v_desired_scalar.abs() + SWING_TRIGGER_SPEED;
+            if !saturated_brake {
+                v_support = compute_support_velocity(
+                    delta,
+                    config.kv,
+                    config.stance_duration_ts,
+                    v_desired_scalar,
+                );
+                let v_sup_eff =
+                    apply_support_floor(v_support, v_desired_scalar, config.td_solve_floor);
+                let beta = config.beta.clamp(0.0, 1.0);
+                v = (v + beta * (v_sup_eff - v)).clamp(-v_ceil, v_ceil);
+                state.hip_vel.x = v;
+            }
         }
     }
 
