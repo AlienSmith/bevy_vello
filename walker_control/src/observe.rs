@@ -56,6 +56,19 @@ pub struct Fiction {
     pub com: Vec2,
     /// EMA-filtered mass-weighted CoM velocity.
     pub v_com: Vec2,
+    /// EMA-filtered whole-body **angular momentum about the CoM** (px²/s per
+    /// unit mass), vello y-down frame: `L = Σ mᵢ (rᵢ.x·v'ᵢ.y − rᵢ.y·v'ᵢ.x) / Σ mᵢ`
+    /// with `rᵢ = pos − com`, `v'ᵢ = vel − v_com`. Conserved through ballistic
+    /// flight (`plans/jump-ppo-residual-polar-action.md` §10/§12): it is the
+    /// spin the jump LOCKS IN at liftoff — the quantity every backflip carried
+    /// invisibly (`lean` only sees the hip→waist stick, not the body).
+    pub ang_momentum: f32,
+    /// EMA-filtered **whole-body spin rate about the CoM**, rad/s:
+    /// `L / I`, `I = Σ mᵢ |rᵢ|²` (mass-weighted, per unit mass). The rotational
+    /// twin of `v_com`: while `lean_rate` is the stick's rate, this is the
+    /// *body's*. Sign convention: positive reads like a growing forward lean
+    /// when the mass distribution is torso-dominated.
+    pub omega_com: f32,
     /// Measured foot state `[left, right]`. Velocities are unfiltered (the
     /// math does not consume them; slip telemetry and gates do).
     pub feet: [FootState; 2],
@@ -76,6 +89,8 @@ impl Default for Fiction {
             lean_rate: 0.0,
             com: Vec2::ZERO,
             v_com: Vec2::ZERO,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [FootState::default(); 2],
             grounded: false,
         }
@@ -243,6 +258,48 @@ pub fn com_velocity(samples: &[ParticleSample]) -> Option<Vec2> {
     Some(v / total)
 }
 
+/// Whole-body **angular momentum per unit mass** about the CoM and the
+/// **moment of inertia** used to convert it, from the same mass-weighted
+/// particle set as [`center_of_mass`]/[`com_velocity`] (plan
+/// `jump-ppo-residual-polar-action.md` §10):
+///
+/// ```text
+/// rᵢ  = posᵢ − com ;  v'ᵢ = velᵢ − v_com ;  mᵢ = 1/inv_massᵢ
+/// L   = Σ mᵢ (rᵢ.x·v'ᵢ.y − rᵢ.y·v'ᵢ.x) / Σ mᵢ     // px²/s (per unit mass)
+/// I   = Σ mᵢ |rᵢ|² / Σ mᵢ                          // px²   (per unit mass)
+/// ```
+///
+/// Returns `None` when nothing finite contributed (`Σ m ≤ 0`); `I` may be 0
+/// for a degenerate all-at-CoM sample set — callers divide with a guard.
+/// The cross-product sign follows the vello y-down frame: the same handedness
+/// as [`attitude_pitch`]'s `+ = lean +x` once y-prime is negated, i.e. a body
+/// tipping forward (waist moving +x about the CoM) reads **positive** `L`.
+pub fn com_angular_momentum(
+    samples: &[ParticleSample],
+    com: Vec2,
+    v_com: Vec2,
+) -> Option<(f32, f32)> {
+    let mut total = 0.0f32;
+    let mut l = 0.0f32;
+    let mut i = 0.0f32;
+    for s in samples {
+        if !s.pos.is_finite() || !s.vel.is_finite() || !s.inv_mass.is_finite() || s.inv_mass <= 0.0
+        {
+            continue;
+        }
+        let m = 1.0 / s.inv_mass;
+        total += m;
+        let r = s.pos - com;
+        let v = s.vel - v_com;
+        l += m * (r.x * v.y - r.y * v.x);
+        i += m * r.length_squared();
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    Some((l / total, i / total))
+}
+
 /// Stick attitude from the `hip → waist` axis against world vertical, Vello
 /// y-down. Upright `(0, -1)` ⇒ 0 rad; `+` = forward lean toward `+x`.
 /// Degenerate (zero-length) axes ⇒ `0`.
@@ -295,6 +352,10 @@ pub struct Observer {
     pub fiction: Fiction,
     v_hip: Vec2,
     v_com: Vec2,
+    /// EMA state for [`Fiction::ang_momentum`] and [`Fiction::omega_com`]
+    /// (same filter contract as the velocities — §10).
+    ang_mom: f32,
+    omega_com: f32,
     theta_prev: f32,
     omega: f32,
     primed: bool,
@@ -313,6 +374,10 @@ pub struct RawReality {
     pub lean: f32,
     pub lean_rate: f32,
     pub com: Vec2,
+    /// Pre-filter [`Fiction::ang_momentum`] (§10).
+    pub ang_momentum: f32,
+    /// Pre-filter [`Fiction::omega_com`] (§10).
+    pub omega_com: f32,
 }
 
 impl Observer {
@@ -361,12 +426,29 @@ impl Observer {
         } else {
             v_com_raw
         };
-        self.primed = true;
 
         // --- CoM position: mass-weighted, hip fallback when degenerate ---
         let com = center_of_mass(s.body)
             .map(|(c, _, _)| c)
             .unwrap_or(s.hip.pos);
+
+        // --- rotational CoM state (§10): L and ω about the mass center, from
+        // the same particle set as the CoM filters. Uses the FILTERED v_com (
+        // consistent pair with the EMAs above; raw goes to `raw` below). The
+        // degenerate set (no finite masses) reads 0/0 = zero spin. ---
+        let (l_raw, inertia) = com_angular_momentum(s.body, com, self.v_com).unwrap_or((0.0, 0.0));
+        let omega_com_raw = if inertia > 1e-6 { l_raw / inertia } else { 0.0 };
+        self.ang_mom = if self.primed {
+            self.ang_mom + (l_raw - self.ang_mom) * alpha
+        } else {
+            l_raw
+        };
+        self.omega_com = if self.primed {
+            self.omega_com + (omega_com_raw - self.omega_com) * alpha
+        } else {
+            omega_com_raw
+        };
+        self.primed = true;
 
         // --- feet + hysteresis ---
         let mut feet = [FootState::default(); 2];
@@ -389,6 +471,8 @@ impl Observer {
             lean: theta,
             lean_rate: omega_raw,
             com,
+            ang_momentum: l_raw,
+            omega_com: omega_com_raw,
         };
 
         let fiction = Fiction {
@@ -399,6 +483,8 @@ impl Observer {
             lean_rate: self.omega,
             com,
             v_com: self.v_com,
+            ang_momentum: self.ang_mom,
+            omega_com: self.omega_com,
             feet,
             grounded,
         };
@@ -647,6 +733,8 @@ mod tests {
             lean_rate: 0.0,
             com: Vec2::ZERO,
             v_com: Vec2::ZERO,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [FootState::default(); 2],
             grounded: false,
         };
@@ -711,6 +799,57 @@ mod tests {
         assert_eq!(n, 2);
         assert!((total - 3.0).abs() < 1e-5, "total {total}");
         assert!((com.x - 20.0 / 3.0).abs() < 1e-4, "com {com}");
+    }
+
+    #[test]
+    fn com_angular_momentum_sees_spin_and_ignores_pure_translation() {
+        // Plan §10: a two-mass dumbbell spinning about its CoM. Top mass (above
+        // the CoM, y-down ⇒ r.y < 0) moving +x reads POSITIVE L — a forward tip.
+        let spin = [
+            ParticleSample {
+                pos: Vec2::new(0.0, -10.0),
+                vel: Vec2::new(10.0, 0.0),
+                inv_mass: 1.0,
+            },
+            ParticleSample {
+                pos: Vec2::new(0.0, 10.0),
+                vel: Vec2::new(-10.0, 0.0),
+                inv_mass: 1.0,
+            },
+        ];
+        let (l, i) = com_angular_momentum(&spin, Vec2::ZERO, Vec2::ZERO).unwrap();
+        assert!(
+            (l - 100.0).abs() < 1e-4,
+            "forward-tip L must be positive, got {l}"
+        );
+        assert!(
+            (i - 100.0).abs() < 1e-4,
+            "I is the mass-weighted |r|², got {i}"
+        );
+
+        // The same dumbbell translated rigidly carries NO spin: subtracting the
+        // CoM velocity kills every relative velocity.
+        let drift = [
+            ParticleSample {
+                pos: Vec2::new(0.0, -10.0),
+                vel: Vec2::new(250.0, -40.0),
+                inv_mass: 1.0,
+            },
+            ParticleSample {
+                pos: Vec2::new(0.0, 10.0),
+                vel: Vec2::new(250.0, -40.0),
+                inv_mass: 1.0,
+            },
+        ];
+        let v_com = com_velocity(&drift).unwrap();
+        let (l, _) = com_angular_momentum(&drift, Vec2::ZERO, v_com).unwrap();
+        assert!(
+            l.abs() < 1e-4,
+            "pure translation must read zero spin, got {l}"
+        );
+
+        // Nothing finite contributes ⇒ None (the observe() caller maps it to 0).
+        assert!(com_angular_momentum(&[], Vec2::ZERO, Vec2::ZERO).is_none());
     }
 
     #[test]

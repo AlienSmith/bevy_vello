@@ -64,7 +64,7 @@ use crate::observe::{Fiction, Observer};
 /// Columns of the scalar block, in the exact `TelemetryRow::set` order used by
 /// the harness, plus the two appended columns. The formatter emits exactly these
 /// keys, in exactly this order.
-pub const SCALAR_COLUMNS: [&str; 56] = [
+pub const SCALAR_COLUMNS: [&str; 58] = [
     "tau",
     "t",
     "act",
@@ -121,6 +121,8 @@ pub const SCALAR_COLUMNS: [&str; 56] = [
     "tPRLLay",
     "mode",
     "grounded",
+    "ang_mom",
+    "omega_com",
 ];
 
 /// The commanded-target column groups, in header order: `tP3` (hip), `tP40`
@@ -243,6 +245,12 @@ pub struct TickRecord {
     pub hit: [bool; 2],
     /// Debounced whole-body support flag.
     pub grounded: bool,
+    /// Filtered whole-body angular momentum about the CoM (px²/s per unit
+    /// mass) — the spin a jump locks in at liftoff (`plans/jump-ppo-residual-
+    /// polar-action.md` §10).
+    pub ang_mom: f32,
+    /// Filtered whole-body spin rate about the CoM, rad/s (`L / I`).
+    pub omega_com: f32,
     /// Measured hip (`P3`) position, raw Vello frame.
     pub real_hip: Vec2,
     /// Measured hip velocity (pre-filter — the legacy particle channels are
@@ -318,6 +326,8 @@ impl Default for TickRecord {
             contact: [false; 2],
             hit: [false; 2],
             grounded: false,
+            ang_mom: 0.0,
+            omega_com: 0.0,
             real_hip: Vec2::ZERO,
             real_hip_vel: Vec2::ZERO,
             real_feet: [Vec2::ZERO; 2],
@@ -357,6 +367,8 @@ impl TickRecord {
             self.hit[i] = fiction.feet[i].touching;
         }
         self.grounded = fiction.grounded;
+        self.ang_mom = fiction.ang_momentum;
+        self.omega_com = fiction.omega_com;
         self.real_hip = fiction.hip;
         self.real_hip_vel = observer.raw.v_hip;
         for i in 0..2 {
@@ -420,6 +432,8 @@ impl TickRecord {
         self.contact = [false; 2];
         self.hit = [false; 2];
         self.grounded = false;
+        self.ang_mom = 0.0;
+        self.omega_com = 0.0;
         self.real_hip = Vec2::ZERO;
         self.real_hip_vel = Vec2::ZERO;
         self.real_feet = [Vec2::ZERO; 2];
@@ -544,6 +558,8 @@ impl TickRecord {
         // ---- Appended: the two signals the new architecture owns ----
         push("mode", mode_name(self.mode).to_string());
         push("grounded", format!("{}", self.grounded as u8));
+        push("ang_mom", format!("{:.2}", self.ang_mom));
+        push("omega_com", format!("{:.4}", self.omega_com));
 
         // ---- Measured particle channels, legacy V10 order (plot_p3.py,
         // pose_viewer.py): hip + feet real, every other slot zero-filled. ----
@@ -611,6 +627,8 @@ mod tests {
             lean_rate: 0.1,
             com: Vec2::new(0.0, -140.0),
             v_com: Vec2::new(vx, 0.0),
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [
                 FootState {
                     pos: Vec2::new(-10.0, -90.0),

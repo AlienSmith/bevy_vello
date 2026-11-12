@@ -98,7 +98,7 @@ impl Default for LearnedConfig {
         // Defaults match the v10 rig at scale 0.5 and the gait's own
         // `theta_max`/`target_speed` (walker_math::LowerBodyConfig::default).
         Self {
-            obs_dim: 14,
+            obs_dim: 16,
             action_dim: 7,
             hidden: vec![64, 64],
             v_scale: 200.0,
@@ -202,9 +202,9 @@ impl LearnedCtrl {
         self.policy = policy;
     }
 
-    /// `Fiction` + `Command` → the fixed-width observation (plan §3, 14 dims,
-    /// all hip-relative, rig-normalized, travel-frame-independent so one policy
-    /// works for either facing).
+    /// `Fiction` + `Command` → the fixed-width observation (plan §3 + the §10
+    /// rotational channels, 16 dims, all hip-relative, rig-normalized,
+    /// travel-frame-independent so one policy works for either facing).
     ///
     /// ```text
     /// 0  v_com_y / v_scale        (jump power signal)
@@ -217,6 +217,10 @@ impl LearnedCtrl {
     /// 9  lfoot touching 1/0   10 rfoot touching 1/0
     /// 11 cmd dir.y            12 cmd dir.x          (move intent: +y=jump, ±x=walk)
     /// 13 cmd speed / v_scale
+    /// 14 omega_com / omega_scale   (body spin rate about CoM — the *body's*
+    ///    rate, invisible in `lean_rate`, which only sees the hip→waist stick)
+    /// 15 ang_mom / (hip_height·v_scale)  (the conserved quantity through
+    ///    ballistic flight: null it at liftoff or the spin locks in — plan §10/§12)
     /// ```
     pub fn build_obs(&self, cmd: &Command, fiction: &Fiction) -> Vec<f32> {
         let c = &self.cfg;
@@ -249,6 +253,8 @@ impl LearnedCtrl {
             cmd.dir.y,
             if vertical { 0.0 } else { cmd.dir.x },
             cmd.speed / c.v_scale,
+            fiction.omega_com / c.omega_scale,
+            fiction.ang_momentum / (c.hip_height * c.v_scale),
         ];
         // Any non-finite measurement (a degenerate first fiction) reads as 0 so
         // the net never sees a NaN input.
@@ -381,6 +387,8 @@ mod tests {
             lean_rate: 0.0,
             com: hip,
             v_com: v,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [
                 FootState {
                     pos: feet[0],

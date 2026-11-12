@@ -1016,6 +1016,8 @@ mod tests {
             lean_rate: 0.0,
             com: hip,
             v_com: v,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [
                 FootState {
                     pos: feet[0],

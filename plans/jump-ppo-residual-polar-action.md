@@ -323,6 +323,47 @@ that already worked, no policy surgery; then the residual's job is genuinely
 attitude/shape, not "wait for reality". This answers the "can replay give
 reasonable direction when physics diverges?" worry at its weakest seam.
 
+## 12. Ballistic lock-in — the jump is decided at liftoff (user insight)
+
+At the instant the feet leave the ground the flight is **fully determined**:
+gravity is the only external force, so the CoM parabola AND the angular
+momentum `L` (§10) are conserved through the arc. At the last grounded tick
+(vello y-down, `g = 980 px/s²`):
+
+```
+apex_pred    = h + v_com.y² / (2g)          (v_com.y < 0 = moving up)
+t_flight     = ballistic solve from h, v_com.y
+x_land_pred  = com.x + v_com.x · t_flight
+spin_drift   = ∫ L/I(t) dt  ≈ (L / Ĩ) · t_flight   // sign/rank reliable, Ĩ mid-arc
+```
+
+Measured proof: v10 hop1 launched at stick-lean −0.11 but locked L ⇒ θ ran to
+−1.5 "with no cause" in flight; no airborne action could arrest it (legs too
+light — no reaction authority). The flight is a **receipt, not a negotiation**.
+
+Exploits:
+
+1. **Prediction channels in the obs.** Computed at liftoff, held live through
+   Flight (re-estimated each tick with current §10 state):
+   `(apex_pred − hip_height)/hip_height`, `(x_land_pred − support_x)/leg_len`,
+   `spin_drift`. The net sees the *consequence of its launch decision while it
+   is still correlated with the decision* — dense credit instead of a fall
+   0.4 s later with unknown cause.
+2. **Reward shaping at the lock-in tick, not at the crash.** A predicted
+   `|spin_drift| > θ_fall` is knowable immediately ⇒ price the doomed launch
+   at launch (optionally end the episode — it is already dead). Directly
+   attacks the old PPO hop's sparse-post-crash signal.
+3. **Flight-phase authority freeze (optional, structural).** δ is only *acted
+   on* during Load/Launch/Land; through Flight the proposal holds (the v1
+   pencil already approximates this). Physics says in-flight torso actions
+   cannot change the locked trajectory anyway; the only true in-flight job is
+   leg *placement geometry* for touchdown — handled by the Land phase, which
+   is grounded authority. Fewer things to learn, cleaner credit.
+
+Dependency order: §10 fields (`L`, `ω_com`) are the inputs to every prediction
+here, so §10 lands first (unchanged), §12 features ship with the residual env
+(step 5 of the build order).
+
 (Stash of the failed v8–v10 tuning saga: `stash@{0}`, recoverable but not the
 base — we build residual on committed v1 `JumpCtrl`, plus the §11 `Load→Launch`
 event-trigger fix.)
