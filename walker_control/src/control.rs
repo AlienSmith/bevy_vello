@@ -96,6 +96,13 @@ impl Command {
         }
     }
 
+    /// True when the command's vertical channel asks for a jump: `dir.y <
+    /// −0.5` (vello y-down ⇒ up). Only meaningful on commands that already
+    /// pass [`Self::is_move`] (the jump carries `dir.x = 1` for exactly that).
+    pub fn is_jump(&self) -> bool {
+        self.dir.y < -0.5
+    }
+
     /// Signed horizontal command speed (`dir.x · speed`).
     pub fn vx(&self) -> f32 {
         self.dir.x * self.speed
@@ -124,6 +131,11 @@ pub enum LocoMode {
     /// (`plans/ppo-learned-walker.md`). Chosen by [`ControlConfig::use_learned`]
     /// instead of [`Walking`](LocoMode::Walking) for a move command.
     Learned,
+    /// The **hand-rolled jump** — a scripted crouch→extend stroke
+    /// ([`crate::jump::JumpCtrl`]), the authored expert for the jump intent
+    /// (`dir.y < −0.5`). Chosen only when `use_learned` is off; the learned
+    /// path keeps its own jump handling through `Learned` untouched.
+    Jumping,
 }
 
 impl Default for LocoMode {
@@ -782,6 +794,9 @@ pub enum Controller {
     BoostStart(BoostStartCtrl),
     /// The learned policy behind the same seam (`plans/ppo-learned-walker.md`).
     Learned(crate::learned::LearnedCtrl),
+    /// The hand-rolled jump stroke — the authored expert for the jump intent
+    /// (the `Jumping` mode; only reachable when `use_learned` is off).
+    Jumping(crate::jump::JumpCtrl),
 }
 
 impl Controller {
@@ -802,6 +817,7 @@ impl Controller {
                 Some(c) => Controller::Learned(c),
                 None => Controller::Standing(StandingCtrl::new(lower)),
             },
+            LocoMode::Jumping => Controller::Jumping(crate::jump::JumpCtrl::new(lower)),
         }
     }
 
@@ -820,6 +836,7 @@ impl Controller {
             Controller::Walking(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::BoostStart(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::Learned(c) => c.step(cmd, fiction, cfg, dt, facing),
+            Controller::Jumping(c) => c.step(cmd, fiction, cfg, dt, facing),
         }
     }
 
@@ -829,6 +846,7 @@ impl Controller {
             Controller::Walking(c) => c.mode(),
             Controller::BoostStart(c) => c.mode(),
             Controller::Learned(c) => c.mode(),
+            Controller::Jumping(c) => c.mode(),
         }
     }
 
@@ -931,7 +949,18 @@ impl LocoState {
             // Launch: a boosted move kicks the gait through BoostStart.
             (LocoMode::Standing, Some(c)) if c.boost => LocoMode::BoostStart,
             // A plain move enters the gait directly (already up to speed).
+            // …except a JUMP intent in the authored stack: the hand-rolled
+            // [`crate::jump::JumpCtrl` owns it (the expert stroke we train PPO
+            // against later). Gated on `!use_learned` so the PPO training and
+            // deploy paths (where `Learned` owns the jump intent through
+            // `dir.y` in the obs) are bit-for-bit untouched.
+            (LocoMode::Standing, Some(c)) if !cfg.use_learned && c.is_jump() => LocoMode::Jumping,
             (LocoMode::Standing, Some(_)) => move_mode,
+            // The stroke is self-clocking (and re-hops while the jump intent
+            // is held). It ends when the intent goes away — command `None`
+            // (handled above) or a plain (non-jump) move command.
+            (LocoMode::Jumping, Some(c)) if !cfg.use_learned && c.is_jump() => LocoMode::Jumping,
+            (LocoMode::Jumping, Some(_)) => move_mode,
             (LocoMode::BoostStart, Some(c)) => {
                 // Event handover: hold the launch while the boost flag is
                 // set, until the DCM crosses the gathered front foot; the
@@ -942,6 +971,7 @@ impl LocoState {
                     move_mode
                 }
             }
+            (LocoMode::Walking, Some(c)) if !cfg.use_learned && c.is_jump() => LocoMode::Jumping,
             (LocoMode::Walking, Some(_)) => LocoMode::Walking,
             (LocoMode::Learned, Some(_)) => LocoMode::Learned,
         };
@@ -1130,6 +1160,65 @@ mod tests {
         let f = centered();
         let m = st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
         assert_eq!(m, LocoMode::Walking, "no boost flag ⇒ no launch window");
+    }
+
+    #[test]
+    fn a_jump_intent_mid_walk_arms_the_stroke() {
+        // Run up (Walking) and switch the command's vertical channel: the
+        // gait hands over to the jump stroke while travel keeps going.
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(
+            st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0),
+            LocoMode::Walking
+        );
+        let m = st.decide(Some(Command::jump(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Jumping, "dir.y arms the stroke mid-gait");
+    }
+
+    #[test]
+    fn a_jump_intent_selects_the_hand_rolled_stroke() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        let m = st.decide(Some(Command::jump(100.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Jumping, "dir.y < −0.5 ⇒ authored jump");
+        // Held jump intent stays in the stroke (it self-clocks and re-hops).
+        for _ in 0..90 {
+            let m = st.decide(Some(Command::jump(100.0)), &f, &cfg, 1.0 / 90.0);
+            assert_eq!(m, LocoMode::Jumping);
+        }
+        // Command end returns to standing like every other mode.
+        let m = st.decide(None, &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Standing);
+    }
+
+    #[test]
+    fn a_walk_command_mid_stroke_releases_to_the_gait() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        st.decide(Some(Command::jump(100.0)), &f, &cfg, 1.0 / 90.0);
+        let m = st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Walking, "no vertical intent ⇒ gait");
+    }
+
+    #[test]
+    fn the_learned_path_keeps_its_own_jump_handling() {
+        // With `use_learned` on (training/deploy), the jump intent must NOT
+        // route to the authored stroke — `Learned` owns it through the obs.
+        let mut cfg = ControlConfig::default();
+        cfg.use_learned = true;
+        let mut st = LocoState::new();
+        let f = centered();
+        let m = st.decide(Some(Command::jump(100.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(
+            m,
+            LocoMode::Learned,
+            "PPO path untouched by the expert gate"
+        );
     }
 
     #[test]

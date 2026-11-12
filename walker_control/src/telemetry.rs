@@ -160,6 +160,7 @@ pub fn mode_name(mode: LocoMode) -> &'static str {
         LocoMode::Walking => "walking",
         LocoMode::BoostStart => "boost",
         LocoMode::Learned => "learned",
+        LocoMode::Jumping => "jump",
     }
 }
 
