@@ -64,7 +64,7 @@ use crate::observe::{Fiction, Observer};
 /// Columns of the scalar block, in the exact `TelemetryRow::set` order used by
 /// the harness, plus the two appended columns. The formatter emits exactly these
 /// keys, in exactly this order.
-pub const SCALAR_COLUMNS: [&str; 58] = [
+pub const SCALAR_COLUMNS: [&str; 65] = [
     "tau",
     "t",
     "act",
@@ -123,6 +123,13 @@ pub const SCALAR_COLUMNS: [&str; 58] = [
     "grounded",
     "ang_mom",
     "omega_com",
+    "trig_l",
+    "trig_r",
+    "sat",
+    "x_max",
+    "v_plan",
+    "v_fic",
+    "v_law",
 ];
 
 /// The commanded-target column groups, in header order: `tP3` (hip), `tP40`
@@ -296,6 +303,24 @@ pub struct TickRecord {
     /// `true` when this tick's control produced loop-3 debug (`WalkingCtrl`).
     pub att_active: bool,
 
+    // ---- F0 (plans/walk-speed-dcm-rules.md §3): gait internals from
+    // `ControlOut.debug`, all zero when no solver tick ran this tick ----
+    /// Which condition ended the most recent stance per leg: `0` none,
+    /// `1` timer, `2` dcm_crossed (the §3 event), `3` com_crossed (emergency).
+    /// The §2b claim "the event trigger is dead code" reads out of this column.
+    pub trig: [u8; 2],
+    /// `true` when the unclamped capture point fell outside `hip ± x_max`
+    /// this tick — the reach-saturation ("in trouble") signal.
+    pub sat: bool,
+    /// Geometric reach `X_max` actually used this tick, px.
+    pub gait_x_max: f32,
+    /// The solver's ramped reference velocity `v_ref`, px/s (travel frame).
+    pub gait_v_des: f32,
+    /// The fiction velocity after the ceiling clamp, px/s (travel frame).
+    pub gait_v_fic: f32,
+    /// The velocity actually fed to the deadbeat lead term (`v_law`).
+    pub gait_v_law: f32,
+
     // ---- written by `actuate_stage` (knees) ----
     /// IK knee targets; `None` when the bones were degenerate.
     pub knees: [Option<Vec2>; 2],
@@ -346,6 +371,12 @@ impl Default for TickRecord {
             att_torque: 0.0,
             hip_accel: 0.0,
             att_active: false,
+            trig: [0; 2],
+            sat: false,
+            gait_x_max: 0.0,
+            gait_v_des: 0.0,
+            gait_v_fic: 0.0,
+            gait_v_law: 0.0,
             knees: [None; 2],
             harness: HarnessSlice::default(),
             clock: 0.0,
@@ -400,6 +431,14 @@ impl TickRecord {
                 self.att_torque = d.attitude_torque;
                 self.hip_accel = d.hip_accel_x;
                 self.att_active = true;
+                // F0: the gait internals ride the same debug payload — one
+                // writer, one tick, no second derivation.
+                self.trig = [d.left_trigger_reason, d.right_trigger_reason];
+                self.sat = d.capture_saturated;
+                self.gait_x_max = d.x_max;
+                self.gait_v_des = d.v_desired;
+                self.gait_v_fic = d.v_clamped;
+                self.gait_v_law = d.plan_v_law;
             }
             None => {
                 self.designed_theta = 0.0;
@@ -407,6 +446,13 @@ impl TickRecord {
                 self.att_torque = 0.0;
                 self.hip_accel = 0.0;
                 self.att_active = false;
+                // No solver tick ⇒ no gait internals either.
+                self.trig = [0; 2];
+                self.sat = false;
+                self.gait_x_max = 0.0;
+                self.gait_v_des = 0.0;
+                self.gait_v_fic = 0.0;
+                self.gait_v_law = 0.0;
             }
         }
     }
@@ -457,6 +503,12 @@ impl TickRecord {
         self.att_torque = 0.0;
         self.hip_accel = 0.0;
         self.att_active = false;
+        self.trig = [0; 2];
+        self.sat = false;
+        self.gait_x_max = 0.0;
+        self.gait_v_des = 0.0;
+        self.gait_v_fic = 0.0;
+        self.gait_v_law = 0.0;
         self.knees = [None; 2];
     }
 
@@ -560,6 +612,15 @@ impl TickRecord {
         push("grounded", format!("{}", self.grounded as u8));
         push("ang_mom", format!("{:.2}", self.ang_mom));
         push("omega_com", format!("{:.4}", self.omega_com));
+
+        // ---- F0: gait internals (plans/walk-speed-dcm-rules.md §3) ----
+        push("trig_l", self.trig[0].to_string());
+        push("trig_r", self.trig[1].to_string());
+        push("sat", format!("{}", self.sat as u8));
+        push("x_max", format!("{:.1}", self.gait_x_max));
+        push("v_plan", format!("{:.2}", self.gait_v_des));
+        push("v_fic", format!("{:.2}", self.gait_v_fic));
+        push("v_law", format!("{:.2}", self.gait_v_law));
 
         // ---- Measured particle channels, legacy V10 order (plot_p3.py,
         // pose_viewer.py): hip + feet real, every other slot zero-filled. ----
