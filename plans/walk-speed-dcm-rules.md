@@ -178,87 +178,136 @@ granted by shortening the swing, not lengthening the stance.
    (`x_max ≈ 54`, `ξ` 45 px ahead of the hip at 150 px/s — the §2-suspect-3
    saturation, now understood as *structural*, not incidental).
 
-### 4c. The three-point update scheme
+### 4c. The fight, and the corrected math (2026-11-12 re-derivation)
 
-**Point 1 — trigger the lift on the DCM, not the CoM (ALREADY SHIPPED, keep
-it).** `dcm_crossed` (`stepping.rs:172`) fires the rear-foot lift when `ξ`
-passes the support edge — that is exactly this rule; the lead margin makes
-it fire ~one swing early, which the doctrine *wants* (early lift). What it
-lacks is the **double-support debounce**: a 20–40 ms lockout after a
-measured touchdown so landing bounce cannot re-trigger a step. At high
-speed `ξ` is already ahead of the foot at touchdown, so liftoff is
-immediate — and with a short swing the *cadence*, not the trigger, sets
-step time.
+The measured attractor is a **deadbeat ↔ event-scheduler conflict**: the law
+promises velocity decay at deadline `t_c`; the scheduler grants stance for
+whatever the swing clock/event produces; when they disagree the promise is
+voided and neither Δv nor cadence responds to the command. The user's fix
+package (predict the event deadline, re-plan through swing, guard the per-step
+velocity change) is the resolution. Before adopting it, the feasibility math
+was re-derived in the repo's own closed form — and it corrects BOTH the earlier
+§4c note and the intuition that any horizon choice makes the brake reachable.
 
-**Point 2 — parameterize the swing by a DYNAMIC duration (the implementation
-focus).** Drive the swing trajectory from a target `T_swing`:
+From `p − x = α·v − β·v_des`, `α = 1/(ω₀·tanh(ω₀t_c))`,
+`β = 1/(ω₀·sinh(ω₀t_c))`, two identities (cosh−1)/sinh = tanh(·/2):
+
+- **Cruise/accel** (`v_des = v`): `p − x = (v/ω₀)·tanh(ω₀t_c/2)` — grows
+  with horizon, bounded by `v/ω₀`.
+- **One-step stop** (`v_des = 0`): `p − x = (v/ω₀)·coth(ω₀t_c)` — shrinks
+  toward `v/ω₀` as the horizon GROWS; explodes as it shrinks (a short
+  horizon demands MORE, not less — the superseded note above, and the
+  "−23 px in reach" table floated in chat, are wrong; this is the verified
+  algebra).
+
+At `v = 150, z₀ = 104`: `v/ω₀ = 49 px` vs `x_max ≈ 54`. **Every honest brake
+demand sits at or past the reach edge regardless of `t_c`.** Feasibility is
+therefore forced by geometry:
+
+1. the reach clamp IS the per-step brake authority (plant at max lead ⇒
+   `Δv` per step ≈ `v/ω₀·(coth−1)`-bounded bleed);
+2. large command changes MUST span multiple steps (120→80→40→0) — the user's
+   guard 3.1 is a necessity, not a preference;
+3. what swing time then buys is **cadence**: more clamped-brake feet per
+   second, each delivered *before the CoM crosses the old pivot* (§4a
+   Phase-1-only braking). Short swing = many small feasible brakes.
+
+### 4d. The three-point scheme (user package, corrected against 4c)
+
+**Fix 1 — predict the event deadline for the law (not a constant).** The
+deadline the deadbeat should promise is the stance the scheduler will
+actually grant. Shipped trigger geometry (`stepping.rs:205`):
+`dir·(ξ − plant) ≥ toe − margin`, `margin = v_com·T_swing`, so the edge sits
+`margin − toe` BEHIND the pivot and the naive `T_step = (1/ω)ln(Δ/(ξ₀−p))`
+(the user's formula, edge *ahead*) is negative/undefined exactly when braking
+is hardest — a sign correction, not a rejection:
 
 ```
-T_cruise = 0.35 s     # normal walking
-T_brake  = 0.15..0.18 s  # while v_com > v_des (fast forward delivery of the brake foot)
+edge  := plant + dir·(toe_len − margin)         # same edge as the trigger
+T_ev  := (1/ω₀)·ln( (edge − ξ₀)·dir / … )       # defined while ξ₀ < edge (cruise)
 ```
 
-scaled between the two by the velocity error (e.g. lerp on
-`(v−v_des)/v_des`, clamped), and pass **the same** `T_swing` into the
-deadbeat law as the convergence deadline `t_c` (clamped
-`T_step ≥ 0.15 s` so the law's coefficients cannot blow up — α
-`≈ 1/(ω₀²·t_c)` as `t_c→0`). With this, the horizon promise and the
-cadence that grants it are one number: R3 is satisfied *by construction*.
+In cruise it is the true short window before `dcm_crossed` fires (~tens of ms
+— the gait grants far less stance than the fixed `t_c = stance_ts` promises);
+in deep brake it is undefined and the *measured* horizon takes over — the
+shipped `ADAPT_TC` (`types.rs:215`) already folds in the previous stride's
+measured wait; the upgrade is to predict from current `ξ₀` and to floor the
+law's promise at the horizon the *swing schedule* guarantees (Fix 2), so the
+planner and the state machine stop fighting.
 
-Honest note on the coefficient behavior: shortening `t_c` *increases* the
-demanded forward plant (α ≈ 0.66 at 0.15 s vs 0.37 at 0.35 s ⇒ brake demand
-`x+63` px vs reach 54 px). That is not a bug — it is the mechanism: the
-demand saturates against the reach clamp, the foot plants at maximum
-forward reach = **maximum available braking**, and the short swing delivers
-that saturated plant *before the CoM crosses the pivot*. The reach clamp
-becomes a deliberate authority limiter instead of an error-stealing silent
-failure.
+**Fix 2 — re-solve the swing target every tick in flight (closed-loop
+re-planning).** The form `p = ξ_t − (ξ_des − ξ_t)/(e^{ωT_rem}−1)` is right but
+`ξ_des` is ill-defined for cruise (the law targets a velocity at a deadline,
+not a point). The clean shipped-primitive equivalent: at the *current*
+overspeed, the brake demand is `≥ v/ω₀ ≥ 49` and past reach — so
+`t_c_planned` is never the lever; instead re-solve the deadbeat each swing
+tick with `v_com(t)`, `ξ(t)` (they change with every physics bump) and the
+**guaranteed** deadline `t_c_g = t_c_event + T_rem`, clamping the result to
+reach (the clamp is the authority, per 4c — a saturated target is *correct*,
+not an error). This replaces one-shot liftoff placement: friction/impact
+changes mid-step are absorbed by the next plant, smoothly.
 
-**Point 3 — two-phase stance impedance (NOTED, DEFERRED).** Firm strut
-while the hip is behind the leading foot (Phase 1 braking), softened knee/
-ankle if the hip crosses into Phase 2 (rob gravity of its acceleration
-boost). This is the §1-R4 lever. We deliberately do **not** hand-build it:
-it is a continuous stiffness schedule over the stance cycle — precisely the
-kind of fine-grained profile the jump PPO residual (and possibly a walk
-residual) is better positioned to discover. Keep as a documented future
-action; the actuation path (`actuate::leg_commands` →
-`emit::distance_config` per-tick compliance) is already identified in §4c
-of the pre-revision text if RL ever wants it.
+**Fix 3 — hybrid guard.** (3.1) per-step Δv capped by reach — automatic in
+the corrected reading (the clamp does it); no separate slew limiter needed,
+which also **supersedes the Point 0 setpoint-ramp proposal** from chat — the
+law + clamp produces the 120→80→40→0 staircase *by physics*, without a
+command shaper. (3.2) `T_swing ∝ 1/v` — keep as **fixed spatial lead**
+`L = v·T_swing` (the margin is already built on it; the swing then always
+covers one swing-time of travel, with the trigger unchanged). (3.3) timeout
+fallback — already shipped as `hovered_in` (stuck swing lands anyway) +
+`wants_step` freeze (stuck stance settles safely); the one real cliff is
+`v_des → 0` mid-swing: floor the law's `v_des` at ~15 px/s and let the last
+segment be handled by the existing capture-point stop path (`stopping` in
+`walk.rs:184`).
 
-### 4d. The per-tick update loop (pseudocode, points 1+2 combined)
+**Point 3 (two-phase impedance) stays deferred to RL** as in the pre-
+revision text: continuous stiffness over the stance cycle is exactly what a
+residual should discover, not hand-build (R4; also the jump landing-absorp-
+tion's mechanism).
+
+### 4e. Per-tick update loop (v2, the three fixes combined)
 
 ```
 every tick (walking mode):
-  # 1. reality
-  measure com_x, v_com (EMA-filtered); z0 := hip_height (NOMINAL)
-  omega0 := sqrt(g / z0)
-  xi     := com_x + v_com / omega0
+  # reality (unchanged stamps)
+  omega0 := sqrt(g / z0);  xi := com_x + v_com/omega0
+  v_des  := cmd.speed * dir_sign            # raw intent — NO slew limiter (4d-3.1)
 
-  # 2. intent → cadence
-  v_des := cmd.speed * dir_sign
-  err   := (|v_com| − v_des) / max(v_des, 1)          # signed overspeed
-  T_sw  := lerp(T_cruise=0.35, T_brake=0.15, clamp(err, 0, 1))
-  t_c   := max(T_sw, 0.15)                            # law floor
+  # cadence by fixed spatial lead (4d-3.2)
+  T_sw   := clamp(L_lead / max(|v_com|, v_floor), T_min, T_max)   # e.g. L=30 px, [0.15,0.35]
 
-  # 3. placement (deadbeat on the SAME horizon)
-  p     := xi + (v_com·e^(−omega0·t_c) − v_des) / (omega0·sinh(omega0·t_c))
-  p     := clamp(p, hip ± x_max)                      # saturation = max brake
+  # deadline the event/schedule guarantees (Fix 1) — measured off the STANCE plant:
+  #   xi diverges from plant as (xi−p)e^(ωt), so edge crossing:
+  edge   := plant_stance + dir·(toe_len − v_com·T_sw)
+  T_ev   := (1/omega0)·ln( dir·(edge−plant) / dir·(xi−plant) )
+            # defined iff both dir-distances share sign and ratio > 1. Branches:
+            #  · margin > toe (any walking speed with lead L≥toe): edge behind ξ at
+            #    touchdown → T_ev ≈ 0 → liftoff IMMEDIATE, stance = T_sw exactly.
+            #    (This is why the fixed clock secretly scheduled the gait — B0 makes
+            #    it open and controllable: T_sw IS the horizon.)
+            #  · v < toe/T_sw (low speed): T_ev > 0 predicted — the event grants
+            #    MORE stance than the swing asks (pendulum support time); use it.
+            #  · ξ behind plant (deep brake): diverges away, never crosses → the
+            #    shipped com_crossed emergency grants ≈ (plant−x)/v; fallback =
+            #    ADAPT last-granted horizon.
+  t_c    := max(clamp(T_ev, 0, T_max) + T_rem_of_swing, 0.15)  # floor: law stability
 
-  # 4. liftoff (point 1, shipped + debounce)
-  if stance_leg and not debouncing:
-      if xi crossed plant toe (dir-aware, margin lead as today):
-          begin swing: target p, DURATION T_sw, existing arc
-  on touchdown: plant := measured foot_x; debounce timer := 30 ms
+  # placement, re-solved EVERY tick including mid-swing (Fix 2)
+  p      := capture_point_deadbeat(xi, v_com, v_des, omega0, t_c)
+  p      := clamp(p, hip ± x_max)          # saturation = max feasible brake (4c)
+  if leg.swing: retarget leg.swing_to = p   # was frozen at liftoff
 
-  # 5. fiction velocity (keep plan_meas_v lead; hip_v_mix / td_solve per F1-F2)
+  # liftoff: shipped dcm_crossed + margin + new 30 ms touchdown debounce
 ```
 
-Scope for this implementation round: **point 2** (dynamic `T_sw` as both
-swing duration and deadbeat `t_c`) + the 20–40 ms double-support debounce;
-point 1 is already `dcm_crossed`; point 3 deferred to RL. The F-ladder (§3)
-still runs, but its meaning changes: with point 2 in, `STANCE_TS`/
-`SWING_TS` envs become the A/B arms (fixed vs dynamic cadence), and F1/F2
-decide whether `td_solve`/`hip_v_mix` coexist with the new cadence or fight it.
+Build order (replaces the old "Scope for this implementation round"):
+**B0** = the dynamic-`T_sw`-as-fixed-spatial-lead schedule + per-tick swing
+retargeting + `t_c` = predicted/mixed horizon, all behind one env
+(`SWING_DYN=1`, default off ⇒ bit-identical committed gait); the debounce
+ships with it. Then run the 60-120-60 ladder (§3, now reinterpreted as
+fixed-vs-dynamic cadence A/B). `td_solve`/`hip_v_mix` (F1/F2) stay as the
+next suspects if the attractor outlives B0 — with B0, short *granted*
+horizons may make the old double-correction benign; the CSV will say.
 
 ## 5. Files & anchors (verified 2026-11-12, post-§10 tree `1f8a0d3`)
 
