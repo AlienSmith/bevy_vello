@@ -32,8 +32,11 @@ use game_lib::{
     flush_rows, CharacterRoot, Connectivity, LeftLegController, RightLegController,
     SpineController, SpineDriveEnabled, VelloCharacterPlugin,
 };
+use std::sync::{Arc, RwLock};
+
 use walker_control::{
     emit::LegHandles,
+    learned::{LearnMode, LearnedCtrl},
     observe::ObserveHandles,
     plugin::{
         AttachWalker, ScriptResource, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer,
@@ -41,6 +44,7 @@ use walker_control::{
     script::ScriptTrack,
     walker::{Walker, WalkerConfig},
 };
+use walker_nn::PolicyBundle;
 
 /// Character asset ids (must match `CharacterRoot` and the blueprint controller
 /// bindings: `left_leg`/`right_leg` particles + `PLLL`/`PRLL` colliders).
@@ -77,6 +81,12 @@ const FLOOR_HALF_LEN: f64 = 2400.0;
 /// Commanded speed for a held direction key (px/s).
 const WALK_SPEED: f32 = 120.0;
 
+/// Commanded magnitude for the jump-intent key (`Up`/`W`): reproduces the
+/// training `Command::jump(speed)` exactly — `dir = (1,−1)` so `vx = speed`
+/// passes the FSM move gate while `dir.y = −1` is the jump channel of the
+/// observation (vello y-down ⇒ −y = up).
+const JUMP_SPEED: f32 = 100.0;
+
 /// Commanded speed when the boost key (Shift) is held with a direction.
 const BOOST_SPEED: f32 = 120.0;
 
@@ -101,7 +111,29 @@ fn win_hidden() -> bool {
 
 fn main() {
     let hidden = win_hidden();
+    // Deploy path (plan §7): `POLICY=path.json` loads a trained bundle; the
+    // attach system then wires a Deploy-mode `LearnedCtrl` behind the seam.
+    // Absent ⇒ the authored gait, exactly as before.
+    let policy = std::env::var("POLICY")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| match PolicyBundle::load_json(&p) {
+            Ok(b) => {
+                info!(
+                    "walker_qa: policy '{p}' loaded (obs {}, action {})",
+                    b.obs_dim(),
+                    b.action_dim()
+                );
+                Some(Arc::new(RwLock::new(b)))
+            }
+            Err(e) => {
+                warn!("walker_qa: POLICY '{p}' failed to load: {e}; using authored gait");
+                None
+            }
+        })
+        .flatten();
     App::default()
+        .insert_resource(PolicySlot(policy))
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
@@ -245,6 +277,11 @@ fn pause_physics(mut collision: ResMut<VelloCollisionWorld>) {
 struct ScriptSlot {
     decided: bool,
 }
+
+/// The loaded policy bundle (or `None` — authored gait). Set once at startup
+/// from `POLICY=path.json`; read by [`attach_walker`].
+#[derive(Resource)]
+struct PolicySlot(pub Option<Arc<RwLock<PolicyBundle>>>);
 
 /// Install the `SCRIPT=path.json` command track once, before any walker tick
 /// needs it. An unreadable/broken script logs and falls back to keyboard.
@@ -435,6 +472,7 @@ fn check_character_loaded(
 /// `Connectivity` name. Runs once per character (tracked in `attached`).
 fn attach_walker(
     mut commands: Commands,
+    policy: Res<PolicySlot>,
     mut collision: ResMut<VelloCollisionWorld>,
     roots: Query<(
         Entity,
@@ -501,6 +539,19 @@ fn attach_walker(
         // match the rig or the commanded feet float above the ground.
         config.lower.hip_height = 104.0;
         apply_lower_env(&mut config.lower);
+        // Deploy: a trained policy behind the same `Step` seam (plan §7). The
+        // `use_learned` flag routes a *move* command to `LocoMode::Learned`;
+        // `dir.y` in the command tells the policy which move — `Up`/`W` sets
+        // the jump intent, so the jump milestone deploys unchanged.
+        if let Some(bundle) = policy.0.clone() {
+            config.control.use_learned = true;
+            let lcfg = walker_control::learned::LearnedConfig {
+                hip_height: 104.0,
+                ..Default::default()
+            };
+            config.learned = Some(LearnedCtrl::with_policy(bundle, LearnMode::Deploy, lcfg));
+            info!("attached LEARNED walker to character {root:?}");
+        }
         commands.trigger_targets(
             AttachWalker {
                 config,
@@ -562,6 +613,15 @@ fn keyboard_intent(keys: Res<ButtonInput<KeyCode>>, mut intents: Query<&mut Walk
             dir.x -= 1.0;
         }
         let boost = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        // Jump intent (`Up`/`W`): dir (1,−1) ⇒ vx = speed passes the FSM move
+        // gate and dir.y = −1 is the jump channel the trained policy reads.
+        let jump = keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW);
+        if jump {
+            intent.dir = Vec2::new(1.0, -1.0);
+            intent.speed = JUMP_SPEED;
+            intent.boost = false;
+            continue;
+        }
         intent.dir = dir;
         intent.speed = if dir.length() > 0.0 {
             if boost {

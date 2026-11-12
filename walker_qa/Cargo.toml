@@ -20,3 +20,6 @@ bevy_vello = { path = ".." }
 game_lib = { path = "../examples/game_lib" }
 walker_control = { path = "../walker_control" }
 walker_math = { path = "../walker_math" }
+# Deploy path: `POLICY=path.json` loads a trained `PolicyBundle` (walker_nn)
+# into a Deploy-mode `LearnedCtrl` behind the same `Step` seam (plan §7).
+walker_nn = { path = "../walker_nn" }

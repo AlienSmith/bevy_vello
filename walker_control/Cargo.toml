@@ -13,5 +13,6 @@ bevy = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 walker_math = { path = "../walker_math" }
+walker_nn = { path = "../walker_nn" }
 bevy_vello = { path = ".." }
 vello_physics = { workspace = true }

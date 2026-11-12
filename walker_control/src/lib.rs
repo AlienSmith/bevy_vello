@@ -8,6 +8,7 @@
 pub mod actuate;
 pub mod control;
 pub mod emit;
+pub mod learned;
 pub mod observe;
 pub mod plugin;
 pub mod script;
