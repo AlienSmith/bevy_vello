@@ -31,6 +31,31 @@ Stride arithmetic pins the shape: v·T ≈ 150·0.6 ≈ 90 px at every segment.
 Whatever the placement law aims, the realized stride is locked to the fixed
 clock's product.
 
+## 0b. F0 VERDICT (2026-11-12 run with the new columns)
+
+The audit's arithmetic assumed the scale-1 defaults; the QA rig is a scale-
+0.5 asset. Measured (`walkv60-120-60.csv`, trig/sat/x_max/v_plan/v_fic/v_law):
+
+- `x_max = 30.5` (not 54) — `full ≈ 63, h ≈ 52, margin 0.85`.
+- `sat = 0.92–1.00` EVERY walking tick at 60 AND 120 commands: the deadbeat
+  demand exceeds reach at all speeds ≥ ~120. Cruise at 154 already needs
+  `(v/ω₀)·tanh ≈ 28 ≈ x_max` — zero headroom; any brake saturates.
+- `v_filt` attractor 151/151/154 ≈ `v_abs = 2·x_max·√m_e/T_sw = 154.0`
+  EXACTLY: the gait is pinned at the geometric ceiling — the fastest stride
+  the 0.28 s clock can deliver within 30 px reach. Not the boot kick
+  persisting: a hard physics limit, approached from above AND below.
+- `v_plan = v_fic` (60/60, 120/120): fiction tracks command; `v_law` carries
+  the true 135–154. In walker_control the fiction drives PLACEMENT only, and
+  placement saturates ⇒ **command has no path to the body at overspeed**.
+
+Corollary (fixes the suspect ranking): steady 60 px/s IS feasible on this rig
+(cruise demand ≈ 11 of 30 px). Only the 154→60 TRANSITION is infeasible as a
+one-step brake. Guard 3.1 (reach-budgeted Δv staircase) is therefore the
+PRIMARY and SUFFICIENT fix: clamp `v_des` so per-step demand ≤ ~0.7·x_max.
+Swing-time machinery stays queued (R2/R3 honesty) but the attractor needs
+the staircase first. The script speeds (boost 150 > ceiling 154≈edge) also
+flag: boost should target ≈0.8·v_abs, not ≈v_abs.
+
 ## 1. The rules (the doctrine this project commits to)
 
 The body between footsteps is a Linear Inverted Pendulum:
