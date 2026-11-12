@@ -323,7 +323,7 @@ that already worked, no policy surgery; then the residual's job is genuinely
 attitude/shape, not "wait for reality". This answers the "can replay give
 reasonable direction when physics diverges?" worry at its weakest seam.
 
-## 12. Ballistic lock-in — the jump is decided at liftoff (user insight)
+## 12. Ballistic lock-in — two checkpoints, flight reward-free (user framing, revised)
 
 At the instant the feet leave the ground the flight is **fully determined**:
 gravity is the only external force, so the CoM parabola AND the angular
@@ -338,31 +338,119 @@ spin_drift   = ∫ L/I(t) dt  ≈ (L / Ĩ) · t_flight   // sign/rank reliable, 
 ```
 
 Measured proof: v10 hop1 launched at stick-lean −0.11 but locked L ⇒ θ ran to
-−1.5 "with no cause" in flight; no airborne action could arrest it (legs too
-light — no reaction authority). The flight is a **receipt, not a negotiation**.
+−1.5 "with no cause" in flight. The design consequence (user): **the jump is
+evaluated at two checkpoints — liftoff and landing — and only there.** The
+low-ω-at-liftoff doctrine also makes the one caveat to lock-in (the figure-
+skater effect: `ω = L/I` *is* shapable mid-air by changing `I` with leg
+config) irrelevant to the reward: a launch with small `L` needs no mid-air
+correction at any achievable `I`. Flight is quiet by demand, not by rescue.
 
-Exploits:
+### 12.1 Checkpoint 1 — liftoff tick (last grounded → first airborne)
 
-1. **Prediction channels in the obs.** Computed at liftoff, held live through
-   Flight (re-estimated each tick with current §10 state):
-   `(apex_pred − hip_height)/hip_height`, `(x_land_pred − support_x)/leg_len`,
-   `spin_drift`. The net sees the *consequence of its launch decision while it
-   is still correlated with the decision* — dense credit instead of a fall
-   0.4 s later with unknown cause.
-2. **Reward shaping at the lock-in tick, not at the crash.** A predicted
-   `|spin_drift| > θ_fall` is knowable immediately ⇒ price the doomed launch
-   at launch (optionally end the episode — it is already dead). Directly
-   attacks the old PPO hop's sparse-post-crash signal.
-3. **Flight-phase authority freeze (optional, structural).** δ is only *acted
-   on* during Load/Launch/Land; through Flight the proposal holds (the v1
-   pencil already approximates this). Physics says in-flight torso actions
-   cannot change the locked trajectory anyway; the only true in-flight job is
-   leg *placement geometry* for touchdown — handled by the Land phase, which
-   is grounded authority. Fewer things to learn, cleaner credit.
+```
+r_lock = − w_L · |ang_momentum| / (hip_height·v_scale)     // the conserved purchase
+       [+ optional − w_spin · |omega_com| / omega_scale     // what actually topples]
+       [+ optional + w_apex · clamp(apex_pred/target, 0, 1)] // the height we bought]
+```
 
-Dependency order: §10 fields (`L`, `ω_com`) are the inputs to every prediction
-here, so §10 lands first (unchanged), §12 features ship with the residual env
-(step 5 of the build order).
+`L` is the honest price (it is what is *locked*); `ω_com` prices the immediate
+consequence through the current `I`. Start with `L` alone; the two are a cheap
+ablation. This is exactly the sparse-signal fix the old PPO hop lacked: the
+doomed launch is priced on the tick it happens, not 0.4 s later at the crash.
+
+### 12.2 Checkpoint 2 — the Land window (first ~`land_window_ts` ≈ 0.3 s grounded after flight)
+
+The user's DCM suite, using the repo's own walking math
+(`walker_math::placement` — `ξ = x + v/ω₀`, `ω₀ = √(g/z₀)`):
+
+```
+ξ        = com.x + v_com.x / ω₀        with ω₀ = √(g / hip_height)   // z₀ NOMINAL
+p_center = (feet[0].x + feet[1].x) / 2 // geometric center of the two feet
+e_DCM    = |ξ − p_center| / leg_len
+
+r_land (per tick, inside the window) =
+    − w_dcm    · e_DCM                        // 1. primary balance judge
+    − w_xi     · |fd(ξ̇)| / v_scale           // 2. settle judge, FINITE-DIFFERENCED
+    − w_post   · |height − target|            // 3a. knees absorb, don't collapse
+    − w_spin   · |omega_com| / omega_scale    // 3b. torso not spinning while feet plant
+```
+
+Notes that pin the design:
+
+- **z₀ = nominal standing height, not live z** (user's adjustment). The knees
+  compress during absorption; `ξ` built on `z₀` stays a rock-solid balance
+  indicator while `z` does its job of changing. This matches the existing
+  `omega0(cfg.hip_height, cfg.gravity)` call sites in the gait.
+- **Judges 1 and 2 are the same ideal quantity — keep 2 for the transient.**
+  Under ideal LIPM, differentiating `ξ = x + v/ω₀` with `a = ω₀²(x − p_foot)`
+  gives `ξ̇ = ω₀·(ξ − p_foot) = ω₀·e_DCM`. So `|ξ̇| ≈ 0` is *implied* by
+  `e_DCM ≈ 0` — EXCEPT during the impact transient, where the constant-height
+  assumption breaks (knee compression, vertical impulse). The finite-differenced
+  `ξ̇` is precisely the "absorb smoothly, don't wobble on the ankles" signal.
+  Both are cheap; drop judge 2 by ablation if it measures out as dead weight.
+- Judge 3b is the same currency as checkpoint 1: the spin you land with was
+  purchased at liftoff. The Land-window spin penalty is the *delivery*, the
+  liftoff `L` penalty is the *price* — GAE connects them, so both get credit
+  for the same launch decision.
+
+### 12.3 Flight ticks: no shaping
+
+Alive bonus only. The landing reward flows back through GAE to the launch
+action; nothing else is required (or useful — see the quiet-by-demand framing
+above). Obs prediction channels (§12.4) give the critic the trajectory it is
+crediting.
+
+### 12.4 Prediction channels (obs only, not reward)
+
+At liftoff, re-estimated per Flight tick from §10 state:
+`(apex_pred − hip_height)/hip_height`, `(x_land_pred − p_center)/leg_len`,
+`spin_drift` (running integral `Σ (L/I_now)·dt` since liftoff — exact under the
+current config, updates as leg config changes; supersedes the `L/Ĩ·t_flight`
+placeholder). The net sees the consequence of its launch decision while it is
+still correlated with the decision.
+
+### 12.5 Termination: measured fall only
+
+The earlier "optionally end the episode on predicted doom" is **removed**: a
+predicted-doom termination invites the degenerate optimum of never launching.
+Predictions inform the reward, never the episode boundary.
+
+### 12.6 Authority during Flight
+
+δ is **not acted on** through Flight (the v1 pencil already holds shape —
+swinging airborne legs reaction-rotate the torso through the leg↔hip struts,
+the only joints that exist). Landing placement is grounded authority: the Land
+window is where the capture is earned. If training later shows the feet need
+mid-air re-presentation, release the freeze for the last ~0.1 s before
+touchdown — a measured decision, not a speculative one.
+
+## 13. One policy, checkpointed credit (decision)
+
+Two *reward* checkpoints, **one** policy — do not train a ground net and an
+airborne net:
+
+1. The flight states are *generated by* the launch policy; a separate flight
+   net trains on a non-stationary distribution owned by another learner
+   (classic coupled-instability), and under §12 the flight has near-zero
+   authority anyway — nothing for a dedicated net to do.
+2. The three landing decisions split cleanly without model count: **launch**
+   sets the conditions (learned — checkpoint 1), **flight** is a receipt
+   (no learning needed), **touchdown capture** is earned in the Land window
+   (learned — checkpoint 2) and then handed to the existing land-into-step
+   gait machinery.
+3. The policy is phase-conditioned by its observations (grounded/touching/
+   height/prediction channels), not by a phase switch in the network.
+   `decide()`'s gating already restricts which controller runs; the residual
+   lives inside that one controller.
+
+Escalation path *only if* flight measures out as the bottleneck: a two-stage
+curriculum (freeze launch, train Land-window capture, unfreeze) — same net,
+staged credit, not a second model.
+
+Dependency order: §10 fields (`L`, `ω_com`) are the inputs to everything here,
+so §10 landed first (done, `1f8a0d3`). §12/§13 features ship with the residual
+env (step 5 of the build order): reward terms in `ppo_collect_system`, the
+prediction channels in the residual obs layout (§7, amended additively).
 
 (Stash of the failed v8–v10 tuning saga: `stash@{0}`, recoverable but not the
 base — we build residual on committed v1 `JumpCtrl`, plus the §11 `Load→Launch`
