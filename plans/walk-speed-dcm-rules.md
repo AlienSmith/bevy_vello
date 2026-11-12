@@ -80,7 +80,55 @@ Corollary rules:
   exist yet. It is also the same mechanism the jump's landing absorption
   wants (`plans/jump-ppo-residual-polar-action.md` §12.2 height judge).
 
-## 2. Why the attractor is ~150 (suspects, in audit order)
+## 2b. THE MECHANISM (code audit, 2026-11-12 — supersedes the suspect ranking)
+
+Reading `stepping.rs:201-233` + `placement.rs:213-224` + the CSV closed the
+case. Three facts chain into the attractor:
+
+1. **The trigger is always true at touchdown.** `dcm_crossed` fires when
+   `dir·(ξ − plant) ≥ toe − margin`, `margin = v·T_sw`. At v=150 the margin
+   is 42 vs `toe = 8` — the gate reads `≥ −34`, i.e. "lift unless ξ is 34+
+   px *behind* your plant." A brake plant is aimed ≈44 px ahead of the hip,
+   ξ sits 45 ahead ⇒ `ξ − plant ≈ +1` ⇒ trivially crossed. The "event"
+   trigger is dead code in practice: it fires the tick the stance begins.
+2. **Only the anti-phase gate grants any stance at all.** `stance_over &&
+   wants_step && !other_swinging` — a foot cannot lift while its partner is
+   mid-swing, so stance duration = the partner's flight = the swing PACING
+   `t_target = stride/v` (stepping.rs:285), capped at 0.28. The DCM event
+   never schedules anything; the flight pacing does.
+3. **The brake is granted a horizon but starved of authority.** The
+   anti-phase gate floors stance at the partner's flight (≈0.3 s — close to
+   the law's t_c, so the horizon is roughly honored; earlier "stance ≈ 0"
+   reasoning corrected). The starvation is geometric: at v=150→v_des=60 the
+   deadbeat demands a plant ≈46–52 px ahead of the hip while `x_max ≈ 54`
+   — 85–96 % of reach. Swing delivery lag (the foot travels ~90 px in
+   0.28 s while the hip runs at 150; the last px take a measured ~0.2 s to
+   close) lands it 10–20 px short ⇒ real deceleration `ω₀²·(x−p)·T` is
+   ~2× weaker than promised, and the shortfall grows with Δv ⇒ the
+   attractor. `capture_saturated` fires intermittently (invisible — not in
+   the CSV; hence F0). The law/scheduler fight is confirmed in a subtler
+   form: the law's promise depends on a plant the scheduler's cadence
+   cannot *deliver*, and the always-true trigger (1) makes the scheduler
+   blind to that (it never waits for ξ the way the margin formula claims).
+
+Fix, faithful to the user's package (its guard 3.1 is now the PRIMARY lever —
+smaller Δv per step makes the demand comfortably reachable, killing the
+delivery-lag shortfall): drive `v_des` toward `cmd.speed` at a *reach-budgeted*
+rate so per-step demand ≤ ~70 % of `x_max` (the 120→80→40→0 staircase the user
+predicted, as a command shaper — §4d-3.1's "automatic in the clamp" reading
+holds only because the clamp was silently *failing* to decelerate; with the
+shaper the clamp is reserved for emergencies). Plus the scheduler honesty: the
+trigger evaluates against the NEXT support (the incoming plant), lifting when
+ξ crosses the incoming foot's edge — at cruise ~immediate (as the margin
+intended), under braking the stance holds while ξ is behind the incoming
+plant. Implementation: `swing_dyn` flag; predictive `t_hold` + `t_cap = 2·T_sw`
+fallback; `T_sw = clamp(L_lead/v, 0.15, 0.35)` driving swing pacing, margin,
+and the deadbeat floor; 30 ms touchdown debounce. Re-solve already ships
+per-frame (`placement.rs:196` horizon-stretch); swap fixed `t_c` for scheduled.
+F0 (export `trigger_reason`, `capture_saturated`, plants) lands FIRST — the
+delivery-lag hypothesis above is the thing to see.
+
+## 2c. Why the attractor is ~150 (suspects, in audit order — historical)
 
 The placement law runs every tick with `plan_meas_v = true` (WalkingCtrl::new
 closes the velocity loop through the deadbeat lead). At v≈150, v_des=60, the
