@@ -77,9 +77,40 @@ def load(path, targets):
     )
 
 
+def parse_args(argv):
+    """`--targets`, `--plan`, `--range T0 T1` (seconds, inclusive), PATH [OUT.png].
+
+    `--targets` draws the profile command (`tPLLLx/y`, the old 5-curve panel);
+    `--plan` additionally draws the placement law's own aim (`planLx/y`). They are
+    separate switches so each panel can keep the legacy line count when that is
+    what the reader expects.
+    """
+    targets = False
+    show_plan = False
+    t_range = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--targets":
+            targets = True
+            i += 1
+        elif a == "--plan":
+            show_plan = True
+            i += 1
+        elif a == "--range":
+            if i + 2 >= len(argv):
+                sys.exit("--range needs two numbers: --range T0 T1")
+            t_range = (float(argv[i + 1]), float(argv[i + 2]))
+            i += 3
+        else:
+            rest.append(a)
+            i += 1
+    return rest, targets, show_plan, t_range
+
+
 def main():
-    args = [a for a in sys.argv[1:] if a != "--targets"]
-    targets = "--targets" in sys.argv
+    args, targets, show_plan, t_range = parse_args(sys.argv[1:])
     if len(args) < 1:
         sys.exit(__doc__)
     path = args[0]
@@ -103,6 +134,25 @@ def main():
         rfx,
     ) = load(path, targets)
 
+    # Optional window: everything below (curves, shading, summary) sees only
+    # [t0, t1]. Used to zoom on transients (e.g. the 0–2.5 s entry where the
+    # body leaves the boost and the speed runs away).
+    if t_range is not None:
+        t0, t1 = t_range
+        m = (t >= t0) & (t <= t1)
+        if not m.any():
+            sys.exit(f"no rows in {t_range[0]}..{t_range[1]} s (data {t[0]:.2f}..{t[-1]:.2f})")
+
+        def win(a):
+            return None if a is None else a[m]
+
+        t, hip, lft, rft = t[m], hip[m], lft[m], rft[m]
+        gl, gr = gl[m], gr[m]
+        lt, rt = win(lt), win(rt)
+        plan_l, plan_r = win(plan_l), win(plan_r)
+        vx, vcmd, v_filt, v_des = win(vx), win(vcmd), win(v_filt), win(v_des)
+        lfx, rfx = win(lfx), win(rfx)
+
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
 
     def shade(ax):
@@ -114,15 +164,19 @@ def main():
     def curves(ax, col, ylab, title=None):
         shade(ax)  # bands first, so the curves draw on top
         ax.plot(t, hip[:, col], lw=1.4, color="k", label="hip P3")
-        ax.plot(t, lft[:, col], lw=1.0, color="#d6336c", label="L foot PLLL")
-        ax.plot(t, rft[:, col], lw=1.0, color="#1971c2", label="R foot PRLL")
-        if plan_l is not None:
+        ax.plot(t, lft[:, col], lw=1.0, color="#d6336c", label="L foot (physics)")
+        ax.plot(t, rft[:, col], lw=1.0, color="#1971c2", label="R foot (physics)")
+        if show_plan and plan_l is not None:
             # The placement law's OWN target (DebugInfo left/right_target_x at
             # the config floor), drawn on BOTH axes together with the commanded
             # profile target so "the law aimed wrong" and "the leg did not reach
-            # the aim" are visually separable.
-            ax.plot(t, plan_l[:, col], lw=1.1, ls=":", color="#862e9c", label="L plan (law)")
-            ax.plot(t, plan_r[:, col], lw=1.1, ls=":", color="#e8590c", label="R plan (law)")
+            # the aim" are visually separable. Opt-in (`--plan`) so a plain
+            # `--targets` plot keeps the legacy five curves per panel.
+            # Same hue per side as the physics foot (left = pink family,
+            # right = blue family); only the line style/weight distinguishes
+            # physics / actuator / dcm, so a side is one colour.
+            ax.plot(t, plan_l[:, col], lw=1.2, ls=":", color="#8a1c42", label="L dcm")
+            ax.plot(t, plan_r[:, col], lw=1.2, ls=":", color="#0b3d66", label="R dcm")
         if targets:
             ax.plot(
                 t,
@@ -131,7 +185,7 @@ def main():
                 ls="--",
                 color="#d6336c",
                 alpha=0.7,
-                label="L target",
+                label="L actuator",
             )
             ax.plot(
                 t,
@@ -140,7 +194,7 @@ def main():
                 ls="--",
                 color="#1971c2",
                 alpha=0.7,
-                label="R target",
+                label="R actuator",
             )
         ax.grid(alpha=0.3)
         ax.legend(loc="upper left", ncol=3)
@@ -176,6 +230,11 @@ def main():
     ax3.legend(loc="upper left", ncol=2)
     ax3.set_ylabel("hip vx (px/s)")
     ax3.set_xlabel("t (s)")
+    if t_range is not None:
+        ax1.set_xlim(t_range)
+        ax1.set_title(
+            f"Hip + feet position vs time — {path}  [{t_range[0]:.2f}..{t_range[1]:.2f} s]"
+        )
 
     fig.tight_layout()
     fig.savefig(out, dpi=110)
