@@ -192,6 +192,15 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
 /// foot target (longer stance/swing) lets the leg catch up to its command.
 /// Unknown keys ignored.
 fn apply_lower_env(cfg: &mut walker_math::LowerBodyConfig) {
+    // `HIP_HEIGHT=<px>`: the planner's assumed hip height above the floor. The
+    // attach path pins it to 104, but the body actually stands 108–112 px above
+    // the foot, and with 111 px legs that leaves only `√(111² − 110²) ≈ 15 px`
+    // of horizontal reach — far less than the `x_max ≈ 33 px` the law computes
+    // from 104. Lowering this makes the commanded stance lower and restores a
+    // real reach envelope (at 90 px: √(111² − 90²) ≈ 65 px).
+    if let Some(v) = env_f32("HIP_HEIGHT") {
+        cfg.hip_height = v;
+    }
     if let Some(v) = env_f32("STANCE_TS") {
         cfg.stance_duration_ts = v;
     }
