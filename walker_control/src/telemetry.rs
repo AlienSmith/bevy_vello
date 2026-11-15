@@ -64,7 +64,7 @@ use crate::observe::{Fiction, Observer};
 /// Columns of the scalar block, in the exact `TelemetryRow::set` order used by
 /// the harness, plus the two appended columns. The formatter emits exactly these
 /// keys, in exactly this order.
-pub const SCALAR_COLUMNS: [&str; 56] = [
+pub const SCALAR_COLUMNS: [&str; 60] = [
     "tau",
     "t",
     "act",
@@ -121,6 +121,15 @@ pub const SCALAR_COLUMNS: [&str; 56] = [
     "tPRLLay",
     "mode",
     "grounded",
+    // Appended (2026-11-15): the placement law's own swing target per foot, as
+    // a Vello world point (`ControlOut::plan`). `tPLLLx/y` is the *profile* foot
+    // the actuator is asked for; these four columns are the plant the LAW aimed
+    // at. `nan` outside the gait controller. Appended after `grounded` so every
+    // pre-existing column keeps its frozen index.
+    "planLx",
+    "planLy",
+    "planRx",
+    "planRy",
 ];
 
 /// The commanded-target column groups, in header order: `tP3` (hip), `tP40`
@@ -269,6 +278,9 @@ pub struct TickRecord {
     pub hip: Vec2,
     /// Commanded hip velocity (full vector, for `tP3vy`).
     pub hip_vel: Vec2,
+    /// The placement law's swing target per foot, Vello world point; `NaN`
+    /// outside the gait controller (`ControlOut::plan`).
+    pub plan: [Vec2; 2],
     /// Commanded foot positions.
     pub feet: [Vec2; 2],
 
@@ -328,6 +340,7 @@ impl Default for TickRecord {
             mode: LocoMode::default(),
             hip: Vec2::ZERO,
             hip_vel: Vec2::ZERO,
+            plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             feet: [Vec2::ZERO; 2],
             designed_theta: 0.0,
             designed_omega: 0.0,
@@ -374,6 +387,7 @@ impl TickRecord {
         self.mode = out.mode;
         self.hip = out.pose.hip;
         self.hip_vel = out.hip_vel;
+        self.plan = out.plan;
         self.feet = [out.pose.left_foot.pos, out.pose.right_foot.pos];
         // Loop-3 truth (only `WalkingCtrl` fills `debug`; the rest of the modes
         // report zeros with `att_active = false`). Mirror θ/ω by facing into the
@@ -542,6 +556,10 @@ impl TickRecord {
         // ---- Appended: the two signals the new architecture owns ----
         push("mode", mode_name(self.mode).to_string());
         push("grounded", format!("{}", self.grounded as u8));
+        push("planLx", format!("{:.2}", self.plan[0].x));
+        push("planLy", format!("{:.2}", self.plan[0].y));
+        push("planRx", format!("{:.2}", self.plan[1].x));
+        push("planRy", format!("{:.2}", self.plan[1].y));
 
         // ---- Measured particle channels, legacy V10 order (plot_p3.py,
         // pose_viewer.py): hip + feet real, every other slot zero-filled. ----

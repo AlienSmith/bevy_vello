@@ -23,6 +23,8 @@ import matplotlib.pyplot as plt
 def load(path, targets):
     t, hip, lft, rft, gl, gr = [], [], [], [], [], []
     lt, rt = [], []  # commanded foot targets (x, y) if wanted
+    plan_l, plan_r = [], []  # the placement LAW's swing target x (planLx/planRx)
+    has_plan = False
     vx, vcmd = [], []  # measured hip vx (P3vx) + fiction commanded vx (cmd_vx)
     lfx, rfx = [], []  # measured FOOT vx (PLLLvx/PRLLvx) — horizontal collision jitter
     v_filt, v_des = [], []  # persistent filtered reality + desired velocity (new columns)
@@ -44,6 +46,12 @@ def load(path, targets):
             if targets:
                 lt.append((float(row["tPLLLx"]), -float(row["tPLLLy"])))
                 rt.append((float(row["tPRLLx"]), -float(row["tPRLLy"])))
+            if "planLx" in row:
+                has_plan = True
+                # The law's target is a world POINT (plant x, floor y), so both
+                # panels can draw the aim it actually asked for.
+                plan_l.append((float(row.get("planLx") or "nan"), -float(row.get("planLy") or "nan")))
+                plan_r.append((float(row.get("planRx") or "nan"), -float(row.get("planRy") or "nan")))
             gl.append(int(row["gait_l"]))
             gr.append(int(row["gait_r"]))
     hip = np.array(hip)
@@ -58,6 +66,8 @@ def load(path, targets):
         np.array(gr),
         np.array(lt) if targets else None,
         np.array(rt) if targets else None,
+        np.array(plan_l) if has_plan else None,
+        np.array(plan_r) if has_plan else None,
         np.array(vx),
         np.array(vcmd),
         np.array(v_filt) if has_filt else None,
@@ -83,6 +93,8 @@ def main():
         gr,
         lt,
         rt,
+        plan_l,
+        plan_r,
         vx,
         vcmd,
         v_filt,
@@ -104,6 +116,13 @@ def main():
         ax.plot(t, hip[:, col], lw=1.4, color="k", label="hip P3")
         ax.plot(t, lft[:, col], lw=1.0, color="#d6336c", label="L foot PLLL")
         ax.plot(t, rft[:, col], lw=1.0, color="#1971c2", label="R foot PRLL")
+        if plan_l is not None:
+            # The placement law's OWN target (DebugInfo left/right_target_x at
+            # the config floor), drawn on BOTH axes together with the commanded
+            # profile target so "the law aimed wrong" and "the leg did not reach
+            # the aim" are visually separable.
+            ax.plot(t, plan_l[:, col], lw=1.1, ls=":", color="#862e9c", label="L plan (law)")
+            ax.plot(t, plan_r[:, col], lw=1.1, ls=":", color="#e8590c", label="R plan (law)")
         if targets:
             ax.plot(
                 t,

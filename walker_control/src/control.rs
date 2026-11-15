@@ -148,6 +148,16 @@ pub struct ControlOut {
     pub pose: Pose,
     /// Root velocity target (telemetry + prediction).
     pub hip_vel: Vec2,
+    /// The **placement law's own swing target** per foot, as a Vello world
+    /// point (same frame as [`Pose::left_foot`]); `NaN` outside `WalkingCtrl`.
+    ///
+    /// `pose.*_foot.pos` is the *profile* position the actuator is commanded to
+    /// (the Hermite output, IK-clamped); this is the plant the law asked for
+    /// (`DebugInfo::left/right_target_x`, planted at the config floor) before
+    /// the profile and the pose map touched it. Exporting both separates "the
+    /// law aimed wrong" from "the leg did not reach the aim", and lets the QA
+    /// plot draw the aim on BOTH axes (x target + the plant's floor height).
+    pub plan: [Vec2; 2],
     /// Which controller produced this.
     pub mode: LocoMode,
     /// Walking-internals telemetry; `None` outside the gait controller.
@@ -261,6 +271,7 @@ pub fn hold_pose(
             upper_angle: fiction.lean,
         },
         hip_vel: fiction.v_hip,
+        plan: [Vec2::new(f32::NAN, f32::NAN); 2],
         mode,
         debug: None,
     }
@@ -380,6 +391,7 @@ impl Step for StandingCtrl {
                 upper_angle: 0.0,
             },
             hip_vel: Vec2::ZERO,
+            plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::Standing,
             debug: None,
         }
@@ -613,6 +625,13 @@ impl Step for WalkingCtrl {
             // The solver's own integrated hip velocity, travel frame → vello
             // (x mirrored by facing, y negated for y-down).
             hip_vel: Vec2::new(pose.hip_vel.x * facing, -pose.hip_vel.y),
+            // The law's target in the same Vello frame as the pose feet: the
+            // solver's travel frame maps by `facing` about the solver hip, and
+            // every plan is planted on the config floor line.
+            plan: [
+                hip + to_vello(Vec2::new(debug.left_target_x, self.cfg.floor_y) - pose.hip),
+                hip + to_vello(Vec2::new(debug.right_target_x, self.cfg.floor_y) - pose.hip),
+            ],
             mode: LocoMode::Walking,
             debug: Some(debug),
         }
@@ -737,6 +756,7 @@ impl Step for BoostStartCtrl {
             // The boost commands no velocity: it is a held pose. Telemetry
             // reads the real forward creep only after the walking handover.
             hip_vel: Vec2::ZERO,
+            plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::BoostStart,
             debug: None,
         }
@@ -1019,6 +1039,7 @@ mod tests {
                 upper_angle: 0.1,
             },
             hip_vel: Vec2::new(50.0, 0.0),
+            plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::Standing,
             debug: None,
         };
