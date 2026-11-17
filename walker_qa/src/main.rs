@@ -186,6 +186,11 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("ATT_KD") {
         cfg.att_closure_kd = v;
     }
+    // Stance-foot press along the hip→foot chord, px (0 = off). See
+    // `ControlConfig::stance_press_depth`.
+    if let Some(v) = env_f32("STANCE_DEPTH") {
+        cfg.stance_press_depth = v;
+    }
 }
 
 /// Tune the gait cadence from env so a sweep can test whether a slower-moving

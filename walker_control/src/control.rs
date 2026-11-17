@@ -210,6 +210,19 @@ pub struct ControlConfig {
     /// Attitude-loop closure: rate gain on the MEASURED lean rate (rad/s →
     /// radians). Damps the real wobble the fiction damper cannot see.
     pub att_closure_kd: f32,
+    /// Stance-foot press, px (`STANCE_DEPTH`). Default **0** (off ⇒ the pose is
+    /// bit-identical to the solver output). When nonzero, `WalkingCtrl::step`
+    /// extends the STANCE leg's commanded foot a few px FURTHER along the
+    /// hip→foot chord as the very last act of the controller, before the
+    /// actuator reads the pose. Pressing along the leg axis (not straight down)
+    /// loads the foot into the floor the way the strut actually pushes, and
+    /// leaves the planner's geometry (`floor_y`, plants, swing targets) and the
+    /// vertical loop completely untouched — it is a pure actuation preload.
+    ///
+    /// Shaped by a stance-phase envelope: mild at touchdown and liftoff,
+    /// strongest mid-stance (`sin(π·age/T_stance)`), so it never yanks at the
+    /// stance boundaries where the contact is being made/broken.
+    pub stance_press_depth: f32,
 }
 
 impl Default for ControlConfig {
@@ -235,6 +248,9 @@ impl Default for ControlConfig {
             // survival + 10x wobble damping vs the open loop.
             att_closure_kp: 0.1,
             att_closure_kd: 0.15,
+            // Off by default: the walking pose stays bit-identical to the
+            // solver output until a sweep says otherwise.
+            stance_press_depth: 0.0,
         }
     }
 }
@@ -608,15 +624,37 @@ impl Step for WalkingCtrl {
         let left_stance = self.state.left.phase == walker_math::GaitPhase::Stance;
         let right_stance = self.state.right.phase == walker_math::GaitPhase::Stance;
         let to_vello = |off: Vec2| Vec2::new(off.x * facing, -off.y);
+        // --- Stance press (`STANCE_DEPTH`): the LAST act before the actuator ---
+        // Extend a STANCE leg's commanded foot along the hip→foot chord,
+        // envelope-shaped across stance (mild at touchdown/liftoff, strongest
+        // mid-stance); swing feet and `depth == 0` stay bit-identical. See
+        // [`stance_press`]; nothing feeds back into the solver, so the pose
+        // is a pure output preload.
+        let ts = self.cfg.stance_duration_ts.max(f32::EPSILON);
+        let depth = cfg.stance_press_depth;
         ControlOut {
             pose: Pose {
                 hip,
                 left_foot: FootPose {
-                    pos: hip + to_vello(pose.left_foot - pose.hip),
+                    pos: hip
+                        + to_vello(stance_press(
+                            depth,
+                            ts,
+                            left_stance,
+                            self.state.left.phase_timer,
+                            pose.left_foot - pose.hip,
+                        )),
                     stance: left_stance,
                 },
                 right_foot: FootPose {
-                    pos: hip + to_vello(pose.right_foot - pose.hip),
+                    pos: hip
+                        + to_vello(stance_press(
+                            depth,
+                            ts,
+                            right_stance,
+                            self.state.right.phase_timer,
+                            pose.right_foot - pose.hip,
+                        )),
                     stance: right_stance,
                 },
                 facing,
@@ -909,6 +947,30 @@ impl LocoState {
         }
         self.mode
     }
+}
+
+/// Stance-foot press (`STANCE_DEPTH`): extend a STANCE leg's commanded
+/// hip→foot offset by `depth · sin(π · age / T_stance)` px **along the chord**,
+/// i.e. away from the hip in the same direction the strut already pushes.
+/// Mild at the stance boundaries (`age → 0` and `age → T_stance`, where the
+/// envelope vanishes), strongest mid-stance. Returns `off` untouched when the
+/// leg is in swing, when `depth == 0` (keeps the pose bit-identical), or for a
+/// degenerate zero-length chord. Pure and side-effect free so it can be tested
+/// directly; `WalkingCtrl::step` is the only caller.
+fn stance_press(depth: f32, t_stance: f32, stance: bool, timer: f32, off: Vec2) -> Vec2 {
+    if !stance || depth == 0.0 {
+        return off;
+    }
+    let len = off.length();
+    if len <= f32::EPSILON {
+        return off;
+    }
+    // `timer` counts DOWN from `t_stance` after the solver tick; age is the
+    // fraction of stance already spent, clamped so a stretched/early state can
+    // never push the envelope outside [0, 1] cycles.
+    let age = (t_stance - timer).clamp(0.0, t_stance);
+    let env = ((age / t_stance) * std::f32::consts::PI).sin();
+    off * (1.0 + (depth * env) / len)
 }
 
 /// The boost release event: has the DCM `ξ ≈ com + v_com·boost_lead_tau`
@@ -1580,5 +1642,74 @@ mod tests {
         let a = run();
         let b = run();
         assert_eq!(a, b, "same inputs ⇒ same outputs (D1)");
+    }
+
+    #[test]
+    fn stance_press_is_chord_aligned_envelope_shaped_and_stance_only() {
+        // Geometry: hip at solver origin, foot 100 px directly BELOW it in the
+        // solver's y-UP frame (a perfectly vertical leg). The press must lengthen
+        // the hip→foot chord — never tilt it — so the x component stays 0.
+        let off = Vec2::new(0.0, -100.0);
+        let t = 0.28;
+        let depth = 6.0;
+
+        // Swing foot: untouched, bit-identical.
+        assert_eq!(
+            stance_press(depth, t, false, t * 0.5, off),
+            off,
+            "swing leg not pressed"
+        );
+
+        // depth == 0: inert even in stance (bit-identical pose when off).
+        assert_eq!(
+            stance_press(0.0, t, true, t * 0.5, off),
+            off,
+            "zero depth is inert"
+        );
+
+        // Mid-stance (age = t/2): envelope peaks at sin(π/2) = 1 ⇒ +depth px,
+        // purely along the chord (direction unchanged, length +depth).
+        let mid = stance_press(depth, t, true, t - t * 0.5, off);
+        assert_eq!(mid.x, 0.0, "press stays on the vertical chord");
+        assert!(
+            (mid.length() - (100.0 + depth)).abs() < 1e-3,
+            "mid-stance press = depth along chord: {}",
+            mid.length()
+        );
+        // Direction preserved (still straight down in solver frame).
+        assert!(
+            mid.y < 0.0 && mid.y < off.y,
+            "foot pushed FURTHER from hip, not lifted"
+        );
+
+        // Boundaries: touchdown (age 0) and liftoff (age t) envelope → 0.
+        let td = stance_press(depth, t, true, t, off);
+        assert!(
+            (td - off).length() < 1e-4,
+            "touchdown is mild (envelope→0): {td:?}"
+        );
+        let lo = stance_press(depth, t, true, 0.0, off);
+        assert!(
+            (lo - off).length() < 1e-4,
+            "liftoff is mild (envelope→0): {lo:?}"
+        );
+
+        // Monotone ramp-up on the first half, ramp-down on the second.
+        let quarter = stance_press(depth, t, true, t - t * 0.25, off).length();
+        let three_quarter = stance_press(depth, t, true, t - t * 0.75, off).length();
+        assert!(
+            quarter > td.length() && quarter < mid.length(),
+            "quarter-stance rises toward the peak: {quarter}"
+        );
+        assert!(
+            (three_quarter - quarter).abs() < 1e-2,
+            "envelope is symmetric about mid-stance: {quarter} vs {three_quarter}"
+        );
+
+        // Degenerate zero-length chord must not divide by zero.
+        assert_eq!(
+            stance_press(depth, t, true, t * 0.5, Vec2::ZERO),
+            Vec2::ZERO
+        );
     }
 }
