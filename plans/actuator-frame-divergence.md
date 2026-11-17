@@ -136,6 +136,46 @@ tangential (further rotation):
   so with `v_filt` 70–155 against `v_des` 40–70 the swing target is placed for a
   slower body: touchdown `ERR` median −17 px.
 
+## The second term: velocity-proportional servo lag (2026-11-17)
+
+The rotation test's residual is not noise. Fitting the swing-phase foot error
+against the static frame error `δ = meas_theta − att_target` and the commanded
+foot velocity `v_cmd = tPLLLvx` gives
+
+```
+ex ≈ b_δ·δ + τ·v_cmd + c·ω_body
+```
+
+| run | phase | mean ex | b_δ | τ | `τ·v` at swing p95 | c |
+|---|---|---|---|---|---|---|
+| sd7 (60/90-40-70-40) | stance | 10–11.5 px | 72–87 px/rad | ~7 ms | ~0 | ~0 |
+| sd7 | swing | 17.2–17.7 px | 41–45 px/rad | **15–19 ms** | 7.5–9.6 px | 3–6 |
+| sd8 (60/120/60) | stance | 7.7–8.5 px | 46–67 px/rad | ~6–8 ms | ~0 | 1–2 |
+| sd8 | swing | 13.7 px | 25–31 px/rad | **15–20 ms** | 7.7–9.8 px | 3–10 |
+
+Stance is static frame only (`v ≈ 0`). Swing carries a **~15–20 ms
+velocity-proportional lag** on top of the static frame — about 1.5 ticks at
+90 Hz, i.e. the observe→control→actuate→solve transport plus the joint
+spring-damper lag. `ω_body` contributes the smaller `c` term.
+
+Why: the actuator is a pure **position** servo. It emits `rest_cos/rest_sin`
+and `rest_length`, never a rate. The joint's required rate is
+`θ̇_plan + ω_body` (the hip must counter-rotate to hold a world thigh under a
+rotating torso), and neither is fed forward. The DCM is not at fault — it plans
+CoM position/velocity and does not need the angular rate — the *servo* needs it.
+
+**Lead attempt rejected (2026-11-17).** A `τ·v` lead on the commanded foot was
+implemented and run (`sd10`, `FOOT_LEAD_TS=0.02`). It overshoots at landing:
+the vertical swing velocity is downward near touchdown, so the linear lead pushes
+the target below the plan/floor (`tPRLLy` 316–318 vs `planRy` 314 at
+t≈5.50–5.52), and `LowerBodyPose` velocities are finite differences of the pose,
+which spike at phase transitions (`tPRLLvx` −4369 / +2767 px/s at t≈5.55), so
+the lead can be tens of px. The lead was removed.
+
+The measured τ is still real. The structural fix is the solver's velocity
+projection (`AngularConstraintConfig::angular_velocity = Some(θ̇_rest + ω_meas)`,
+`sigma > 0`), which uses rates rather than a tuned delay.
+
 ## Why it never self-corrects
 
 1. The pose is hip-relative and re-expressed around the **measured** hip every
