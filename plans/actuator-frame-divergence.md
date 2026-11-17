@@ -550,9 +550,15 @@ findings worth keeping:
   dominated 100:1 and the pin was *inert*. `1e-11` is the value that would
   actually hold the torso.
 - Even so it was not a direction worth keeping, so the pin was removed: the walk
-  did not improve and the gait still commands a ~0.15 rad lean the pin would
-  have to override every tick. If the pin is ever revisited, the lean command
-  must be zeroed at the same time, or the two just fight.
+  did not improve, and the walking pose still emits `upper_angle` from the
+  attitude loop, which the pin would have to override every tick. Note what that
+  signal actually is (measured over a walk, 2761 ticks): `att_target` mean
+  **0.000**, range **−0.214 … +0.125**, and the model's own lean `body_theta`
+  mean **−0.001**, range −0.067 … +0.052. So it is not a steady lean — only the
+  *launch* pre-lean (`boost_lean`) was a steady tilt, and that is gone. What
+  remains is the attitude loop's oscillation, which is precisely the correction
+  a pin would make redundant. If the pin is ever revisited, that command must go
+  to zero at the same time, or the two just fight.
 
 Reverted: `ActuatorConfig` is back to `hip_compliance / knee_compliance / zeta /
 strut_active / strut_idle`, and `actuate_stage` queues only the legs.
