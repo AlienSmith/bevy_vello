@@ -232,6 +232,34 @@ pub fn actuate_stage(
         w.observer.fiction.dt,
         world,
     );
+    // --- Boost hip thrust: put the launch's forward push on the BODY ---
+    // A pose-level push can only move FEET, and a sliding foot delivers almost
+    // nothing (measured: 6 px of foot drag → 0.6 px of hip travel). During the
+    // launch's push window, add one tick of horizontal `Δv` to the hip particle
+    // `P3` as an idempotent velocity overwrite (last write wins, so a lost or
+    // duplicated application cannot accumulate energy). See
+    // `ControlConfig::boost_hip_accel`.
+    let accel = w.config.control.boost_hip_accel;
+    if accel != 0.0
+        && w.state.mode == LocoMode::BoostStart
+        && w.state.since >= w.config.control.boost_crouch_ts
+    {
+        let dt = w.observer.fiction.dt;
+        // Travel sign from the held command (vello x); fall back to facing.
+        let s = w
+            .command
+            .map(|c| c.vx().signum())
+            .filter(|s| *s != 0.0)
+            .unwrap_or(if out.pose.facing < 0.0 { -1.0 } else { 1.0 });
+        if let Ok(p) = p_q.get(left.parts[1]) {
+            let dv = Vec2::new(s * accel * dt.max(0.0), 0.0);
+            world.queue_connect_particle_velocity(
+                character,
+                &left.parts[1],
+                p.particle.velocity + dv,
+            );
+        }
+    }
 }
 
 /// A live leg snapshot for the actuator, or the degenerate fallback (struts

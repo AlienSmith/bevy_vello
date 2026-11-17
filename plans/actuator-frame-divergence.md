@@ -374,9 +374,20 @@ Three measured steps, all on the entry tick:
    default 0). An earlier version translated *both* feet backwards; that drags
    the support out from under the body and the launch falls backwards instead of
    forward. The pushing foot's displacement is capped by its own horizontal
-   reach room, `sqrt(reach² − y²) − |x|` — ~10 px at `HIP_HEIGHT=98`, ~15 at 96,
-   ~26 at 90 — so **the squash depth sets the strength of the push**, not
+   reach room, `sqrt(reach^2 - y^2) - |x|` — ~10 px at `HIP_HEIGHT=98`, ~15 at
+   96, ~26 at 90 — so **the squash depth sets the strength of the push**, not
    `boost_kick` (values above the room are silently clamped).
+
+3. **Hip thrust — the push that actually reaches the body.** All of the above
+   moves FEET, and a foot that slides delivers almost nothing (measured: 6 px of
+   foot drag → 0.6 px of hip travel). `ControlConfig::boost_hip_accel`
+   (`BOOST_HIP_ACCEL`, px/s², default 300, 0 = off) makes `actuate_stage` add
+   one tick of horizontal `Δv = dir · accel · dt` to the **hip particle `P3`**
+   while the push window is open, as an idempotent velocity overwrite (last
+   write wins — a lost or duplicated application cannot accumulate energy). At
+   300 px/s² over the 0.29 s launch that is ~87 px/s, i.e. the cruise the plan
+   asks for, at the moment the gait takes over. This is the one part of the
+   launch that is not a pose command.
 
 The launch is **upright** (`upper_angle = 0`): the old 0.05 rad pre-lean only
 bought ~1.8 px of CoM offset and, because the torso target is referenced to the

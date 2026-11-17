@@ -233,6 +233,19 @@ pub struct ControlConfig {
     /// a 15 px drive is ~375 px/s of foot speed, fast enough to beat the slip
     /// that turned the first (0.12 s, 8 px) attempt into a drag.
     pub boost_kick_ts: f32,
+    /// Boost **hip thrust**, px/s² (`BOOST_HIP_ACCEL`). While the launch is
+    /// pushing (`since ≥ boost_crouch_ts`), `actuate_stage` adds one tick of
+    /// horizontal `Δv = dir · accel · dt` to the **hip particle `P3`**, as an
+    /// idempotent velocity overwrite (last write wins, so a lost or duplicated
+    /// application can never accumulate energy).
+    ///
+    /// This is the one place the launch puts force where it belongs. Every
+    /// pose-level push can only move FEET, and a foot that slides delivers
+    /// almost nothing (measured: 6 px of foot drag → 0.6 px of hip travel). The
+    /// speed the gait inherits is the speed of the BODY, so it is set directly.
+    /// At 300 px/s² over the 0.29 s launch that is ~87 px/s of forward speed —
+    /// the cruise the plan asks for. 0 disables it.
+    pub boost_hip_accel: f32,
     /// Attitude-loop closure: position gain on the MEASURED lean error
     /// (radians → radians). `0.0` keeps `upper_angle` a pure echo of the
     /// solver's model lean — the open loop whose damper (`−kd·ω`) sees fiction
@@ -298,6 +311,8 @@ impl Default for ControlConfig {
             boost_kick: 15.0,
             boost_kick_front: 0.0,
             boost_kick_ts: 0.04,
+            // ~90 px/s of forward speed over the 0.29 s launch.
+            boost_hip_accel: 300.0,
             // Validated on the 10s track (see the field docs): full-walk
             // survival + 10x wobble damping vs the open loop.
             att_closure_kp: 0.1,

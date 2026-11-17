@@ -201,6 +201,10 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("STANCE_DEPTH") {
         cfg.stance_press_depth = v;
     }
+    // Boost hip thrust, px/s² (0 = off): horizontal Δv on `P3` during the push.
+    if let Some(v) = env_f32("BOOST_HIP_ACCEL") {
+        cfg.boost_hip_accel = v;
+    }
 }
 
 /// Tune the gait cadence from env so a sweep can test whether a slower-moving
