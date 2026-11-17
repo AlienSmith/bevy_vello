@@ -354,32 +354,46 @@ Three measured steps, all on the entry tick:
    an order of magnitude less than the 9–15 px the squat hands it. (That lean
    has since been removed: the launch is upright and the kick is the drive.)
 
-Fixes now in place:
+## The launch is now explicitly two steps
 
-- the crouch is **eased** (`boost_crouch_ts`, smoothstep, default 0.25 s), so
-  the entry tick is the blueprint rest pose and the depth arrives after the
-  body has had time to fold under load;
-- the **push-off** (`boost_push`, default 0) extends the BACK leg's chord along
-  its own hip→foot direction, ramped by `boost_push_ts` and clamped to
-  `thigh + calf − chord`;
-- the launch is **upright**: `upper_angle = 0` for the whole cell. The old 0.05
-  rad pre-lean only bought ~1.8 px of CoM offset, and because the torso target
-  is referenced to the live thigh it also had to be paid for in pitch — now the
-  kick is the drive and the attitude reference stays vertical;
-- the **kick-off** (`boost_kick`, default **15 px**, ramp
-  `boost_kick_ts` = **0.04 s**) drives the BACK foot *backwards along travel*:
-  the leg extends behind the body, so the reaction is **100 % forward** hip
-  travel (a chord extension is only ~30 % — the back chord is 18° off vertical).
-  It is clamped by the horizontal reach left, `sqrt(reach² − y²) − |x|`, so the
-  clamp — not the knob — decides: ~15 px at `hip_height = 96`, ~10 px at 98.
-  The 0.04 s ramp is deliberate: at 15 px it is ~375 px/s of foot drive, fast
-  enough to beat the slip that turned the first (0.12 s, 8 px) attempt into a
-  drag. No env override: the value is baked.
+1. **Squash — vertical only.** `rest_shift` eases both plant depths from the
+   blueprint rest depths toward `hip_height` over `boost_crouch_ts` (default
+   0.25 s). Nothing moves in x. Both feet are `stance` for the whole cell, so
+   the crouch pulls the **hip** down onto planted feet — a swing-flagged foot
+   would just be lifted by the same ramp (measured: the back foot floated
+   through the first 0.2 s of the launch).
+2. **Push the BACK foot backwards.** Starting only once step 1 has landed, the
+   **back** plant translates backwards along travel by `boost_kick` (default
+   15 px) over `boost_kick_ts` (default 0.04 s ≈ 375 px/s of foot drive, an
+   impulse rather than a drag): that leg extends behind the body, so the
+   reaction pushes the hips **forward**, and every pixel of the displacement is
+   forward travel — unlike a chord extension, which is only ~30 % forward.
+   `boost_push` (default 0) then extends the kicked chord along itself.
 
-**Headroom, and why the two push-offs differ.** At the v10 rest pose the back
-chord is |(−33, 106)| = 111 px of a 110 px leg, so `reach − chord` is *negative*
-and both are no-ops — that is why a real launch crouches first, not a bug. The
-crouch then buys very different room:
+   The **front foot is the support and does not move** (`boost_kick_front`,
+   default 0). An earlier version translated *both* feet backwards; that drags
+   the support out from under the body and the launch falls backwards instead of
+   forward. The pushing foot's displacement is capped by its own horizontal
+   reach room, `sqrt(reach² − y²) − |x|` — ~10 px at `HIP_HEIGHT=98`, ~15 at 96,
+   ~26 at 90 — so **the squash depth sets the strength of the push**, not
+   `boost_kick` (values above the room are silently clamped).
+
+The launch is **upright** (`upper_angle = 0`): the old 0.05 rad pre-lean only
+bought ~1.8 px of CoM offset and, because the torso target is referenced to the
+live thigh, it had to be paid for in pitch.
+
+**Release: the DCM event, but only after the schedule.** `boost_handover_due`
+still requires `ξ = com + v_com·τ` to pass the frontmost foot, but it now *also*
+requires the launch schedule to have played out (`since ≥ boost_crouch_ts +
+boost_kick_ts`). Without that gate the event fires during the squash or a couple
+of ticks into the push — the body goes to the gait before the push has delivered
+its speed, and the walk starts from rest against the full planned speed. With
+it, the push gets its whole window and the handover inherits its velocity.
+
+**Headroom, and why the steps are ordered.** At the v10 rest pose the back chord
+is |(−33, 106)| = 111 px of a 110 px leg, so there is *no* room to translate
+backwards — that is why a real launch squashes first, not a bug. The squash then
+buys very different room per foot:
 
 | `hip_height` | back chord | chord extension room | **backward kick room** |
 |---|---|---|---|
@@ -387,9 +401,12 @@ crouch then buys very different room:
 | 98 | 106.3 | 3.7 | **10.4** |
 | 96 | 104.4 | 5.6 | **15.0** |
 
-The backward kick is the better lever on paper: it uses the leg's *horizontal*
+The backward translation is the better lever: it uses the leg's *horizontal*
 reach, and every pixel of it should be forward hip travel instead of ~3 px of
-lift. `boost_kick` defaults to 8 px — inert at `HIP_HEIGHT=104`, active at 96–98.
+lift. `boost_kick` defaults to 15 px, **applied to both feet** in step 2 — a
+single back-foot kick only pushes if that one foot grips, and the gathered front
+foot has by far the most room (~50 px). At `HIP_HEIGHT=104` the back foot has no
+room at all, so the squash is what makes step 2 possible.
 
 **Measured 2026-11-17 (first kick run): the kicking foot SLID, and the body did
 not move.** Over t = 1.21 → 1.30 the back-foot target went 141.0 → 131.4 px and
@@ -505,6 +522,40 @@ leg must carry the body at the commanded chord instead. Any real fix has to make
 the leg load-bearing first — stiffness (`KNEE_COMPLIANCE`, `STRUT_ACTIVE`), the
 commanded height (`HIP_HEIGHT` near the rig's own ~104), or a damped strut — and
 only then can the foot be kept on the surface.
+
+## Why every vertical fix fails: one shared DOF (and the waist pin, reverted)
+
+Worth stating plainly, because it explains four different-looking failures: a
+leg has two DOF — the **chord** and the **hip angle** — and the chord is
+effectively rigid (`strut_active = 1e-6`). So the leg has **one usable DOF**, and
+two loops want it:
+
+- the **attitude** loop (hip joint), which is also what keeps the torso from
+  tipping;
+- the **height** of the hip above a planted foot, which with a rigid chord *is*
+  the leg's orientation — the same DOF.
+
+That is why the frame corrections leaked into pitch, why the vertical damper ran
+away into forward lean, and why clamping the foot to the floor removed the
+over-extension the body was standing on. Not four unrelated bugs: one shared DOF.
+
+**Experiment: pin the torso vertically (tried, REVERTED).** `actuate_stage`
+queued an external position constraint every tick holding `P2` at
+`(P3.x, P3.y − |P2−P3|)`, which removes the attitude job from the legs. Two
+findings worth keeping:
+
+- **A pin must out-stiffen the joints it competes with.** `P2` is held by *both*
+  legs' hip joints *and* the pin; XPBD compliance decides the winner and does not
+  average. At the first default (`1e-7` vs `hip_compliance = 1e-9`) the joints
+  dominated 100:1 and the pin was *inert*. `1e-11` is the value that would
+  actually hold the torso.
+- Even so it was not a direction worth keeping, so the pin was removed: the walk
+  did not improve and the gait still commands a ~0.15 rad lean the pin would
+  have to override every tick. If the pin is ever revisited, the lean command
+  must be zeroed at the same time, or the two just fight.
+
+Reverted: `ActuatorConfig` is back to `hip_compliance / knee_compliance / zeta /
+strut_active / strut_idle`, and `actuate_stage` queues only the legs.
 
 ## Side notes (not the cause)
 

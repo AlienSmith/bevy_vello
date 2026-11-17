@@ -54,9 +54,10 @@ pub struct Command {
     pub speed: f32,
     /// This move is a **launch**: start it through [`LocoMode::BoostStart`]
     /// instead of entering the gait directly. The launch is an **upright**
-    /// held stance — crouch, then kick the back foot backwards — held while
-    /// this flag is set; the machine hands over to [`LocoMode::Walking`] as
-    /// soon as the DCM passes the front foot (see [`boost_handover_due`]).
+    /// held stance — squash, then push the back foot backwards — held while
+    /// this flag is set; the machine hands over to [`LocoMode::Walking`] when
+    /// the launch schedule has played out *and* the DCM has passed the front
+    /// foot (see [`boost_handover_due`]).
     pub boost: bool,
 }
 
@@ -203,20 +204,31 @@ pub struct ControlConfig {
     pub boost_push: f32,
     /// Boost push-off ramp, seconds (smoothstep; a step is a velocity kick).
     pub boost_push_ts: f32,
-    /// Boost **kick-off**, px: drive the BACK foot this far
-    /// BACKWARDS along travel while it is planted, so the leg extends behind
-    /// the body and the reaction pushes the hip FORWARD. This is the push a
-    /// chord extension cannot give: the back foot sits 33 px behind and
-    /// ~`hip_height` below the hip, so extending along that chord is only
-    /// ~30 % forward travel, while moving the foot backwards is 100 % of it.
+    /// Boost **step two**: move **both** plant targets this far BACKWARDS along
+    /// travel, so both legs extend behind the body and the reaction pushes the
+    /// hips FORWARD. 100 % of this displacement is forward travel, unlike the
+    /// ~30 % a chord extension gives (the chord is ~18° off vertical).
     ///
-    /// Clamped by the horizontal reach the leg has left
-    /// (`sqrt(reach² − y²) − |x|`), so at the v10 rest depth (back chord 111 px
-    /// of a 110 px leg) it is a **no-op**: only a crouch buys the room — about
-    /// 15 px at `hip_height = 96`, 10 px at 98. The kick therefore works *with*
-    /// `boost_crouch_ts`: crouch first, then kick. Default 15 px (the clamp
-    /// takes whatever the crouch actually bought).
+    /// The launch is explicitly two steps, in this order:
+    /// 1. **squash** — `rest_shift` eases both plant depths toward
+    ///    `hip_height` over `boost_crouch_ts` (vertical only, nothing moves in
+    ///    x), with both feet support so the HIP is pulled down;
+    /// 2. **move both feet backwards** — this knob, starting only once step 1
+    ///    has landed, because the legs need the crouch's reach room before they
+    ///    can translate: each foot is clamped by its own
+    ///    `sqrt(reach² − y²) − |x|` (~50 px for the gathered front foot, ~15 px
+    ///    for the back one at `hip_height = 96`, none at the v10 rest depth).
+    ///
+    /// Release is unchanged: the DCM `ξ = com + v_com·τ` passing the frontmost
+    /// foot ([`boost_handover_due`]). Default 15 px, **back foot only** — see
+    /// [`Self::boost_kick_front`].
     pub boost_kick: f32,
+    /// Boost step two, the **front** foot's share of the backward translation,
+    /// px. Default **0**: the gathered front foot is the support the body is
+    /// standing on, so dragging it backwards removes that support and tips the
+    /// body back (measured: the two-feet version fell backwards). Keep this at 0
+    /// and let the back leg do the pushing.
+    pub boost_kick_front: f32,
     /// Boost kick-off ramp, seconds. Short = a kick, long = a shove: at 0.04 s
     /// a 15 px drive is ~375 px/s of foot speed, fast enough to beat the slip
     /// that turned the first (0.12 s, 8 px) attempt into a drag.
@@ -284,6 +296,7 @@ impl Default for ControlConfig {
             // On by default, but the reach clamp makes it a no-op unless the
             // launch is crouched (see the field docs).
             boost_kick: 15.0,
+            boost_kick_front: 0.0,
             boost_kick_ts: 0.04,
             // Validated on the 10s track (see the field docs): full-walk
             // survival + 10x wobble damping vs the open loop.
@@ -871,47 +884,49 @@ impl Step for BoostStartCtrl {
         let crouch = smoothstep01(self.since / cfg.boost_crouch_ts.max(1e-3));
         let rest_shift = Vec2::new(0.0, (hip_h - REST_RIGHT_FOOT.y) * crouch);
         let ts = cfg.boost_gather_ts.max(1e-3);
-        // The BACK leg — the offset pointing against travel — is the kicker.
-        let left_back = REST_LEFT_FOOT.x * s <= 0.0;
-        let back_rest = if left_back {
-            REST_LEFT_FOOT
-        } else {
-            REST_RIGHT_FOOT
-        } + rest_shift;
-        // Both push-offs wait for the CROUCH to finish (`boost_crouch_ts`): the
-        // back foot has to be loaded before it can be driven, otherwise the
-        // kick just drags an unloaded foot (measured: the back foot floated
-        // through the first 0.2 s of the launch and the kick still slid it 6 px
-        // across the floor for 0.6 px of hip travel).
-        let push_age = (self.since - cfg.boost_crouch_ts.max(1e-3)).max(0.0);
-        // 1) KICK: drive the back foot BACKWARDS along travel, so
-        //    the leg extends behind the body and the reaction pushes the hip
-        //    FORWARD — 100 % of this displacement is forward travel, unlike the
-        //    ~30 % a chord extension gives (the back chord is ~18° off vertical).
-        //    Limited to the horizontal reach left (`sqrt(reach² − y²) − |x|`),
-        //    which is NEGATIVE at the v10 rest depth: a crouch buys the kick.
-        let kick_room = (self.reach * self.reach - back_rest.y * back_rest.y)
-            .max(0.0)
-            .sqrt()
-            - back_rest.x.abs();
-        let kick = (cfg.boost_kick * smoothstep01(push_age / cfg.boost_kick_ts.max(1e-3)))
-            .min(kick_room.max(0.0));
-        let back_kicked = back_rest + Vec2::new(-s * kick, 0.0);
-        // 2) PUSH (`BOOST_PUSH`): extend the (already kicked) chord along
-        //    itself, which reacts on the hip up-and-forward and lifts the body
-        //    out of the crouch. Clamped to the reach left too.
-        let push = cfg
-            .boost_push
-            .min((self.reach - back_kicked.length()).max(0.0))
-            * smoothstep01(push_age / cfg.boost_push_ts.max(1e-3));
-        let back_out = chord_extend(back_kicked, push);
+        // --- STEP 1: SQUASH (vertical only) -------------------------------
+        // `rest_shift` eases both plant targets toward the hip over
+        // `boost_crouch_ts`; nothing moves in x yet, and both feet are support
+        // so the crouch pulls the HIP down onto planted feet.
         let left_off = gather(REST_LEFT_FOOT + rest_shift);
         let right_off = gather(REST_RIGHT_FOOT + rest_shift);
-        let (left_off, right_off) = if left_back {
-            (back_out, right_off)
-        } else {
-            (left_off, back_out)
+        // --- STEP 2: MOVE BOTH FEET BACKWARDS -----------------------------
+        // Only after the squash has landed. BOTH plant targets translate
+        // backwards along travel by the same amount, so the hips are pushed
+        // forward whichever foot carries the load — a single back-foot kick
+        // only pushes if that one foot grips (measured: it slid 6 px for 0.6 px
+        // of hip travel). Each foot is limited by ITS OWN horizontal reach room
+        // `sqrt(reach² − y²) − |x|`: the gathered front foot has ~50 px, the
+        // back one only ~15 px at 96 and none at the v10 rest depth, which is
+        // why the squash comes first.
+        let step2_age = (self.since - cfg.boost_crouch_ts.max(1e-3)).max(0.0);
+        let step2 = smoothstep01(step2_age / cfg.boost_kick_ts.max(1e-3));
+        let reach = self.reach;
+        // The BACK leg is the pusher (`boost_kick`); the FRONT foot is the
+        // support and stays put (`boost_kick_front`, default 0). Dragging the
+        // support backwards removes what the body is standing on.
+        let left_back = REST_LEFT_FOOT.x * s <= 0.0;
+        let kick_of = |back: bool| {
+            let base = if back {
+                cfg.boost_kick
+            } else {
+                cfg.boost_kick_front
+            };
+            base * step2
         };
+        let push_age = step2_age;
+        let push_off = |off: Vec2, kick: f32| {
+            let room = (reach * reach - off.y * off.y).max(0.0).sqrt() - off.x.abs();
+            let kicked = off + Vec2::new(-s * kick.min(room.max(0.0)), 0.0);
+            // `BOOST_PUSH` (default 0) rides on top: extend the kicked chord
+            // along itself, which reacts on the hip up-and-forward and lifts the
+            // body out of the crouch. Clamped to the reach left too.
+            let push = cfg.boost_push.min((reach - kicked.length()).max(0.0))
+                * smoothstep01(push_age / cfg.boost_push_ts.max(1e-3));
+            chord_extend(kicked, push)
+        };
+        let left_off = push_off(left_off, kick_of(left_back));
+        let right_off = push_off(right_off, kick_of(!left_back));
         // BOTH feet are SUPPORT for the whole launch. A swing-flagged foot
         // rides the idle 1e-2 tether, so the crouch ramp merely lifts it off
         // the floor and the kick then drags it through the air — the back leg
@@ -1039,18 +1054,24 @@ impl Default for Controller {
 ///               plain move (no boost) goes Standing → Walking directly
 /// ```
 ///
-/// The boost exit is **event-driven**: the launch holds while the `boost`
-/// flag is set AND the DCM has not yet reached the gathered front foot
-/// ([`boost_handover_due`]). The handover fires the instant ξ crosses the
-/// frontmost foot — the very condition WalkingCtrl's own first `dcm_crossed`
-/// liftoff waits for — so the gait opens with a step in place. A timer
-/// handover (the old cell-end release) overshoots: the gather sweeps the foot
-/// *past* ξ, storing a gap the first step must spend as a giant leap (measured
-/// v_filt ran to 220 px/s against a 120 command, past the reach envelope).
-/// A plain `move` cell (flag drop) still releases as a fallback when the
-/// event never fires. Command end — `None`, or a signed speed under
-/// [`ControlConfig::move_threshold`] — always returns to Standing from any
-/// mode.
+/// The boost exit is **event-driven, and scheduled**: the launch holds while
+/// the `boost` flag is set AND the launch's own schedule has not played out
+/// (squash `boost_crouch_ts`, then push `boost_kick_ts`) AND the DCM has not
+/// yet reached the gathered front foot ([`boost_handover_due`]). Once all three
+/// hold, the handover fires the instant ξ crosses the frontmost foot — the very
+/// condition WalkingCtrl's own first `dcm_crossed` liftoff waits for — so the
+/// gait opens with a step in place. A timer handover (the old cell-end release)
+/// overshoots: the gather sweeps the foot *past* ξ, storing a gap the first step
+/// must spend as a giant leap (measured v_filt ran to 220 px/s against a 120
+/// command, past the reach envelope). A plain `move` cell (flag drop) still
+/// releases as a fallback when the event never fires. Command end — `None`, or a
+/// signed speed under [`ControlConfig::move_threshold`] — always returns to
+/// Standing from any mode.
+///
+/// The schedule gate exists because the DCM event can fire *during* the squash
+/// or a few ticks into the push: the body is given to the gait before the push
+/// has delivered its speed, and the walk then starts from rest against the full
+/// planned speed.
 #[derive(Debug, Clone, Copy)]
 pub struct LocoState {
     pub mode: LocoMode,
@@ -1095,7 +1116,7 @@ impl LocoState {
                 // Event handover: hold the launch while the boost flag is
                 // set, until the DCM crosses the gathered front foot; the
                 // first plain move releases it even if the event never fires.
-                if c.boost && !boost_handover_due(&c, fiction, cfg) {
+                if c.boost && !boost_handover_due(&c, fiction, cfg, self.since) {
                     LocoMode::BoostStart
                 } else {
                     LocoMode::Walking
@@ -1171,7 +1192,17 @@ fn smoothstep01(x: f32) -> f32 {
 /// meet ξ; at the crossing both feet are behind ξ — the state in which the
 /// walking gait wants to liftoff the front foot *now* — and the launch
 /// converts to the fall.
-fn boost_handover_due(cmd: &Command, fiction: &Fiction, cfg: &ControlConfig) -> bool {
+fn boost_handover_due(cmd: &Command, fiction: &Fiction, cfg: &ControlConfig, since: f32) -> bool {
+    // The launch has a SCHEDULE — squash (`boost_crouch_ts`), then push
+    // (`boost_kick_ts`) — and the DCM event alone can fire during the squash or
+    // a few ticks into the push, which hands the body to the gait BEFORE the
+    // push has delivered its speed. The walk then starts from (almost) rest
+    // while the plan asks for the full speed, and the first step is a leap.
+    // Hold the launch until the schedule has played out.
+    let launch_done = cfg.boost_crouch_ts.max(0.0) + cfg.boost_kick_ts.max(0.0);
+    if since < launch_done {
+        return false;
+    }
     // Travel sign: a boost always carries a nonzero vx through the entry gate.
     let s = cmd.vx().signum();
     let xi = fiction.com.x + fiction.v_com.x * cfg.boost_lead_tau;
@@ -1407,7 +1438,8 @@ mod tests {
             LocoMode::Walking,
             "ξ past every foot => the fall converts to the gait"
         );
-        // A zooming body (ξ = 400·0.33 = 132) releases even with feet at hip:
+        // A zooming body (ξ = 400·0.33 = 132) releases even with feet at hip —
+        // but only once the launch SCHEDULE (squash + push) has played out.
         let mut st = LocoState::new();
         st.decide(Some(Command::boost(120.0)), &holding, &cfg, dt);
         let zooming = fiction(
@@ -1417,10 +1449,20 @@ mod tests {
             0.0,
             Vec2::new(400.0, 0.0),
         );
+        // Right at entry the schedule is not done: even a body that is already
+        // past ξ must hold, or the walk starts before the push has delivered.
+        assert_eq!(
+            st.decide(Some(Command::boost(120.0)), &zooming, &cfg, dt),
+            LocoMode::BoostStart,
+            "the launch schedule outranks the DCM event"
+        );
+        for _ in 0..40 {
+            st.decide(Some(Command::boost(120.0)), &holding, &cfg, dt);
+        }
         assert_eq!(
             st.decide(Some(Command::boost(120.0)), &zooming, &cfg, dt),
             LocoMode::Walking,
-            "velocity feeds the event through ξ"
+            "velocity feeds the event through ξ, once the schedule is done"
         );
         // The flag-drop fallback still releases even when the event never
         // fires (front foot stays ahead of ξ):
@@ -1504,11 +1546,13 @@ mod tests {
 
     #[test]
     fn boost_stays_upright_and_gathers_the_feet_under_the_hip() {
+        // Kick off: this test is about the gather + the upright torso only.
         // The launch is UPRIGHT (the kick supplies the forward drive) and the
         // FRONT foot slides from its rest offset to directly under the hip over
         // `boost_gather_ts`, then holds. Both feet are support; a held pose
         // commands no hip velocity.
-        let cfg = ControlConfig::default();
+        let mut cfg = ControlConfig::default();
+        cfg.boost_kick = 0.0; // step two has its own test
         let dt = 1.0 / 90.0;
         let f = fiction(
             Vec2::new(0.0, -140.0),
@@ -1587,8 +1631,10 @@ mod tests {
     fn boost_gathers_the_front_foot_toward_the_command_travel_sign() {
         // A -x launch gathers the other foot: the FRONT foot (the offset
         // pointing along travel) moves under the hip, the back foot never does.
-        // The torso stays upright either way.
-        let cfg = ControlConfig::default();
+        // The torso stays upright either way; the step-two translation is off
+        // here so the gather is what is measured.
+        let mut cfg = ControlConfig::default();
+        cfg.boost_kick = 0.0;
         let dt = 1.0 / 90.0;
         let f = fiction(
             Vec2::new(0.0, -140.0),
@@ -1637,6 +1683,7 @@ mod tests {
         // ramps in (no step) over the first half of the gather window.
         let mut cfg = ControlConfig::default();
         cfg.stance_press_depth = 4.0;
+        cfg.boost_kick = 0.0; // the press alone (no step-two translation)
         let dt = 1.0 / 90.0;
         let f = fiction(
             Vec2::new(0.0, -140.0),
@@ -1684,7 +1731,8 @@ mod tests {
         );
 
         // Depth 0 (the default) keeps the gathered chord bit-identical.
-        let plain = ControlConfig::default();
+        let mut plain = ControlConfig::default();
+        plain.boost_kick = 0.0;
         let mut c0 = BoostStartCtrl::new(&boost_lower());
         let mut g = c0.step(&Command::boost(120.0), &f, &plain, dt, 1.0);
         for _ in 0..300 {
@@ -1825,12 +1873,14 @@ mod tests {
             "the push keeps the chord's own direction: {left:?}"
         );
         assert!(out.pose.left_foot.stance, "the pushing leg must be stance");
+        // `BOOST_PUSH` extends BOTH chords along themselves (it is applied after
+        // the step-two translation), so both land on the reach here.
         let right = out.pose.right_foot.pos - f.hip;
         assert!(
-            (right.length() - 96.0).abs() < 0.01,
-            "the front (support) foot is untouched: {right:?}"
+            (right.length() - reach).abs() < 0.01,
+            "the front chord is extended to the reach too: {right:?}"
         );
-        // Off (the default): the back foot is a swing leg at its rest offset.
+        // Off (the default): both feet stay at their rest offsets.
         let plain = ControlConfig::default();
         let mut c0 = BoostStartCtrl::new(&boost_lower());
         let mut g = c0.step(&Command::boost(120.0), &f, &plain, dt, 1.0);
@@ -1848,12 +1898,13 @@ mod tests {
     }
 
     #[test]
-    fn boost_kicks_the_back_foot_backwards_up_to_the_reach() {
-        // The kick-off drives the BACK foot backwards along travel: the leg
-        // extends behind the body, so the reaction pushes the hip FORWARD — 100 %
-        // of this displacement is forward travel, unlike the ~30 % a chord
-        // extension gives. It stops at the horizontal reach left, and at the
-        // un-crouched v10 depth there is no room at all.
+    fn boost_squashes_first_then_pushes_the_back_foot() {
+        // Two steps, in this order: (1) squash vertically — both depths ease
+        // toward `hip_height`, nothing moves in x; (2) the BACK foot translates
+        // backwards along travel, so its leg extends behind the body and the
+        // reaction pushes the hips forward (100 % of that displacement is
+        // forward travel). The FRONT foot is the support and does not move:
+        // dragging it backwards removes what the body is standing on.
         let cfg = ControlConfig::default(); // kick 15 px, ramp 0.04 s
         let dt = 1.0 / 90.0;
         let f = fiction(
@@ -1863,58 +1914,68 @@ mod tests {
             0.0,
             Vec2::ZERO,
         );
-        let run = |low: &LowerBodyConfig, cfg: &ControlConfig| {
-            let mut c = BoostStartCtrl::new(low);
-            let mut out = c.step(&Command::boost(120.0), &f, cfg, dt, 1.0);
-            for _ in 0..300 {
-                out = c.step(&Command::boost(120.0), &f, cfg, dt, 1.0);
-            }
-            out
-        };
         let mut low = boost_lower();
         low.hip_height = 96.0;
         let reach = low.thigh_len + low.calf_len;
-        // The default 15 px is more than the 96 px crouch leaves (≈15.0), so
-        // the clamp decides: the chord lands exactly on the reach.
-        let hard = run(&low, &cfg).pose.left_foot.pos - f.hip;
+        // Step 1 only: one tick after entry, before the squash has landed, the
+        // plants have not moved in x at all.
+        let mut c = BoostStartCtrl::new(&low);
+        let first = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        let r0 = first.pose.right_foot.pos - f.hip;
+        let l0 = first.pose.left_foot.pos - f.hip;
         assert!(
-            (hard.length() - reach).abs() < 0.02,
-            "the default kick is clamped to the reach: {} of {reach}",
-            hard.length()
-        );
-        assert!(
-            hard.x < REST_LEFT_FOOT.x - 10.0,
-            "the back foot is driven well behind its rest offset: {hard:?}"
-        );
-        assert!(
-            (hard.y - 99.0).abs() < 0.02,
-            "the kick leaves the depth alone: {hard:?}"
+            r0.x > 38.0 && (l0.x - REST_LEFT_FOOT.x).abs() < 1.0,
+            "step 1 is vertical only: no plant has been translated backwards \
+             yet (only the gather has started): {r0:?} {l0:?}"
         );
 
-        // Within the room it is exactly the configured displacement.
-        let mut small = cfg;
-        small.boost_kick = 4.0;
-        let b2 = run(&low, &small).pose.left_foot.pos - f.hip;
+        // Both steps settled.
+        let mut out = first;
+        for _ in 0..300 {
+            out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let right = out.pose.right_foot.pos - f.hip; // front foot (gathered)
+        let left = out.pose.left_foot.pos - f.hip; // back foot
         assert!(
-            (b2.x - (REST_LEFT_FOOT.x - 4.0)).abs() < 0.02,
-            "4 px kick moves the foot 4 px: {b2:?}"
+            right.x.abs() < 0.02,
+            "the front foot is the support and stays under the hip: {right:?}"
         );
         assert!(
-            (b2.length() - ((33.0f32 * 33.0 + 99.0 * 99.0).sqrt() + 4.0 * 0.31)).abs() < 1.0,
-            "the chord grows by the backward component only: {b2:?}"
+            left.x < REST_LEFT_FOOT.x - 14.0,
+            "the back foot is driven well behind its rest offset (clamped to its \
+             own ~15 px of room): {left:?}"
         );
-        let out = run(&low, &cfg);
-        assert!(out.pose.left_foot.stance, "the kicking leg must be stance");
+        assert!(
+            left.length() <= reach + 1e-3 && right.length() <= reach + 1e-3,
+            "neither chord is commanded past the reach: {} {}",
+            left.length(),
+            right.length()
+        );
+        assert!(
+            (right.y - 96.0).abs() < 0.02 && (left.y - 99.0).abs() < 0.02,
+            "the squash depths survive step 2: {right:?} {left:?}"
+        );
+        assert!(
+            out.pose.left_foot.stance && out.pose.right_foot.stance,
+            "both legs are support through both steps"
+        );
 
-        // No crouch, no room: the pose is the blueprint rest pose again.
-        let rest = run(&boost_lower(), &cfg);
+        // No squash, no reach room: step 2 cannot move the back foot at all.
+        let mut c0 = BoostStartCtrl::new(&boost_lower());
+        let mut g = c0.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        for _ in 0..300 {
+            g = c0.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let back = g.pose.left_foot.pos - f.hip;
         assert!(
-            (rest.pose.left_foot.pos - (f.hip + REST_LEFT_FOOT)).length() < 1.5,
-            "no room ⇒ no kick (the chord is clamped to the reach)"
+            (back - REST_LEFT_FOOT).length() < 1.5,
+            "no room ⇒ the back foot cannot translate: {back:?}"
         );
+        // …and the front (support) foot never moves in x, squash or not.
+        let front = g.pose.right_foot.pos - f.hip;
         assert!(
-            rest.pose.left_foot.stance,
-            "the back leg is still a support leg, it just cannot kick"
+            front.x.abs() < 1.0,
+            "the front foot is support: it does not translate: {front:?}"
         );
     }
 
