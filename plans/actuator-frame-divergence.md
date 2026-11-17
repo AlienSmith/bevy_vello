@@ -583,3 +583,51 @@ strut_active / strut_idle`, and `actuate_stage` queues only the legs.
   effect.
 - The stance foot is commanded ~2.6 px below the live particle centre; the
   collider radius accounts for most of it. Not a control error.
+
+## "Can friction eat all tangential velocity?" — tried, it cannot (2026-11-17)
+
+The engine has no separate foot friction. One `CollisionConstraintConfig` per
+collider (`lib.rs:102`); the feet are simply the only colliders carrying a
+different number (0.35 vs 0.1). Two live implementations, both penetration-
+proportional, no μN anywhere:
+
+| path | law | level |
+|---|---|---|
+| fine, curve contact | `max_disp = friction · penetration` ([`constraints.rs:210`](../study_vello/integrations/vello_physics/src/constraints.rs:210)) | position |
+| coarse, body frame | `v_t_scale = 1 − min(friction·penetration·dt·100, 1)` ([`:1461`](../study_vello/integrations/vello_physics/src/constraints.rs:1461)) + angular damp | velocity |
+| static | `(1 − compliance) · penetration` ([`:320`](../study_vello/integrations/vello_physics/src/constraints.rs:320)) | **dead code**, never constructed |
+
+So `friction_compliance_scaler` is a **budget**, and higher = more grip (the
+`sweep_foot_friction.py` docstring had it backwards and swept downward; fixed).
+The fine clamp already cancels *all* of the per-substep tangential drift as long
+as `|disp_t| ≤ friction · penetration`.
+
+**The literal "eat everything" (unbounded budget) diverges.** Setting
+`max_friction_disp = ∞` for `friction ≥ 1.0` launched the character to
+`hip y = −6823` and then through the floor (`tmp/walker_qa/sticky_f1.csv`,
+17 s). Mechanism: the budget is tied to the penetration it is pushing out of, so
+a true pin feeds more load into the leg, which feeds more depth back in — the
+same load-bearing penetration as §"one-sided floor clamp". Reverted; only the
+explanatory comment remains.
+
+**Even the stable version makes the slide worse.** Same script
+(`walkv60-boost90-40-70-40.json`), feet 0.35 vs 1.0:
+
+| feet scaler | stance drift mean L / R | worst | hip path |
+|---|---|---|---|
+| 0.35 | 12.3 / 27.9 px | 39.4 px | ends below the floor |
+| 1.0 | 31.8 / 46.5 px | 83.4 px | stands, but 123 px/s average |
+
+The reason is in the telemetry: during a nominally pinned stance the foot
+particles still move at up to **1283 px/s** (`peak_speed`), an order of magnitude
+above the body speed (~100 px/s). Friction only cancels the drift of one curve
+point over one substep; it is competing with the two constraints that actually
+own the leg (the rigid strut and the knee angle), and those re-place the foot at
+the commanded target every tick. A contact cannot hold a point that is being
+teleported. More grip only delivers the leg drive more completely — which is
+also why "more friction ⇒ walks backwards": the body overruns the plan
+(`plan − hip` goes `+35 → −1 px` inside one stance), the plant ends up behind
+the hip, and the rigid strut then pulls the body back.
+
+Conclusion: friction is not the lever for stance slip; the actuator's stance
+target must stop moving in the world (the world-anchored plant).

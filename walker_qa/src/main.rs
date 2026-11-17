@@ -205,6 +205,11 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("BOOST_HIP_ACCEL") {
         cfg.boost_hip_accel = v;
     }
+    // Stance pin (1 = on): hold the stance foot's world x for the whole stance
+    // instead of letting the emitted target ride the measured hip.
+    if let Some(v) = env_f32("STANCE_PIN") {
+        cfg.stance_pin = v != 0.0;
+    }
 }
 
 /// Tune the gait cadence from env so a sweep can test whether a slower-moving

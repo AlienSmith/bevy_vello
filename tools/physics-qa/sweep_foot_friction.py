@@ -16,15 +16,17 @@ This is the friction half of the walking foot-slide loop documented in
 No rebuild is needed: the parameters live in the runtime asset, which the game
 reads at startup.
 
-Friction semantics (see `physics_tuning_progress.md` §3): floor contact uses
-`StaticCollisionConstraint`, where `friction_strength = 1 - friction_compliance`,
-so **lower `friction_compliance_scaler` = more friction**. `0.0` means no
-friction at all in `FineCollisionConstraint`; on the static floor it is the
-maximum grip, which the asset itself warns can jitter — hence the sweep.
+Friction semantics: the live floor contact is `FineCollisionConstraint`, whose
+tangential budget is `max_friction_disp = friction * penetration`. So **higher
+`friction_compliance_scaler` = more grip**, the opposite of the `1 - x` form in
+`StaticCollisionConstraint` (which is never constructed). `0.0` disables
+friction; `0.0 < x < 1.0` is a finite budget that saturates when the contact is
+driven faster than `x * penetration / sub_dt`; `x >= 1.0` is **no-slip** (the
+budget is lifted and the contact point is pinned). Sweep upward, not downward.
 
 Usage
 -----
-  sweep_foot_friction.py [--frictions 0.1,0.05,0.02,0.0] [--colliders LLL,RLL]
+  sweep_foot_friction.py [--frictions 0.1,0.35,0.7,1.0,2.0] [--colliders LLL,RLL]
                          [--repeat N] [--gate 2.0]
                          [--skip-start 1.1] [--skip-end 10.5]
                          [--asset PATH] [--binary PATH] [--script PATH]
@@ -53,7 +55,7 @@ import analyze_foot_slide as afs  # noqa: E402  (same directory)
 
 # The two colliders that own the realized foot particles PLLL / PRLL.
 DEFAULT_COLLIDERS = "LLL,RLL"
-DEFAULT_FRICTIONS = "0.1,0.05,0.02,0.0"
+DEFAULT_FRICTIONS = "0.1,0.35,0.7,1.0,2.0"
 # Startup / stop transients in the 11.5 s walk (see physics_tuning_progress.md).
 # 1.6 s, not 1.1 s: at 1.1 s the window still catches the tail of the startup
 # transient (a stance at t=1.13-1.72 s was the "worst" stance for several

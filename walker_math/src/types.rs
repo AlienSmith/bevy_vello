@@ -312,6 +312,13 @@ impl Default for LowerBodyConfig {
             // Sign-flip floor ON by default (see field doc): the unbounded
             // touchdown solve stalls cruise once the body actually stands up.
             td_solve_floor: 0.5,
+            // ON: the touchdown rewrite is what keeps the fiction's `hip_vel.x`
+            // in the neighbourhood of reality. Turning it off (2026-11-17) made
+            // `cmd_vx` smooth but dragged the commanded plant BACKWARDS: the
+            // pose maps `measured_hip + (plant - solver_hip)`, so with the
+            // fiction at the command (80) and the body at 120 the plant target
+            // drifts at -40 px/s — measured -23..-34 px/s, ~10 px of commanded
+            // slide per stance. Restored.
             td_solve: true,
             // Analytic deadbeat placement is the shipped law; `0` auto-picks
             // the stance duration as the convergence deadline.

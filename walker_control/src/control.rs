@@ -279,6 +279,24 @@ pub struct ControlConfig {
     /// strongest mid-stance (`sin(π·age/T_stance)`), so it never yanks at the
     /// stance boundaries where the contact is being made/broken.
     pub stance_press_depth: f32,
+    /// Stance **pin**, px-free switch (`STANCE_PIN`). Default **false**.
+    ///
+    /// The walking pose is emitted as `measured_hip + (plant − solver_hip)`, so
+    /// every stance target rides the body: the commanded foot travels forward
+    /// with the hip for the whole stance, and the actuator drags the real foot
+    /// with it (measured: a stance foot moving at up to 1283 px/s while the
+    /// body moves ~100). Friction cannot hold a point that is being carried —
+    /// see `plans/actuator-frame-divergence.md`.
+    ///
+    /// When on, [`WalkingCtrl`] latches the stance foot's **world x** the first
+    /// tick the leg is flagged stance, and emits every later tick of that
+    /// stance at the latched x (released on lift-off). The strut rest length and
+    /// the knee angle are both derived from the emitted pose, so the whole
+    /// actuation chain then agrees with a foot that is actually planted: the
+    /// leg pivots over the pin instead of chasing it. Only x is held — y keeps
+    /// the hip-relative mapping, because every vertical re-anchor tried so far
+    /// lost the over-extension the body was standing on.
+    pub stance_pin: bool,
 }
 
 impl Default for ControlConfig {
@@ -320,6 +338,8 @@ impl Default for ControlConfig {
             // Off by default: the walking pose stays bit-identical to the
             // solver output until a sweep says otherwise.
             stance_press_depth: 0.0,
+            // Off by default: opt in with `STANCE_PIN=1`.
+            stance_pin: false,
         }
     }
 }
@@ -542,6 +562,11 @@ pub struct WalkingCtrl {
     anchor: Option<Vec2>,
     /// Solver seed hip at the same moment (`ResolverState::new`'s position).
     seed_hip: Vec2,
+    /// Per-leg stance pin (`STANCE_PIN`): the WORLD x of the stance foot the
+    /// actuator has committed to, latched on stance entry and released on
+    /// lift-off. Index 0 = left, 1 = right. Only written when
+    /// [`ControlConfig::stance_pin`] is on.
+    pin: [Option<f32>; 2],
 }
 
 impl WalkingCtrl {
@@ -575,6 +600,7 @@ impl WalkingCtrl {
             cfg,
             anchor: None,
             seed_hip,
+            pin: [None, None],
         }
     }
 }
@@ -718,29 +744,44 @@ impl Step for WalkingCtrl {
         // but the clamp breaks the walk: the leg loses the over-extension the
         // body was standing on. Same story as the floor-frame attempt — see
         // `plans/actuator-frame-divergence.md`.
+        let mut left_off = stance_press(
+            depth,
+            ts,
+            left_stance,
+            self.state.left.phase_timer,
+            pose.left_foot - pose.hip,
+        );
+        let mut right_off = stance_press(
+            depth,
+            ts,
+            right_stance,
+            self.state.right.phase_timer,
+            pose.right_foot - pose.hip,
+        );
+        // --- Stance pin (`STANCE_PIN`): the stance foot cannot slide ---
+        // Latch the WORLD x on stance entry and keep emitting that x for the
+        // rest of the stance. Everything downstream (strut rest length, knee
+        // angle) is derived from this pose, so the actuator stops chasing a
+        // target that rides the measured hip.
+        if cfg.stance_pin {
+            pin_off(&mut left_off, left_stance, &mut self.pin[0], hip.x, facing);
+            pin_off(
+                &mut right_off,
+                right_stance,
+                &mut self.pin[1],
+                hip.x,
+                facing,
+            );
+        }
         ControlOut {
             pose: Pose {
                 hip,
                 left_foot: FootPose {
-                    pos: hip
-                        + to_vello(stance_press(
-                            depth,
-                            ts,
-                            left_stance,
-                            self.state.left.phase_timer,
-                            pose.left_foot - pose.hip,
-                        )),
+                    pos: hip + to_vello(left_off),
                     stance: left_stance,
                 },
                 right_foot: FootPose {
-                    pos: hip
-                        + to_vello(stance_press(
-                            depth,
-                            ts,
-                            right_stance,
-                            self.state.right.phase_timer,
-                            pose.right_foot - pose.hip,
-                        )),
+                    pos: hip + to_vello(right_off),
                     stance: right_stance,
                 },
                 facing,
@@ -1175,6 +1216,26 @@ fn stance_press(depth: f32, t_stance: f32, stance: bool, timer: f32, off: Vec2) 
 /// on. The single definition of "push along the hip→foot chord" for both the
 /// stance press and the boost push-off; returns `off` untouched for a
 /// degenerate chord or a zero delta.
+/// Hold a stance foot's **world** x at the value it had when the stance began.
+///
+/// `off` is the emitted `foot − hip` offset in the solver travel frame (the
+/// caller negates y when it maps to Vello), so the world x is
+/// `hip_x + off.x · facing`. On stance entry the latch is seeded from that
+/// value; on every later stance tick the x is rewritten to it; on lift-off the
+/// latch is cleared so the swing can move freely. Only x is rewritten — y keeps
+/// whatever the hip-relative mapping produced (see
+/// [`ControlConfig::stance_pin`]).
+fn pin_off(off: &mut Vec2, stance: bool, pin: &mut Option<f32>, hip_x: f32, facing: f32) {
+    if !stance {
+        *pin = None;
+        return;
+    }
+    let world_x = hip_x + off.x * facing;
+    let pinned = pin.unwrap_or(world_x);
+    *pin = Some(pinned);
+    *off = Vec2::new((pinned - hip_x) * facing, off.y);
+}
+
 fn chord_extend(off: Vec2, delta: f32) -> Vec2 {
     let len = off.length();
     if delta == 0.0 || len <= f32::EPSILON {
@@ -2053,6 +2114,95 @@ mod tests {
     }
 
     #[test]
+    fn stance_pin_holds_the_world_x_only_while_stance() {
+        // First stance tick latches at the current world x, later ticks rewrite
+        // the offset so the world x is unchanged, lift-off clears the latch.
+        let mut pin = None;
+        let mut off = Vec2::new(10.0, 5.0);
+        pin_off(&mut off, true, &mut pin, 100.0, 1.0);
+        assert_eq!(pin, Some(110.0), "latched on entry");
+        assert_eq!(off, Vec2::new(10.0, 5.0), "entry tick is untouched");
+        pin_off(&mut off, true, &mut pin, 110.0, 1.0);
+        assert_eq!(
+            off,
+            Vec2::new(0.0, 5.0),
+            "hip moved +10, so the offset loses 10"
+        );
+        assert_eq!(110.0 + off.x, 110.0, "world x held");
+        assert_eq!(off.y, 5.0, "y is never rewritten");
+        // Mirrored travel frame: off.x maps to world −x.
+        let mut pin = None;
+        let mut off = Vec2::new(10.0, 5.0);
+        pin_off(&mut off, true, &mut pin, 100.0, -1.0);
+        assert_eq!(pin, Some(90.0));
+        pin_off(&mut off, true, &mut pin, 110.0, -1.0);
+        assert_eq!(110.0 + off.x * -1.0, 90.0, "world x held when mirrored");
+        // Lift-off: latch cleared, offset untouched.
+        let held = off;
+        pin_off(&mut off, false, &mut pin, 110.0, -1.0);
+        assert_eq!(pin, None);
+        assert_eq!(off, held);
+    }
+
+    #[test]
+    fn stance_pin_stops_the_stance_foot_riding_the_measured_hip() {
+        // The pose is emitted at the MEASURED hip, so without the pin the
+        // commanded stance foot advances with the body (that is the actuator
+        // dragging a planted foot). With the pin the stance foot's world x is
+        // constant for the whole stance.
+        let low = LowerBodyConfig::default();
+        let spread = |pin: bool| -> f32 {
+            let mut cfg = ControlConfig::default();
+            cfg.stance_pin = pin;
+            let mut c = WalkingCtrl::new(&low);
+            let mut runs: [Vec<f32>; 2] = [vec![], vec![]];
+            let mut cur: [Vec<f32>; 2] = [vec![], vec![]];
+            let mut hip_x = 0.0;
+            for _ in 0..60 {
+                let f = standing_fiction(hip_x, Vec2::new(90.0, 0.0));
+                let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
+                for (i, foot) in [out.pose.left_foot, out.pose.right_foot].iter().enumerate() {
+                    if foot.stance {
+                        cur[i].push(foot.pos.x);
+                    } else if cur[i].len() > runs[i].len() {
+                        runs[i] = std::mem::take(&mut cur[i]);
+                    } else {
+                        cur[i].clear();
+                    }
+                }
+                hip_x += 1.0;
+            }
+            for i in 0..2 {
+                if cur[i].len() > runs[i].len() {
+                    runs[i] = std::mem::take(&mut cur[i]);
+                }
+            }
+            let longest = if runs[0].len() >= runs[1].len() {
+                &runs[0]
+            } else {
+                &runs[1]
+            };
+            assert!(longest.len() >= 3, "need a stance run to measure");
+            let (lo, hi) = longest
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| {
+                    (lo.min(*x), hi.max(*x))
+                });
+            hi - lo
+        };
+        let free = spread(false);
+        let pinned = spread(true);
+        assert!(
+            free > 1.0,
+            "without the pin the stance target rides the hip: {free} px"
+        );
+        assert!(
+            pinned < 1e-3,
+            "with the pin the stance world x is constant: {pinned} px"
+        );
+    }
+
+    #[test]
     fn the_attitude_closure_is_inert_at_zero_gains() {
         // Zero gains must reproduce the old open-loop mapping exactly:
         // `upper_angle = debug.theta * facing`, bit for bit.
@@ -2295,6 +2445,15 @@ mod tests {
         assert_eq!(
             stance_press(depth, t, true, t * 0.5, Vec2::ZERO),
             Vec2::ZERO
+        );
+
+        // Fractional depth is exact: `STANCE_DEPTH` is an f32 the whole way
+        // (env → `ControlConfig` → here), so 2.5 px means 2.5 px, not 2.
+        let frac = stance_press(2.5, t, true, t - t * 0.5, off);
+        assert!(
+            (frac.length() - 102.5).abs() < 1e-4,
+            "fractional depth is preserved: {}",
+            frac.length()
         );
     }
 }
