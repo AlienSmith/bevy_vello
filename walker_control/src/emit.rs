@@ -198,6 +198,7 @@ mod tests {
             },
             facing: 1.0,
             upper_angle: 0.1,
+            stance_split: false,
         };
         let live = LegLive {
             waist: Vec2::new(0.0, -180.0),

@@ -190,6 +190,26 @@ pub struct ControlConfig {
     /// `ξ ≈ com + v_com·τ` (τ ≈ 1/ω₀ at standing height). The launch releases
     /// when this leads past the frontmost foot — [`boost_handover_due`].
     pub boost_lead_tau: f32,
+    /// Boost crouch time, seconds: the plant depths ease from the blueprint
+    /// rest depths to `LowerBodyConfig::hip_height` over this window instead
+    /// of stepping there on the first boost tick. A step on a planted chord is
+    /// a velocity kick — a 5 px squash (`HIP_HEIGHT=98`) drove the hip
+    /// 7→31 px/s DOWN and −11→−61 px/s BACKWARD in a single tick, walked the
+    /// hip 9 px behind its start, and because ξ = com + v·τ then never passed
+    /// the frontmost foot the launch never released: the boost ran its whole
+    /// cell and the gait handed over with the CoM behind both plants.
+    pub boost_crouch_ts: f32,
+    /// Boost push-off, px: extend the BACK leg's chord (the one pointing
+    /// against travel) this far along its own hip→foot direction, ramped in
+    /// from half a gather window. The pushing foot is flagged `stance` for the
+    /// duration — a swing foot rides the idle 1e-2 tether and has no authority
+    /// to push with. Clamped to the reach the leg actually has left
+    /// (`thigh + calf − chord`): the v10 back foot already sits at 111 px of a
+    /// 110 px leg, so a push only has room AFTER a crouch — crouch first, then
+    /// extend, exactly like a real launch. Default **0** (off).
+    pub boost_push: f32,
+    /// Boost push-off ramp, seconds (smoothstep; a step is a velocity kick).
+    pub boost_push_ts: f32,
     /// Attitude-loop closure: position gain on the MEASURED lean error
     /// (radians → radians). `0.0` keeps `upper_angle` a pure echo of the
     /// solver's model lean — the open loop whose damper (`−kd·ω`) sees fiction
@@ -244,6 +264,13 @@ impl Default for ControlConfig {
             // 1/ω₀ at hip_height ≈ 104 (ω₀ = √(980/104) ≈ 3.07): the DCM's
             // velocity lead over the CoM.
             boost_lead_tau: 0.33,
+            // Long enough to be a ramp at 90 Hz (≈ 23 ticks), short enough
+            // that the crouch is in place before the handover event.
+            boost_crouch_ts: 0.25,
+            // Off by default: the launch stays a pure leaned stance until a
+            // sweep says the push helps.
+            boost_push: 0.0,
+            boost_push_ts: 0.3,
             // Validated on the 10s track (see the field docs): full-walk
             // survival + 10x wobble damping vs the open loop.
             att_closure_kp: 0.1,
@@ -285,6 +312,7 @@ pub fn hold_pose(
             },
             facing,
             upper_angle: fiction.lean,
+            stance_split: false,
         },
         hip_vel: fiction.v_hip,
         plan: [Vec2::new(f32::NAN, f32::NAN); 2],
@@ -405,6 +433,7 @@ impl Step for StandingCtrl {
                 // The rest pose's `P3→P2` axis is straight up (offset
                 // `(0, −35)`), so the attitude command is upright.
                 upper_angle: 0.0,
+                stance_split: false,
             },
             hip_vel: Vec2::ZERO,
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
@@ -624,6 +653,14 @@ impl Step for WalkingCtrl {
         let left_stance = self.state.left.phase == walker_math::GaitPhase::Stance;
         let right_stance = self.state.right.phase == walker_math::GaitPhase::Stance;
         let to_vello = |off: Vec2| Vec2::new(off.x * facing, -off.y);
+        //
+        // NOTE (tried and REVERTED 2026-11-17): mapping this pose's y through
+        // the floor line instead of the measured hip. It fixes the hop (the
+        // stance foot stops riding the hip's vault — see
+        // `plans/actuator-frame-divergence.md` for the numbers) but the walk
+        // gets WORSE end to end, and it needs a matching `pose.hip` command
+        // plus a live-pivot hip target to avoid a kneel. Left untouched until
+        // the hop can be addressed without re-anchoring the whole pose.
         // --- Stance press (`STANCE_DEPTH`): the LAST act before the actuator ---
         // Extend a STANCE leg's commanded foot along the hip→foot chord,
         // envelope-shaped across stance (mild at touchdown/liftoff, strongest
@@ -659,6 +696,7 @@ impl Step for WalkingCtrl {
                 },
                 facing,
                 upper_angle,
+                stance_split: true,
             },
             // The solver's own integrated hip velocity, travel frame → vello
             // (x mirrored by facing, y negated for y-down).
@@ -721,20 +759,31 @@ pub struct BoostStartCtrl {
     /// the hip (x offset 0, rest depth). Ramps over `boost_gather_ts`. The
     /// back foot holds its rest offset throughout.
     pub gather: f32,
+    /// Rig standing hip height (`LowerBodyConfig::hip_height`, vello y-down
+    /// px). The support (right) plant is placed this depth below the hip
+    /// instead of the blueprint's hardcoded 103 px, so `HIP_HEIGHT` crouches
+    /// the launch exactly as it crouches the gait. `<= 0` / non-finite falls
+    /// back to the rest depth.
+    pub hip_height: f32,
+    /// Bone reach (`thigh_len + calf_len`, px). The push-off is clamped to
+    /// `reach − chord`, so it can never command a leg past full extension.
+    pub reach: f32,
 }
 
 impl BoostStartCtrl {
-    pub fn new() -> Self {
+    pub fn new(lower: &LowerBodyConfig) -> Self {
         Self {
             since: 0.0,
             gather: 0.0,
+            hip_height: lower.hip_height,
+            reach: lower.thigh_len + lower.calf_len,
         }
     }
 }
 
 impl Default for BoostStartCtrl {
     fn default() -> Self {
-        Self::new()
+        Self::new(&LowerBodyConfig::default())
     }
 }
 
@@ -770,26 +819,83 @@ impl Step for BoostStartCtrl {
             }
         };
         //
-        // Both feet are commanded as STANCE (strut active), regardless of the
-        // measured touch: the lean puts the CoM past the static margin, and a
-        // foot flagged swing rides the idle tether (1e-2 = no authority), so
-        // the measured lean crept through a self-reinforcing forward rock
-        // (0.25 -> 0.70 rad over 2 s, left foot peeling at ~1.7 s). The active
-        // strut holds the chord planted through the pull-in.
+        // The RIGHT foot is the support (stance) foot: it is the v10 FRONT
+        // foot for an eastward boost and the one the gather pulls under the
+        // hip, so it carries the launch. Flagged stance, its strut is active
+        // and it also takes the stance press (`STANCE_DEPTH`) — the same
+        // chord-aligned extension `WalkingCtrl` applies — so the launch loads
+        // the support leg into the floor instead of standing on a relaxed
+        // chord that lets the leaned CoM keep rolling forward.
+        //
+        // The LEFT foot is the swing foot: it holds its rest offset behind the
+        // hip and is placed by the angular joints only. Keeping one foot
+        // strictly BEHIND the hip is what makes the handover commit the fall
+        // forward, so the back foot stays put — unless the push-off is armed,
+        // in which case the back leg is the one that pushes (see below).
         let hip = fiction.hip;
+        // Rig hip height: the support plant sits at the commanded standing
+        // height below the hip, not the blueprint's hardcoded 103 px, so
+        // `HIP_HEIGHT` crouches the launch like it crouches the gait. The
+        // whole rest pose shifts by the same amount, which keeps the v10
+        // asymmetry (left foot 3 px lower than the right) intact.
+        let hip_h = if self.hip_height.is_finite() && self.hip_height > 0.0 {
+            self.hip_height
+        } else {
+            REST_RIGHT_FOOT.y
+        };
+        // The crouch is EASED, never stepped: the plants are holding the whole
+        // body, so a depth step is a chord-velocity kick straight through the
+        // struts (see `boost_crouch_ts`). At `since = 0` the pose is the
+        // blueprint rest pose, i.e. what the body already has.
+        let crouch = smoothstep01(self.since / cfg.boost_crouch_ts.max(1e-3));
+        let rest_shift = Vec2::new(0.0, (hip_h - REST_RIGHT_FOOT.y) * crouch);
+        let ts = cfg.boost_gather_ts.max(1e-3);
+        // Push-off (`BOOST_PUSH`): the BACK leg — the offset pointing against
+        // travel — extends along its own hip→foot chord, which reacts on the
+        // hip up-and-forward. The chord is (33, ~hip_h), i.e. ~18° off
+        // vertical, so only ~30 % of the extension becomes forward travel; the
+        // rest lifts the body out of the crouch. Clamped to the reach left, so
+        // this can never command a leg past full extension.
+        let left_back = REST_LEFT_FOOT.x * s <= 0.0;
+        let back_rest = if left_back {
+            REST_LEFT_FOOT
+        } else {
+            REST_RIGHT_FOOT
+        } + rest_shift;
+        let headroom = (self.reach - back_rest.length()).max(0.0);
+        let push_age = (self.since - 0.5 * ts).max(0.0);
+        let push =
+            cfg.boost_push.min(headroom) * smoothstep01(push_age / cfg.boost_push_ts.max(1e-3));
+        let left_off = gather(REST_LEFT_FOOT + rest_shift);
+        let right_off = gather(REST_RIGHT_FOOT + rest_shift);
+        let (left_off, right_off) = if left_back {
+            (chord_extend(left_off, push), right_off)
+        } else {
+            (left_off, chord_extend(right_off, push))
+        };
+        // The pushing foot needs an active strut to push with; the support
+        // foot is stance unconditionally.
+        let left_stance = left_back && push > 0.0;
+        let right_stance = true;
+        // Press envelope: `stance_press` peaks at `age = t_stance / 2`, so the
+        // launch ramps in over the first half of the gather window and then
+        // holds at full depth (`self.since` is clamped, pinning `age`).
+        let press_timer = ts - self.since.min(ts * 0.5);
+        let depth = cfg.stance_press_depth;
         ControlOut {
             pose: Pose {
                 hip,
                 left_foot: FootPose {
-                    pos: hip + gather(REST_LEFT_FOOT),
-                    stance: true,
+                    pos: hip + stance_press(depth, ts, left_stance, press_timer, left_off),
+                    stance: left_stance,
                 },
                 right_foot: FootPose {
-                    pos: hip + gather(REST_RIGHT_FOOT),
-                    stance: true,
+                    pos: hip + stance_press(depth, ts, right_stance, press_timer, right_off),
+                    stance: right_stance,
                 },
                 facing,
                 upper_angle: s * cfg.boost_lean,
+                stance_split: false,
             },
             // The boost commands no velocity: it is a held pose. Telemetry
             // reads the real forward creep only after the walking handover.
@@ -819,7 +925,7 @@ impl Controller {
         match mode {
             LocoMode::Standing => Controller::Standing(StandingCtrl::new(lower)),
             LocoMode::Walking => Controller::Walking(WalkingCtrl::new(lower)),
-            LocoMode::BoostStart => Controller::BoostStart(BoostStartCtrl::new()),
+            LocoMode::BoostStart => Controller::BoostStart(BoostStartCtrl::new(lower)),
         }
     }
 
@@ -956,13 +1062,11 @@ impl LocoState {
 /// envelope vanishes), strongest mid-stance. Returns `off` untouched when the
 /// leg is in swing, when `depth == 0` (keeps the pose bit-identical), or for a
 /// degenerate zero-length chord. Pure and side-effect free so it can be tested
-/// directly; `WalkingCtrl::step` is the only caller.
+/// directly. Two callers: `WalkingCtrl::step` (both feet, each gated by its own
+/// stance flag) and `BoostStartCtrl::step` (the right/support foot only, with
+/// its timer pinned at the envelope peak so the launch holds full depth).
 fn stance_press(depth: f32, t_stance: f32, stance: bool, timer: f32, off: Vec2) -> Vec2 {
     if !stance || depth == 0.0 {
-        return off;
-    }
-    let len = off.length();
-    if len <= f32::EPSILON {
         return off;
     }
     // `timer` counts DOWN from `t_stance` after the solver tick; age is the
@@ -970,7 +1074,27 @@ fn stance_press(depth: f32, t_stance: f32, stance: bool, timer: f32, off: Vec2) 
     // never push the envelope outside [0, 1] cycles.
     let age = (t_stance - timer).clamp(0.0, t_stance);
     let env = ((age / t_stance) * std::f32::consts::PI).sin();
-    off * (1.0 + (depth * env) / len)
+    chord_extend(off, depth * env)
+}
+
+/// Extend `off` along its own direction by `delta` px (`delta < 0` shortens),
+/// i.e. push the foot away from the hip down the chord the strut already lies
+/// on. The single definition of "push along the hip→foot chord" for both the
+/// stance press and the boost push-off; returns `off` untouched for a
+/// degenerate chord or a zero delta.
+fn chord_extend(off: Vec2, delta: f32) -> Vec2 {
+    let len = off.length();
+    if delta == 0.0 || len <= f32::EPSILON {
+        return off;
+    }
+    off * (1.0 + delta / len)
+}
+
+/// Smooth 0→1 with zero slope at both ends. Every planted-chord length change
+/// goes through this: a step is a velocity kick through the whole body.
+fn smoothstep01(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
 }
 
 /// The boost release event: has the DCM `ξ ≈ com + v_com·boost_lead_tau`
@@ -1099,6 +1223,7 @@ mod tests {
                 },
                 facing: 1.0,
                 upper_angle: 0.1,
+                stance_split: true,
             },
             hip_vel: Vec2::new(50.0, 0.0),
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
@@ -1297,12 +1422,25 @@ mod tests {
         assert_eq!(out.mode, LocoMode::Walking);
     }
 
+    /// The boost's blueprint assertions assume the rig stands at the v10 rest
+    /// depth (support foot 103 px below the hip): `HIP_HEIGHT` replaces that
+    /// hardcoded depth, and `LowerBodyConfig::default()` is the sandbox's
+    /// crouched 90. Pinning the height to the blueprint keeps the geometry
+    /// tests on the unmodified rest pose.
+    fn boost_lower() -> LowerBodyConfig {
+        LowerBodyConfig {
+            hip_height: REST_RIGHT_FOOT.y,
+            ..LowerBodyConfig::default()
+        }
+    }
+
     #[test]
     fn boost_tilts_and_gathers_the_feet_under_the_hip() {
-        // Two jobs in the boost cell: the stick tilts toward travel AND both
-        // feet slide from their rest offsets to directly under the hip over
-        // `boost_gather_ts`, then hold. Feet stay stance:true (strut active)
-        // throughout; a held pose commands no hip velocity.
+        // Two jobs in the boost cell: the stick tilts toward travel AND the
+        // FRONT foot slides from its rest offset to directly under the hip
+        // over `boost_gather_ts`, then holds. The right foot is the support
+        // (stance:true, strut active), the left is the swing leg
+        // (stance:false); a held pose commands no hip velocity.
         let cfg = ControlConfig::default();
         let dt = 1.0 / 90.0;
         let f = fiction(
@@ -1312,12 +1450,16 @@ mod tests {
             0.0,
             Vec2::ZERO,
         );
-        let mut c = BoostStartCtrl::new();
+        let mut c = BoostStartCtrl::new(&boost_lower());
         let out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
         assert_eq!(out.mode, LocoMode::BoostStart);
         assert_eq!(out.pose.hip, f.hip, "frame anchored at measured hip");
         assert_eq!(out.pose.upper_angle, cfg.boost_lean, "the stick tilts");
-        assert!(out.pose.left_foot.stance && out.pose.right_foot.stance);
+        assert_eq!(
+            (out.pose.left_foot.stance, out.pose.right_foot.stance),
+            (false, true),
+            "the right foot is the stance foot, the left is the swing leg"
+        );
         assert_eq!(out.hip_vel, Vec2::ZERO, "a held pose commands no velocity");
         // Tick 1 starts from the rest offsets and the FRONT foot (right, +x
         // travel) creeps inward; one more tick moves it <1 px toward hip x,
@@ -1386,7 +1528,7 @@ mod tests {
             0.0,
             Vec2::ZERO,
         );
-        let mut c = BoostStartCtrl::new();
+        let mut c = BoostStartCtrl::new(&boost_lower());
         let west = Command {
             dir: Vec2::new(-1.0, 0.0),
             speed: 120.0,
@@ -1407,6 +1549,217 @@ mod tests {
             f.hip + REST_RIGHT_FOOT,
             "the back foot (right) never moves"
         );
+        assert_eq!(
+            (out.pose.left_foot.stance, out.pose.right_foot.stance),
+            (false, true),
+            "the support foot is always the right one, independent of travel"
+        );
+    }
+
+    #[test]
+    fn boost_applies_the_stance_press_to_the_right_foot_only() {
+        // `STANCE_DEPTH` in the launch: the support (right) foot's chord is
+        // extended along its own hip->foot direction, exactly like a walking
+        // stance, while the swing (left) foot is left untouched and the press
+        // ramps in (no step) over the first half of the gather window.
+        let mut cfg = ControlConfig::default();
+        cfg.stance_press_depth = 4.0;
+        let dt = 1.0 / 90.0;
+        let f = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        let mut c = BoostStartCtrl::new(&boost_lower());
+        let first = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        let first_r = first.pose.right_foot.pos - f.hip;
+        let gathered_first = Vec2::new(
+            REST_RIGHT_FOOT.x * (1.0 - dt / cfg.boost_gather_ts),
+            REST_RIGHT_FOOT.y,
+        );
+        assert!(
+            (first_r.length() - gathered_first.length()).abs() < 1.0,
+            "the press ramps in rather than stepping: {first_r:?}"
+        );
+
+        // Hold through the full gather window: the gather lands under the hip
+        // at rest depth, and the press adds exactly `depth` px along the chord.
+        let mut out = first;
+        for _ in 0..300 {
+            out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let right = out.pose.right_foot.pos - f.hip;
+        assert!(right.x.abs() < 0.01, "gathered under the hip: {right:?}");
+        assert!(
+            (right.length() - (REST_RIGHT_FOOT.y.abs() + 4.0)).abs() < 0.01,
+            "support chord pressed by STANCE_DEPTH: {right:?}"
+        );
+        assert!(right.y > 0.0, "the press extends away from the hip");
+        assert_eq!(
+            out.pose.left_foot.pos,
+            f.hip + REST_LEFT_FOOT,
+            "the swing foot never takes the press"
+        );
+        assert_eq!(
+            (out.pose.left_foot.stance, out.pose.right_foot.stance),
+            (false, true)
+        );
+
+        // Depth 0 (the default) keeps the gathered chord bit-identical.
+        let plain = ControlConfig::default();
+        let mut c0 = BoostStartCtrl::new(&boost_lower());
+        let mut g = c0.step(&Command::boost(120.0), &f, &plain, dt, 1.0);
+        for _ in 0..300 {
+            g = c0.step(&Command::boost(120.0), &f, &plain, dt, 1.0);
+        }
+        let gathered = g.pose.right_foot.pos - f.hip;
+        assert!(
+            (gathered.length() - REST_RIGHT_FOOT.y.abs()).abs() < 0.01,
+            "depth 0 keeps the gathered chord: {gathered:?}"
+        );
+    }
+
+    #[test]
+    fn boost_crouches_the_support_plant_to_the_configured_hip_height() {
+        // `HIP_HEIGHT` reaches the launch: a lower standing height deepens the
+        // gather (feet closer to the hip) while the v10 x offsets and the 3 px
+        // left/right depth skew are preserved. An unseeded (zero) height falls
+        // back to the blueprint depth.
+        let cfg = ControlConfig::default();
+        let dt = 1.0 / 90.0;
+        let f = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        let mut low = boost_lower();
+        low.hip_height = 96.0;
+        let mut c = BoostStartCtrl::new(&low);
+        let mut out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        for _ in 0..300 {
+            out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let right = out.pose.right_foot.pos - f.hip;
+        let left = out.pose.left_foot.pos - f.hip;
+        assert!(right.x.abs() < 0.01, "gathered under the hip: {right:?}");
+        assert!(
+            (right.y - 96.0).abs() < 1e-3,
+            "the support plant depth IS the hip height: {right:?}"
+        );
+        assert!(
+            (left.y - 99.0).abs() < 1e-3,
+            "the 3 px blueprint skew is kept: {left:?}"
+        );
+        assert!(
+            (left.x - REST_LEFT_FOOT.x).abs() < 1e-3,
+            "the back foot's x offset never changes: {left:?}"
+        );
+
+        // Zero / unseeded height: the rest depth, exactly as before.
+        let mut zero = boost_lower();
+        zero.hip_height = 0.0;
+        let mut c0 = BoostStartCtrl::new(&zero);
+        let mut g = c0.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        for _ in 0..300 {
+            g = c0.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        assert!(
+            (g.pose.right_foot.pos.y - (f.hip.y + REST_RIGHT_FOOT.y)).abs() < 1e-3,
+            "an unseeded height falls back to the blueprint depth"
+        );
+    }
+
+    #[test]
+    fn boost_eases_into_the_crouch_instead_of_stepping_it() {
+        // A squash applied as a step yanks a planted chord (measured: a 5 px
+        // step at HIP_HEIGHT=98 moved the hip 7→31 px/s down and −11→−61 px/s
+        // BACKWARD in ONE tick, and the launch then never released). The depth
+        // must ramp out of the rest pose the body already has.
+        let cfg = ControlConfig::default();
+        let dt = 1.0 / 90.0;
+        let f = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        let mut low = boost_lower();
+        low.hip_height = 98.0;
+        let mut c = BoostStartCtrl::new(&low);
+        let first = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        let d0 = first.pose.right_foot.pos.y - f.hip.y;
+        assert!(
+            (d0 - REST_RIGHT_FOOT.y).abs() < 0.5,
+            "no depth step on the entry tick: {d0}"
+        );
+        let mut out = first;
+        let ticks = ((cfg.boost_crouch_ts * 1.5) / dt) as usize;
+        for _ in 0..ticks {
+            out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let d1 = out.pose.right_foot.pos.y - f.hip.y;
+        assert!(
+            (d1 - 98.0).abs() < 0.02,
+            "the crouch arrives at the rig hip height: {d1}"
+        );
+    }
+
+    #[test]
+    fn boost_push_extends_the_back_chord_up_to_the_reach_left() {
+        // `BOOST_PUSH` extends the BACK (left, −x travel) leg along its own
+        // hip→foot chord and flags it stance so its strut can push. The
+        // extension is clamped to `thigh + calf − chord`: at the v10 rest
+        // depth the back leg already sits at 111 px of a 110 px leg, so there
+        // is no room to push until the crouch has bought some.
+        let mut low = boost_lower();
+        low.hip_height = 96.0;
+        let mut cfg = ControlConfig::default();
+        cfg.boost_push = 20.0; // deliberately more than the headroom
+        let dt = 1.0 / 90.0;
+        let f = fiction(
+            Vec2::new(0.0, -140.0),
+            [Vec2::new(-33.0, -34.0), Vec2::new(39.5, -37.0)],
+            [true, true],
+            0.0,
+            Vec2::ZERO,
+        );
+        let mut c = BoostStartCtrl::new(&low);
+        let mut out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        for _ in 0..300 {
+            out = c.step(&Command::boost(120.0), &f, &cfg, dt, 1.0);
+        }
+        let left = out.pose.left_foot.pos - f.hip;
+        let reach = low.thigh_len + low.calf_len;
+        assert!(
+            (left.length() - reach).abs() < 0.01,
+            "clamped to the reach left: {} of {reach}",
+            left.length()
+        );
+        let crouched = REST_LEFT_FOOT.y + 96.0 - REST_RIGHT_FOOT.y;
+        assert!(
+            (left.y / left.x - crouched / REST_LEFT_FOOT.x).abs() < 1e-4,
+            "the push keeps the chord's own direction: {left:?}"
+        );
+        assert!(out.pose.left_foot.stance, "the pushing leg must be stance");
+        let right = out.pose.right_foot.pos - f.hip;
+        assert!(
+            (right.length() - 96.0).abs() < 0.01,
+            "the front (support) foot is untouched: {right:?}"
+        );
+        // Off (the default): the back foot is a swing leg at its rest offset.
+        let plain = ControlConfig::default();
+        let mut c0 = BoostStartCtrl::new(&boost_lower());
+        let mut g = c0.step(&Command::boost(120.0), &f, &plain, dt, 1.0);
+        for _ in 0..300 {
+            g = c0.step(&Command::boost(120.0), &f, &plain, dt, 1.0);
+        }
+        assert!(!g.pose.left_foot.stance);
+        assert!((g.pose.left_foot.pos - (f.hip + REST_LEFT_FOOT)).length() < 0.01);
     }
 
     // --- WalkingCtrl: the walker_math seam ---

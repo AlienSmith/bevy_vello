@@ -268,41 +268,164 @@ backward, and the pre-fix `a_t` swing hip joint cancels that reaction. With the
 swing leg world-referenced, the cancellation is gone and the stance leg alone
 cannot hold the pitch.
 
-**Conclusion:** the two hip joints are *jointly* the attitude actuator. Any
-split that frees one of them for delivery removes half the authority — there is
-no blend that keeps both. The functional code was reverted to the pre-fix `a_t`
-behavior (HEAD), the only stable configuration. The remaining options are the
-independent actuators, not another blend:
+**Architecture (implemented 2026-11-17): stance controls the spine; the swing
+foot is controlled from the stance feet and the spine.**
 
-1. `Angular(PW, P3, P2)` against a pinned world-reference particle (`PW` above
-   the hip, `free_mask = 0b110`), or
-2. an ankle joint (a real foot-orientation DOF+actuator), or
-3. accept the foot lag and keep the stable walk.
+- **Stance leg** → hip target against the **commanded lean** (`a_t`): the
+  planted foot + leg hold the torso at the desired attitude.
+- **Swing leg** → hip target against the **live `P3→P2`**: the swing foot is
+  placed in the spine frame the stance feet have established.
+
+The split is **walking-only**, gated by `Pose::stance_split` (set by
+`WalkingCtrl`). Standing, Boost, and every other controller set it `false` and
+keep the commanded-lean reference on **both** legs — the committed behaviour —
+so the final stand and the launch are unchanged.
+
+`ATT_BLEND` was removed; this is the split exactly as specified. The known
+problem to improve on is that the swing hip no longer contributes a spine
+spring, so the model can pitch backward under the swing reaction. That is the
+next thing to fix — not by re-blending the references, but by improving how the
+spine is held (stance authority, cadence/crouch, or an additional actuator).
+
+**Measured context:** the stance foot is planted (`slide` −0.6 px with
+`STANCE_DEPTH=1`), so the stance leg is a good anchor. At `hip_height = 104`
+the stance leg is near full extension (chord 99–110 of 110, `x_max 30.5 px`),
+which is the likely authority limit; `HIP_HEIGHT = 96–100` is the physical
+margin lever (`x_max 45.6 / 39.0 px`).
 
 **Separate real bug found:** measured contact is true only ~24 % of walking
-ticks (`sd5`: `contact_l` 0.23, `contact_r` 0.25). Any future gate (strut,
-attitude, phase authority) must not trust it until the contact reporting is
-fixed.
+ticks. Any future gate must not trust it until the contact reporting is fixed.
 
-Telemetry appends `contact_l`, `contact_r`, `hit_l`, `hit_r`, `load_l`,
-`load_r`: `load_*` is the weight the actuator actually consumed, so the gate is
-measurable (`plans/stance-delivery-is-the-brake.md` §6b asked for exactly this).
+## Boost: the right foot is the stance foot (2026-11-17)
 
-## Validation plan
+The launch now uses the same stance machinery as the gait:
 
-1. `cargo test -p walker_control` — 88 tests, including blend
-   monotonicity/continuity, the load ramp/instant drop, the boost pin, and the
-   two frame tests.
-2. Re-run the sd5 script to a new CSV; keep `sd5.csv` for A/B.
-3. Gates:
-   - `meas_theta` bounded like sd5 (sd ~0.03–0.04 rad) — the stance channel held;
-   - swing touchdown `ERR` / `end_gap` shrink toward the aim/slip floor;
-   - `load_l/r` ≈ 1 through stance and 0 through swing, no chatter;
-   - `load_l + load_r` ≈ 1 across each handover (no authority gap);
-   - final stand: `load_l = load_r = 1` and `meas_theta` bounded.
-4. If `meas_theta` runs away, the stance channel lacks support (read
-   `contact_*`), not a gain; if swing `ERR` does not improve, the frame was not
-   the landing problem.
+- **Right foot = stance** (`stance: true`, strut active). It is the v10 FRONT
+  foot for an eastward boost and the one the gather pulls under the hip, so it
+  carries the launch.
+- **Left foot = swing** (`stance: false`). It holds its rest offset behind the
+  hip and rides the angular joints only.
+- **Stance press (`STANCE_DEPTH`) applies to the right foot**, via the same
+  `stance_press` helper the gait uses. The launch has no stance phase timer, so
+  the envelope is pinned at its peak: `age = min(since, T_gather/2)`, i.e. the
+  press ramps in over the first half of the gather window and then holds at full
+  depth for the rest of the cell.
+
+This replaces the earlier "both feet stance" choice (which existed because a
+swing-flagged foot rode the idle 1e-2 tether and the lean crept into a forward
+rock). The back foot is still behind the hip, which is what keeps the handover
+committing the fall forward. `stance_split` stays `false` in Boost, so both legs
+still target the commanded lean `a_t`.
+
+**`HIP_HEIGHT` reaches the launch too.** `BoostStartCtrl` now takes the
+`LowerBodyConfig`, and the support (right) plant depth is the configured
+standing hip height instead of the blueprint's hardcoded 103 px. The whole rest
+pose shifts by `hip_height − 103`, so the v10 x offsets and the 3 px left/right
+depth skew survive; `hip_height <= 0` (unseeded) falls back to 103. In the QA
+harness the attach already does `config.lower.hip_height = 104.0` then
+`apply_lower_env`, so `HIP_HEIGHT=96` now crouches the boost by the same 8 px it
+crouches the gait — one knob, both phases.
+
+## Why a squashed boost falls BACKWARD (2026-11-17, `tmp/walker_qa/1.csv` vs `0.csv`)
+
+`0.csv` = committed code, `HIP_HEIGHT=104`, `STANCE_DEPTH=0`: the boost releases
+at t=1.39, `v_filt` −4.8 → +4.6, the walk advances 179 → 1875 px over 20 s and
+ends standing. `1.csv` = right-foot stance + `HIP_HEIGHT=98` +
+`STANCE_DEPTH≈2`: the boost runs its FULL cell (no release at 0.4 s), the hip
+moves 175.5 → 167.0 (**backward 8.5 px**), and the walk then travels backward
+(mean `v_filt` −8.1, hip 167 → 119).
+
+Three measured steps, all on the entry tick:
+
+1. **The squash was a step, not a ramp.** The plants were holding the whole
+   body at depth 103/106 and the boost's first tick commanded 98/101 — both
+   chords yanked 5 px toward the hip in one 11 ms tick (≈450 px/s closure).
+   `P3vy` 6.6 → 31.1 px/s (down), `P3vx` −11.3 → −61.5 px/s (backward), and the
+   hip lost 6 px of height over the next 0.3 s. A planted chord cannot be
+   stepped: the strut reacts *on the hip* one-for-one, and folding a loaded leg
+   with an anterior knee translates the hip backward (squat mechanics).
+2. **The release condition is forward-only.** `boost_handover_due` needs
+   ξ = com + v·τ to lead past the frontmost foot. With `v_com` negative, ξ moves
+   *behind* the plants, so the launch never fires and the boost holds the
+   leaned pose for the whole cell.
+3. **The handover is then poisoned.** The gait starts with the CoM behind both
+   plants; its DCM event lifts the wrong foot and the body keeps going
+   backward. The `boost_lean` of 0.05 rad only buys ~1.8 px of CoM offset —
+   an order of magnitude less than the 9–15 px the squat hands it.
+
+Fixes now in place:
+
+- the crouch is **eased** (`boost_crouch_ts`, smoothstep, default 0.25 s), so
+  the entry tick is the blueprint rest pose and the depth arrives after the
+  body has had time to fold under load;
+- the **push-off** (`boost_push`, default 0) extends the BACK leg's chord along
+  its own hip→foot direction, ramped by `boost_push_ts` and clamped to
+  `thigh + calf − chord`.
+
+**The push-off has almost no headroom at the v10 rest pose**: the back chord is
+|(−33, 106)| = 111 px of a 110 px leg, so `reach − chord` is *negative* and a
+push does nothing. That is not a bug — it is why a real launch crouches first.
+At `HIP_HEIGHT=96` the back chord is 104.4 px, i.e. 5.6 px of push, of which
+only ~30 % (the chord is 18° off vertical) becomes forward hip speed; the rest
+lifts the body out of the crouch. Deeper crouch ⇒ more push.
+
+## The walking hop: the feet were planted on the MEASURED HIP (diagnosed 2026-11-17)
+
+The walk that follows the fixed landing hopped: the hip swung **20.2 px**
+vertically, the "stance" foot left the floor, and the contact-only slip was
+**22–29 px per stance** (max 48). `STANCE_DEPTH` made it worse, and the telemetry
+says why.
+
+`pose.foot - pose.hip` is a **solver-frame offset**, and the walking pose emitted
+`hip + to_vello(offset)`. So the measured hip's vertical excursion was copied
+1:1 into the commanded foot:
+
+- `(target_y − hip_y)` during stance is **98.00 px, constant**, on both feet;
+- the *world* y of that stance target therefore spans **303 … 323** against a
+  floor line at **307.4** — 4 px of air at the top of the vault, **16 px of
+  floor press** at the bottom;
+- **42 %** of stance-flagged ticks had the stance foot >2 px off the floor
+  (both feet airborne on 41 % of walking ticks), and `corr(hip_y, foot_y)` on
+  the stance leg is 0.76.
+
+That press-and-release is a spring: the foot is shoved 16 px into the collider at
+the bottom of the vault and it pushes the body back out. A constant
+`STANCE_DEPTH` offset cannot cancel an oscillation around the floor line — it
+just adds to the press at the bottom — which is exactly why a larger depth made
+the hop worse.
+
+### Status: REVERTED (2026-11-17)
+
+The fix was implemented, unit-tested and run; the walk got worse end to end, so
+the walking pose is back to `hip + to_vello(solver offset)` bit-for-bit. The
+diagnosis above stands and is worth keeping, because it says exactly what a
+future attempt must do — as a **package**:
+
+1. **Feet in the floor frame** — `floor_vello_y − (pose.foot.y − floor_y)`
+   instead of the measured hip. This does remove the hop mechanism, and the
+   emitted stance target then holds 306.1 instead of spanning 303..323.
+2. **The emitted hip must be a command too**, or the character KNEELS:
+   `leg_commands` derives each strut's rest length from `|pose.hip − foot|`, so
+   with the foot pinned to the floor that rest length became the body's *current
+   sag*, re-measured every tick — a spring with zero restoring force whose set
+   point walks downhill with the body. Measured: hip 208 → 237 in 0.45 s while
+   both foot targets sat on 306.1.
+3. **`leg_commands` must pivot the stance hip target at the LIVE hip (`P3`)**
+   once (2) is in place: the target only depends on the torso reference's
+   *direction*, and pivoting at a commanded height skews it by
+   `atan(height error / thigh)` (≈20° at a 20 px sag). The swing branch already
+   worked this way.
+
+With all three in place the kneel was gone but the run was still worse than the
+legacy map, so it was reverted rather than tuned on top of a frame change.
+
+**Before trying again:** once the foot is genuinely on the floor, the stance leg
+carries the body at the commanded chord. At `hip_height = 98` with 110 px bones
+the knee is ~54° off straight — a deep squat — so the achieved height is set by
+the leg stiffness (`KNEE_COMPLIANCE`, `STRUT_ACTIVE`), not by the command; the
+v10 rig stands at ~104 and needs far less knee torque there. Also
+`floor_vello_y = anchor.y + hip_height` inherits the seed's rig-vs-config height
+gap (`plans/floor_anchor_live_stance.md`, the 90-vs-106 note).
 
 ## Side notes (not the cause)
 

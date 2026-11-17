@@ -591,6 +591,7 @@ pub fn pose_or_default(pose: Option<Pose>, facing: f32) -> Pose {
         right_foot: crate::actuate::FootPose::default(),
         facing,
         upper_angle: 0.0,
+        stance_split: false,
     })
 }
 

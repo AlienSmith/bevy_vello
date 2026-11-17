@@ -180,6 +180,19 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("BOOST_GATHER_TS") {
         cfg.boost_gather_ts = v;
     }
+    // Boost crouch ramp, s: how long the plant depths take to reach
+    // `HIP_HEIGHT` (a step is a velocity kick — see `boost_crouch_ts`).
+    if let Some(v) = env_f32("BOOST_CROUCH_TS") {
+        cfg.boost_crouch_ts = v;
+    }
+    // Boost push-off along the BACK leg's chord, px (0 = off). Clamped to the
+    // reach the leg has left, so it only does anything after a crouch.
+    if let Some(v) = env_f32("BOOST_PUSH") {
+        cfg.boost_push = v;
+    }
+    if let Some(v) = env_f32("BOOST_PUSH_TS") {
+        cfg.boost_push_ts = v;
+    }
     if let Some(v) = env_f32("ATT_KP") {
         cfg.att_closure_kp = v;
     }

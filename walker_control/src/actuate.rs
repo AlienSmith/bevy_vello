@@ -23,15 +23,19 @@
 //! stateless per tick: given (live particles, pose), the commands are a pure
 //! function.
 //!
-//! # Loop 3 — the upper-body orientation lives in the hip joints, not the waist
-//! For this model the body above `P3` is a **rigid stick**: `P1`/head are tied
-//! to `P2` by blueprint distance joints, so the `P1-P2-P3` angular joint is
-//! *not* an attitude actuator (it would only fight the rigidity). The stick's
-//! orientation is the **`P3 → P2` axis**, set by the two leg hip joints
-//! `P40-P3-P2` and `P41-P3-P2` — exactly the `hip_joint` commands emitted
-//! here. The commanded `upper_angle` enters by aiming the hip joint's
-//! reference bone (`P3 → P2`) at the lean, via `a_t` below. This is loop 3's
-//! actuator and the reason there is no separate waist command.
+//! # Hip reference: stance drives the spine; only Walking splits the swing leg
+//! The body above `P3` is a **rigid stick** (`P1`/head tied to `P2` by
+//! blueprint distance joints), so `P1-P2-P3` is *not* an attitude actuator and
+//! `P3 → P2` is held only by a distance joint. The hip joint is therefore the
+//! only attitude authority, and the two legs use it as:
+//!
+//! - **Walking, stance leg** → aim against the commanded lean (`a_t`): the
+//!   planted foot + leg hold the spine at the desired attitude.
+//! - **Walking, swing leg** → aim against the live `P3 → P2`: the swing foot
+//!   is placed in the spine frame the stance feet established.
+//! - **Standing / Boost / anything else** → aim against `a_t` for BOTH legs
+//!   (the committed behaviour). The split is **walking-only**, gated by
+//!   [`Pose::stance_split`].
 //!
 //! Ported from [`calculate_leg_pd`](../../examples/game_lib/src/character/leg_pd.rs)
 //! with the dead machinery stripped: no `anchor_chain`/`ext_pin` modes (there
@@ -66,6 +70,10 @@ pub struct Pose {
     /// delivered through the two leg hip joints (`P40-P3-P2`, `P41-P3-P2`) as
     /// the lean of the `P3 → P2` reference axis — never as a waist constraint.
     pub upper_angle: f32,
+    /// Whether the stance/swing split is active. `WalkingCtrl` sets `true`; every
+    /// other controller sets `false`, which keeps the commanded-lean reference
+    /// on **both** legs (the standing/boost behaviour).
+    pub stance_split: bool,
 }
 
 /// A foot target plus its stance state (the strut gate).
@@ -276,14 +284,22 @@ fn leg_commands(
     let theta_knee = angle_at(live.hip, live.knee, live.foot);
 
     // ---- Target angles ----
-    // Loop 3 via the hip joints: the thigh reference axis (`P3 → P2`) is aimed
-    // at the commanded upper-body lean. `a_t` is the virtual `P2` the hip joint
-    // should see — the live `P3→P2` length rotated forward by `upper_angle`
-    // (vello y-down: upright is `(0,-1)`, `+x` is forward).
-    let len = spine.length();
-    let (sin_lean, cos_lean) = pose.upper_angle.sin_cos();
-    let a_t = pose.hip + Vec2::new(len * sin_lean, -len * cos_lean);
-    let target_hip = angle_at(a_t, pose.hip, knee);
+    // Walking only (`Pose::stance_split`):
+    // - STANCE leg → controls the SPINE: aim against the commanded lean (`a_t`),
+    //   so the planted foot + leg hold the torso at the desired attitude.
+    // - SWING leg → places its FOOT in the spine frame the stance feet have
+    //   established: aim against the live `P3→P2`.
+    // Standing / Boost / every other controller leaves `stance_split = false`
+    // and keeps the committed `a_t` reference on BOTH legs.
+    let split_swing = pose.stance_split && !foot_pose.stance;
+    let target_hip = if split_swing {
+        angle_at(live.waist, live.hip, knee)
+    } else {
+        let len = spine.length();
+        let (sin_lean, cos_lean) = pose.upper_angle.sin_cos();
+        let a_t = pose.hip + Vec2::new(len * sin_lean, -len * cos_lean);
+        angle_at(a_t, pose.hip, knee)
+    };
     let target_knee = angle_at(pose.hip, knee, foot_pose.pos);
 
     // ---- Emit (dead zone, fixed compliance/zeta, rest = target) ----
@@ -394,6 +410,7 @@ mod tests {
             right_foot: right,
             facing: 1.0,
             upper_angle,
+            stance_split: true,
         }
     }
 
@@ -522,9 +539,9 @@ mod tests {
     }
 
     #[test]
-    fn lean_tilts_the_hip_target_forward() {
-        // A positive upper_angle aims the `P3 → P2` reference forward: with the
-        // leg otherwise in an IK-consistent rest pose, that opens a hip error.
+    fn the_stance_leg_controls_the_spine() {
+        // Stance: the planted foot + leg hold the torso at the commanded lean,
+        // so a commanded lean must open a hip error.
         let cfg = ActuatorConfig::default();
         let hip = Vec2::new(0.0, -140.0);
         let foot = Vec2::new(0.0, -60.0);
@@ -546,6 +563,93 @@ mod tests {
         let cmd = a.right.hip_joint.expect("lean must emit a hip command");
         let theta = cmd.rest_sin.atan2(cmd.rest_cos);
         assert!(theta.abs() > 1e-3, "rest angle must carry the lean");
+    }
+
+    #[test]
+    fn the_swing_leg_is_placed_in_the_live_spine_frame() {
+        // Swing: the foot is placed relative to the spine the stance feet have
+        // established. An IK-consistent live leg with an upright torso is in
+        // the dead zone even when the pose asks for a lean.
+        let cfg = ActuatorConfig::default();
+        let hip = Vec2::new(0.0, -140.0);
+        let foot = Vec2::new(0.0, -60.0);
+        let l = leg_from_pose(hip, foot, 1.0);
+        let r = l;
+        let pose = pose_with(
+            FootPose {
+                pos: foot,
+                stance: false,
+            },
+            FootPose {
+                pos: foot,
+                stance: false,
+            },
+            0.15,
+        );
+        let a = actuate_tick(&l, &r, &pose, &cfg, 1.0 / 90.0);
+        assert!(
+            a.left.hip_joint.is_none() && a.right.hip_joint.is_none(),
+            "the commanded lean must not rotate a swing leg; the live spine is its frame"
+        );
+    }
+
+    #[test]
+    fn a_tilted_spine_does_not_shift_an_already_placed_swing_foot() {
+        // The stance feet have pitched the spine by ~9 deg. A swing leg that
+        // already sits on its commanded foot must still be in the dead zone:
+        // the foot is expressed in that live spine frame, not the world.
+        let cfg = ActuatorConfig::default();
+        let hip = Vec2::new(0.0, -140.0);
+        let foot = Vec2::new(0.0, -60.0);
+        let mut l = leg_from_pose(hip, foot, 1.0);
+        let d = 0.16f32;
+        l.waist = hip + Vec2::new(40.0 * d.sin(), -40.0 * d.cos());
+        let r = l;
+        let pose = pose_with(
+            FootPose {
+                pos: foot,
+                stance: false,
+            },
+            FootPose {
+                pos: foot,
+                stance: false,
+            },
+            0.0,
+        );
+        let a = actuate_tick(&l, &r, &pose, &cfg, 1.0 / 90.0);
+        assert!(
+            a.left.hip_joint.is_none() && a.right.hip_joint.is_none(),
+            "a tilted spine with the swing foot already placed must not emit a hip error"
+        );
+    }
+
+    #[test]
+    fn non_walking_modes_keep_the_commanded_lean_on_both_feet() {
+        // The split is walking-only: with `stance_split = false`, a
+        // swing-flagged foot must still be aimed at the commanded lean, which
+        // keeps Standing and Boost on the committed behaviour.
+        let cfg = ActuatorConfig::default();
+        let hip = Vec2::new(0.0, -140.0);
+        let foot = Vec2::new(0.0, -60.0);
+        let l = leg_from_pose(hip, foot, 1.0);
+        let r = l;
+        let mut pose = pose_with(
+            FootPose {
+                pos: foot,
+                stance: false,
+            },
+            FootPose {
+                pos: foot,
+                stance: false,
+            },
+            0.15,
+        );
+        pose.stance_split = false;
+        let a = actuate_tick(&l, &r, &pose, &cfg, 1.0 / 90.0);
+        assert!(
+            a.left.hip_joint.is_some() && a.right.hip_joint.is_some(),
+            "non-walking modes keep the commanded-lean reference on both legs"
+        );
     }
 
     #[test]
@@ -622,6 +726,7 @@ mod tests {
                     },
                     facing,
                     upper_angle: 0.0,
+                    stance_split: true,
                 },
                 &cfg,
                 1.0 / 90.0,
