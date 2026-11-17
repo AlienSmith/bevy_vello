@@ -17,7 +17,7 @@ So the realized leg is the commanded leg **rotated by the torso-pitch error**,
 and the foot lags by `L · (θ_meas − θ_cmd)`.
 
 Reproduce on `tmp/walker_qa/sd5.csv`
-(`SCRIPT=tmp/walker_qa/walkv60-boost90-40-70-40.json WIN_HIDDEN=1`):
+(`SCRIPT=plans/walker_v60_boost90_40_70_40_script.json WIN_HIDDEN=1`):
 
 ```
 python3 tools/physics-qa/three_level_trace.py tmp/walker_qa/sd5.csv --range 4 6
@@ -611,7 +611,7 @@ same load-bearing penetration as §"one-sided floor clamp". Reverted; only the
 explanatory comment remains.
 
 **Even the stable version makes the slide worse.** Same script
-(`walkv60-boost90-40-70-40.json`), feet 0.35 vs 1.0:
+(`plans/walker_v60_boost90_40_70_40_script.json`), feet 0.35 vs 1.0:
 
 | feet scaler | stance drift mean L / R | worst | hip path |
 |---|---|---|---|
@@ -631,3 +631,46 @@ the hip, and the rigid strut then pulls the body back.
 
 Conclusion: friction is not the lever for stance slip; the actuator's stance
 target must stop moving in the world (the world-anchored plant).
+
+## The stance pin: command-side only (2026-11-17, 8ad78c3) and the physical hold (tried, REVERTED)
+
+`ControlConfig::stance_pin` latches the stance foot's **world x** on stance entry
+and emits that x for the rest of the stance, so the strut rest length and the
+knee angle are both derived from a foot that is actually planted. Verified in
+`tmp/walker_qa/2.csv`: the commanded stance x is **bit-constant** for all 39
+stances (`tPLLLx` = 551.66 for the whole 5.01–5.31 stance, etc.).
+
+That alone does not stop the foot moving. Same stance, same CSV:
+
+| quantity | value |
+|---|---|
+| commanded foot x | 551.66, constant |
+| hip x | 527.9 → 554.7 (+26.8 px) |
+| actual foot x | 542.4 → **525.1** → 534.1 |
+| hip→foot chord | 97.9 … 101.7 px (reach 110) |
+| commanded chord angle | +13.6° → −2.5° |
+| actual chord angle | +8.9° → −12.9° (lag ≤ 15°) |
+
+The chord is constant, so the ankle is on a circle about the hip: the leg is
+pivoting about the **hip**, not about the **foot**, and the ankle slides along
+the arc. The pose cannot fix that — the joint servos (`hip_compliance = 1e-9`,
+plus `STABLIZE_STEPS_COUNT` extra passes) out-rank the contact's
+`friction · penetration` ≈ 3 px per solve. Two independent defects were found
+and one fix was accepted:
+
+- **Accepted (still in):** the pin latches the *commanded* x, which at stance
+  entry is already ~9 px ahead of the real foot, so the actuator spends the
+  stance pulling the ankle forward into a gap the floor will not give. Seeding
+  the latch from the measured foot removes that standing demand.
+- **Tried, REVERTED: the physical hold.** An external position constraint on
+  the foot particle (`(pin_x, live_y)`, x-only so the floor keeps owning y,
+  `compliance = 0`, solved first in `softbody_connection::solve_constraints`)
+  does remove the residual ankle travel, but the walk loses the speed-control
+  tendency and stops looking natural: a foot that cannot move at all converts
+  every servo error into body load. The command-side pin alone is the version
+  that walks well, and it is now the **default** (`STANCE_PIN=0` disables it).
+
+Implementation note for anyone revisiting the constraint: `compliance` must be
+≲ `1e-6`. The solver pulls `len/(inv_mass + compliance/dt²)`, so `1e-2` gives
+`alpha ≈ 1.3e3` at 1/360 s and the constraint is numerically inert — that is
+what made the torso pin at `1e-7` look broken.

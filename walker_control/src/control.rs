@@ -296,6 +296,14 @@ pub struct ControlConfig {
     /// leg pivots over the pin instead of chasing it. Only x is held — y keeps
     /// the hip-relative mapping, because every vertical re-anchor tried so far
     /// lost the over-extension the body was standing on.
+    ///
+    /// A physical hold (an external position constraint on the foot particle)
+    /// was added on top of this and **reverted**: it does remove the residual
+    /// ±13 px of ankle travel around the pin, but the walk loses the speed-
+    /// control tendency and stops looking natural, because a foot that cannot
+    /// move at all turns every servo error into body load. The command-side pin
+    /// alone is the version that walks well. Default **true** (`STANCE_PIN=0`
+    /// disables it).
     pub stance_pin: bool,
 }
 
@@ -338,8 +346,8 @@ impl Default for ControlConfig {
             // Off by default: the walking pose stays bit-identical to the
             // solver output until a sweep says otherwise.
             stance_press_depth: 0.0,
-            // Off by default: opt in with `STANCE_PIN=1`.
-            stance_pin: false,
+            // On by default: the stance foot holds its world x.
+            stance_pin: true,
         }
     }
 }

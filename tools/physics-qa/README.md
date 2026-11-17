@@ -488,3 +488,25 @@ light-coloured card sprite, so track it across a `--input` run. Direction is the
 discriminator — no input leaves the player put, while the enemy wanders in every
 run, so only real input can flip the player's direction of travel.
 
+
+## Reference walk (current defaults)
+
+The command used to look at the walking scene with the current tuning — real
+window, a 1.3 px stance press, `HIP_HEIGHT=98`, and a strong launch thrust:
+
+```
+tools/physics-qa/run_walker_qa.sh 2 SCRIPT=tmp/walker_qa/walkv60-120-60.json STANCE_DEPTH=1.0 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=5000 STANCE_TS=0.27 SWING_TS=0.27
+```
+
+| argument | effect |
+| --- | --- |
+| `2` | artifact tag → `tmp/walker_qa/2.csv`, `2.hips_feet.png`, `2.log` |
+| `SCRIPT=…` | the v60/120/60 speed track (`stand` → `boost 90` → `60` → `120` → `60` → `stand`), kept in `plans/` because `tmp/` is not tracked |
+| `STANCE_DEPTH=1.3` | stance-foot press along the hip→foot chord, px (see `ControlConfig::stance_press_depth`) |
+| `WIN_HIDDEN=0` | open a real window instead of running headless |
+| `HIP_HEIGHT=98` | crouched stand/plant height for the walk |
+| `BOOST_HIP_ACCEL=7000` | launch thrust on `P3`, px/s² (default 300) |
+
+The stance foot's world x is pinned by default (`STANCE_PIN` on; `STANCE_PIN=0`
+disables it) — see `plans/actuator-frame-divergence.md` for what that does and
+what it does not fix.
