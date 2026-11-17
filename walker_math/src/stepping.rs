@@ -272,31 +272,29 @@ pub(crate) fn step_leg(
             // stops land both feet on one side of the hip.
             leg.swing_to.x =
                 plan_target_x(hip_x, v, v_desired, leg.phase_timer.max(0.0), config, plan);
-            // §19.2.1 deadbeat swing timing: traverse the spline so the foot
-            // reaches the capture point about when the CoM does, instead of on
-            // the fixed swing timer. `T_remain = |x_land − x_com| / v_com`
-            // (with a floor so near-zero speed doesn't divide by zero or swing
-            // forever); the swing timer remains only as a fallover cap.
-            let swing_frac = if plan.measured.is_some() {
-                // Pace the arrival over the time the hip/CoM takes to cross the
-                // residual distance to the plant, capped by the swing timer (the
-                // fallover bound). Slow body → longer effective swing; fast body
-                // → quicker swing.
-                let t_target = {
-                    let dist = (leg.swing_to.x - leg.plant_pos.x).abs();
-                    let speed = v.abs().max(1.0);
-                    (dist / speed)
-                        .min(config.swing_duration_ts)
-                        .max(f32::EPSILON)
-                };
-                // Fraction elapsed toward touchdown scaled by the paced time.
-                (1.0 - (leg.phase_timer / t_target).clamp(0.0, 1.0)).clamp(0.0, 1.0)
-            } else {
-                // No measurement: fall back to the timer-paced profile exactly as
-                // the pre-§19 resolver.
-                let total = config.swing_duration_ts.max(f32::EPSILON);
-                (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0)
-            };
+            // Swing progress: traverse the spline across the FULL scheduled
+            // flight so `s` reaches 1 exactly when the swing timer expires.
+            //
+            // This deliberately does NOT re-pace to `dist/|v|` (the old §19.2.1
+            // deadbeat timing). That clock could run shorter than the flight the
+            // gait actually grants: contact-gated landing keeps the foot in the
+            // air until it touches down, and the deadbeat re-plans `swing_to`
+            // every tick (its horizon shrinks with the remaining flight, so the
+            // aim slides backward). With a too-short `t_target`, `s` clamped to
+            // 1 well before touchdown and the foot PARKED on a `swing_to` that
+            // kept retreating under it — the foot stopped chasing the target, so
+            // any further target motion diverged from the foot instead of being
+            // followed. Measured on sd4: cruise end_hold was 0.0 s (the timer was
+            // already the binding clock there) but every transient swung this way
+            // (boot 0.278 s, post-launch 0.03-0.06 s early park).
+            //
+            // Timer pacing keeps the profile moving with the live target for the
+            // whole swing; the foot still lands short only because of the actuator
+            // rate limit (a separate delivery problem), not because it stopped
+            // trying. The contact `waiting` branch below already absorbs a flight
+            // that runs past the timer.
+            let total = config.swing_duration_ts.max(f32::EPSILON);
+            let swing_frac = (1.0 - (leg.phase_timer / total).clamp(0.0, 1.0)).clamp(0.0, 1.0);
             let t = swing_frac;
             leg.swing_prog = swing_frac;
             // Three-phase swing profile (plan §3): lift → advance → extend,
