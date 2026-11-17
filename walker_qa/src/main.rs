@@ -174,9 +174,6 @@ fn env_f32(key: &str) -> Option<f32> {
 /// Tune the boost shape from env so a lean sweep can test how much stored
 /// fall-energy the handover inherits. Unknown keys ignored.
 fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
-    if let Some(v) = env_f32("BOOST_LEAN") {
-        cfg.boost_lean = v;
-    }
     if let Some(v) = env_f32("BOOST_GATHER_TS") {
         cfg.boost_gather_ts = v;
     }

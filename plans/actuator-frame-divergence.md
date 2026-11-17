@@ -350,8 +350,9 @@ Three measured steps, all on the entry tick:
    leaned pose for the whole cell.
 3. **The handover is then poisoned.** The gait starts with the CoM behind both
    plants; its DCM event lifts the wrong foot and the body keeps going
-   backward. The `boost_lean` of 0.05 rad only buys ~1.8 px of CoM offset —
-   an order of magnitude less than the 9–15 px the squat hands it.
+   backward. The `boost_lean` of 0.05 rad only bought ~1.8 px of CoM offset —
+   an order of magnitude less than the 9–15 px the squat hands it. (That lean
+   has since been removed: the launch is upright and the kick is the drive.)
 
 Fixes now in place:
 
@@ -360,14 +361,70 @@ Fixes now in place:
   body has had time to fold under load;
 - the **push-off** (`boost_push`, default 0) extends the BACK leg's chord along
   its own hip→foot direction, ramped by `boost_push_ts` and clamped to
-  `thigh + calf − chord`.
+  `thigh + calf − chord`;
+- the launch is **upright**: `upper_angle = 0` for the whole cell. The old 0.05
+  rad pre-lean only bought ~1.8 px of CoM offset, and because the torso target
+  is referenced to the live thigh it also had to be paid for in pitch — now the
+  kick is the drive and the attitude reference stays vertical;
+- the **kick-off** (`boost_kick`, default **15 px**, ramp
+  `boost_kick_ts` = **0.04 s**) drives the BACK foot *backwards along travel*:
+  the leg extends behind the body, so the reaction is **100 % forward** hip
+  travel (a chord extension is only ~30 % — the back chord is 18° off vertical).
+  It is clamped by the horizontal reach left, `sqrt(reach² − y²) − |x|`, so the
+  clamp — not the knob — decides: ~15 px at `hip_height = 96`, ~10 px at 98.
+  The 0.04 s ramp is deliberate: at 15 px it is ~375 px/s of foot drive, fast
+  enough to beat the slip that turned the first (0.12 s, 8 px) attempt into a
+  drag. No env override: the value is baked.
 
-**The push-off has almost no headroom at the v10 rest pose**: the back chord is
-|(−33, 106)| = 111 px of a 110 px leg, so `reach − chord` is *negative* and a
-push does nothing. That is not a bug — it is why a real launch crouches first.
-At `HIP_HEIGHT=96` the back chord is 104.4 px, i.e. 5.6 px of push, of which
-only ~30 % (the chord is 18° off vertical) becomes forward hip speed; the rest
-lifts the body out of the crouch. Deeper crouch ⇒ more push.
+**Headroom, and why the two push-offs differ.** At the v10 rest pose the back
+chord is |(−33, 106)| = 111 px of a 110 px leg, so `reach − chord` is *negative*
+and both are no-ops — that is why a real launch crouches first, not a bug. The
+crouch then buys very different room:
+
+| `hip_height` | back chord | chord extension room | **backward kick room** |
+|---|---|---|---|
+| 104 | 110.9 | 0 | **0** |
+| 98 | 106.3 | 3.7 | **10.4** |
+| 96 | 104.4 | 5.6 | **15.0** |
+
+The backward kick is the better lever on paper: it uses the leg's *horizontal*
+reach, and every pixel of it should be forward hip travel instead of ~3 px of
+lift. `boost_kick` defaults to 8 px — inert at `HIP_HEIGHT=104`, active at 96–98.
+
+**Measured 2026-11-17 (first kick run): the kicking foot SLID, and the body did
+not move.** Over t = 1.21 → 1.30 the back-foot target went 141.0 → 131.4 px and
+the *actual* foot 136.6 → 130.2 px, while the hip went 174.4 → 175.0 px — i.e.
+the foot dragged ~6 px backwards across the floor and only 0.6 px of that became
+forward hip travel. The pose can only *command* a foot position; whether that
+becomes a push is decided by grip. With a sliding foot there is only kinetic
+friction, so the launch still ends at zero forward speed: it released at t=1.34
+with `v_com ≈ −0.7` (the release test is positional — ξ just past the front
+foot), the gait then started at 0 while the plan asked 90 px/s, threw the first
+swing foot 24 px forward (tL 134 → 158) while the hip recoiled, and the body
+walked backwards from then on.
+
+Root cause of the slide: **the back foot was not a support foot at all.** When
+the right foot became the only stance leg, the back leg was flagged `swing` for
+the first 0.2 s of the launch — an idle 1e-2 tether, no authority — and the
+crouch ramp then *lifts* a swing foot (it moves both plant targets toward the
+hip). So the kick started on a foot that was in the air and merely dragged it.
+That is exactly the "back foot lifts before the push" in the picture.
+
+Fixes now in place:
+
+- **both feet are support for the whole launch** (`stance: true` on both), so the
+  crouch pulls the *hip* down onto a planted back foot instead of lifting the
+  foot into the air;
+- the **kick waits for the crouch** (`since − boost_crouch_ts`) so the back foot
+  has landed and loaded before it is driven;
+- every emitted chord is **clamped to `thigh + calf`** (`clamp_len`), so neither
+  the press nor the kick can command a leg past its reach (the back chord is
+  already 111 px of a 110 px leg at the v10 rest depth).
+
+If the foot still slides with a loaded, crouched leg, then it really is a grip
+limit (`friction_compliance_scaler`, and `BOOST_KICK_TS = 0.03–0.05` to make the
+drive an impulse rather than a drag), and the pose layer cannot deliver a
+push-off at all — the answer is then the strut/actuator route.
 
 ## The walking hop: the feet were planted on the MEASURED HIP (diagnosed 2026-11-17)
 
@@ -426,6 +483,28 @@ the leg stiffness (`KNEE_COMPLIANCE`, `STRUT_ACTIVE`), not by the command; the
 v10 rig stands at ~104 and needs far less knee torque there. Also
 `floor_vello_y = anchor.y + hip_height` inherits the seed's rig-vs-config height
 gap (`plans/floor_anchor_live_stance.md`, the 90-vs-106 note).
+
+## One-sided floor clamp on the stance foot — tried, REVERTED (2026-11-17)
+
+With `STANCE_DEPTH = 0` the stance foot *is* commanded below the ground: the pose
+rides the measured hip, so a body standing lower than `hip_height` buries the
+plant by that much (measured: the target spanned 303 … 323 against a floor line
+at 307.4, i.e. up to 16 px under).
+
+The clamp tried was one-sided and minimal — `pos.y = pos.y.min(floor_vello_y)`
+for a stance foot only, with `STANCE_DEPTH` applied *after* it so the press kept
+its range. Unit-tested and run: **it breaks the walk.** The leg loses the
+over-extension the body was standing on (at `hip_height = 98` and 110 px bones
+that over-extension is what makes the stance a column rather than a 54° squat),
+so the body no longer has support and the walk degrades.
+
+That is the same lesson as the floor-frame attempt, in a smaller dose: **the
+"penetration" is load-bearing.** The stance foot is buried precisely because the
+leg is over-extended and the floor is what stops it; remove the burial and the
+leg must carry the body at the commanded chord instead. Any real fix has to make
+the leg load-bearing first — stiffness (`KNEE_COMPLIANCE`, `STRUT_ACTIVE`), the
+commanded height (`HIP_HEIGHT` near the rig's own ~104), or a damped strut — and
+only then can the foot be kept on the surface.
 
 ## Side notes (not the cause)
 
