@@ -1467,16 +1467,22 @@ impl Step for JumpCtrl {
         // which is what keeps the pose out of the tip cliff.
         let jump_impulse = if self.fire_impulse {
             self.fire_impulse = false;
-            // Launch speed in px/s. `JUMP_IMPULSE` is a literal override; when
-            // unset (0) it is derived from the apex target, so `JUMP_APEX`
-            // alone still produces the whole hop. The apex is measured from the
-            // CURRENT height (`jump_apex − rise`), not a blind constant: the
-            // body may still be below standing when the stroke releases.
+            // Launch speed in px/s. `JUMP_IMPULSE` semantics:
+            //   > 0  literal launch speed,
+            //   == 0 derived from the apex target (`sqrt(2·g·apex)`), so
+            //        `JUMP_APEX` alone still produces the whole hop,
+            //   < 0  DISABLED — pure loop-2 (the strut alone must launch; the
+            //        control experiment for "can the legs do it?").
+            // The apex is measured from the CURRENT height (`jump_apex − rise`),
+            // not a blind constant: the body may still be below standing when
+            // the stroke releases.
             let v0 = if cfg.jump_launch_impulse > 0.0 {
                 cfg.jump_launch_impulse
-            } else {
+            } else if cfg.jump_launch_impulse == 0.0 {
                 let apex_needed = (self.cfg.jump_apex - rise).max(1.0);
                 (2.0 * self.cfg.gravity * apex_needed).sqrt()
+            } else {
+                0.0
             };
             // vello y is DOWN, so an upward launch is a NEGATIVE Δv_y.
             -v0.max(0.0)
@@ -3267,6 +3273,21 @@ mod tests {
             (fired[0] + 234.0).abs() < 1e-3,
             "impulse {} should be −234 px/s (upward)",
             fired[0]
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_negative_knob_disables_the_impulse() {
+        // `JUMP_IMPULSE < 0` means DISABLED — the loop-2-only control case:
+        // no impulse is ever fired, so the legs alone must carry the hop.
+        let lower = LowerBodyConfig::default();
+        let mut cfg = ControlConfig::default();
+        cfg.jump_launch_impulse = -1.0;
+        let mut c = JumpCtrl::new(&lower);
+        let outs = run_hop(&mut c, &cfg, lower.jump_apex, 80);
+        assert!(
+            outs.iter().all(|o| o.jump_impulse == 0.0),
+            "a negative knob must fire no impulse"
         );
     }
 

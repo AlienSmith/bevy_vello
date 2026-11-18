@@ -26,7 +26,9 @@
 //! `game_lib → walker_control` a one-way dependency.
 
 use bevy::prelude::*;
-use bevy_vello::integrations::physics::{VelloConstraintWorld, VelloParticle};
+use bevy_vello::integrations::physics::{
+    CharacterPivotImpulseEvent, VelloConstraintWorld, VelloParticle,
+};
 use walker_math::LowerBodyConfig;
 
 use crate::actuate::{ActuatorConfig, LegLive};
@@ -267,28 +269,36 @@ pub fn actuate_stage(
     }
 
     // --- Jump launch: put the hop on the BODY, once ---
-    // Same reasoning as the boost thrust above, on the vertical axis: the pose
-    // strut has only ~5.5 px of extension left at standing, so it cannot launch
-    // a hop (see `plans/walker-jump-findings.md`). `JumpCtrl` asks for this on
-    // exactly one tick.
+    // `JumpCtrl` asks for this on exactly one tick (`jump_impulse` is a target
+    // Δv in px/s). The legs cannot launch the hop themselves (only ~5.5 px of
+    // extension left at standing), so it is applied to the BODY as a physics
+    // impulse on every particle of both leg assemblies (hip, knee, foot) — not
+    // `P3` alone, which would leave the floor-pinned feet to eat it in one
+    // frame.
     //
-    // The impulse is applied to EVERY particle of both leg assemblies (hip,
-    // knee, foot), not the hip alone. The legs are rigid bone rods: kicking only
-    // `P3` left the feet pinned to the floor by contact, so the closed hip→floor
-    // chain ate the impulse in ~1 frame (measured: `P3vy` reached only −113 of
-    // −234 and the body rose 6 px — the extension budget). Giving the same `Δv`
-    // to the whole chain launches it rigidly, so the feet actually leave the
-    // ground.
+    // This is a real **impulse** (`CharacterPivotImpulseEvent` →
+    // `add_connect_external_force`), NOT a velocity overwrite. The solver scales
+    // it by each particle's inverse mass (`Δpos = J·inv_mass·dt`), so a heavy
+    // torso is moved less than a light limb and no energy is conjured. To get a
+    // target Δv per particle we solve `J = Δv / (inv_mass·dt)` from the live
+    // inverse mass. Idempotent: the solver consumes and removes the impulse at
+    // the next step, so it can never accumulate.
     if out.jump_impulse != 0.0 {
-        let dv = Vec2::new(0.0, out.jump_impulse);
+        let dt = w.observer.fiction.dt.max(1e-4);
         for leg in [left, right] {
             for part in leg.parts {
                 if let Ok(p) = p_q.get(part) {
-                    world.queue_connect_particle_velocity(
-                        character,
-                        &part,
-                        p.particle.velocity + dv,
-                    );
+                    let inv_mass = p.particle.inv_mass;
+                    if inv_mass <= 0.0 {
+                        continue;
+                    }
+                    // Δv = J·inv_mass·dt / dt ⇒ J = Δv / inv_mass.
+                    let impulse = Vec2::new(0.0, out.jump_impulse) / inv_mass;
+                    world.queue_character_external_force(&CharacterPivotImpulseEvent {
+                        character_entity: character,
+                        joint_entity: part,
+                        impulse,
+                    });
                 }
             }
         }

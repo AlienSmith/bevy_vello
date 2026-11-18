@@ -100,45 +100,64 @@ Fixing it is a design change, not a parameter change. Two principled options:
 Recommendation: option 1 first. It reuses the proven boost mechanism, keeps the
 loop-2 law and the measured phase machine, and is a bounded change.
 
-## 7. The impulse launch WORKS (option 1, implemented 2026-11-18)
+## 7. Can loop 2 launch the hop itself? NO — measured. (2026-11-18)
 
-The vertical impulse launch was implemented and **validated**. The hop now
-genuinely leaves the ground and lands upright:
+The decisive control experiment: set the external impulse **off** and let only
+the leg strut extension try to launch. `JUMP_IMPULSE` < 0 now means DISABLED
+(previously `0` silently fell back to a derived `sqrt(2·g·apex)`, which made an
+earlier "loop-2 alone" run a false positive — it had still fired a derived
+impulse).
 
-| Metric | Before (chord-only) | After (impulse) |
-|---|---|---|
-| Rise | 5.55 px (saturated) | **25.1 px** |
-| Airborne | 0.30 s (marginal) | **0.44 s** |
-| `meas_theta` range | −1.59 rad (91°, fell) | **−0.10 … +0.04 rad (5.5° max)** |
-| `omega_com` range | 1.72 mean / 3.89 max | **−0.27 … +0.43** |
-| Landing | tipped over | grounded, upright (final θ 0.02–0.06) |
+| Run | Impulse | Rise | Airborne | Feet leave floor? |
+|---|---|---|---|---|
+| `loop2_pure` (`JUMP_IMPULSE=-1`) | **none** | **0.08 px** | 0.011 s | **NO** (min foot y 305.3 ≈ standing) |
+| `imp_api_tune` (`JUMP_IMPULSE=150`) | mass-scaled impulse | **28.7 px** | 0.47 s | yes (min foot y 281.5) |
 
-Run: `imp28c` — `JUMP_APEX=8 JUMP_IMPULSE=234` (shallow crouch, below the tip
-cliff; the height comes from the impulse, so no deep crouch is needed).
+**Loop 2 alone cannot launch.** The strut is a rest-length servo standing at
+104.5 of 110 px reach; extending it moves the hip ~5 px at most and never lifts
+the feet, so the ground reaction never appears. This is the same geometric
+ceiling as §2, now demonstrated by direct measurement rather than inferred.
 
-### What it took (three things, all necessary)
+## 8. The hop is carried by a real physics IMPULSE (the safe API)
 
-1. **The impulse itself** (`ControlConfig::jump_launch_impulse`, `JUMP_IMPULSE`
-   env knob). `JumpCtrl` fires it once on the Launch→Flight transition;
-   `actuate_stage` writes it via `queue_connect_particle_velocity`. With the
-   knob unset it derives `v0 = sqrt(2·g·apex)`, so `JUMP_APEX` alone also works.
-2. **Apply it to the WHOLE leg chain, not `P3` alone.** The legs are rigid bone
-   rods: kicking only `P3` left the feet pinned to the floor by contact, and the
-   closed hip→floor chain ate the impulse in ~1 frame (`P3vy` reached only −113
-   of −234; body rose 6 px = the extension budget). Writing the same `Δv` to
-   every particle of both leg assemblies launches the chain rigidly, so the feet
-   actually leave the ground.
-3. **Tuck the feet to the body in Flight** (`fly_l`/`fly_r`, captured at release
-   relative to the measured hip). Holding the fixed world plants let the strut
-   length `|hip − foot|` grow without bound as the hip rose, so the compliant
-   leg dragged the hip back down — the visible ground "bump" (`P3` rose 6 px,
-   `grounded` toggling). Riding the hip keeps `rest_length = |fly|` constant, so
-   the leg neither launches nor damps.
+The first implementation set the particle **velocity outright**
+(`queue_connect_particle_velocity`, a total overwrite — "dangerous": it discards
+the solver's current velocity and can conjure energy). That is replaced with the
+solver's impulse path:
+
+- `ControlOut::jump_impulse` is a target Δv (px/s).
+- `actuate_stage` converts it to a mass-scaled impulse per particle
+  `J = Δv / inv_mass` and queues `CharacterPivotImpulseEvent` →
+  `add_connect_external_force`. The solver applies `Δpos = J·inv_mass·dt`, i.e.
+  a true impulse where a heavy torso moves less than a light limb and no energy
+  is created. The impulse is consumed and removed the same step (cannot
+  accumulate).
+
+Applied to the **whole leg chain** (hip, knee, foot, both legs): the legs are
+rigid rod constraints, so kicking only the hip lets the floor-pinned feet eat the
+impulse in ~1 frame. And in Flight the feet **tuck to the measured hip**
+(`fly_l`/`fly_r`, captured at release) so the strut length `|hip − foot|` stays
+constant — holding the world plants let it grow without bound and dragged the hip
+back down (the ground "bump").
+
+Validated (`imp_api_tune`, `JUMP_APEX=8 JUMP_IMPULSE=150`):
+
+| Metric | chord-only (loop 2) | velocity overwrite (old) | mass-scaled impulse (now) |
+|---|---|---|---|
+| Rise | 0.08 px | 25.1 px | **28.7 px** |
+| Airborne | 0.01 s | 0.44 s | **0.47 s** |
+| `meas_theta` max | — | 5.5° | **5.5°** |
+| Feet leave floor | no | yes | **yes** |
+| Energy | — | overwrite (unsafe) | **mass-scaled (physical)** |
+
+### Env-knob semantics (`JUMP_IMPULSE`)
+
+- `> 0` literal target Δv (px/s). ~150 ⇒ ~28 px rise.
+- `== 0` derived `sqrt(2·g·apex)`, so `JUMP_APEX` alone works.
+- `< 0` DISABLED — pure loop 2 (the control experiment above).
 
 ### Still to address
 
-Deepening toward the full 28 px is a tuning matter now (the mechanism is
-proven): raise `JUMP_IMPULSE` toward `sqrt(2·g·28) ≈ 234` at the *foot* and let
-the loop-2 law close on the measured rise. The `jump → standing` handover pose
-discontinuity (feet y 308 → 403, hip x 175.7 → 105.2 for one frame) is a
-mode-switch bug and is still independent of the launch mechanism.
+The `jump → standing` handover pose discontinuity (feet y 308 → 403, hip x
+175.7 → 105.2 for one frame) is a mode-switch bug, independent of the launch
+mechanism.
