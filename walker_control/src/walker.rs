@@ -128,7 +128,12 @@ impl Walker {
 /// returns to standing. `boost` marks the launch move that runs through
 /// [`LocoMode::BoostStart`] before the gait takes over.
 pub fn set_command(w: &mut Walker, dir: Vec2, speed: f32, boost: bool) {
-    w.command = Some(Command { dir, speed, boost });
+    w.command = Some(Command {
+        dir,
+        speed,
+        boost,
+        jump: false,
+    });
 }
 
 /// Observe stage (runs first): gather physics reality, filter it, and update
@@ -258,6 +263,34 @@ pub fn actuate_stage(
                 &left.parts[1],
                 p.particle.velocity + dv,
             );
+        }
+    }
+
+    // --- Jump launch: put the hop on the BODY, once ---
+    // Same reasoning as the boost thrust above, on the vertical axis: the pose
+    // strut has only ~5.5 px of extension left at standing, so it cannot launch
+    // a hop (see `plans/walker-jump-findings.md`). `JumpCtrl` asks for this on
+    // exactly one tick.
+    //
+    // The impulse is applied to EVERY particle of both leg assemblies (hip,
+    // knee, foot), not the hip alone. The legs are rigid bone rods: kicking only
+    // `P3` left the feet pinned to the floor by contact, so the closed hip→floor
+    // chain ate the impulse in ~1 frame (measured: `P3vy` reached only −113 of
+    // −234 and the body rose 6 px — the extension budget). Giving the same `Δv`
+    // to the whole chain launches it rigidly, so the feet actually leave the
+    // ground.
+    if out.jump_impulse != 0.0 {
+        let dv = Vec2::new(0.0, out.jump_impulse);
+        for leg in [left, right] {
+            for part in leg.parts {
+                if let Ok(p) = p_q.get(part) {
+                    world.queue_connect_particle_velocity(
+                        character,
+                        &part,
+                        p.particle.velocity + dv,
+                    );
+                }
+            }
         }
     }
 }

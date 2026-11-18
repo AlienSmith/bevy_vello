@@ -205,6 +205,12 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("BOOST_HIP_ACCEL") {
         cfg.boost_hip_accel = v;
     }
+    // Jump launch impulse, px/s (0 = off): the vertical Δv written once onto the
+    // hip particle `P3` when the power stroke releases. Mirrors `BOOST_HIP_ACCEL`
+    // but on the body, not the feet. `v0 = sqrt(2·g·apex)`; 28 px ⇒ ~234 px/s.
+    if let Some(v) = env_f32("JUMP_IMPULSE") {
+        cfg.jump_launch_impulse = v;
+    }
     // Stance pin (1 = on): hold the stance foot's world x for the whole stance
     // instead of letting the emitted target ride the measured hip.
     if let Some(v) = env_f32("STANCE_PIN") {
@@ -227,6 +233,18 @@ fn apply_lower_env(cfg: &mut walker_math::LowerBodyConfig) {
     }
     if let Some(v) = env_f32("STANCE_TS") {
         cfg.stance_duration_ts = v;
+    }
+    // `JUMP_APEX=<px>`: the loop-2 target rise for the vertical hop (default
+    // 60). Keep it modest (~25-30) for now: flight time grows as sqrt(apex) and
+    // the CoM spin carried off the ground is conserved, so a tall hop
+    // multiplies the landing tilt for free. See `JumpCtrl`.
+    if let Some(v) = env_f32("JUMP_APEX") {
+        cfg.jump_apex = v;
+    }
+    // `K_P_APEX=<f>`: loop-2's per-hop displacement gain (default 0.5). The
+    // `Δl` integrator's convergence rate.
+    if let Some(v) = env_f32("K_P_APEX") {
+        cfg.k_p_apex = v;
     }
     if let Some(v) = env_f32("SWING_TS") {
         cfg.swing_duration_ts = v;

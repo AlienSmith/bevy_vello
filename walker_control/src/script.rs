@@ -58,6 +58,8 @@ pub enum Cell {
     Move(MoveArgs),
     /// A move that launches through BoostStart (the `boost` verb).
     Boost(MoveArgs),
+    /// An in-place vertical hop (the `jump` verb) — `LocoMode::Jump`.
+    Jump(StandArgs),
 }
 
 impl Cell {
@@ -66,6 +68,7 @@ impl Cell {
         match self {
             Cell::Stand(a) => a.dur,
             Cell::Move(a) | Cell::Boost(a) => a.dur,
+            Cell::Jump(a) => a.dur,
         }
     }
 
@@ -77,12 +80,15 @@ impl Cell {
                 dir: Vec2::new(a.dir[0], a.dir[1]),
                 speed: a.speed,
                 boost: false,
+                jump: false,
             }),
             Cell::Boost(a) => Some(Command {
                 dir: Vec2::new(a.dir[0], a.dir[1]),
                 speed: a.speed,
                 boost: true,
+                jump: false,
             }),
+            Cell::Jump(_) => Some(Command::jump()),
         }
     }
 
@@ -92,6 +98,7 @@ impl Cell {
             Cell::Stand(_) => "stand",
             Cell::Move(_) => "move",
             Cell::Boost(_) => "boost",
+            Cell::Jump(_) => "jump",
         }
     }
 }
@@ -224,6 +231,21 @@ mod tests {
     }"#;
 
     #[test]
+    fn the_jump_cell_holds_a_jump_command() {
+        // The `jump` verb drives the loop-2 vertical stroke, not the gait:
+        // `plans/jump_script.json` uses exactly this shape.
+        let t = ScriptTrack::from_json(r#"{ "script": [ { "jump": { "dur": 0.8 } } ] }"#)
+            .expect("jump script parses");
+        assert_eq!(t.cells.len(), 1);
+        let c = t.cells[0].command().expect("jump emits a command");
+        assert!(c.jump);
+        assert!(!c.boost, "a hop is not a horizontal launch");
+        assert_eq!(c.vx(), 0.0, "the hop is in place");
+        assert_eq!(t.cells[0].kind(), "jump");
+        assert!((t.cells[0].dur() - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
     fn json_tracks_the_three_cell_kinds() {
         let t = ScriptTrack::from_json(SAMPLE).expect("sample parses");
         assert_eq!(t.cells.len(), 3);
@@ -235,7 +257,8 @@ mod tests {
             Some(Command {
                 dir: Vec2::new(-1.0, 0.0),
                 speed: 90.0,
-                boost: false
+                boost: false,
+                jump: false
             })
         );
     }

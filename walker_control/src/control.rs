@@ -59,6 +59,11 @@ pub struct Command {
     /// the launch schedule has played out *and* the DCM has passed the front
     /// foot (see [`boost_handover_due`]).
     pub boost: bool,
+    /// This command is a **vertical hop** (`LocoMode::Jump`): crouch, extend,
+    /// fly, absorb. Unlike `boost` it asks for no horizontal travel — the
+    /// stroke is in place (the loop-2 vertical law, `plans/raibert-xpbd-2d-walker.md`
+    /// §5). `dir`/`speed` are ignored by the jump controller.
+    pub jump: bool,
 }
 
 impl Command {
@@ -69,6 +74,7 @@ impl Command {
             dir,
             speed,
             boost: false,
+            jump: false,
         }
     }
 
@@ -79,6 +85,17 @@ impl Command {
             dir,
             speed,
             boost: true,
+            jump: false,
+        }
+    }
+
+    /// Convenience: an in-place vertical hop.
+    pub fn jump() -> Self {
+        Self {
+            dir: Vec2::ZERO,
+            speed: 0.0,
+            boost: false,
+            jump: true,
         }
     }
 
@@ -106,6 +123,10 @@ pub enum LocoMode {
     Walking,
     /// The swappable launch used to start moving (`plans/walker-control-rewrite.md` §5).
     BoostStart,
+    /// The vertical hop: loop 2's crouch → launch → flight → absorb stroke,
+    /// driven through the stance chord instead of a leg-PD height target.
+    /// See [`JumpCtrl`].
+    Jump,
 }
 
 impl Default for LocoMode {
@@ -157,6 +178,11 @@ pub struct ControlOut {
     /// law aimed wrong" from "the leg did not reach the aim", and lets the QA
     /// plot draw the aim on BOTH axes (x target + the plant's floor height).
     pub plan: [Vec2; 2],
+    /// Vertical launch impulse for this tick, px/s (`Δv_y` on the hip particle
+    /// `P3`). Zero everywhere except the single tick the jump's power stroke
+    /// releases; applied by `actuate_stage` as an idempotent velocity write,
+    /// exactly like the boost's `boost_hip_accel` on the horizontal axis.
+    pub jump_impulse: f32,
     /// Which controller produced this.
     pub mode: LocoMode,
     /// Walking-internals telemetry; `None` outside the gait controller.
@@ -246,6 +272,21 @@ pub struct ControlConfig {
     /// At 300 px/s² over the 0.29 s launch that is ~87 px/s of forward speed —
     /// the cruise the plan asks for. 0 disables it.
     pub boost_hip_accel: f32,
+    /// Jump **launch impulse**, px/s: the vertical `Δv_y` applied to the hip
+    /// particle `P3` when the jump's power stroke fires, as an idempotent
+    /// velocity write (same pattern as [`Self::boost_hip_accel`], on the other
+    /// axis).
+    ///
+    /// This is the jump's *only* real authority. The pose-level strut is a
+    /// rest-length servo whose travel is capped by the leg's extension budget:
+    /// standing already sits at 104.5 of 110 px, leaving **5.5 px**, so the
+    /// measured apex saturated there no matter what the law asked for, and any
+    /// crouch deep enough to add stroke tipped the body 91° (see
+    /// `plans/walker-jump-findings.md`). The legs keep their job — support and
+    /// attitude — but the height comes from this impulse.
+    ///
+    /// `v0 = sqrt(2·g·apex)`; for `apex = 28 px`, `g = 980` ⇒ ~234 px/s.
+    pub jump_launch_impulse: f32,
     /// Attitude-loop closure: position gain on the MEASURED lean error
     /// (radians → radians). `0.0` keeps `upper_angle` a pure echo of the
     /// solver's model lean — the open loop whose damper (`−kd·ω`) sees fiction
@@ -310,6 +351,7 @@ pub struct ControlConfig {
 impl Default for ControlConfig {
     fn default() -> Self {
         Self {
+            jump_launch_impulse: 0.0,
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
             // Deliberately BELOW the gait's own cruise lean (~0.15 rad): the
@@ -385,6 +427,7 @@ pub fn hold_pose(
             stance_split: false,
         },
         hip_vel: fiction.v_hip,
+        jump_impulse: 0.0,
         plan: [Vec2::new(f32::NAN, f32::NAN); 2],
         mode,
         debug: None,
@@ -506,6 +549,7 @@ impl Step for StandingCtrl {
                 stance_split: false,
             },
             hip_vel: Vec2::ZERO,
+            jump_impulse: 0.0,
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::Standing,
             debug: None,
@@ -804,6 +848,7 @@ impl Step for WalkingCtrl {
             // The solver's own integrated hip velocity, travel frame → vello
             // (x mirrored by facing, y negated for y-down).
             hip_vel: Vec2::new(pose.hip_vel.x * facing, -pose.hip_vel.y),
+            jump_impulse: 0.0,
             // The law's target in the same Vello frame as the pose feet: the
             // solver's travel frame maps by `facing` about the solver hip, and
             // every plan is planted on the config floor line.
@@ -1041,6 +1086,7 @@ impl Step for BoostStartCtrl {
             // The boost commands no velocity: it is a held pose. Telemetry
             // reads the real forward creep only after the walking handover.
             hip_vel: Vec2::ZERO,
+            jump_impulse: 0.0,
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::BoostStart,
             debug: None,
@@ -1052,12 +1098,490 @@ impl Step for BoostStartCtrl {
     }
 }
 
-/// The three controllers, one shared slot (the component field is this enum).
+/// The **vertical hop** — loop 2's `Stand → Load → Launch → Flight → Land`
+/// stroke, delivered through the stance chord instead of a leg-PD height
+/// target.
+///
+/// # Why the chord is the actuator
+/// [`crate::actuate`] consumes only the pose *shape*: a `stance: true` foot gets
+/// a stiff hip↔foot strut at `|hip − foot|`. So shortening a stance foot's
+/// offset while it is friction-planted pulls the hip **down** (Load), and
+/// re-extending it pushes the hip **up** (Launch). `pose.hip` itself is a free
+/// anchor. That is the same channel [`crate::control::BoostStartCtrl`] uses for
+/// its crouch, and the channel the `ppo-learned-walker` branch measured lifting
+/// the hip ~25 px — the physics of the stroke is proven, only the controller
+/// is new.
+///
+/// # The law is loop 2's, not a new one
+/// The stroke depth per hop comes from [`walker_math::update_delta_l`]
+/// (`Δl = Δl_prev + k_p·(h_desired − h_apex)`), the launch release from
+/// [`walker_math::apex_to_launch_speed`] (altitude-aware: coast from *here* to
+/// the target apex), and the apex is the **measured** rise, so the integrator
+/// closes on real ground reaction rather than a timer. See
+/// `plans/raibert-xpbd-2d-walker.md` §5 and `plans/vertical-stabilizer.md`.
+///
+/// # Spin and landing (the reason this is more than a timer)
+/// In flight there is no external torque about the CoM, so `L` is conserved:
+/// the landing tilt is `ω_com · T_flight`. Two authored countermeasures, both
+/// closed form (no learning):
+///
+/// - **Load spin-nulling.** The rest stance is asymmetric by construction
+///   (left `x = −33`, right `x = +39.5`), so a symmetric stroke *must* produce
+///   torque `τ ∝ x_L·F_L + x_R·F_R`. Cancelling it needs
+///   `F_L/F_R = −x_R/x_L = 1.197`: press the behind foot ~20 % harder. Applied
+///   as a differential depth scale during Load.
+/// - **Land absorb.** Any residual `L` at touchdown is spent by the ALIPM
+///   catch offset (`walker_math::alipm_offset`) — the same `k_L` term the
+///   walking gait now ships, which is exactly the right shape for absorbing
+///   conserved spin on contact.
+///
+/// `jump_apex` should stay modest (≈25–30 px): flight time grows as `√apex`,
+/// so a tall hop multiplies the conserved-spin tilt for free.
+#[derive(Debug, Clone)]
+pub struct JumpCtrl {
+    phase: JumpPhase,
+    /// Seconds inside the current phase (guards the edge cases only — every
+    /// real transition is measured).
+    t: f32,
+    /// `Δl` from loop 2's law: the crouch depth this hop banks.
+    delta_l: f32,
+    /// Measured apex rise of the last completed hop (`h_apex` in the law).
+    h_apex_prev: f32,
+    /// Measured hip y at Load entry (vello y-down). All depths are relative to
+    /// this, so the stroke inherits the body's actual standing height.
+    stand_y: f32,
+    /// Running max rise this hop (vello y-down: `rise = stand_y − hip.y`).
+    h_apex: f32,
+    /// True once the current stroke has been seeded (Load entry).
+    seeded: bool,
+    /// Set when the power stroke releases; the next emit applies the vertical
+    /// launch impulse to the hip particle (one tick only).
+    fire_impulse: bool,
+    /// Set once the single authored hop has absorbed and recovered. The
+    /// controller then holds the rest shape (no re-arm) so it cannot ratchet
+    /// the body down hop after hop; the command ends the mode.
+    done: bool,
+    /// The measured floor line at seed (max measured foot y). Seeded from
+    /// reality, not `hip_height`, because the standing strut leaves the feet a
+    /// few px above `hip_height` — clamping to the config value would shorten
+    /// the rest chord on every tick.
+    floor_est: f32,
+    /// The measured hip y the design height is measured from
+    /// (`floor_est − stance_h`). The grounded pose is expressed as an absolute
+    /// height above the floor, NOT as an offset from the drifting hip.
+    stand_hip_y: f32,
+    /// The world x the grounded pose is anchored at (measured hip x at seed).
+    /// Held fixed, NOT tracked: following the measured x is what let the feet
+    /// ride the falling body (measured −90 px drift).
+    anchor_x: f32,
+    /// The two **world** plant points (measured feet at seed). While grounded
+    /// the commanded feet sit exactly here — the walking gait's stance latch,
+    /// extended to y as well.
+    plant_l: Vec2,
+    plant_r: Vec2,
+    /// Flight tuck: the foot offsets relative to the MEASURED hip, captured on
+    /// the release tick. In flight the feet ride the body rigidly
+    /// (`foot = fiction.hip + fly_*`), so the strut length is held constant and
+    /// the compliant leg cannot drag the impulse back down. Captured relative to
+    /// the measured hip, they equal `plant_*` on the first flight tick — the
+    /// pose stays continuous across the Launch→Flight boundary.
+    fly_l: Vec2,
+    fly_r: Vec2,
+    /// Completed touchdown count (telemetry/tests).
+    pub hops: u32,
+    /// Gait config copy: supplies `jump_apex`, `k_p_apex`, `launch_accel`,
+    /// `gravity`, the leg lengths and the loop-3 gains.
+    cfg: LowerBodyConfig,
+}
+
+/// The jump stroke's phases. Mirrors the loop-2 machine
+/// ([`walker_math::VerticalPhase`]) but is owned here because the actuator is
+/// the chord, not the solver's height integrator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpPhase {
+    /// Chord shortens toward the banked crouch; feet planted. This is the
+    /// window where spin is nulled while friction is available.
+    Load,
+    /// Chord re-extends to the rest length: the power stroke.
+    Launch,
+    /// Airborne. Stance off; shape held; loop 3 re-orients in the air.
+    Flight,
+    /// Touchdown: stance back on, chord absorbs, residual `L` spent on the aim.
+    Land,
+}
+
+/// The v10 rest offsets the whole stack stands on (spawn scale 0.5). The jump
+/// reuses them so a landed hop leaves the body exactly where standing would.
+const JUMP_REST_LEFT: Vec2 = Vec2::new(-33.0, 106.0);
+const JUMP_REST_RIGHT: Vec2 = Vec2::new(39.5, 103.0);
+
+impl JumpCtrl {
+    pub fn new(lower: &LowerBodyConfig) -> Self {
+        Self {
+            phase: JumpPhase::Load,
+            t: 0.0,
+            delta_l: 0.0,
+            h_apex_prev: 0.0,
+            stand_y: 0.0,
+            h_apex: 0.0,
+            seeded: false,
+            fire_impulse: false,
+            done: false,
+            floor_est: 0.0,
+            stand_hip_y: 0.0,
+            anchor_x: 0.0,
+            plant_l: Vec2::ZERO,
+            plant_r: Vec2::ZERO,
+            fly_l: Vec2::ZERO,
+            fly_r: Vec2::ZERO,
+            hops: 0,
+            cfg: lower.clone(),
+        }
+    }
+
+    /// Ease factor on normalized phase time (zero slope at both ends): every
+    /// chord length change is a velocity kick through the whole body.
+    fn ease(&self, dur: f32) -> f32 {
+        if dur <= 0.0 {
+            return 1.0;
+        }
+        smoothstep01(self.t / dur)
+    }
+
+    /// Crouch depth banked for this hop, from loop 2's law. First hop:
+    /// `Δl = k_p·jump_apex` (`h_apex_prev = 0`).
+    fn bank_delta_l(&mut self) {
+        self.delta_l = walker_math::update_delta_l(
+            self.delta_l,
+            self.cfg.jump_apex,
+            self.h_apex_prev,
+            self.cfg.k_p_apex,
+        );
+        // Never ask for more crouch than the legs have: the chord must stay
+        // above the knee-fold floor (`crouch_height` above the floor).
+        let max_crouch = (self.cfg.hip_height - self.cfg.crouch_height).max(0.0);
+        self.delta_l = self.delta_l.clamp(0.0, max_crouch);
+    }
+
+    /// Mean rest depth of the two jump offsets — the standing hip height above
+    /// the measured floor line (`floor − stance_h`). With the v10 rest offsets
+    /// this is 104.5 px, which reproduces the measured standing hip (≈203.5 for
+    /// a 308 floor).
+    fn stance_h() -> f32 {
+        0.5 * (JUMP_REST_LEFT.y + JUMP_REST_RIGHT.y)
+    }
+
+    /// Differential depth scale that nulls the stroke's torque about the CoM.
+    ///
+    /// Torque from two planted feet is `τ = x_L·F_L + x_R·F_R`; with
+    /// `F ∝ depth` the cancelling ratio is `F_L/F_R = −x_R/x_L`. Returns
+    /// `(left_scale, right_scale)` normalized so the *mean* depth is unchanged
+    /// (the hop height the law banked is preserved; only the split moves).
+    ///
+    /// **The x must be the real PLANTED contacts, not the rest offsets.** The
+    /// rest offsets are asymmetric (−33 / +39.5 → ratio 1.197) but the measured
+    /// plants are symmetric about the hip (measured −37.3 / +37.2 → ratio 1.0).
+    /// Using the rest ratio on symmetric plants is a pure 20 % differential
+    /// with nothing to cancel — it INJECTS torque, and the tip grows with crouch
+    /// depth (measured: `JUMP_APEX=0`, which applies no split, holds
+    /// `|ω_com|` at 0.11; a 14 px crouch drives it to 1.88 rad/s and tips the
+    /// torso 91°).
+    fn spin_null_scales(&self, hip_x: f32) -> (f32, f32) {
+        let xl = self.plant_l.x - hip_x;
+        let xr = self.plant_r.x - hip_x;
+        if xl.abs() < f32::EPSILON || xr.abs() < f32::EPSILON {
+            return (1.0, 1.0);
+        }
+        // F_L/F_R = |x_R|/|x_L|
+        let r = (xr / xl).abs();
+        // Split around the mean: a = 2r/(1+r), b = 2/(1+r)  (a/b = r, mean 1).
+        let a = 2.0 * r / (1.0 + r);
+        let b = 2.0 / (1.0 + r);
+        (a, b)
+    }
+}
+
+impl Step for JumpCtrl {
+    fn step(
+        &mut self,
+        _cmd: &Command,
+        fiction: &Fiction,
+        cfg: &ControlConfig,
+        dt: f32,
+        facing: f32,
+    ) -> ControlOut {
+        let dt = dt.max(0.0);
+        self.t += dt;
+
+        // ---- Seed at Load entry: standing height, floor line, plants, depth ----
+        if !self.seeded {
+            self.seeded = true;
+            self.stand_y = fiction.hip.y;
+            self.h_apex = 0.0;
+            self.bank_delta_l();
+            // Floor line and plants from the MEASURED feet, not `hip_height`:
+            // the standing strut leaves the feet a few px above the nominal line.
+            self.floor_est = fiction
+                .feet
+                .iter()
+                .map(|f| f.pos.y)
+                .fold(f32::MIN, f32::max);
+            self.plant_l = fiction.feet[0].pos;
+            self.plant_r = fiction.feet[1].pos;
+            // Standing hip y implied by the rest stance: the floor minus the
+            // mean rest chord. Grounded height targets are expressed from here.
+            self.stand_hip_y = self.floor_est - Self::stance_h();
+            self.anchor_x = fiction.hip.x;
+        }
+
+        // Current measured rise above the standing height (vello y-down:
+        // smaller y = higher, so rise is `stand_y − hip.y`).
+        let rise = self.stand_y - fiction.hip.y;
+        if rise > self.h_apex {
+            self.h_apex = rise;
+        }
+        let v_up = -fiction.v_hip.y; // positive = rising
+
+        // ---- Phase transitions: every one is measured, not timed ----
+        // A completed hop latches `done` and holds the rest shape; it does NOT
+        // re-arm Load. Re-arming re-seeds `stand_y` at whatever sagged height
+        // the body happens to be at, which ratchets it downward hop after hop.
+        if !self.done {
+            match self.phase {
+                JumpPhase::Load => {
+                    // Crouch banked and reached (or the leg can fold no further).
+                    let target = self.stand_hip_y + self.delta_l;
+                    let loaded = fiction.hip.y >= target - 1.0 || self.t > 0.45;
+                    if loaded {
+                        self.phase = JumpPhase::Launch;
+                        self.t = 0.0;
+                    }
+                }
+                JumpPhase::Launch => {
+                    // Release on the altitude-aware cutoff: the launch speed
+                    // needed to coast from the CURRENT height to the target
+                    // apex. Falling short after a full extension ends it anyway.
+                    let rise_target = self.cfg.jump_apex;
+                    let v_req = walker_math::apex_to_launch_speed(
+                        (rise_target - rise).max(0.0),
+                        self.cfg.gravity,
+                    );
+                    let extended = self.t * self.cfg.launch_accel >= v_req.max(1.0);
+                    let airborne = !fiction.grounded;
+                    if (v_up >= v_req && rise > 0.0) || extended || airborne || self.t > 0.30 {
+                        self.phase = JumpPhase::Flight;
+                        self.t = 0.0;
+                        // Release the real launch here — once.
+                        self.fire_impulse = true;
+                        // Capture the flight tuck relative to the MEASURED hip:
+                        // the feet then ride the body rigidly in flight, holding
+                        // the strut length constant so the compliant leg cannot
+                        // pull the impulse back down (the ground "bump"). Equal
+                        // to the plants on this tick, so the pose stays
+                        // continuous across the boundary.
+                        self.fly_l = self.plant_l - fiction.hip;
+                        self.fly_r = self.plant_r - fiction.hip;
+                    }
+                }
+                JumpPhase::Flight => {
+                    // Land on measured contact, not on the ballistic clock.
+                    if fiction.grounded || (rise <= 1.0 && v_up <= 0.0 && self.t > 0.10) {
+                        self.h_apex_prev = self.h_apex;
+                        self.hops += 1;
+                        self.phase = JumpPhase::Land;
+                        self.t = 0.0;
+                    } else if self.t > 1.2 {
+                        // Never came down (tunnelled / lost contact): recover.
+                        self.h_apex_prev = self.h_apex;
+                        self.phase = JumpPhase::Land;
+                        self.t = 0.0;
+                    }
+                }
+                JumpPhase::Land => {
+                    // Absorb completed (or already grounded): latch the hop.
+                    if self.t > 0.30 && fiction.grounded {
+                        self.done = true;
+                    }
+                }
+            }
+        }
+
+        // ---- Shape: chord offsets for this phase ----
+        let (sl, sr) = self.spin_null_scales(self.anchor_x);
+        let mut stance = true;
+        // Loop 3 on every phase (control closure gains, order 0.1 — NOT the
+        // solver's `attitude_kp`, which is 45). Measured: forcing this to 0
+        // made the tip WORSE (−1.59 → −1.67 rad), so loop 3 is not the cause;
+        // the cause is the pose discontinuity fixed in the emit block below.
+        let upper_angle = if cfg.att_closure_kp != 0.0 || cfg.att_closure_kd != 0.0 {
+            walker_math::attitude_lean_pd(
+                fiction.lean,
+                fiction.lean_rate,
+                0.0,
+                cfg.att_closure_kp,
+                cfg.att_closure_kd,
+                self.cfg.theta_max,
+            )
+        } else {
+            0.0
+        };
+
+        // The grounded stroke is expressed as foot depth vs a FIXED hip below
+        // (see the emit block); here only Flight needs a shape — the pencil.
+        if !self.done && self.phase == JumpPhase::Flight {
+            stance = false;
+        }
+
+        // ---- Pose: WORLD-ANCHORED while grounded, hip-riding in flight ----
+        //
+        // The strata that must not be conflated:
+        //
+        // * The actuator's strut is a position servo on `rest_length =
+        //   |pose.hip − foot|`. Emitting `pose.hip = measured_hip` makes that
+        //   target identically `|offset|` — the strut follows the body and can
+        //   never command an absolute height. Worse, "shorten the offset"
+        //   then commands a knee FOLD, which against a hip-following foot is a
+        //   fold-to-sitting attractor (measured: hip ends 9 px above the floor).
+        // * The vertical stroke is therefore expressed as the FEET moving down
+        //   from a FIXED hip, not the hip moving from fixed feet: with the hip
+        //   pinned at the design height, a lower foot *is* a longer chord and a
+        //   higher foot *is* a shorter one, so the strut reads a real length
+        //   error and pushes.
+        // * Grounded x is anchored at `anchor_x`, never tracked: tracking the
+        //   measured x is what let the plants ride the falling body.
+        // Extension overshoot: how far the hip may rise ABOVE standing before
+        // the leg hits full reach. Without this the power stroke returns to the
+        // standing chord (already 104.5 of 110 px) and stops — the hip never
+        // exceeds `stand_hip_y`, so no upward velocity is ever handed to Flight
+        // (measured: apex 0.05 px vs 28 target).
+        let reach = self.cfg.thigh_len + self.cfg.calf_len;
+        let overshoot = (reach - Self::stance_h()).max(0.0);
+
+        // ---- Launch impulse: the jump's real authority ----
+        // Fired on the single tick the power stroke releases (the
+        // Launch→Flight transition). The legs cannot deliver a hop — the strut
+        // is a rest-length servo with only 5.5 px of extension left at standing
+        // (see `plans/walker-jump-findings.md`) — so the height is handed to the
+        // body directly as a vertical velocity on P3, exactly as the boost does
+        // it on the horizontal axis. Deeper crouches are therefore unnecessary,
+        // which is what keeps the pose out of the tip cliff.
+        let jump_impulse = if self.fire_impulse {
+            self.fire_impulse = false;
+            // Launch speed in px/s. `JUMP_IMPULSE` is a literal override; when
+            // unset (0) it is derived from the apex target, so `JUMP_APEX`
+            // alone still produces the whole hop. The apex is measured from the
+            // CURRENT height (`jump_apex − rise`), not a blind constant: the
+            // body may still be below standing when the stroke releases.
+            let v0 = if cfg.jump_launch_impulse > 0.0 {
+                cfg.jump_launch_impulse
+            } else {
+                let apex_needed = (self.cfg.jump_apex - rise).max(1.0);
+                (2.0 * self.cfg.gravity * apex_needed).sqrt()
+            };
+            // vello y is DOWN, so an upward launch is a NEGATIVE Δv_y.
+            -v0.max(0.0)
+        } else {
+            0.0
+        };
+
+        let ground_depth = match (self.done, self.phase) {
+            // Crouch: drop the hip below standing (chord shortens).
+            (false, JumpPhase::Load) => self.delta_l * self.ease(0.22),
+            // Power stroke: drive from the crouch all the way PAST rest into the
+            // remaining leg extension — this is the stroke that launches.
+            (false, JumpPhase::Launch) => {
+                self.delta_l * (1.0 - self.ease(0.12)) - overshoot * self.ease(0.12)
+            }
+            // Absorb: relax back to rest.
+            (false, JumpPhase::Land) => self.delta_l * 0.25 * (1.0 - self.ease(0.25)),
+            _ => 0.0,
+        };
+
+        let pose_hip = if stance {
+            // Design height: the crouch lowers the hip by the same depth the
+            // chord shortens, so `|hip − foot|` grows monotonically and the
+            // strut sees a real error.
+            Vec2::new(self.anchor_x, self.stand_hip_y + ground_depth)
+        } else {
+            // Airborne: the hip is a free anchor; ride reality.
+            fiction.hip
+        };
+
+        let mut foot_l;
+        let mut foot_r;
+        if stance {
+            foot_l = self.plant_l;
+            foot_r = self.plant_r;
+            // Spin-null split on the power stroke only (see `spin_null_scales`):
+            // press the behind foot harder by pushing it FURTHER DOWN, i.e.
+            // lowering its plant only while thrust is actually generated.
+            if !self.done && self.phase == JumpPhase::Launch {
+                let push = self.delta_l * (1.0 - self.ease(0.12));
+                foot_l.y += push * (sl - 1.0);
+                foot_r.y += push * (sr - 1.0);
+            }
+            // Land absorb's catch: shift the aim, not the height.
+            if !self.done && self.phase == JumpPhase::Land {
+                let catch = walker_math::alipm_offset(
+                    fiction.ang_momentum,
+                    (self.stand_hip_y - self.cfg.floor_y).max(1.0) + rise,
+                    self.cfg.gravity,
+                    self.cfg.k_l,
+                )
+                .clamp(-self.cfg.step_height, self.cfg.step_height);
+                foot_l.x += catch;
+                foot_r.x += catch;
+            }
+        } else {
+            // Airborne: the feet RIDE the body. The tuck offsets were captured
+            // at release relative to the measured hip, so on the first flight
+            // tick `fiction.hip + fly == plant` — the pose is continuous across
+            // the boundary. Holding the fixed world plants instead made the
+            // strut length `|hip − foot|` grow without bound as the hip rose,
+            // so the compliant leg dragged the hip straight back down: the
+            // measured ground "bump" (P3 rose 6 px then bounced, `grounded`
+            // toggling). Riding the hip keeps `rest_length = |fly|` constant,
+            // so the leg neither launches nor damps — the impulse is free.
+            foot_l = fiction.hip + self.fly_l;
+            foot_r = fiction.hip + self.fly_r;
+        }
+
+        ControlOut {
+            pose: Pose {
+                hip: pose_hip,
+                left_foot: FootPose {
+                    pos: foot_l,
+                    stance,
+                },
+                right_foot: FootPose {
+                    pos: foot_r,
+                    stance,
+                },
+                facing,
+                upper_angle: upper_angle * facing,
+                stance_split: false,
+            },
+            // No horizontal intent: an in-place hop.
+            hip_vel: Vec2::ZERO,
+            jump_impulse,
+            plan: [Vec2::new(f32::NAN, f32::NAN); 2],
+            mode: LocoMode::Jump,
+            debug: None,
+        }
+    }
+
+    fn mode(&self) -> LocoMode {
+        LocoMode::Jump
+    }
+}
+
+/// The four controllers, one shared slot (the component field is this enum).
 #[derive(Debug, Clone)]
 pub enum Controller {
     Standing(StandingCtrl),
     Walking(WalkingCtrl),
     BoostStart(BoostStartCtrl),
+    Jump(JumpCtrl),
 }
 
 impl Controller {
@@ -1067,6 +1591,7 @@ impl Controller {
             LocoMode::Standing => Controller::Standing(StandingCtrl::new(lower)),
             LocoMode::Walking => Controller::Walking(WalkingCtrl::new(lower)),
             LocoMode::BoostStart => Controller::BoostStart(BoostStartCtrl::new(lower)),
+            LocoMode::Jump => Controller::Jump(JumpCtrl::new(lower)),
         }
     }
 
@@ -1084,6 +1609,7 @@ impl Controller {
             Controller::Standing(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::Walking(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::BoostStart(c) => c.step(cmd, fiction, cfg, dt, facing),
+            Controller::Jump(c) => c.step(cmd, fiction, cfg, dt, facing),
         }
     }
 
@@ -1092,6 +1618,7 @@ impl Controller {
             Controller::Standing(c) => c.mode(),
             Controller::Walking(c) => c.mode(),
             Controller::BoostStart(c) => c.mode(),
+            Controller::Jump(c) => c.mode(),
         }
     }
 }
@@ -1171,8 +1698,10 @@ impl LocoState {
         dt: f32,
     ) -> LocoMode {
         self.since += dt.max(0.0);
-        // A held move command; anything else counts as no command at all.
-        let active = cmd.filter(|c| c.is_move(cfg.move_threshold));
+        // A held command; anything else counts as no command at all. A jump is
+        // held even though its speed is zero — `is_move` alone would filter it
+        // out and drop the machine straight back to Standing.
+        let active = cmd.filter(|c| c.jump || c.is_move(cfg.move_threshold));
 
         let next = match (self.mode, active) {
             // Command ended (or never started): stand, from any mode.
@@ -1180,7 +1709,13 @@ impl LocoState {
             // Launch: a boosted move kicks the gait through BoostStart.
             (LocoMode::Standing, Some(c)) if c.boost => LocoMode::BoostStart,
             // A plain move enters the gait directly (already up to speed).
+            (LocoMode::Standing, Some(c)) if c.jump => LocoMode::Jump,
             (LocoMode::Standing, Some(_)) => LocoMode::Walking,
+            // The hop owns the body until its command is released. Landing is
+            // inside the stroke; the machine must not hand back to Standing
+            // mid-flight (a stance pose in the air would grab the ground).
+            (LocoMode::Jump, Some(c)) if c.jump => LocoMode::Jump,
+            (LocoMode::Jump, Some(_)) => LocoMode::Standing,
             (LocoMode::BoostStart, Some(c)) => {
                 // Event handover: hold the launch while the boost flag is
                 // set, until the DCM crosses the gathered front foot; the
@@ -1416,6 +1951,7 @@ mod tests {
                 stance_split: true,
             },
             hip_vel: Vec2::new(50.0, 0.0),
+            jump_impulse: 0.0,
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::Standing,
             debug: None,
@@ -1578,6 +2114,7 @@ mod tests {
             dir: Vec2::X,
             speed: cfg.move_threshold * 0.5,
             boost: false,
+            jump: false,
         };
         assert_eq!(
             st.decide(Some(stop), &f, &cfg, 1.0 / 90.0),
@@ -1739,6 +2276,7 @@ mod tests {
             dir: Vec2::new(-1.0, 0.0),
             speed: 120.0,
             boost: true,
+            jump: false,
         };
         let mut out = c.step(&west, &f, &cfg, dt, 1.0);
         assert_eq!(
@@ -2339,6 +2877,7 @@ mod tests {
             dir: Vec2::new(-1.0, 0.0),
             speed: 120.0,
             boost: false,
+            jump: false,
         };
         let mut out = hold_pose(&f, &cfg, LocoMode::Walking, -1.0);
         for _ in 0..20 {
@@ -2470,5 +3009,361 @@ mod tests {
             "fractional depth is preserved: {}",
             frac.length()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // JumpCtrl — the loop-2 vertical hop
+    // -----------------------------------------------------------------------
+
+    /// Standing fiction with the feet at the v10 rest offsets under a hip, and
+    /// an explicit `grounded` / vertical-velocity state so a hop can be driven.
+    fn jump_fiction(hip: Vec2, feet: [Vec2; 2], grounded: bool, v: Vec2) -> Fiction {
+        let mut f = fiction(hip, feet, [grounded, grounded], 0.0, v);
+        f.grounded = grounded;
+        f
+    }
+
+    fn jump_rest_feet(hip: Vec2) -> [Vec2; 2] {
+        [hip + JUMP_REST_LEFT, hip + JUMP_REST_RIGHT]
+    }
+
+    /// Drive a controller through a whole hop, returning every output and the
+    /// phase reached. The fiction is advanced by a crude but honest ballistic
+    /// model: while the controller commands stance the hip is braced (it cannot
+    /// rise), in flight it moves ballistically. That is enough to exercise the
+    /// phase machine's measured transitions.
+    fn run_hop(
+        ctrl: &mut JumpCtrl,
+        cfg: &ControlConfig,
+        apex: f32,
+        ticks: usize,
+    ) -> Vec<ControlOut> {
+        let dt = 1.0 / 90.0;
+        let g = ctrl.cfg.gravity;
+        let mut hip = Vec2::new(0.0, -140.0);
+        let stand = hip.y;
+        let mut vy = 0.0f32;
+        let mut grounded = true;
+        let mut out = Vec::with_capacity(ticks);
+        for _ in 0..ticks {
+            let feet = jump_rest_feet(hip);
+            let f = jump_fiction(hip, feet, grounded, Vec2::new(0.0, vy));
+            let o = ctrl.step(&Command::jump(), &f, cfg, dt, 1.0);
+            // Advance the crude plant: a stance chord reaches its target and
+            // the hip follows; a flight arc is integrated ballistically.
+            let target_y = o.pose.left_foot.pos.y - JUMP_REST_LEFT.y;
+            if ctrl.phase == JumpPhase::Flight {
+                vy -= g * dt;
+                hip.y += vy * dt;
+                grounded = false;
+                if hip.y >= stand {
+                    hip.y = stand;
+                    vy = 0.0;
+                    grounded = true;
+                }
+            } else {
+                // Braced: the hip sits where the commanded chord puts it.
+                hip.y = stand + target_y.min(0.0);
+                vy = 0.0;
+                grounded = true;
+            }
+            out.push(o);
+            // Keep the rise bounded so a broken stroke cannot run away.
+            if hip.y < stand - 2.0 * apex.max(30.0) {
+                hip.y = stand - 2.0 * apex.max(30.0);
+                vy = vy.min(0.0);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn jump_ctrl_reports_the_jump_mode_and_starts_loading() {
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        let hip = Vec2::new(0.0, -140.0);
+        let f = jump_fiction(hip, jump_rest_feet(hip), true, Vec2::ZERO);
+        let o = c.step(&Command::jump(), &f, &cfg, 1.0 / 90.0, 1.0);
+        assert_eq!(o.mode, LocoMode::Jump);
+        assert_eq!(c.mode(), LocoMode::Jump);
+        assert_eq!(
+            c.phase,
+            JumpPhase::Load,
+            "a fresh hop starts by banking depth"
+        );
+        assert!(
+            o.pose.left_foot.stance && o.pose.right_foot.stance,
+            "loaded feet are planted"
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_banks_the_loop_two_depth_on_the_first_hop() {
+        // First hop: Δl = k_p·jump_apex (h_apex_prev = 0).
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        let hip = Vec2::new(0.0, -140.0);
+        let f = jump_fiction(hip, jump_rest_feet(hip), true, Vec2::ZERO);
+        c.step(&Command::jump(), &f, &cfg, 1.0 / 90.0, 1.0);
+        let want = (lower.k_p_apex * lower.jump_apex).min(lower.hip_height - lower.crouch_height);
+        assert!(
+            (c.delta_l - want).abs() < 1e-3,
+            "banked Δl {} != k_p·apex {}",
+            c.delta_l,
+            want
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_shortens_then_restores_the_stance_chord() {
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        let outs = run_hop(&mut c, &cfg, lower.jump_apex, 60);
+        let depth = |o: &ControlOut| o.pose.left_foot.pos.y - o.pose.hip.y;
+        let rest = JUMP_REST_LEFT.y;
+        // Load must shorten the chord below rest before Launch restores it.
+        let min_depth = outs.iter().map(depth).fold(f32::INFINITY, f32::min);
+        assert!(
+            min_depth < rest - 2.0,
+            "the crouch never shortened the chord (min {min_depth} vs rest {rest})"
+        );
+        // And the stroke must return to (at least) rest for the power stroke.
+        let max_depth = outs.iter().map(depth).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_depth >= rest - 0.5,
+            "the stroke never extended back to rest (max {max_depth})"
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_flight_is_airborne_and_pencil_shaped() {
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        let outs = run_hop(&mut c, &cfg, lower.jump_apex, 80);
+        let flying: Vec<_> = outs.iter().filter(|o| !o.pose.left_foot.stance).collect();
+        assert!(!flying.is_empty(), "the stroke never left the ground");
+        for o in &flying {
+            assert!(!o.pose.right_foot.stance, "flight is airborne on both feet");
+            // Pencil: the airborne shape keeps the rest x-offsets (swinging the
+            // legs would reaction-rotate the torso).
+            let lx = o.pose.left_foot.pos.x - o.pose.hip.x;
+            let rx = o.pose.right_foot.pos.x - o.pose.hip.x;
+            assert!(
+                (lx - JUMP_REST_LEFT.x).abs() < 1.5 && (rx - JUMP_REST_RIGHT.x).abs() < 1.5,
+                "airborne x-offsets drifted: {lx} {rx}"
+            );
+        }
+    }
+
+    #[test]
+    fn jump_ctrl_spin_null_uses_the_real_plant_geometry() {
+        // The ratio MUST come from the planted contact points, not the rest
+        // offsets. Symmetric plants about the hip need NO differential: any
+        // non-1.0 split there injects torque and tips the body.
+        let lower = LowerBodyConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        c.plant_l = Vec2::new(-37.3, 308.0);
+        c.plant_r = Vec2::new(37.2, 307.0);
+        let (sl, sr) = c.spin_null_scales(0.0);
+        assert!(
+            (sl / sr - 1.0).abs() < 0.02,
+            "symmetric plants must give a ~1.0 ratio, got {}",
+            sl / sr
+        );
+
+        // An asymmetric plant DOES need a differential: F_L/F_R = |x_R|/|x_L|.
+        c.plant_l = Vec2::new(-33.0, 308.0);
+        c.plant_r = Vec2::new(39.5, 307.0);
+        let (sl, sr) = c.spin_null_scales(0.0);
+        let want = (39.5f32 / 33.0).abs();
+        assert!(
+            (sl / sr - want).abs() < 1e-4,
+            "differential press ratio {} != |x_R/x_L| {want}",
+            sl / sr
+        );
+        // Mean is unchanged, so the law's banked hop height survives the split.
+        assert!(
+            (0.5 * (sl + sr) - 1.0).abs() < 1e-4,
+            "the split must preserve mean depth"
+        );
+        // The behind foot (negative x) is the one pressed harder.
+        assert!(
+            sl > sr,
+            "the left (behind) foot must carry the larger depth"
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_apex_is_closed_on_the_measured_rise() {
+        // A hop whose measured apex is short must bank MORE depth next time:
+        // that is the loop-2 integrator's job (Δl grows with h_desired − h_apex).
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        let hip = Vec2::new(0.0, -140.0);
+        let f = jump_fiction(hip, jump_rest_feet(hip), true, Vec2::ZERO);
+        c.step(&Command::jump(), &f, &cfg, 1.0 / 90.0, 1.0);
+        let dl_first = c.delta_l;
+
+        // Finish the hop with a measured apex far below the target.
+        c.phase = JumpPhase::Flight;
+        c.h_apex = lower.jump_apex * 0.5;
+        c.h_apex_prev = c.h_apex;
+        c.phase = JumpPhase::Land;
+        c.t = 0.0;
+        // Re-seed for the next hop and bank against the short apex.
+        c.seeded = false;
+        c.step(&Command::jump(), &f, &cfg, 1.0 / 90.0, 1.0);
+        assert!(
+            c.delta_l > dl_first,
+            "a short apex must grow the crouch: {} -> {}",
+            dl_first,
+            c.delta_l
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_is_deterministic() {
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut a = JumpCtrl::new(&lower);
+        let mut b = JumpCtrl::new(&lower);
+        let oa = run_hop(&mut a, &cfg, lower.jump_apex, 70);
+        let ob = run_hop(&mut b, &cfg, lower.jump_apex, 70);
+        for (x, y) in oa.iter().zip(ob.iter()) {
+            assert_eq!(x.pose.left_foot.pos, y.pose.left_foot.pos);
+            assert_eq!(x.pose.right_foot.pos, y.pose.right_foot.pos);
+            assert_eq!(x.pose.upper_angle.to_bits(), y.pose.upper_angle.to_bits());
+        }
+    }
+
+    #[test]
+    fn jump_ctrl_fires_the_launch_impulse_once_at_release() {
+        // The legs cannot launch the hop (5.5 px of extension budget), so the
+        // real authority is the vertical Δv written once onto P3 when the power
+        // stroke releases. It must fire on exactly ONE tick, be upward (vello
+        // y-down ⇒ negative), and match the configured launch speed literally.
+        let lower = LowerBodyConfig::default();
+        let mut cfg = ControlConfig::default();
+        cfg.jump_launch_impulse = 234.0;
+        let mut c = JumpCtrl::new(&lower);
+        let outs = run_hop(&mut c, &cfg, lower.jump_apex, 80);
+        let fired: Vec<f32> = outs
+            .iter()
+            .map(|o| o.jump_impulse)
+            .filter(|v| *v != 0.0)
+            .collect();
+        assert_eq!(
+            fired.len(),
+            1,
+            "the launch impulse must fire once, fired {} times",
+            fired.len()
+        );
+        assert!(
+            (fired[0] + 234.0).abs() < 1e-3,
+            "impulse {} should be −234 px/s (upward)",
+            fired[0]
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_derives_the_impulse_from_the_apex_when_unset() {
+        // With no explicit `JUMP_IMPULSE`, the launch speed is derived from the
+        // apex target so `JUMP_APEX` alone still produces the whole hop. It is
+        // reduced by any rise the legs already banked, so it is never MORE than
+        // the speed for the full apex — that is the energetic invariant.
+        let lower = LowerBodyConfig::default();
+        let cfg = ControlConfig::default();
+        let mut c = JumpCtrl::new(&lower);
+        let outs = run_hop(&mut c, &cfg, lower.jump_apex, 80);
+        let impulse = outs
+            .iter()
+            .map(|o| o.jump_impulse)
+            .find(|v| *v != 0.0)
+            .expect("the stroke never fired the impulse");
+        let full = (2.0 * lower.gravity * lower.jump_apex).sqrt();
+        assert!(impulse < 0.0, "the impulse must be upward, got {impulse}");
+        assert!(
+            impulse.abs() <= full + 1e-3,
+            "derived {} exceeds the full-apex speed {full}",
+            impulse.abs()
+        );
+    }
+
+    #[test]
+    fn jump_ctrl_land_absorb_is_inert_at_zero_k_l() {
+        // The residual-spin spend on landing is the ALIPM term: with k_L = 0 it
+        // must contribute nothing, so the absorb aim is the plain plant x.
+        // Seed through a real tick (the controller owns its plants/anchors).
+        let cfg = ControlConfig::default();
+        let hip = Vec2::new(0.0, -140.0);
+        let feet = jump_rest_feet(hip);
+        let mut f = jump_fiction(hip, feet, true, Vec2::ZERO);
+        f.ang_momentum = 5000.0;
+
+        let land_at = |k_l: f32| -> f32 {
+            let mut lower = LowerBodyConfig::default();
+            lower.k_l = k_l;
+            let mut c = JumpCtrl::new(&lower);
+            // One tick to seed (plant_l/plant_r/anchor_x/stand_hip_y).
+            c.step(&Command::jump(), &f, &cfg, 1.0 / 90.0, 1.0);
+            // Force a landed stroke with a large measured spin.
+            c.delta_l = 20.0;
+            c.h_apex = lower.jump_apex;
+            c.phase = JumpPhase::Land;
+            c.t = 0.0;
+            let o = c.step(&Command::jump(), &f, &cfg, 1.0 / 90.0, 1.0);
+            o.pose.left_foot.pos.x - feet[0].x
+        };
+
+        let zero = land_at(0.0);
+        assert!(
+            zero.abs() < 1e-3,
+            "k_L = 0 must not move the aim, got {zero}"
+        );
+        let one = land_at(1.0);
+        assert!(
+            one.abs() > 0.5,
+            "k_L = 1 must spend the spin on the aim, got {one}"
+        );
+    }
+
+    #[test]
+    fn the_state_machine_enters_and_holds_the_jump() {
+        let f = centered();
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        assert_eq!(
+            st.decide(Some(Command::jump()), &f, &cfg, 1.0 / 90.0),
+            LocoMode::Jump
+        );
+        // Held odd: the mode stays Jump even as the stroke advances.
+        // (decide() has no stroke state, so a held jump must never fall back.)
+        assert_eq!(
+            st.decide(Some(Command::jump()), &f, &cfg, 1.0 / 90.0),
+            LocoMode::Jump
+        );
+        // Released: back to standing, from Jump.
+        assert_eq!(st.decide(None, &f, &cfg, 1.0 / 90.0), LocoMode::Standing);
+    }
+
+    #[test]
+    fn a_jump_command_wins_over_a_plain_move() {
+        // A jump is not a walk: if both flags are set the vertical stroke owns
+        // the body (a hop with horizontal intent is out of scope for now).
+        let f = centered();
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let both = Command {
+            dir: Vec2::X,
+            speed: 100.0,
+            boost: false,
+            jump: true,
+        };
+        assert_eq!(st.decide(Some(both), &f, &cfg, 1.0 / 90.0), LocoMode::Jump);
     }
 }

@@ -91,6 +91,8 @@ pub struct WalkerIntent {
     pub speed: f32,
     /// Launch this move through BoostStart before the gait takes over.
     pub boost: bool,
+    /// Request an in-place vertical hop this tick (`LocoMode::Jump`).
+    pub jump: bool,
 }
 
 /// The fixed-tick chain, in order. Observe must see the physics world before
@@ -203,6 +205,7 @@ pub fn intent_system(
                     dir: intent.dir,
                     speed: intent.speed,
                     boost: intent.boost,
+                    jump: intent.jump,
                 });
             } else {
                 walker.command = None;
