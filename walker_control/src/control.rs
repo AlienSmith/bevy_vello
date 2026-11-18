@@ -1633,6 +1633,10 @@ pub enum Controller {
     /// The hand-rolled jump stroke — the authored expert for the jump intent
     /// (the `Jumping` mode; only reachable when `use_learned` is off).
     Jumping(crate::jump::JumpCtrl),
+    /// The **jump residual** — a PPO policy correcting the authored expert in
+    /// the polar action space (`plans/jump-ppo-residual-polar-action.md`). Only
+    /// built when a residual policy is injected (`WalkerConfig::jump_residual`).
+    JumpResidual(crate::jump_residual::JumpResidual),
 }
 
 impl Controller {
@@ -1675,6 +1679,7 @@ impl Controller {
             Controller::Jump(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::Learned(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::Jumping(c) => c.step(cmd, fiction, cfg, dt, facing),
+            Controller::JumpResidual(c) => c.step(cmd, fiction, cfg, dt, facing),
         }
     }
 
@@ -1686,6 +1691,7 @@ impl Controller {
             Controller::Jump(c) => c.mode(),
             Controller::Learned(c) => c.mode(),
             Controller::Jumping(c) => c.mode(),
+            Controller::JumpResidual(c) => c.mode(),
         }
     }
 
@@ -1697,6 +1703,7 @@ impl Controller {
     pub fn take_last(&mut self) -> Option<crate::learned::LastStep> {
         match self {
             Controller::Learned(c) => c.take_last(),
+            Controller::JumpResidual(c) => c.take_last(),
             _ => None,
         }
     }

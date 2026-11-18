@@ -50,6 +50,11 @@ pub struct WalkerConfig {
     /// every authored-gait scene; the harness/deploy path inject a
     /// [`crate::learned::LearnedCtrl`] (which carries the shared policy `Arc`).
     pub learned: Option<crate::learned::LearnedCtrl>,
+    /// The **jump-residual** policy slot (`plans/jump-ppo-residual-polar-action.md`).
+    /// When present and the machine enters [`LocoMode::Jumping`], the residual
+    /// corrects the authored expert in the polar action space; `None` keeps the
+    /// plain expert stroke. Injected by the training / deploy path only.
+    pub jump_residual: Option<crate::jump_residual::JumpResidual>,
 }
 
 /// The actuator's mailbox: the last [`ControlOut`] the controller produced.
@@ -190,8 +195,16 @@ pub fn control_stage(w: &mut Walker) {
 
     if mode != w.controller.mode() {
         // Hand the policy slot (shared `Arc`, cheap clone) to the learned
-        // controller when the machine enters [`LocoMode::Learned`].
-        w.controller = Controller::for_mode(mode, &w.config.lower, w.config.learned.clone());
+        // controller when the machine enters [`LocoMode::Learned`], and to the
+        // jump residual when one is injected and the machine enters `Jumping`.
+        w.controller = if mode == LocoMode::Jumping {
+            match w.config.jump_residual.clone() {
+                Some(residual) => Controller::JumpResidual(residual),
+                None => Controller::for_mode(mode, &w.config.lower, w.config.learned.clone()),
+            }
+        } else {
+            Controller::for_mode(mode, &w.config.lower, w.config.learned.clone())
+        };
     }
 
     // Borrow split: the controller mutates its own schedule state; fiction,
