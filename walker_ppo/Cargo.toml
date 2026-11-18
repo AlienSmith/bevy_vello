@@ -1,0 +1,21 @@
+[package]
+name = "walker_ppo"
+description = "PPO training app: N v10 characters on the real softbody/GPU-collision physics, one shared trainer, first milestone = a straight vertical jump (plans/ppo-learned-walker.md §6)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "walker_ppo"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { workspace = true }
+vello_physics = { workspace = true }
+bevy_vello = { path = ".." }
+game_lib = { path = "../examples/game_lib" }
+walker_control = { path = "../walker_control" }
+walker_math = { path = "../walker_math" }
+walker_nn = { path = "../walker_nn" }

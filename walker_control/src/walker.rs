@@ -45,6 +45,11 @@ pub struct WalkerConfig {
     pub control: ControlConfig,
     pub observe: ObserveConfig,
     pub actuator: ActuatorConfig,
+    /// The learned policy slot, used when `control.use_learned` routes a move
+    /// to [`LocoMode::Learned`] (`plans/ppo-learned-walker.md`). `None` for
+    /// every authored-gait scene; the harness/deploy path inject a
+    /// [`crate::learned::LearnedCtrl`] (which carries the shared policy `Arc`).
+    pub learned: Option<crate::learned::LearnedCtrl>,
 }
 
 /// The actuator's mailbox: the last [`ControlOut`] the controller produced.
@@ -93,7 +98,9 @@ pub struct Walker {
 
 impl Walker {
     pub fn new(config: WalkerConfig, facing: f32) -> Self {
-        let controller = Controller::for_mode(LocoMode::Standing, &config.lower);
+        // A fresh character stands: the policy slot is only handed over when
+        // the mode machine swaps into Learned (see `control_stage`).
+        let controller = Controller::for_mode(LocoMode::Standing, &config.lower, None);
         Self {
             config,
             command: None,
@@ -182,7 +189,9 @@ pub fn control_stage(w: &mut Walker) {
         .decide(w.command, &w.observer.fiction, &w.config.control, dt);
 
     if mode != w.controller.mode() {
-        w.controller = Controller::for_mode(mode, &w.config.lower);
+        // Hand the policy slot (shared `Arc`, cheap clone) to the learned
+        // controller when the machine enters [`LocoMode::Learned`].
+        w.controller = Controller::for_mode(mode, &w.config.lower, w.config.learned.clone());
     }
 
     // Borrow split: the controller mutates its own schedule state; fiction,
@@ -278,13 +287,12 @@ pub fn actuate_stage(
     //
     // This is a real **impulse** (`CharacterPivotImpulseEvent` →
     // `add_connect_external_force`), NOT a velocity overwrite. The solver scales
-    // it by each particle's inverse mass (`Δpos = J·inv_mass·dt`), so a heavy
-    // torso is moved less than a light limb and no energy is conjured. To get a
-    // target Δv per particle we solve `J = Δv / (inv_mass·dt)` from the live
-    // inverse mass. Idempotent: the solver consumes and removes the impulse at
-    // the next step, so it can never accumulate.
+    // it by each particle's inverse mass (`Δpos = J·inv_mass·dt`, then
+    // `v = Δpos/dt`), so a heavy torso is moved less than a light limb and no
+    // energy is conjured. To get a target Δv per particle we solve
+    // `J = Δv / inv_mass` from the live inverse mass. Idempotent: the solver
+    // consumes and removes the impulse at the next step, so it never accumulates.
     if out.jump_impulse != 0.0 {
-        let dt = w.observer.fiction.dt.max(1e-4);
         for leg in [left, right] {
             for part in leg.parts {
                 if let Ok(p) = p_q.get(part) {

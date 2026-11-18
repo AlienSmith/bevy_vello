@@ -4,8 +4,10 @@ members = [
   "examples/collision_detection",
   "examples/game_lib",
   "walker_math",
+  "walker_nn",
   "walker_control",
-  "walker_qa"
+  "walker_qa",
+  "walker_ppo"
 ]
 
 [workspace.package]

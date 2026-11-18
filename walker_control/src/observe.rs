@@ -808,6 +808,57 @@ mod tests {
     }
 
     #[test]
+    fn com_angular_momentum_sees_spin_and_ignores_pure_translation() {
+        // Plan §10: a two-mass dumbbell spinning about its CoM. Top mass (above
+        // the CoM, y-down ⇒ r.y < 0) moving +x reads POSITIVE L — a forward tip.
+        let spin = [
+            ParticleSample {
+                pos: Vec2::new(0.0, -10.0),
+                vel: Vec2::new(10.0, 0.0),
+                inv_mass: 1.0,
+            },
+            ParticleSample {
+                pos: Vec2::new(0.0, 10.0),
+                vel: Vec2::new(-10.0, 0.0),
+                inv_mass: 1.0,
+            },
+        ];
+        let (l, i) = com_angular_momentum(&spin, Vec2::ZERO, Vec2::ZERO).unwrap();
+        assert!(
+            (l - 100.0).abs() < 1e-4,
+            "forward-tip L must be positive, got {l}"
+        );
+        assert!(
+            (i - 100.0).abs() < 1e-4,
+            "I is the mass-weighted |r|², got {i}"
+        );
+
+        // The same dumbbell translated rigidly carries NO spin: subtracting the
+        // CoM velocity kills every relative velocity.
+        let drift = [
+            ParticleSample {
+                pos: Vec2::new(0.0, -10.0),
+                vel: Vec2::new(250.0, -40.0),
+                inv_mass: 1.0,
+            },
+            ParticleSample {
+                pos: Vec2::new(0.0, 10.0),
+                vel: Vec2::new(250.0, -40.0),
+                inv_mass: 1.0,
+            },
+        ];
+        let v_com = com_velocity(&drift).unwrap();
+        let (l, _) = com_angular_momentum(&drift, Vec2::ZERO, v_com).unwrap();
+        assert!(
+            l.abs() < 1e-4,
+            "pure translation must read zero spin, got {l}"
+        );
+
+        // Nothing finite contributes ⇒ None (the observe() caller maps it to 0).
+        assert!(com_angular_momentum(&[], Vec2::ZERO, Vec2::ZERO).is_none());
+    }
+
+    #[test]
     fn attitude_upright_is_zero_and_forward_lean_is_positive() {
         // y-down frame: waist above the hip is (0, -L) ⇒ 0 rad.
         assert!(attitude_pitch(Vec2::new(0.0, -140.0), Vec2::new(0.0, -180.0)).abs() < 1e-6);

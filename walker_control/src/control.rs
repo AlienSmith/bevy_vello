@@ -99,6 +99,27 @@ impl Command {
         }
     }
 
+    /// Convenience: a **vertical jump intent** (the first PPO milestone, plan
+    /// §0). Vello y-down ⇒ "up" is `dir.y < 0`. The x-component is `1` purely
+    /// so [`Self::is_move`] passes (`vx = dir.x·speed` gates the FSM on
+    /// horizontal speed); the learned controller reads `dir.y` in its
+    /// observation as the move intent, so the sign carries the meaning.
+    pub fn jump_vertical(speed: f32) -> Self {
+        Self {
+            dir: Vec2::new(1.0, -1.0),
+            speed,
+            boost: false,
+            jump: false,
+        }
+    }
+
+    /// True when the command's vertical channel asks for a jump: `dir.y <
+    /// −0.5` (vello y-down ⇒ up). Only meaningful on commands that already
+    /// pass [`Self::is_move`] (the jump carries `dir.x = 1` for exactly that).
+    pub fn is_jump(&self) -> bool {
+        self.dir.y < -0.5
+    }
+
     /// Signed horizontal command speed (`dir.x · speed`).
     pub fn vx(&self) -> f32 {
         self.dir.x * self.speed
@@ -127,6 +148,15 @@ pub enum LocoMode {
     /// driven through the stance chord instead of a leg-PD height target.
     /// See [`JumpCtrl`].
     Jump,
+    /// The **learned** policy — a `walker_nn` controller behind this same seam
+    /// (`plans/ppo-learned-walker.md`). Chosen by [`ControlConfig::use_learned`]
+    /// instead of [`Walking`](LocoMode::Walking) for a move command.
+    Learned,
+    /// The **hand-rolled jump** — a scripted crouch→extend stroke
+    /// ([`crate::jump::JumpCtrl`]), the authored expert for the jump intent
+    /// (`dir.y < −0.5`). Chosen only when `use_learned` is off; the learned
+    /// path keeps its own jump handling through `Learned` untouched.
+    Jumping,
 }
 
 impl Default for LocoMode {
@@ -346,6 +376,13 @@ pub struct ControlConfig {
     /// alone is the version that walks well. Default **true** (`STANCE_PIN=0`
     /// disables it).
     pub stance_pin: bool,
+    /// Route move commands through [`LocoMode::Learned`] instead of the authored
+    /// [`Walking`](LocoMode::Walking) gait (`plans/ppo-learned-walker.md`).
+    /// Off by default so every existing scene/test keeps the DCM pipeline; the
+    /// training app and the `POLICY=` deploy path turn it on. The policy itself
+    /// lives on `WalkerConfig` (this struct is `Copy`); see
+    /// [`crate::walker::WalkerConfig::learned`].
+    pub use_learned: bool,
 }
 
 impl Default for ControlConfig {
@@ -390,6 +427,9 @@ impl Default for ControlConfig {
             stance_press_depth: 0.0,
             // On by default: the stance foot holds its world x.
             stance_pin: true,
+            // The authored gait is the default; the learned path is opted into
+            // by the training app / `POLICY=` deploy.
+            use_learned: false,
         }
     }
 }
@@ -1588,16 +1628,33 @@ pub enum Controller {
     Walking(WalkingCtrl),
     BoostStart(BoostStartCtrl),
     Jump(JumpCtrl),
+    /// The learned policy behind the same seam (`plans/ppo-learned-walker.md`).
+    Learned(crate::learned::LearnedCtrl),
+    /// The hand-rolled jump stroke — the authored expert for the jump intent
+    /// (the `Jumping` mode; only reachable when `use_learned` is off).
+    Jumping(crate::jump::JumpCtrl),
 }
 
 impl Controller {
-    /// Build the controller for a mode. `lower` supplies the gait config.
-    pub fn for_mode(mode: LocoMode, lower: &LowerBodyConfig) -> Self {
+    /// Build the controller for a mode. `lower` supplies the gait config;
+    /// `learned` is the policy slot used for [`LocoMode::Learned`]. A `None`
+    /// with a `Learned` request is a wiring bug, so it falls back to Standing
+    /// rather than inventing a net.
+    pub fn for_mode(
+        mode: LocoMode,
+        lower: &LowerBodyConfig,
+        learned: Option<crate::learned::LearnedCtrl>,
+    ) -> Self {
         match mode {
             LocoMode::Standing => Controller::Standing(StandingCtrl::new(lower)),
             LocoMode::Walking => Controller::Walking(WalkingCtrl::new(lower)),
             LocoMode::BoostStart => Controller::BoostStart(BoostStartCtrl::new(lower)),
             LocoMode::Jump => Controller::Jump(JumpCtrl::new(lower)),
+            LocoMode::Learned => match learned {
+                Some(c) => Controller::Learned(c),
+                None => Controller::Standing(StandingCtrl::new(lower)),
+            },
+            LocoMode::Jumping => Controller::Jumping(crate::jump::JumpCtrl::new(lower)),
         }
     }
 
@@ -1616,6 +1673,8 @@ impl Controller {
             Controller::Walking(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::BoostStart(c) => c.step(cmd, fiction, cfg, dt, facing),
             Controller::Jump(c) => c.step(cmd, fiction, cfg, dt, facing),
+            Controller::Learned(c) => c.step(cmd, fiction, cfg, dt, facing),
+            Controller::Jumping(c) => c.step(cmd, fiction, cfg, dt, facing),
         }
     }
 
@@ -1625,6 +1684,20 @@ impl Controller {
             Controller::Walking(c) => c.mode(),
             Controller::BoostStart(c) => c.mode(),
             Controller::Jump(c) => c.mode(),
+            Controller::Learned(c) => c.mode(),
+            Controller::Jumping(c) => c.mode(),
+        }
+    }
+
+    /// Hand the training harness this tick's recorded policy step
+    /// ([`crate::learned::LastStep`]) — the observation, sampled action, its
+    /// log-prob and the critic value. `None` from any non-learned controller.
+    /// The harness closes the transition with the reward/done it computes from
+    /// the *next* fiction (plan §4: controller reports, harness collects).
+    pub fn take_last(&mut self) -> Option<crate::learned::LastStep> {
+        match self {
+            Controller::Learned(c) => c.take_last(),
+            _ => None,
         }
     }
 }
@@ -1709,6 +1782,14 @@ impl LocoState {
         // out and drop the machine straight back to Standing.
         let active = cmd.filter(|c| c.jump || c.is_move(cfg.move_threshold));
 
+        // The controller a *move* maps to: the authored gait, or the learned
+        // policy when `use_learned` routes it (plan §4). Standing/BoostStart
+        // stay authored either way.
+        let move_mode = if cfg.use_learned {
+            LocoMode::Learned
+        } else {
+            LocoMode::Walking
+        };
         let next = match (self.mode, active) {
             // Command ended (or never started): stand, from any mode.
             (_, None) => LocoMode::Standing,
@@ -1716,10 +1797,12 @@ impl LocoState {
             (LocoMode::Standing, Some(c)) if c.boost => LocoMode::BoostStart,
             // A plain move enters the gait directly (already up to speed).
             (LocoMode::Standing, Some(c)) if c.jump => LocoMode::Jump,
-            (LocoMode::Standing, Some(_)) => LocoMode::Walking,
-            // The hop owns the body until its command is released. Landing is
-            // inside the stroke; the machine must not hand back to Standing
-            // mid-flight (a stance pose in the air would grab the ground).
+            // A PPO vertical jump intent (`dir.y < −0.5`) selects the hand-rolled
+            // expert stroke directly from standing.
+            (LocoMode::Standing, Some(c)) if !cfg.use_learned && c.is_jump() => LocoMode::Jumping,
+            (LocoMode::Standing, Some(_)) => move_mode,
+            // The impulse hop owns the body until its command is released;
+            // landing is inside the stroke, never a hand-back to Standing.
             (LocoMode::Jump, Some(c)) if c.jump => LocoMode::Jump,
             (LocoMode::Jump, Some(_)) => LocoMode::Standing,
             (LocoMode::BoostStart, Some(c)) => {
@@ -1729,10 +1812,16 @@ impl LocoState {
                 if c.boost && !boost_handover_due(&c, fiction, cfg, self.since) {
                     LocoMode::BoostStart
                 } else {
-                    LocoMode::Walking
+                    move_mode
                 }
             }
+            (LocoMode::Walking, Some(c)) if !cfg.use_learned && c.is_jump() => LocoMode::Jumping,
             (LocoMode::Walking, Some(_)) => LocoMode::Walking,
+            (LocoMode::Learned, Some(_)) => LocoMode::Learned,
+            // The stroke self-clocks and re-hops while the jump intent is held;
+            // any non-jump command releases it back to the gait/learned mode.
+            (LocoMode::Jumping, Some(c)) if !cfg.use_learned && c.is_jump() => LocoMode::Jumping,
+            (LocoMode::Jumping, Some(_)) => move_mode,
         };
 
         if next != self.mode {
@@ -2010,6 +2099,65 @@ mod tests {
     }
 
     #[test]
+    fn a_jump_intent_mid_walk_arms_the_stroke() {
+        // Run up (Walking) and switch the command's vertical channel: the
+        // gait hands over to the jump stroke while travel keeps going.
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(
+            st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0),
+            LocoMode::Walking
+        );
+        let m = st.decide(Some(Command::jump_vertical(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Jumping, "dir.y arms the stroke mid-gait");
+    }
+
+    #[test]
+    fn a_jump_intent_selects_the_hand_rolled_stroke() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        let m = st.decide(Some(Command::jump_vertical(100.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Jumping, "dir.y < −0.5 ⇒ authored jump");
+        // Held jump intent stays in the stroke (it self-clocks and re-hops).
+        for _ in 0..90 {
+            let m = st.decide(Some(Command::jump_vertical(100.0)), &f, &cfg, 1.0 / 90.0);
+            assert_eq!(m, LocoMode::Jumping);
+        }
+        // Command end returns to standing like every other mode.
+        let m = st.decide(None, &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Standing);
+    }
+
+    #[test]
+    fn a_walk_command_mid_stroke_releases_to_the_gait() {
+        let cfg = ControlConfig::default();
+        let mut st = LocoState::new();
+        let f = centered();
+        st.decide(Some(Command::jump_vertical(100.0)), &f, &cfg, 1.0 / 90.0);
+        let m = st.decide(Some(Command::walk(120.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(m, LocoMode::Walking, "no vertical intent ⇒ gait");
+    }
+
+    #[test]
+    fn the_learned_path_keeps_its_own_jump_handling() {
+        // With `use_learned` on (training/deploy), the jump intent must NOT
+        // route to the authored stroke — `Learned` owns it through the obs.
+        let mut cfg = ControlConfig::default();
+        cfg.use_learned = true;
+        let mut st = LocoState::new();
+        let f = centered();
+        let m = st.decide(Some(Command::jump_vertical(100.0)), &f, &cfg, 1.0 / 90.0);
+        assert_eq!(
+            m,
+            LocoMode::Learned,
+            "PPO path untouched by the expert gate"
+        );
+    }
+
+    #[test]
     fn a_boosted_move_hands_over_when_the_boost_flag_drops() {
         // The script (or keyboard) owns the lean window: BoostStart holds the
         // pose exactly while the command carries `boost`; the first plain move
@@ -2148,19 +2296,19 @@ mod tests {
     fn controller_slot_swaps_with_the_mode_and_dispatches() {
         let low = LowerBodyConfig::default();
         let cfg = ControlConfig::default();
-        let mut c = Controller::for_mode(LocoMode::Standing, &low);
+        let mut c = Controller::for_mode(LocoMode::Standing, &low, None);
         assert_eq!(c.mode(), LocoMode::Standing);
         let f = centered();
         let out = c.step(&Command::default(), &f, &cfg, 1.0 / 90.0, 1.0);
         assert_eq!(out.mode, LocoMode::Standing);
 
         // Swapping the slot is just a reassignment — the enum shares one field.
-        c = Controller::for_mode(LocoMode::BoostStart, &low);
+        c = Controller::for_mode(LocoMode::BoostStart, &low, None);
         assert_eq!(c.mode(), LocoMode::BoostStart);
         let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
         assert_eq!(out.mode, LocoMode::BoostStart);
 
-        c = Controller::for_mode(LocoMode::Walking, &low);
+        c = Controller::for_mode(LocoMode::Walking, &low, None);
         assert_eq!(c.mode(), LocoMode::Walking);
         let out = c.step(&Command::walk(120.0), &f, &cfg, 1.0 / 90.0, 1.0);
         assert_eq!(out.mode, LocoMode::Walking);
@@ -2902,7 +3050,7 @@ mod tests {
         let cfg = ControlConfig::default();
         let low = LowerBodyConfig::default();
         let run = || {
-            let mut c = Controller::for_mode(LocoMode::Standing, &low);
+            let mut c = Controller::for_mode(LocoMode::Standing, &low, None);
             let mut st = LocoState::new();
             let mut outs = Vec::new();
             for i in 0..40 {
@@ -2923,7 +3071,7 @@ mod tests {
                 };
                 let mode = st.decide(cmd, &f, &cfg, 1.0 / 90.0);
                 if mode != c.mode() {
-                    c = Controller::for_mode(mode, &low);
+                    c = Controller::for_mode(mode, &low, None);
                 }
                 let out = c.step(&cmd.unwrap_or_default(), &f, &cfg, 1.0 / 90.0, 1.0);
                 outs.push((
