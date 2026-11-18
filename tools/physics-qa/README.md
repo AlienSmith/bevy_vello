@@ -495,7 +495,7 @@ The command used to look at the walking scene with the current tuning — real
 window, a 1.3 px stance press, `HIP_HEIGHT=98`, and a strong launch thrust:
 
 ```
-tools/physics-qa/run_walker_qa.sh 2 SCRIPT=tmp/walker_qa/walkv60-120-60.json STANCE_DEPTH=1.0 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=5000 STANCE_TS=0.27 SWING_TS=0.27
+tools/physics-qa/run_walker_qa.sh 2 SCRIPT=tmp/walker_qa/walkv60-120-60.json STANCE_DEPTH=1.0 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=6000 STANCE_TS=0.27 SWING_TS=0.27
 ```
 
 | argument | effect |
@@ -505,7 +505,8 @@ tools/physics-qa/run_walker_qa.sh 2 SCRIPT=tmp/walker_qa/walkv60-120-60.json STA
 | `STANCE_DEPTH=1.3` | stance-foot press along the hip→foot chord, px (see `ControlConfig::stance_press_depth`) |
 | `WIN_HIDDEN=0` | open a real window instead of running headless |
 | `HIP_HEIGHT=98` | crouched stand/plant height for the walk |
-| `BOOST_HIP_ACCEL=7000` | launch thrust on `P3`, px/s² (default 300) |
+| `BOOST_HIP_ACCEL=6000` | launch thrust on `P3`, px/s² (default 300). Tied to `K_L`: the shipped `K_L=1.0` (ALIPM on) needs only 6000 and topples at 7000; a `K_L=0` walk needs 7000 and topples at 6000. |
+| `K_L=1.0` | ALIPM angular-momentum gain on the capture point (default 1.0 = physical; `0` = plain point-mass law, bit-identical). Sweep 0.25…1.5. |
 
 The stance foot's world x is pinned by default (`STANCE_PIN` on; `STANCE_PIN=0`
 disables it) — see `plans/actuator-frame-divergence.md` for what that does and

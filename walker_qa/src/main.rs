@@ -231,6 +231,13 @@ fn apply_lower_env(cfg: &mut walker_math::LowerBodyConfig) {
     if let Some(v) = env_f32("SWING_TS") {
         cfg.swing_duration_ts = v;
     }
+    // `K_L=<f>`: gain on the ALIPM angular-momentum term
+    // (`Δξ = k_L · L / (z·ω₀)`, plan §5.7). `0` is the plain point-mass capture
+    // point (bit-identical to before), `1.0` is the physical Pratt value; sweep
+    // `0.25 … 1.5` to see how much the measured CoM spin should steer the aim.
+    if let Some(v) = env_f32("K_L") {
+        cfg.k_l = v;
+    }
 }
 
 /// Tune the actuator stiffness from env so a sweep can test whether a

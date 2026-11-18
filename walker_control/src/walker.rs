@@ -293,6 +293,8 @@ mod tests {
             lean_rate: 0.0,
             com: Vec2::new(0.0, -140.0),
             v_com: Vec2::ZERO,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [
                 FootState {
                     pos: Vec2::new(-10.0, -90.0),

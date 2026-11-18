@@ -56,6 +56,23 @@ pub struct Fiction {
     pub com: Vec2,
     /// EMA-filtered mass-weighted CoM velocity.
     pub v_com: Vec2,
+    /// EMA-filtered whole-body **angular momentum about the CoM**
+    /// (px²/s per unit mass), Vello y-down: `L = Σ mᵢ (rᵢ.x·v'ᵢ.y − rᵢ.y·v'ᵢ.x) / Σ mᵢ`.
+    ///
+    /// Sign: a body whose upper mass is swinging toward `+x` about the CoM
+    /// reads **positive** — the same sense as [`Self::lean`]'s `+ = lean +x`.
+    /// This is the rotation the plain LIPM placement law ignores
+    /// (`plans/raibert-xpbd-2d-walker.md` §5.7): the gait kicks the torso every
+    /// step, and a point-mass capture point then aims a foot that the body
+    /// rotates straight over. Consumed by [`crate::control::WalkingCtrl`] as
+    /// the ALIPM term (`LowerBodyConfig::k_l`), and by the jump residual.
+    pub ang_momentum: f32,
+    /// EMA-filtered whole-body **spin rate about the CoM**, rad/s (`L / I`),
+    /// with `I = Σ mᵢ |rᵢ|² / Σ mᵢ`. The rotational twin of [`Self::v_com`]:
+    /// [`Self::lean_rate`] is the hip→waist *stick's* rate, this is the *body's*.
+    /// The two diverge in flight, when the torso counter-rotates against the
+    /// legs (`plans/jump-ppo-residual-polar-action.md` §10).
+    pub omega_com: f32,
     /// Measured foot state `[left, right]`. Velocities are unfiltered (the
     /// math does not consume them; slip telemetry and gates do).
     pub feet: [FootState; 2],
@@ -76,6 +93,8 @@ impl Default for Fiction {
             lean_rate: 0.0,
             com: Vec2::ZERO,
             v_com: Vec2::ZERO,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [FootState::default(); 2],
             grounded: false,
         }
@@ -243,6 +262,47 @@ pub fn com_velocity(samples: &[ParticleSample]) -> Option<Vec2> {
     Some(v / total)
 }
 
+/// Whole-body **angular momentum per unit mass** about the CoM, plus the
+/// **moment of inertia per unit mass** used to turn it into a spin rate:
+///
+/// ```text
+/// rᵢ = posᵢ − com ;  v'ᵢ = velᵢ − v_com ;  mᵢ = 1/inv_massᵢ
+/// L  = Σ mᵢ (rᵢ.x·v'ᵢ.y − rᵢ.y·v'ᵢ.x) / Σ mᵢ      // px²/s
+/// I  = Σ mᵢ |rᵢ|² / Σ mᵢ                           // px²
+/// ```
+///
+/// Same mass-weighted, skip-non-finite contract as [`center_of_mass`] and
+/// [`com_velocity`]. `None` when nothing finite contributed; `I` may be `0` for
+/// an all-at-CoM sample set, so callers guard the division.
+///
+/// Sign follows the Vello y-down frame and [`attitude_pitch`]: a body tipping
+/// forward (upper mass moving `+x` about the CoM) reads **positive** `L`.
+pub fn com_angular_momentum(
+    samples: &[ParticleSample],
+    com: Vec2,
+    v_com: Vec2,
+) -> Option<(f32, f32)> {
+    let mut total = 0.0f32;
+    let mut l = 0.0f32;
+    let mut i = 0.0f32;
+    for s in samples {
+        if !s.pos.is_finite() || !s.vel.is_finite() || !s.inv_mass.is_finite() || s.inv_mass <= 0.0
+        {
+            continue;
+        }
+        let m = 1.0 / s.inv_mass;
+        let r = s.pos - com;
+        let v = s.vel - v_com;
+        total += m;
+        l += m * (r.x * v.y - r.y * v.x);
+        i += m * r.length_squared();
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    Some((l / total, i / total))
+}
+
 /// Stick attitude from the `hip → waist` axis against world vertical, Vello
 /// y-down. Upright `(0, -1)` ⇒ 0 rad; `+` = forward lean toward `+x`.
 /// Degenerate (zero-length) axes ⇒ `0`.
@@ -295,6 +355,10 @@ pub struct Observer {
     pub fiction: Fiction,
     v_hip: Vec2,
     v_com: Vec2,
+    /// EMA state of [`Fiction::ang_momentum`] / [`Fiction::omega_com`] — the
+    /// same filter contract as the velocities (one `tau`, first tick snaps).
+    ang_mom: f32,
+    omega_com: f32,
     theta_prev: f32,
     omega: f32,
     primed: bool,
@@ -313,6 +377,10 @@ pub struct RawReality {
     pub lean: f32,
     pub lean_rate: f32,
     pub com: Vec2,
+    /// Pre-filter [`Fiction::ang_momentum`].
+    pub ang_momentum: f32,
+    /// Pre-filter [`Fiction::omega_com`].
+    pub omega_com: f32,
 }
 
 impl Observer {
@@ -361,12 +429,32 @@ impl Observer {
         } else {
             v_com_raw
         };
-        self.primed = true;
 
         // --- CoM position: mass-weighted, hip fallback when degenerate ---
         let com = center_of_mass(s.body)
             .map(|(c, _, _)| c)
             .unwrap_or(s.hip.pos);
+
+        // --- rotational CoM state: L and ω about the mass centre ---
+        // Same particle set as the linear channels above, with the FILTERED
+        // `v_com` so `L` and `v_com` describe one body motion. A degenerate set
+        // (no finite masses, or every particle at the CoM) reads zero spin
+        // rather than a NaN. `L` is the term the plain point-mass capture point
+        // cannot see — a step injects rotation, and without it the law aims a
+        // foot that the body rotates straight over.
+        let (l_raw, inertia) = com_angular_momentum(s.body, com, self.v_com).unwrap_or((0.0, 0.0));
+        let omega_com_raw = if inertia > 1e-6 { l_raw / inertia } else { 0.0 };
+        self.ang_mom = if self.primed {
+            self.ang_mom + (l_raw - self.ang_mom) * alpha
+        } else {
+            l_raw
+        };
+        self.omega_com = if self.primed {
+            self.omega_com + (omega_com_raw - self.omega_com) * alpha
+        } else {
+            omega_com_raw
+        };
+        self.primed = true;
 
         // --- feet + hysteresis ---
         let mut feet = [FootState::default(); 2];
@@ -389,6 +477,8 @@ impl Observer {
             lean: theta,
             lean_rate: omega_raw,
             com,
+            ang_momentum: l_raw,
+            omega_com: omega_com_raw,
         };
 
         let fiction = Fiction {
@@ -399,6 +489,8 @@ impl Observer {
             lean_rate: self.omega,
             com,
             v_com: self.v_com,
+            ang_momentum: self.ang_mom,
+            omega_com: self.omega_com,
             feet,
             grounded,
         };
@@ -647,6 +739,8 @@ mod tests {
             lean_rate: 0.0,
             com: Vec2::ZERO,
             v_com: Vec2::ZERO,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [FootState::default(); 2],
             grounded: false,
         };

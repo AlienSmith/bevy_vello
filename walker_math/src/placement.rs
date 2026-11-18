@@ -61,6 +61,38 @@ pub struct CaptureMeasure {
     pub v_com: f32,
     /// CoM height above the floor line, px (positive-up).
     pub z_com: f32,
+    /// EMA-filtered whole-body angular momentum about the CoM, px²/s per unit
+    /// mass, in the resolver's **travel frame** (`+` = spinning forward, the
+    /// same sense as a positive `v_com`). Zero means "no measurement"; with
+    /// `k_l = 0` the correction is switched off and the plain point-mass capture
+    /// point comes back bit-for-bit. See [`LowerBodyConfig::k_l`] and
+    /// `plans/raibert-xpbd-2d-walker.md` §5.7.
+    pub l_com: f32,
+}
+
+/// ALIPM capture-point shift from whole-body angular momentum (Pratt 2008 /
+/// centroidal-momentum form, `plans/raibert-xpbd-2d-walker.md` §5.7):
+///
+/// ```text
+/// Δx = k_L · L / (z_CoM · ω₀)        ω₀ = √(g / z_CoM)
+/// ```
+///
+/// `L` is per unit mass (the observer already divides by `Σm`), so the
+/// textbook `m_total` cancels: dimensionally `[px²/s] / (px · 1/s) = px`.
+/// Positive `L` (body tipping forward) shifts the capture point **forward**,
+/// which lengthens the step — that is the correction the point-mass law lacks.
+///
+/// Returns `0.0` when `k_l == 0` (the bit-identical escape hatch, not the
+/// default), when there is no spin, or when `ω₀` is undefined.
+#[inline]
+pub fn alipm_offset(l_com: f32, z_com: f32, gravity: f32, k_l: f32) -> f32 {
+    if k_l == 0.0 || l_com == 0.0 {
+        return 0.0;
+    }
+    match omega0(z_com, gravity) {
+        Some(w) => k_l * l_com / (z_com * w),
+        None => 0.0,
+    }
 }
 
 /// LIPM pendulum frequency `ω₀ = √(g / z_CoM)` (rad/s), or `None` when

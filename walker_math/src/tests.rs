@@ -591,6 +591,7 @@ fn dcm_event_plan(cfg: &LowerBodyConfig) -> StepPlan {
             com_x: 10.0,
             v_com: 60.0,
             z_com: cfg.hip_height,
+            l_com: 0.0,
         }),
         xi: Some(50.0),
         omega0: omega0(cfg.hip_height, cfg.gravity).unwrap_or(3.0),
@@ -788,6 +789,7 @@ fn test_stretch_horizon_is_absolute_deadline_and_bounded_early() {
             com_x: x0,
             v_com: v0,
             z_com: 90.0,
+            l_com: 0.0,
         }),
         xi: Some(x0 + v0 / w),
         omega0: w,
@@ -1040,6 +1042,7 @@ fn test_capture_point_worldspace_independent_of_hip() {
             com_x: hip_x,
             v_com: 40.0,
             z_com: z,
+            l_com: 0.0,
         };
         // Build the plan the way `step_lower_body` does: the DCM state is
         // derived from the measurement once per tick.
@@ -1080,6 +1083,7 @@ fn test_capture_point_clamps_and_reports_saturation() {
         com_x: 500.0,
         v_com: 300.0,
         z_com: cfg.hip_height,
+        l_com: 0.0,
     };
     let plan = StepPlan {
         x_max,
@@ -1135,6 +1139,7 @@ fn test_capture_saturation_reported_through_step_lower_body() {
         com_x: state.hip_pos.x + 1000.0,
         v_com: 400.0,
         z_com: cfg.hip_height,
+        l_com: 0.0,
     });
     let (_p, d1) = step_lower_body(Vec2::X, &cfg, &mut state, dt);
     assert!(d1.capture_saturated, "must report the in-trouble clamp");
@@ -4974,6 +4979,7 @@ fn test_plan_meas_v_low_passes_and_off_is_inert() {
             com_x: s.hip_pos.x,
             v_com: ripple,
             z_com: cfg.hip_height,
+            l_com: 0.0,
         });
         step_lower_body(Vec2::X, &cfg, &mut s, dt);
     }
@@ -4998,6 +5004,7 @@ fn test_plan_meas_v_low_passes_and_off_is_inert() {
                 com_x: 0.0,
                 v_com: 0.0,
                 z_com: 1.0,
+                l_com: 0.0,
             })
         });
         a.measured = m.map(|mm| CaptureMeasure {
@@ -5039,6 +5046,7 @@ fn test_stop_path_uses_measured_brake_when_on_and_fiction_when_off() {
         com_x: s.hip_pos.x,
         v_com: 170.0,
         z_com: cfg_on.hip_height,
+        l_com: 0.0,
     });
     let (_, d_on) = step_lower_body(Vec2::ZERO, &cfg_on, &mut s, dt);
     // v_meas_filt initializes to the first raw sample (170), so `stopping`
@@ -5062,6 +5070,7 @@ fn test_stop_path_uses_measured_brake_when_on_and_fiction_when_off() {
         com_x: s2.hip_pos.x,
         v_com: 170.0,
         z_com: cfg_off.hip_height,
+        l_com: 0.0,
     });
     s2.v_meas_filt = Some(170.0); // poison: the EMA is state-only when off
     let (_, d_off) = step_lower_body(Vec2::ZERO, &cfg_off, &mut s2, dt);
@@ -5399,5 +5408,124 @@ fn test_v_stab_off_is_inert_and_on_is_deterministic() {
     assert!(
         s.v_stab_filt.is_some(),
         "stabilizer did not engage (velocity filter never primed)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ALIPM — whole-body angular momentum in the capture point (`K_L`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_alipm_offset_is_zero_when_disabled_and_signs_like_the_spin() {
+    // `k_L = 0` (the default) must be EXACTLY zero — not merely small — so the
+    // shipped gait stays bit-identical.
+    assert_eq!(alipm_offset(123.4, 100.0, 980.0, 0.0), 0.0);
+    // No spin ⇒ no shift, whatever the gain.
+    assert_eq!(alipm_offset(0.0, 100.0, 980.0, 1.0), 0.0);
+    // Degenerate height ⇒ the law is undefined, not infinite.
+    assert_eq!(alipm_offset(50.0, 0.0, 980.0, 1.0), 0.0);
+
+    // Physical value: `L / (z·ω₀)`, ω₀ = √(980/100).
+    let z: f32 = 100.0;
+    let g: f32 = 980.0;
+    let w = (g / z).sqrt();
+    let want = 250.0 / (z * w);
+    assert!((alipm_offset(250.0, z, g, 1.0) - want).abs() < 1e-5);
+
+    // Sign: forward spin buys a forward (longer) step; a backwards spin a
+    // shorter one. That is the whole point of the correction.
+    assert!(alipm_offset(250.0, z, g, 1.0) > 0.0);
+    assert!(alipm_offset(-250.0, z, g, 1.0) < 0.0);
+    // And the gain scales it linearly.
+    assert!(
+        (alipm_offset(250.0, z, g, 2.0) - 2.0 * want).abs() < 1e-5,
+        "k_L must scale the shift linearly"
+    );
+}
+
+#[test]
+fn test_alipm_k_l_zero_is_bit_identical_to_the_plain_capture_point() {
+    // Same measured state, two configs differing ONLY in `k_l`. With `k_L = 0`
+    // every pose field the resolver emits must match the `k_l = 0` twin
+    // exactly — bit-for-bit, because `alipm_offset` short-circuits to 0.0.
+    let dt = 1.0 / 90.0;
+    let mut cfg_off = LowerBodyConfig::default();
+    cfg_off.k_l = 0.0;
+    let mut cfg_zero = LowerBodyConfig::default();
+    cfg_zero.k_l = 0.0;
+    let mut a = ResolverState::new(&cfg_off);
+    let mut b = ResolverState::new(&cfg_zero);
+    for i in 0..120 {
+        let spin = 180.0 - (i as f32);
+        for s in [&mut a, &mut b] {
+            s.measured = Some(CaptureMeasure {
+                com_x: s.hip_pos.x,
+                v_com: 110.0,
+                z_com: 98.0,
+                l_com: spin,
+            });
+        }
+        let (pa, da) = step_lower_body(Vec2::X, &cfg_off, &mut a, dt);
+        let (pb, db) = step_lower_body(Vec2::X, &cfg_zero, &mut b, dt);
+        assert_eq!(pa.hip, pb.hip);
+        assert_eq!(pa.left_foot, pb.left_foot);
+        assert_eq!(pa.right_foot, pb.right_foot);
+        assert_eq!(da.left_target_x, db.left_target_x);
+        assert_eq!(da.right_target_x, db.right_target_x);
+    }
+}
+
+#[test]
+fn test_alipm_forward_spin_lengthens_the_aimed_step() {
+    // One cruise tick, two gains: a body carrying forward angular momentum must
+    // be aimed further forward. Measured on the placement law directly (the
+    // resolver's plan target), with the LIPM state held identical.
+    let cfg = LowerBodyConfig::default();
+    let z = 98.0;
+    let w = omega0(z, cfg.gravity).unwrap();
+    let com_x = 40.0;
+    let v_com = 120.0;
+    let l = 400.0; // a real step's worth of spin, px²/s
+
+    let xi_plain = com_x + v_com / w;
+    let xi_alipm = xi_plain + alipm_offset(l, z, cfg.gravity, 1.0);
+    assert!(
+        xi_alipm > xi_plain,
+        "forward spin must lead the capture point"
+    );
+
+    let t_flight = 0.20;
+    let v_des = 120.0;
+    let x_max = 30.0;
+    let plan = |xi: f32| StepPlan {
+        x_max,
+        stopping: false,
+        capture_offset: 0.0,
+        measured: Some(CaptureMeasure {
+            com_x,
+            v_com,
+            z_com: z,
+            l_com: l,
+        }),
+        xi: Some(xi),
+        omega0: w,
+        v_law: v_com,
+        brake_step: false,
+        mpc_trigger: false,
+        adapt_tc_wait: 0.0,
+    };
+    let hip_x = 40.0;
+    let p_plain = plan_target_x(hip_x, v_com, v_des, t_flight, &cfg, &plan(xi_plain));
+    let p_alipm = plan_target_x(hip_x, v_com, v_des, t_flight, &cfg, &plan(xi_alipm));
+    assert!(
+        p_alipm > p_plain,
+        "the ALIPM plant must be AHEAD of the plain one: {p_alipm} vs {p_plain}"
+    );
+    // And the size is the offset, up to the reach clamp.
+    let d = p_alipm - p_plain;
+    assert!(
+        (d - alipm_offset(l, z, cfg.gravity, 1.0)).abs() < 1e-3
+            || (p_alipm - hip_x).abs() >= x_max - 1e-3,
+        "the shift must be the offset unless the reach clamp absorbed it: {d}"
     );
 }

@@ -675,6 +675,11 @@ impl Step for WalkingCtrl {
             com_x: self.state.hip_pos.x + (fiction.com.x - fiction.hip.x) * facing,
             v_com: fiction.v_com.x * facing,
             z_com: (floor_vello_y - fiction.com.y).max(1.0),
+            // ALIPM: whole-body angular momentum in the solver's travel frame.
+            // `facing` folds it exactly like `v_com`: the solver's `+x` is the
+            // TRAVEL direction, so a `-x` character's forward spin must read
+            // positive there. Zero-when-unmeasured is the plain-law identity.
+            l_com: fiction.ang_momentum * facing,
         });
 
         // --- Stamp: per-foot contact truth (the gait's landing event) ---
@@ -1312,6 +1317,8 @@ mod tests {
             lean_rate: 0.0,
             com: hip,
             v_com: v,
+            ang_momentum: 0.0,
+            omega_com: 0.0,
             feet: [
                 FootState {
                     pos: feet[0],

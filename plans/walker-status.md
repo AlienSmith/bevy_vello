@@ -254,8 +254,11 @@ commanded slide per stance), so it is **on** with a comment saying exactly that.
 
 ```
 # the reference walk (real window, stance press, crouched height, strong launch)
+# NOTE: BOOST_HIP_ACCEL is tied to `K_L`. The shipped default is `K_L=1.0`
+# (ALIPM on), which needs only 6000; the old 7000 was tuned for `K_L=0` and
+# over-drives a `K_L=1` walk.
 tools/physics-qa/run_walker_qa.sh 2 SCRIPT=plans/walker_v60_120_60_script.json \
-    STANCE_DEPTH=1.3 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=7000
+    STANCE_DEPTH=1.3 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=6000
 
 # the 17 s script every number in this document comes from
 tools/physics-qa/run_walker_qa.sh base SCRIPT=plans/walker_v60_boost90_40_70_40_script.json
@@ -272,7 +275,7 @@ Artifacts: `tmp/walker_qa/<tag>.csv`, `.hips_feet.png`, `.log`. Scripts live in
 
 | knob | target |
 | --- | --- |
-| `HIP_HEIGHT`, `STANCE_TS`, `SWING_TS` | `LowerBodyConfig` |
+| `HIP_HEIGHT`, `STANCE_TS`, `SWING_TS`, `K_L` | `LowerBodyConfig` |
 | `STANCE_DEPTH`, `STANCE_PIN`, `ATT_KP`, `ATT_KD` | `ControlConfig` walking |
 | `BOOST_GATHER_TS`, `BOOST_CROUCH_TS`, `BOOST_PUSH`, `BOOST_PUSH_TS`, `BOOST_HIP_ACCEL` | `ControlConfig` launch |
 | `HIP_COMPLIANCE`, `KNEE_COMPLIANCE`, `ZETA`, `STRUT_ACTIVE`, `STRUT_IDLE` | `ActuatorConfig` |

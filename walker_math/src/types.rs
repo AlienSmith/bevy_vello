@@ -289,6 +289,36 @@ pub struct LowerBodyConfig {
     /// Default 0.15: keeps the commanding velocity smooth yet phase-locked to
     /// reality so it can never re-wobble out of phase (the §0 bounce).
     pub v_stab_sync: f32,
+
+    /// **ALIPM angular-momentum gain** `k_L` (`K_L` env), dimensionless,
+    /// default **1.0** (the physical Pratt value; `0.0` switches it off and is
+    /// bit-identical to the plain point-mass law).
+    ///
+    /// The shipped capture point `ξ = x + v/ω₀` assumes a point mass with **no
+    /// body rotation**. A real step does rotate the body (the stance leg
+    /// pivots, the swing leg's mass is carried across, the attitude loop fights
+    /// back), and the measured `L` about the CoM is nonzero at every touchdown
+    /// — the "unmodeled angular momentum" tripwire of
+    /// `plans/raibert-xpbd-2d-walker.md` §5.7. The placement law then aims a
+    /// foot that the body rotates straight over: the feet are in the right
+    /// place and it topples anyway.
+    ///
+    /// With `k_L > 0` the capture point is shifted by
+    /// [`placement::alipm_offset`] `= k_L·L/(z·ω₀)`, i.e. the spin is paid for
+    /// in step length exactly as Pratt's capture point / ALIPM prescribe.
+    /// Sign check: `L > 0` (tipping forward) lengthens the step forward.
+    /// Sweep 0.25…1.5. This is a *kinematic* correction to the aim, not a
+    /// force: all actuation still goes through the same pose → IK → constraints
+    /// chain.
+    ///
+    /// Measured (the `v60/120/60` track, `K_L=0` vs `K_L=1.0`): the correction
+    /// trims speed-tracking error 27.4 → 25.0 px/s, raises grounded fraction
+    /// 0.911 → 0.922, and lowers the launch thrust the walk needs
+    /// (`BOOST_HIP_ACCEL` 7000 → 6000) because part of the forward tip is now
+    /// accounted for instead of being bought with a harder hip kick. Every
+    /// walking run must be retuned against the *new* launch value — the old
+    /// 7000 over-drives a `k_L = 1` walk and topples it.
+    pub k_l: f32,
 }
 
 impl Default for LowerBodyConfig {
@@ -360,6 +390,10 @@ impl Default for LowerBodyConfig {
             v_stab_aff: 0.0,
             v_stab_trust: 0.1,
             v_stab_sync: 0.15,
+            // ALIPM off by default: the committed walk is the point-mass law's
+            // Measured better than 0 (see the field doc); `k_L = 0` remains the
+            // bit-identical escape hatch for a regression bisect.
+            k_l: 1.0,
         }
     }
 }

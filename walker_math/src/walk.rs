@@ -301,9 +301,19 @@ pub fn step_lower_body(
     // stepping brake feet while the TRUE speed is still above the swing
     // trigger, even if the fiction has already collapsed to rest.
     let brake_step = stopping && v_cap.abs() > super::placement::SWING_TRIGGER_SPEED;
-    let xi = state
-        .measured
-        .and_then(|m| omega0(m.z_com, config.gravity).map(|w| m.com_x + m.v_com / w));
+    // ALIPM: the plain point-mass capture point `x + v/ω₀` assumes the body
+    // cannot spin. Every step injects rotation (the stance leg pivots, the swing
+    // mass crosses over), and the measured `L` about the CoM is what the law
+    // then fails to see — it aims a foot the body rotates straight over
+    // (`plans/raibert-xpbd-2d-walker.md` §5.7). `alipm_offset` adds the
+    // textbook `k_L·L/(z·ω₀)` shift; `k_l == 0` makes it exactly 0.0, which is
+    // the bit-identical escape hatch. The shipped default is `k_l = 1.0`
+    // (measured better; see `LowerBodyConfig::k_l`).
+    let xi = state.measured.and_then(|m| {
+        omega0(m.z_com, config.gravity).map(|w| {
+            m.com_x + m.v_com / w + alipm_offset(m.l_com, m.z_com, config.gravity, config.k_l)
+        })
+    });
     let omega0 = state
         .measured
         .and_then(|m| omega0(m.z_com, config.gravity))
@@ -350,6 +360,7 @@ pub fn step_lower_body(
     // active (pure kinematic fallback) or the capture point is within reach.
     let capture_saturated = match state.measured {
         Some(m) => match capture_point(m.com_x, m.v_com, v_desired_scalar, m.z_com, config.gravity)
+            .map(|c| c + alipm_offset(m.l_com, m.z_com, config.gravity, config.k_l))
         {
             Some(raw) => {
                 let sat_a = raw < state.hip_pos.x - x_max || raw > state.hip_pos.x + x_max;
