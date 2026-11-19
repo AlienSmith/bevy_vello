@@ -474,6 +474,68 @@ Notes that pin the design:
   `(1 − |ω|/ω_scale)` **quality** factor, so a clean landing pays full and a
   spun one pays little.
 
+### 12.2.6 An EVENT credit must be paid at the EVENT (2026-11-19)
+
+The apex was a **terminal** bonus `peak × R_PEAK` gated on `!fallen`, paid by the
+harness at episode end. Measured over one 220-update run, that gate made the
+bonus collectable only by *not jumping*:
+
+```
+1074 episodes timed out WITHOUT EVER LANDING
+  alive +1.438 + peak_bonus +0.213 = +1.651   from peak_height 0.092
+  vs. any real landing:                        never paid more
+82.6% of liftoffs (8258) never landed (1545)
+peak_height:  0.558 (0-15k) -> 0.336 (15-45k) -> 0.050 (45k+)
+corr(update, peak_height) = -0.949   over 220 updates
+while mean_ep_reward was PRESERVED (and even rose to 0.556)
+```
+
+That signature — reward flat, behaviour gone — is the giveaway. The policy had
+learned to **suppress the expert's own stroke**: on screen, the body kicks both
+feet back and does nothing. A reward term was paying for the absence of the very
+thing it was meant to buy.
+
+**Rule.** A credit for an EVENT is paid at the event, unconditionally; never
+ransomed against a later outcome the policy can dodge. Survival is already priced
+by `w_alive` and `fall_penalty`.
+
+Implementation:
+
+```rust
+// in Phase::Flight, while airborne
+let apex_now = f.v_com.y >= 0.0 && self.flight_peak > c.apex_peak_target * 0.05;
+if apex_now && !self.flight_apex_paid {
+    let sat = (self.flight_peak / c.apex_peak_target).clamp(0.0, 1.0);
+    self.last_apex_peak_pay = c.w_apex_peak * sat;   // paid HERE
+    r += self.last_apex_peak_pay;
+    self.flight_apex_paid = true;                     // once per flight
+}
+```
+
+Three guards make it non-gameable:
+
+- **`flight_peak > 5% of target`** — a launch that never rose (the suppressed
+  stroke) earns nothing. Otherwise "twitch and fall back" would be paid.
+- **`flight_apex_paid`** — at most one credit per flight, so a mid-air bob
+  cannot farm it.
+- **`fall_penalty` (3.0) > `w_apex_peak` (2.5)** — a full hop that then crashes
+  nets −0.5, strictly worse than standing still. At the old 0.5 crashing earned
+  +2.0 and the policy learned to launch and fall over.
+
+New defaults: `w_apex_peak: 2.5`, `apex_peak_target: 60 px`, `fall_penalty 3.0`.
+`R_PEAK` is deprecated (accepted, ignored). Three regression tests lock it:
+`the_apex_is_paid_while_airborne_and_not_ransomed_on_survival`,
+`a_failed_launch_earns_no_apex_credit`, `the_apex_credit_is_paid_once_per_flight`.
+
+Verified on an 8-update smoke run: `apex_paid 64/64 (100%)` (previously 0%),
+`mean_peak 0.697` flat across all 8 updates, `mean_apex_rise 34.3 px`.
+
+**Checkpoint selection is part of this bug.** `policy_best.json` used to be
+max-`mean_ep_reward`, which is exactly the quantity being gamed — it held a
+policy with `peak_height 0.023`. `mean_peak_height` is now the primary key with
+reward breaking ties, so the deployable artifact is chosen on *rendered
+behaviour*, not on a number the policy can inflate by standing still.
+
 ### 12.2.5 The settle window must be CLAMPED (2026-11-19)
 
 Same class of bug, one layer down. After the payment above, per-episode

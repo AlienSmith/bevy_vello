@@ -197,7 +197,12 @@ fn min_height() -> f32 {
 }
 /// Fall-termination penalty.
 fn fall_penalty() -> f32 {
-    env_f32("FALL_PENALTY").unwrap_or(0.5)
+    // MUST exceed `RewardConfig::w_apex_peak` (2.5). The apex credit is paid at
+    // the apex, unconditionally; this charge is what keeps "hop then faceplant"
+    // strictly worse than "stand still". At the old 0.5 a full hop (−0.5) netted
+    // +2.0 even when it crashed, i.e. crashing was profitable and the policy
+    // learned to launch and fall over.
+    env_f32("FALL_PENALTY").unwrap_or(3.0)
 }
 /// Hip |v_x| under which the body is considered "vertical". Above `3·` the
 /// gate the episode counts as failing toward a fall termination (out of
@@ -226,8 +231,13 @@ fn land_lean() -> f32 {
 /// *event* (the apex we render) as a terminal term, gated on survival. Kept
 /// separate from the per-tick two-checkpoint reward because it is the one
 /// term still keyed to the whole-episode peak.
+#[allow(dead_code)]
 fn r_peak() -> f32 {
-    env_f32("R_PEAK").unwrap_or(3.0)
+    // Deprecated: the peak is now paid at the APEX EVENT by
+    // `RewardConfig::w_apex_peak`, not as a terminal `peak × R_PEAK` bonus.
+    // Retained only so older launch scripts that set `R_PEAK` do not error;
+    // it no longer influences the reward.
+    env_f32("R_PEAK").unwrap_or(0.0)
 }
 
 /// Assemble the two-checkpoint [`reward::RewardConfig`] from the shared env
@@ -250,6 +260,12 @@ fn reward_cfg() -> reward::RewardConfig {
     }
     if let Some(v) = env_f32("APEX_TARGET") {
         c.apex_target = v;
+    }
+    if let Some(v) = env_f32("W_APEX_PEAK") {
+        c.w_apex_peak = v;
+    }
+    if let Some(v) = env_f32("APEX_PEAK_TARGET") {
+        c.apex_peak_target = v;
     }
     if let Some(v) = env_f32("W_LIFTOFF") {
         c.w_liftoff = v;
@@ -410,6 +426,8 @@ struct PpoState {
     train_rows: Vec<String>,
     ep_rows: Vec<String>,
     best_mean_reward: f32,
+    /// Highest `mean_peak_height` seen, for the peak-gated best checkpoint.
+    best_mean_peak: f32,
     /// **Generation swap handshake.** The update runs once, at a barrier where
     /// every env has finished exactly one episode (see
     /// [`ppo_update_system`]/[`ppo_reset_system`]). `ppo_update_system` sets
@@ -618,6 +636,7 @@ fn main() {
             train_rows: Vec::new(),
             ep_rows: Vec::new(),
             best_mean_reward: f32::NEG_INFINITY,
+            best_mean_peak: -1.0,
             swap_pending: false,
         })
         // `perf_reset` seeds the meter's clock ONCE: running it per-frame in
@@ -1093,18 +1112,24 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
             fall_pen = fall_penalty();
             reward -= fall_pen;
         }
-        // Terminal peak-height bonus: pay for the EVENT, not the rate — the
-        // apex is too brief for dense terms to price it, and the flail cannot
-        // earn it without also paying the lateral charge. Gated on SURVIVAL:
-        // run 7 paid it on crashes too, so "hop, then topple" earned the same
-        // bonus as "hop, then land" — with exploration noise tripping most
-        // episodes, the crash-hop was the practiced behavior and the policy
-        // plateaued at a small hop followed by a forward face-plant.
-        let mut peak_bonus = 0.0;
-        if done && !fallen {
-            peak_bonus = env.peak.max(0.0) * r_peak();
-            reward += peak_bonus;
-        }
+        // The peak is **no longer paid here**. It is paid by
+        // [`reward::JumpReward`] at the APEX EVENT, while the body is still
+        // airborne — see `RewardConfig::w_apex_peak`.
+        //
+        // History: this used to be a terminal bonus `peak × R_PEAK` gated on
+        // `!fallen`. Measured over one 220-update run, that gate made the bonus
+        // collectable only by NOT jumping: the 1074 episodes that timed out
+        // without ever landing earned `alive 1.44 + peak_bonus 0.21 = 1.65` from
+        // a peak of 0.092, which beat every real landing (82.6% of liftoffs
+        // never landed at all). `peak_height` then decayed monotonically
+        // 0.558 → 0.050 while `mean_ep_reward` was preserved
+        // (`corr(update, peak) = −0.949`) — the policy had learned to suppress
+        // the expert's stroke, which is exactly the "kicks both feet back and
+        // does nothing" behaviour seen on screen.
+        //
+        // A credit for an EVENT is paid at the event. Survival is already
+        // priced by `w_alive` and `fall_penalty`.
+        let peak_bonus = env.reward.sum_apex_peak_pay;
 
         env.t += 1;
         env.ep_reward += reward;
@@ -1127,7 +1152,7 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
             state.ep_lens.push(env.t);
             state.ep_peaks.push(env.peak);
             state.ep_rows.push(format!(
-                "{},{},{:.4},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                "{},{},{:.4},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1}",
                 tick,
                 env.root.index(),
                 env.ep_reward,
@@ -1147,7 +1172,8 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
                 env.reward.sum_settle,
                 env.reward.sum_liftoff_charge,
                 -fall_pen,
-                peak_bonus,
+                env.reward.sum_apex_peak_pay,
+                env.reward.last_apex_rise,
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
             // this character and the factory rebuilds it at its rest pose. That
@@ -1363,12 +1389,25 @@ fn ppo_update_system(
     //   policy_snapshot.json — every `SNAPSHOT_EVERY` updates (default 100), so
     //                          an interrupted or diverged run loses at most
     //                          that many updates, not everything.
-    //   policy_best.json     — the highest mean episode reward seen. The
+    //   policy_best.json     — the best policy by a **hop** criterion. The
     //                          artifact you actually DEPLOY. Without it a late
     //                          collapse silently overwrites the good policy.
-    let is_best = !state.ep_rewards.is_empty() && mean_ep > state.best_mean_reward;
+    //
+    // The selector must NOT be pure `mean_ep_reward`: that is the quantity the
+    // policy games. Measured — a run kept its best reward at update 200 while
+    // `peak_height` had fallen to 0.023, so `policy_best.json` held a policy
+    // that stood still. `mean_peak_height` is the rendered behaviour, so it is
+    // the primary key; reward only breaks ties.
+    let is_best = if state.ep_rewards.is_empty() {
+        false
+    } else {
+        let better_hop = mean_peak > state.best_mean_peak + 1e-4;
+        let tied_hop = (mean_peak - state.best_mean_peak).abs() <= 1e-4;
+        better_hop || (tied_hop && mean_ep > state.best_mean_reward)
+    };
     if is_best {
         state.best_mean_reward = mean_ep;
+        state.best_mean_peak = mean_peak;
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
@@ -1417,7 +1456,7 @@ fn mean(v: &[f32]) -> f32 {
 
 const TRAIN_HEADER: &str =
     "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,policy_loss,value_loss,entropy,approx_kl,clip_frac";
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height,liftoffs,landings,land_pay,apex_pay,min_e_dcm,alive,pen,settle,liftoff_chg,fall_pen,peak_bonus";
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height,liftoffs,landings,land_pay,apex_pay,min_e_dcm,alive,pen,settle,liftoff_chg,fall_pen,apex_peak_pay,apex_rise";
 
 fn write_rows(path: &str, header: &str, rows: &[String]) {
     if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {

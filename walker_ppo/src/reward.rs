@@ -51,9 +51,26 @@ pub struct RewardConfig {
     /// it must never out-earn a completed hop.
     pub w_alive: f32,
     /// Liftoff: positive credit for the height bought, `w_apex·apex_pred/target`.
+    /// This prices the *purchase* (the ballistic prediction at the launch tick);
+    /// the rendered event is paid by [`Self::w_apex_peak`].
     pub w_apex: f32,
     /// Apex **rise above standing** that saturates the credit, px.
     pub apex_target: f32,
+    /// **Apex checkpoint**: credit for the rise the body ACTUALLY reached, paid
+    /// ONCE at the apex event (the tick the CoM stops climbing), while still
+    /// airborne and *independent of what happens afterwards*.
+    ///
+    /// This is the fix for the measured collapse: the previous version paid the
+    /// peak as a TERMINAL bonus gated on `!fallen`, so the only way to collect
+    /// it was to avoid falling — and the cheapest way to avoid falling was to
+    /// never jump. Over 220 updates that drove `peak_height` from 0.558 to
+    /// 0.050 while `mean_ep_reward` was preserved (`corr(update, peak) =
+    /// −0.949`), i.e. the policy learned to suppress the expert's own stroke.
+    /// A credit for an EVENT must be paid at the event, not ransomed against a
+    /// later outcome the policy can dodge.
+    pub w_apex_peak: f32,
+    /// Measured rise (px above standing) that saturates [`Self::w_apex_peak`].
+    pub apex_peak_target: f32,
     /// Liftoff: charge on the conserved angular momentum `|L|`.
     pub w_liftoff: f32,
     /// Liftoff (optional ablation): charge on the immediate `|ω_com|`.
@@ -105,6 +122,14 @@ impl Default for RewardConfig {
             w_alive: 0.005,
             w_apex: 0.5,
             apex_target: 40.0,
+            // The measured-apex payment. This replaces the old terminal
+            // `peak × R_PEAK` bonus, which paid ~1.65 for the flat "time out
+            // without ever landing" episodes and so *funded* the degenerate
+            // solution. `apex_peak_target = 60 px` ≈ a real hop; saturating at
+            // 1.0 caps a hop at +2.5, while `fall_penalty` (3.0) is set ABOVE
+            // it so hop-then-crash is still strictly worse than not jumping.
+            w_apex_peak: 2.5,
+            apex_peak_target: 60.0,
             w_liftoff: 0.3,
             w_liftoff_spin: 0.0,
             w_land: 1.5,
@@ -141,6 +166,10 @@ pub struct RewardEvents {
     /// This tick was the first grounded tick after flight — the land window
     /// opened.
     pub landed: bool,
+    /// This tick was the **apex event**: airborne and the CoM has stopped
+    /// climbing (`v_com.y >= 0`, vello y-down). The measured rise is paid
+    /// here, once per flight, regardless of what happens afterwards.
+    pub apex_reached: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +199,17 @@ pub struct JumpReward {
     pub last_e_dcm: f32,
     /// The **best** (smallest) `e_DCM` seen at any landing this episode.
     pub min_e_dcm: f32,
+    /// Tracks the climb inside the current flight, to detect the apex event.
+    pub flight_peak: f32,
+    /// Highest rise above standing reached this flight, px.
+    pub last_apex_rise: f32,
+    /// Credit paid at the most recent apex event (0 outside that tick).
+    pub last_apex_peak_pay: f32,
+    /// Paid `w_apex_peak·saturate(rise)` credits so far this episode.
+    pub sum_apex_peak_pay: f32,
+    /// This flight's apex has already been paid — at most one apex credit per
+    /// flight, so a mid-air bob cannot farm it.
+    flight_apex_paid: bool,
     /// The `w_land·quality` credit paid on the most recent landing (0 outside).
     pub last_land_pay: f32,
     /// The `w_apex·apex` credit paid on the most recent liftoff (0 outside).
@@ -200,6 +240,11 @@ impl JumpReward {
             last_apex_pred: 0.0,
             last_e_dcm: 0.0,
             min_e_dcm: f32::MAX,
+            flight_peak: 0.0,
+            last_apex_rise: 0.0,
+            last_apex_peak_pay: 0.0,
+            sum_apex_peak_pay: 0.0,
+            flight_apex_paid: false,
             last_land_pay: 0.0,
             last_apex_pay: 0.0,
             sum_land_pay: 0.0,
@@ -228,6 +273,11 @@ impl JumpReward {
         self.last_apex_pred = 0.0;
         self.last_e_dcm = 0.0;
         self.min_e_dcm = f32::MAX;
+        self.flight_peak = 0.0;
+        self.last_apex_rise = 0.0;
+        self.last_apex_peak_pay = 0.0;
+        self.sum_apex_peak_pay = 0.0;
+        self.flight_apex_paid = false;
         self.last_land_pay = 0.0;
         self.last_apex_pay = 0.0;
         self.sum_land_pay = 0.0;
@@ -267,6 +317,7 @@ impl JumpReward {
         self.sum_alive += c.w_alive;
         self.last_land_pay = 0.0;
         self.last_apex_pay = 0.0;
+        self.last_apex_peak_pay = 0.0;
 
         // ---- phase transitions ----
         match self.phase {
@@ -289,10 +340,42 @@ impl JumpReward {
                     self.sum_apex_pay += self.last_apex_pay;
                     self.liftoffs += 1;
                     events.liftoff = true;
+                    // Arm the apex event for THIS flight. `rise` is the height
+                    // already bought above standing; the tracker only ever
+                    // grows, so the apex payment cannot be gamed by bobbing.
+                    self.flight_peak = rise;
+                    self.last_apex_rise = 0.0;
+                    self.flight_apex_paid = false;
                     self.phase = Phase::Flight;
                 }
             }
             Phase::Flight => {
+                // ---- CHECKPOINT 1b · the apex EVENT ----
+                // Pay the rise the body ACTUALLY reached, on the tick the CoM
+                // stops climbing, *while airborne*. Crucially this is not gated
+                // on `!fallen`: the credit is for the event, so a hop that is
+                // later mis-landed still banked its height. Ransomning an event
+                // credit against a later outcome is what taught the policy to
+                // suppress the stroke (measured: peak 0.558 → 0.050 over 220
+                // updates while reward was preserved).
+                let rise = height_px - c.hip_height;
+                if rise > self.flight_peak {
+                    self.flight_peak = rise;
+                }
+                // `v_com.y >= 0` ⇒ descending (vello y-down). Guard on having
+                // actually risen: a body that never left the standing line (a
+                // failed launch, `rise ≈ 0`) must not be paid an apex credit
+                // for simply falling back down.
+                let apex_now = f.v_com.y >= 0.0 && self.flight_peak > c.apex_peak_target * 0.05;
+                if apex_now && !self.flight_apex_paid {
+                    let sat = (self.flight_peak / c.apex_peak_target.max(1e-6)).clamp(0.0, 1.0);
+                    self.last_apex_peak_pay = c.w_apex_peak * sat;
+                    r += self.last_apex_peak_pay;
+                    self.sum_apex_peak_pay += self.last_apex_peak_pay;
+                    self.last_apex_rise = self.flight_peak;
+                    self.flight_apex_paid = true;
+                    events.apex_reached = true;
+                }
                 if f.grounded {
                     // ---- CHECKPOINT 2 OPENS · touchdown ----
                     // No payment here. On the impact tick the CoM is still
@@ -735,6 +818,170 @@ mod tests {
         assert!(
             hop_total > still_total + 0.5,
             "hop {hop_total:.3} must beat standing still {still_total:.3}"
+        );
+    }
+
+    /// **The regression that matters.** The apex credit must be paid at the
+    /// APEX EVENT — while airborne — and must survive whatever happens next.
+    ///
+    /// The bug this locks out: the peak used to be a terminal bonus gated on
+    /// `!fallen`, paid by the caller at episode end. Collected over 220 updates
+    /// that drove `peak_height` 0.558 → 0.050 with `corr(update, peak) = −0.949`
+    /// while reward was *preserved*, because the cheap way to claim it was to
+    /// never jump at all. If this test ever fails, that failure mode is back.
+    #[test]
+    fn the_apex_is_paid_while_airborne_and_not_ransomed_on_survival() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
+        let standing = fiction(standing_hip(), standing_hip(), Vec2::ZERO, true);
+        rw.step(&standing, None);
+
+        // Launch: airborne and climbing.
+        let up = fiction(
+            Vec2::new(0.0, SURFACE - HIP - 10.0),
+            Vec2::new(0.0, SURFACE - HIP - 10.0),
+            Vec2::new(0.0, -260.0),
+            false,
+        );
+        let (_, ev) = rw.step(&up, None);
+        assert!(ev.liftoff, "first airborne tick is the liftoff checkpoint");
+        assert!(
+            !ev.apex_reached,
+            "still climbing — the apex event must not fire yet"
+        );
+
+        // Climb to a real apex (40 px above standing).
+        let apex_y = SURFACE - HIP - 40.0;
+        let rising = fiction(
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, -40.0),
+            false,
+        );
+        let (_, ev) = rw.step(&rising, None);
+        assert!(!ev.apex_reached, "v_com.y < 0 is still climbing");
+
+        // The tick the CoM stops climbing — the apex EVENT.
+        let top = fiction(
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, 0.0),
+            false,
+        );
+        let (r_apex, ev) = rw.step(&top, None);
+        assert!(ev.apex_reached, "the apex event must fire at the top");
+        assert!(
+            rw.last_apex_peak_pay > cfg.w_apex_peak * 0.5,
+            "a 40/60 px rise must bank over half the apex credit: {}",
+            rw.last_apex_peak_pay
+        );
+        assert!(
+            r_apex > cfg.w_apex_peak * 0.5,
+            "the credit lands on THIS tick, not at episode end: {r_apex}"
+        );
+
+        // Now the body tumbles and never lands. The apex credit already banked
+        // must be untouched — that is the whole point.
+        let banked = rw.sum_apex_peak_pay;
+        assert!(banked > 0.0);
+        for k in 0..30 {
+            let y = apex_y + k as f32 * 3.0;
+            let falling = fiction(
+                Vec2::new(0.0, y),
+                Vec2::new(0.0, y),
+                Vec2::new(40.0, 300.0),
+                false,
+            );
+            rw.step(&falling, None);
+        }
+        assert!(
+            (rw.sum_apex_peak_pay - banked).abs() < 1e-6,
+            "the banked apex credit must never be revoked by a bad landing"
+        );
+    }
+
+    /// A launch that never actually rises (the stroke was suppressed, `rise ≈ 0`)
+    /// must earn NO apex credit. Otherwise "twitch and fall back" would be paid
+    /// for, which is the same degenerate solution in a smaller form.
+    #[test]
+    fn a_failed_launch_earns_no_apex_credit() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
+        let standing = fiction(standing_hip(), standing_hip(), Vec2::ZERO, true);
+        rw.step(&standing, None);
+
+        // Airborne, but the hip never rose: `flight_peak` stays ~0.
+        let flat = fiction(
+            Vec2::new(0.0, SURFACE - HIP - 0.5),
+            Vec2::new(0.0, SURFACE - HIP - 0.5),
+            Vec2::new(0.0, 60.0),
+            false,
+        );
+        let (_, ev) = rw.step(&flat, None);
+        assert!(ev.liftoff);
+        assert!(!ev.apex_reached);
+        assert_eq!(
+            rw.sum_apex_peak_pay, 0.0,
+            "a non-rise must not be paid as an apex"
+        );
+    }
+
+    /// One credit per flight — a mid-air bob must not farm the apex payment.
+    #[test]
+    fn the_apex_credit_is_paid_once_per_flight() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
+        let standing = fiction(standing_hip(), standing_hip(), Vec2::ZERO, true);
+        rw.step(&standing, None);
+
+        let up = fiction(
+            Vec2::new(0.0, SURFACE - HIP - 10.0),
+            Vec2::new(0.0, SURFACE - HIP - 10.0),
+            Vec2::new(0.0, -260.0),
+            false,
+        );
+        rw.step(&up, None);
+
+        let apex_y = SURFACE - HIP - 60.0;
+        let top = fiction(
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, 0.0),
+            false,
+        );
+        let (_, ev) = rw.step(&top, None);
+        assert!(ev.apex_reached);
+        let first = rw.sum_apex_peak_pay;
+        assert!(first > 0.0);
+
+        // Bob: descend, then rise again while still airborne.
+        for _ in 0..3 {
+            let bob = fiction(
+                Vec2::new(0.0, apex_y + 2.0),
+                Vec2::new(0.0, apex_y + 2.0),
+                Vec2::new(0.0, 20.0),
+                false,
+            );
+            rw.step(&bob, None);
+        }
+        let bob_up = fiction(
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, -30.0),
+            false,
+        );
+        rw.step(&bob_up, None);
+        let bob_top = fiction(
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, apex_y),
+            Vec2::new(0.0, 0.0),
+            false,
+        );
+        rw.step(&bob_top, None);
+        assert!(
+            (rw.sum_apex_peak_pay - first).abs() < 1e-6,
+            "a mid-air bob must not pay the apex twice: {first} -> {}",
+            rw.sum_apex_peak_pay
         );
     }
 }
