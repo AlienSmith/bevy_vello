@@ -40,19 +40,6 @@ use crate::actuate::{FootPose, Pose};
 use crate::control::{Command, ControlConfig, ControlOut, LocoMode, Step};
 use crate::observe::Fiction;
 
-/// Full-extension rest chord (hip→foot) offsets — the same constants
-/// [`StandingCtrl`](crate::control::StandingCtrl) stands on (v10 blueprint,
-/// spawn scale 0.5). Chord ≈ 111 px ≈ `thigh + calf`.
-const REST_LEFT: Vec2 = Vec2::new(-33.0, 106.0);
-const REST_RIGHT: Vec2 = Vec2::new(39.5, 103.0);
-
-/// Crouch chord: depth 106 → 78 px with the **rest x-offsets kept**. The knee
-/// folds (chord ≈ 85 < thigh+calf, the bones are rigid); the hip descends.
-/// Gathering inward was measured to drag the planted feet and kick the torso
-/// (see module docs) — a pure vertical stroke moves only the depth.
-const CROUCH_LEFT: Vec2 = Vec2::new(-33.0, 78.0);
-const CROUCH_RIGHT: Vec2 = Vec2::new(39.5, 78.0);
-
 /// One stroke cycle. Time-phased; `Land` re-arms `Load` while the command is
 /// held (bunny-hop) — the mode machine (`LocoState::decide`) ends the stroke
 /// externally when the jump intent goes away.
@@ -69,11 +56,14 @@ pub enum JumpPhase {
 }
 
 /// The scripted jump controller — the authored expert for the jump intent
-/// (`Command::is_jump`). See the module docs for the stroke.
-#[derive(Debug, Clone, Copy)]
+/// (`Command::is_jump`). The *shape* comes from the keyframed [`jump_clip`]
+/// track; this type only owns the stroke clock, the contact-driven flight exit,
+/// and the ride-along hip anchor.
+#[derive(Debug, Clone)]
 pub struct JumpCtrl {
     phase: JumpPhase,
-    /// Seconds inside the current phase.
+    /// Seconds since the stroke began (the clip's local time, unwrapped across
+    /// re-hops so a held jump keeps advancing through the track).
     t: f32,
     /// Completed touchdown count (telemetry/tests).
     hops: u32,
@@ -83,23 +73,28 @@ pub struct JumpCtrl {
     anchor_v: f32,
     /// True once the ride-along has been seeded (on the first Load entry).
     seeded: bool,
-    // The active ramp: offsets are `lerp(*_from, *_to, smoothstep(t/dur))`.
-    left_from: Vec2,
-    left_to: Vec2,
-    right_from: Vec2,
-    right_to: Vec2,
-    // Phase durations, seconds.
-    load_ts: f32,
-    launch_ts: f32,
-    flight_ts: f32,
-    land_ts: f32,
+    /// Stroke-local phase boundaries (seconds): load end, launch end, flight
+    /// end. From [`crate::jump_clip::jump_clip`]; kept here so a re-hop can
+    /// rebase `t` cheaply.
+    load_end: f32,
+    launch_end: f32,
+    flight_end: f32,
+    /// Chord length used to turn the normalized pose into px offsets.
+    leg_len: f32,
 }
 
 impl JumpCtrl {
-    /// `lower` is unused for now (the chord constants are the v10 blueprint
-    /// rest pose, like [`StandingCtrl`](crate::control::StandingCtrl)); it is
-    /// taken for constructor symmetry and future reach-limited crouch depth.
-    pub fn new(_lower: &walker_math::LowerBodyConfig) -> Self {
+    /// `lower` supplies `thigh_len + calf_len` (the chord the normalized clip
+    /// multiplies into px). Defaults to the v10 blueprint when zero.
+    pub fn new(lower: &walker_math::LowerBodyConfig) -> Self {
+        let leg_len = match lower.thigh_len + lower.calf_len {
+            l if l > 0.0 => l,
+            _ => 110.0,
+        };
+        // Keep the boundaries in lockstep with the clip rather than re-deriving
+        // them: read the key times straight off the track.
+        let clip = crate::jump_clip::jump_clip();
+        let ts: Vec<f32> = clip.keys().iter().map(|k| k.t).collect();
         Self {
             phase: JumpPhase::Load,
             t: 0.0,
@@ -107,14 +102,10 @@ impl JumpCtrl {
             anchor: Vec2::ZERO,
             anchor_v: 0.0,
             seeded: false,
-            left_from: REST_LEFT,
-            left_to: CROUCH_LEFT,
-            right_from: REST_RIGHT,
-            right_to: CROUCH_RIGHT,
-            load_ts: 0.22,
-            launch_ts: 0.12,
-            flight_ts: 0.45,
-            land_ts: 0.25,
+            load_end: ts.get(1).copied().unwrap_or(0.22),
+            launch_end: ts.get(2).copied().unwrap_or(0.34),
+            flight_end: ts.get(3).copied().unwrap_or(0.79),
+            leg_len,
         }
     }
 
@@ -123,23 +114,13 @@ impl JumpCtrl {
         self.hops
     }
 
-    /// Ease the ramps: smoothstep on the normalized phase time.
-    fn ramp_k(&self, dur: f32) -> f32 {
-        if dur <= 0.0 {
-            return 1.0;
-        }
-        let u = (self.t / dur).clamp(0.0, 1.0);
-        u * u * (3.0 - 2.0 * u)
-    }
-
-    /// Begin a new ramp to `to_l`/`to_r` starting from the current offsets.
-    fn begin(&mut self, phase: JumpPhase, cur_l: Vec2, cur_r: Vec2, to_l: Vec2, to_r: Vec2) {
-        self.phase = phase;
-        self.t = 0.0;
-        self.left_from = cur_l;
-        self.left_to = to_l;
-        self.right_from = cur_r;
-        self.right_to = to_r;
+    /// Sample the authored clip at the current stroke time, returning the
+    /// normalized 5-param pose, the stance flag, and the px hip→foot offsets.
+    fn sample_shape(&self) -> ([f32; 5], bool, Vec2, Vec2) {
+        let clip = crate::jump_clip::jump_clip();
+        let key = clip.sample(self.t);
+        let (l, r) = crate::jump_clip::key_to_offsets(key.pose, self.leg_len);
+        (key.pose, key.stance, l, r)
     }
 }
 
@@ -155,46 +136,36 @@ impl Step for JumpCtrl {
         let dt = dt.max(0.0);
         self.t += dt;
 
-        // Phase clock and the shape it commands.
-        let dur = match self.phase {
-            JumpPhase::Load => self.load_ts,
-            JumpPhase::Launch => self.launch_ts,
-            JumpPhase::Flight => self.flight_ts,
-            JumpPhase::Land => self.land_ts,
-        };
-        let k = self.ramp_k(dur);
-        let left = self.left_from.lerp(self.left_to, k);
-        let right = self.right_from.lerp(self.right_to, k);
-        // Stance (stiff strut) everywhere except the airborne phase.
-        let stance = self.phase != JumpPhase::Flight;
-
-        // Transitions: timers out the ground phases; Flight ends early on a
-        // real touchdown (contact is measured, the ballistic arc is not).
-        match self.phase {
-            JumpPhase::Load if self.t >= dur => {
-                self.begin(JumpPhase::Launch, left, right, REST_LEFT, REST_RIGHT);
-            }
-            JumpPhase::Launch if self.t >= dur => {
-                // Pencil: hold the extended shape through the arc (see module
-                // docs — swinging airborne legs reaction-rotates the torso).
-                self.begin(JumpPhase::Flight, left, right, REST_LEFT, REST_RIGHT);
-            }
-            JumpPhase::Flight if self.t >= dur || fiction.feet.iter().any(|f| f.touching) => {
-                self.begin(JumpPhase::Land, left, right, REST_LEFT, REST_RIGHT);
-            }
-            JumpPhase::Land if self.t >= dur && fiction.grounded => {
-                // Held jump intent re-hops (bunny-hop semantics).
-                self.hops += 1;
-                self.begin(
-                    JumpPhase::Load,
-                    REST_LEFT,
-                    REST_RIGHT,
-                    CROUCH_LEFT,
-                    CROUCH_RIGHT,
-                );
-            }
-            _ => {}
+        // Phase boundaries come straight from the clip; the phase itself is a
+        // function of the clock. Flight can end **early** on real contact even
+        // though the clip's shape keeps running (a clip cannot see the world).
+        // The contact check only fires once flight is already established (the
+        // entry tick still reads the feet touching, which is the *launch*, not
+        // a landing).
+        let was_flight = self.phase == JumpPhase::Flight;
+        self.phase = crate::jump_clip::phase_at(self.t);
+        let contact = fiction.feet.iter().any(|f| f.touching);
+        if was_flight && self.phase == JumpPhase::Flight && contact {
+            // Touchdown: skip ahead to the clip's Land segment. The wrap keeps
+            // the pose continuous (the Land key starts at rest, the Flight key
+            // is rest too, so this is a soft jump).
+            self.t = self.flight_end;
+            self.phase = JumpPhase::Land;
         }
+        // Re-hop: once the Land segment has played out while still grounded and
+        // the intent is held, rebase the clock to the top of the clip.
+        if self.phase == JumpPhase::Land && self.t >= self.flight_end + 0.25 && fiction.grounded {
+            self.hops += 1;
+            self.t = 0.0;
+            self.phase = JumpPhase::Load;
+        }
+
+        // Shape: sample the authored clip at the current stroke time. Stance is
+        // authored from the **phase**, not the blended key: the Land segment
+        // starts on the (soft) Flight key, so a lerped flag would keep the
+        // struts soft through touchdown. Ground = stiff, air = soft.
+        let (_pose5, _key_stance, left, right) = self.sample_shape();
+        let stance = self.phase != JumpPhase::Flight;
 
         // Anchor: the pose is translation-invariant in WORLD x — only the
         // chord shape actuates (see [`crate::actuate`]). But while a stance
@@ -256,10 +227,16 @@ mod tests {
     use super::*;
     use crate::observe::FootState;
 
+    /// The clip's rest hip→foot offsets at the default `leg_len` (110 px).
+    fn rest_offsets() -> (Vec2, Vec2) {
+        crate::jump_clip::key_to_offsets(crate::jump_clip::rest_pose(), 110.0)
+    }
+
     /// Standing fiction: feet at the rest offsets under a hip at (0, −140),
     /// both touching.
     fn standing() -> Fiction {
         let hip = Vec2::new(0.0, -140.0);
+        let (l, r) = rest_offsets();
         Fiction {
             dt: 1.0 / 90.0,
             hip,
@@ -272,12 +249,12 @@ mod tests {
             omega_com: 0.0,
             feet: [
                 FootState {
-                    pos: hip + REST_LEFT,
+                    pos: hip + l,
                     vel: Vec2::ZERO,
                     touching: true,
                 },
                 FootState {
-                    pos: hip + REST_RIGHT,
+                    pos: hip + r,
                     vel: Vec2::ZERO,
                     touching: true,
                 },
@@ -334,8 +311,9 @@ mod tests {
         assert!(!flight.pose.left_foot.stance, "flight is airborne");
         assert!(!flight.pose.right_foot.stance);
         assert!(depth(flight) > 100.0, "shape held extended in flight");
+        let (rest_l, _) = rest_offsets();
         assert!(
-            (flight.pose.left_foot.pos.x - flight.pose.hip.x - REST_LEFT.x).abs() < 2.0,
+            (flight.pose.left_foot.pos.x - flight.pose.hip.x - rest_l.x).abs() < 2.0,
             "flight keeps the rest x-offsets"
         );
 

@@ -9,6 +9,7 @@ pub mod actuate;
 pub mod control;
 pub mod emit;
 pub mod jump;
+pub mod jump_clip;
 pub mod jump_residual;
 pub mod learned;
 pub mod observe;

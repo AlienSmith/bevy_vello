@@ -30,6 +30,7 @@
 //! and the `lower_body::mod` re-exports are unchanged from before the split.
 
 mod attitude;
+mod clip;
 mod ik;
 mod laws;
 mod placement;
@@ -39,6 +40,7 @@ mod vertical;
 mod walk;
 
 pub use attitude::*;
+pub use clip::*;
 pub use ik::*;
 pub use laws::*;
 pub use placement::*;
