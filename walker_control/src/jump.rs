@@ -30,9 +30,14 @@
 //!   the jump intent is held) **re-arms Load for the next hop** — bunny-
 //!   hopping, matching loop-2's held-command semantics.
 //!
-//! The stroke is time-phased and deliberately **open-loop** (no height
-//! feedback yet): the authored expert PPO will later be trained against. When
-//! the measured hop is right, the same phases get a closed Δl law on top.
+//! The stroke's *shape* is time-phased and **open-loop** (no height feedback):
+//! the authored expert PPO is trained against exactly this. The one exception
+//! is the `Load→Launch` boundary, which is **event-gated** on the measured
+//! chord (`ControlConfig::jump_fire_r`) rather than fired on the clock — a
+//! run-up hop whose feet have not loaded must not extend into an unbraced
+//! stance (`plans/jump-ppo-residual-polar-action.md` §11). `Flight→Land` is
+//! event-gated on contact the same way. Every other transition, and every
+//! keyframe, remains pure replay.
 
 use glam::Vec2;
 
@@ -73,6 +78,15 @@ pub struct JumpCtrl {
     anchor_v: f32,
     /// True once the ride-along has been seeded (on the first Load entry).
     seeded: bool,
+    /// Seconds spent **held at the Load gate** this stroke (see the advance
+    /// rule in [`Step::step`]). Capped by `ControlConfig::jump_load_cap` so a
+    /// body that never compresses still launches.
+    gate_wait: f32,
+    /// True once this stroke has passed the Load→Launch gate. Latching it is
+    /// what stops the gate re-arming: during Launch the measured chord is
+    /// rising again (that is the extension), so an unlatched condition would
+    /// yank the cursor back to the crouch key forever.
+    fired: bool,
     /// Stroke-local phase boundaries (seconds): load end, launch end, flight
     /// end. From [`crate::jump_clip::jump_clip`]; kept here so a re-hop can
     /// rebase `t` cheaply.
@@ -102,6 +116,8 @@ impl JumpCtrl {
             anchor: Vec2::ZERO,
             anchor_v: 0.0,
             seeded: false,
+            gate_wait: 0.0,
+            fired: false,
             load_end: ts.get(1).copied().unwrap_or(0.22),
             launch_end: ts.get(2).copied().unwrap_or(0.34),
             flight_end: ts.get(3).copied().unwrap_or(0.79),
@@ -112,6 +128,23 @@ impl JumpCtrl {
     /// Completed hops (for tests and later telemetry).
     pub fn hops(&self) -> u32 {
         self.hops
+    }
+
+    /// Measured chord ratio over the **touching** feet: `mean(|foot − hip|) /
+    /// leg_len`. `None` when neither foot reports contact (airborne ⇒ nothing
+    /// to gate on). This is the reality signal the §11 Load→Launch gate reads.
+    fn measured_r(&self, fiction: &Fiction) -> Option<f32> {
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        for f in fiction.feet.iter().filter(|f| f.touching) {
+            sum += (f.pos - fiction.hip).length();
+            n += 1;
+        }
+        if n == 0 {
+            None
+        } else {
+            Some(sum / (n as f32 * self.leg_len.max(1e-6)))
+        }
     }
 
     /// Sample the authored clip at the current stroke time, returning the
@@ -129,12 +162,52 @@ impl Step for JumpCtrl {
         &mut self,
         _cmd: &Command,
         fiction: &Fiction,
-        _cfg: &ControlConfig,
+        cfg: &ControlConfig,
         dt: f32,
         facing: f32,
     ) -> ControlOut {
         let dt = dt.max(0.0);
-        self.t += dt;
+
+        // Advance rule — NOT a bare clock through the whole Load segment. The
+        // Load segment itself runs on time (the crouch must actually be
+        // performed, or there is nothing to measure); the gate only holds the
+        // cursor at the Load→Launch BOUNDARY until the MEASURED chord has
+        // compressed past `jump_fire_r` (§11). This is the same shape as
+        // `Flight→Land` below: authored keys, reality-gated transition.
+        // Fallbacks keep the stroke from ever hanging — `jump_load_cap` seconds
+        // since the boundary, and a disabled knob (`<= 0`) is the old pure
+        // clock replay.
+        let gate_on = cfg.jump_fire_r > 0.0;
+        // The predicate is "would this tick cross into Launch?", not "are we
+        // already past it": a hold parks `t` just under the boundary, so a
+        // position test would disengage on the very next tick.
+        let crossing = !self.fired && self.t + dt >= self.load_end;
+        if gate_on && crossing {
+            let compressed = self
+                .measured_r(fiction)
+                .map(|r| r < cfg.jump_fire_r)
+                .unwrap_or(false);
+            let capped = self.gate_wait >= cfg.jump_load_cap.max(0.0);
+            if compressed || capped {
+                // Release: latch and step across the boundary.
+                self.fired = true;
+                self.t = (self.t + dt).max(self.load_end);
+            } else {
+                // Hold at the crouch key: freeze the cursor just under the
+                // boundary (so `phase_at` still reports Load) and count the
+                // wait so the cap can fire.
+                self.gate_wait += dt;
+                self.t = self.load_end - 1e-4;
+            }
+        } else {
+            // No gate, or already past the boundary: the clock is free. Latch
+            // `fired` on the crossing so "has this stroke launched yet" has one
+            // meaning whether or not the gate is enabled.
+            if crossing {
+                self.fired = true;
+            }
+            self.t += dt;
+        }
 
         // Phase boundaries come straight from the clip; the phase itself is a
         // function of the clock. Flight can end **early** on real contact even
@@ -153,11 +226,14 @@ impl Step for JumpCtrl {
             self.phase = JumpPhase::Land;
         }
         // Re-hop: once the Land segment has played out while still grounded and
-        // the intent is held, rebase the clock to the top of the clip.
+        // the intent is held, rebase the clock to the top of the clip. The gate
+        // re-arms with it — every hop has to earn its own launch.
         if self.phase == JumpPhase::Land && self.t >= self.flight_end + 0.25 && fiction.grounded {
             self.hops += 1;
             self.t = 0.0;
             self.phase = JumpPhase::Load;
+            self.fired = false;
+            self.gate_wait = 0.0;
         }
 
         // Shape: sample the authored clip at the current stroke time. Stance is
@@ -232,6 +308,32 @@ mod tests {
         crate::jump_clip::key_to_offsets(crate::jump_clip::rest_pose(), 110.0)
     }
 
+    /// Config with the §11 Load→Launch gate disabled — the pre-§11 pure clock
+    /// replay. The stroke-mechanics tests below drive a fiction whose chord
+    /// never compresses (a static standing body), so they must not be gated;
+    /// the gate has its own tests further down.
+    fn clock_cfg() -> ControlConfig {
+        ControlConfig {
+            jump_fire_r: 0.0,
+            ..ControlConfig::default()
+        }
+    }
+
+    /// A fiction whose touching feet sit at `chord_ratio · leg_len` from the
+    /// hip — the compression signal the gate reads.
+    fn crouched(chord_ratio: f32) -> Fiction {
+        let mut f = standing();
+        let leg = 110.0;
+        let chord = chord_ratio * leg;
+        // Keep the rest x-direction, shrink only the depth: this reproduces
+        // "the crouch actually loaded" without moving the feet in x.
+        let (l, r) = rest_offsets();
+        let dir = |o: Vec2| o.normalize_or_zero();
+        f.feet[0].pos = f.hip + dir(l) * chord;
+        f.feet[1].pos = f.hip + dir(r) * chord;
+        f
+    }
+
     /// Standing fiction: feet at the rest offsets under a hip at (0, −140),
     /// both touching.
     fn standing() -> Fiction {
@@ -285,7 +387,7 @@ mod tests {
 
     #[test]
     fn the_stroke_crouches_then_extends_then_tucks() {
-        let cfg = ControlConfig::default();
+        let cfg = clock_cfg();
         let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
         let depth = |o: &ControlOut| o.pose.left_foot.pos.y - o.pose.hip.y;
 
@@ -325,7 +427,7 @@ mod tests {
     #[test]
     fn flight_ends_early_on_real_contact() {
         // The ballistic clock may not expire, but a touchdown does: land.
-        let cfg = ControlConfig::default();
+        let cfg = clock_cfg();
         let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
         // Drive Load + Launch grounded until Flight begins (tick 31), a few
         // ticks airborne, then the fiction reports contact again.
@@ -346,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_held_command_re_hops() {
-        let cfg = ControlConfig::default();
+        let cfg = clock_cfg();
         let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
         // One full hop ≈ load .22 + launch .12 + short flight + land .25.
         run(&cfg, &mut ctrl, &standing(), 26); // grounded throughout
@@ -359,7 +461,7 @@ mod tests {
     fn land_waits_for_the_ground() {
         // Commanded contact gone (airborne) ⇒ Land must not hand over;
         // stance-on in the air does no harm (strut target vs free feet).
-        let cfg = ControlConfig::default();
+        let cfg = clock_cfg();
         let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
         // Run to the end of flight without any contact.
         run(&cfg, &mut ctrl, &airborne(), 75);
@@ -376,6 +478,95 @@ mod tests {
             1.0,
         );
         assert_eq!(ctrl.phase, JumpPhase::Land, "still no ground, no re-arm");
+    }
+
+    #[test]
+    fn the_gate_holds_launch_until_the_chord_actually_compresses() {
+        // Static standing body: the chord never compresses, so the cursor must
+        // stall at the Load→Launch boundary instead of firing the extension
+        // into an unbraced stance. This is the whole point of §11.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.8,
+            jump_load_cap: 5.0, // effectively "no cap" for this test
+            ..ControlConfig::default()
+        };
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        // Enough ticks to pass the clip's 0.22 s load and then some.
+        run(&cfg, &mut ctrl, &standing(), 60);
+        assert_eq!(
+            ctrl.phase,
+            JumpPhase::Load,
+            "an unloaded body must not fire the power stroke"
+        );
+        assert!(!ctrl.fired, "the gate never latched");
+    }
+
+    #[test]
+    fn the_gate_releases_the_moment_the_measured_chord_compresses() {
+        let cfg = ControlConfig {
+            jump_fire_r: 0.8,
+            jump_load_cap: 5.0,
+            ..ControlConfig::default()
+        };
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        // Pass the load window still unloaded: still held.
+        run(&cfg, &mut ctrl, &standing(), 21);
+        assert_eq!(ctrl.phase, JumpPhase::Load, "still held before load");
+        // Now the measured chord compresses past 0.8: the very next tick fires.
+        ctrl.step(
+            &Command::jump_vertical(100.0),
+            &crouched(0.7),
+            &cfg,
+            1.0 / 90.0,
+            1.0,
+        );
+        assert!(ctrl.fired, "compression latched the gate");
+        assert_eq!(ctrl.phase, JumpPhase::Launch, "the power stroke begins");
+    }
+
+    #[test]
+    fn the_gate_cap_fires_even_a_body_that_never_loads() {
+        // Fallback: a body that never compresses must still launch at the cap,
+        // so the stroke can never hang.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.8,
+            jump_load_cap: 0.10, // 9 ticks past the boundary
+            ..ControlConfig::default()
+        };
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        run(&cfg, &mut ctrl, &standing(), 60);
+        assert!(ctrl.fired, "the cap released the gate");
+        assert_ne!(ctrl.phase, JumpPhase::Load, "the stroke got past Load");
+    }
+
+    #[test]
+    fn a_disabled_gate_is_the_pure_clock_replay() {
+        // `jump_fire_r <= 0` is the pre-§11 behaviour: launch on the clock even
+        // with an uncompressed body.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.0,
+            ..ControlConfig::default()
+        };
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        run(&cfg, &mut ctrl, &standing(), 26);
+        assert!(ctrl.fired, "no gate ⇒ latched on the clock");
+        assert_eq!(ctrl.phase, JumpPhase::Launch, "fired on schedule");
+    }
+
+    #[test]
+    fn each_re_hop_has_to_earn_its_own_launch() {
+        // The gate re-arms at every re-hop: a compressed first hop must not
+        // leave the latch open for a second hop that never loads.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.8,
+            jump_load_cap: 5.0,
+            ..ControlConfig::default()
+        };
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        // Hop 1: compressed throughout, so it fires and completes.
+        run(&cfg, &mut ctrl, &crouched(0.7), 120);
+        assert!(ctrl.hops() >= 1, "the compressed hop completed");
+        assert!(!ctrl.fired, "the latch re-armed for the next hop");
     }
 
     #[test]

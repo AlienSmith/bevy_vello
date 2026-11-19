@@ -243,6 +243,15 @@ fn apply_control_env(cfg: &mut walker_control::control::ControlConfig) {
     if let Some(v) = env_f32("JUMP_IMPULSE") {
         cfg.jump_launch_impulse = v;
     }
+    // §11 Load→Launch gate: fire the power stroke only once the measured chord
+    // has compressed to this ratio of `leg_len` (`0` disables the gate ⇒ pure
+    // clock replay). `JUMP_LOAD_CAP` is the seconds-past-boundary fallback.
+    if let Some(v) = env_f32("JUMP_FIRE_R") {
+        cfg.jump_fire_r = v;
+    }
+    if let Some(v) = env_f32("JUMP_LOAD_CAP") {
+        cfg.jump_load_cap = v;
+    }
     // Stance pin (1 = on): hold the stance foot's world x for the whole stance
     // instead of letting the emitted target ride the measured hip.
     if let Some(v) = env_f32("STANCE_PIN") {

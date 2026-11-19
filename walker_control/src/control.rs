@@ -317,6 +317,24 @@ pub struct ControlConfig {
     ///
     /// `v0 = sqrt(2·g·apex)`; for `apex = 28 px`, `g = 980` ⇒ ~234 px/s.
     pub jump_launch_impulse: f32,
+    /// Jump **Load→Launch gate**, chord ratio (`JUMP_FIRE_R`). Default `0.8`.
+    ///
+    /// The authored jump clip is a replay: its shape is a pure function of the
+    /// stroke clock. The one place that hurt is `Load→Launch` — on a run-up hop
+    /// the timer fired the power stroke while the feet were still unplanted, so
+    /// the extension pushed into an unbraced stance (measured: apex +0.7 px, a
+    /// lunge) instead of lifting the body. `plans/jump-ppo-residual-polar-
+    /// action.md` §11's fix: hold the cursor at the crouch key until the
+    /// MEASURED chord has actually compressed — `mean(|foot − hip|)/leg_len <
+    /// jump_fire_r` over the touching feet — exactly as `Flight→Land` already
+    /// waits for contact. The shape keys are untouched; only the advance rule
+    /// for `t` gains a gate. `<= 0.0` disables the gate (pure clock replay).
+    pub jump_fire_r: f32,
+    /// Jump Load→Launch gate fallback, seconds (`JUMP_LOAD_CAP`). Default
+    /// `0.30` — a little longer than the clip's natural `0.22 s` load, so a
+    /// healthy crouch fires on compression and only a body that never loads
+    /// waits for the cap. Never a hang: the stroke always launches.
+    pub jump_load_cap: f32,
     /// Attitude-loop closure: position gain on the MEASURED lean error
     /// (radians → radians). `0.0` keeps `upper_angle` a pure echo of the
     /// solver's model lean — the open loop whose damper (`−kd·ω`) sees fiction
@@ -388,7 +406,13 @@ pub struct ControlConfig {
 impl Default for ControlConfig {
     fn default() -> Self {
         Self {
+            // Off by default (0 ⇒ no impulse): the stroke's own extension is
+            // the control case; a nonzero `JUMP_IMPULSE` turns on the real
+            // authority (see the field docs). `qa_prompt`/harness set it.
             jump_launch_impulse: 0.0,
+            // Gate the authored Load→Launch on measured compression (§11).
+            jump_fire_r: 0.8,
+            jump_load_cap: 0.30,
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
             // Deliberately BELOW the gait's own cruise lean (~0.15 rad): the

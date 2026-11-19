@@ -323,6 +323,19 @@ that already worked, no policy surgery; then the residual's job is genuinely
 attitude/shape, not "wait for reality". This answers the "can replay give
 reasonable direction when physics diverges?" worry at its weakest seam.
 
+**Implemented (2026-11-19).** `ControlConfig::jump_fire_r` (default `0.8`;
+`≤ 0` disables ⇒ pure clock replay) plus `ControlConfig::jump_load_cap`
+(default `0.30 s`). The gate sits at the `Load→Launch` **boundary**, not inside
+Load — the crouch itself still plays on time, or there is nothing to measure.
+The predicate is a *crossing* test (`t + dt ≥ load_end`), and the latch
+(`fired`) re-arms at every re-hop so each hop earns its own launch. Harness
+knobs: `JUMP_FIRE_R`, `JUMP_LOAD_CAP`. Tests:
+`the_gate_holds_launch_until_the_chord_actually_compresses`,
+`the_gate_releases_the_moment_the_measured_chord_compresses`,
+`the_gate_cap_fires_even_a_body_that_never_loads`,
+`a_disabled_gate_is_the_pure_clock_replay`,
+`each_re_hop_has_to_earn_its_own_launch`.
+
 ## 12. Ballistic lock-in — two checkpoints, flight reward-free (user framing, revised)
 
 At the instant the feet leave the ground the flight is **fully determined**:
