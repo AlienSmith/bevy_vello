@@ -525,6 +525,47 @@ current config, updates as leg config changes; supersedes the `L/Ĩ·t_flight`
 placeholder). The net sees the consequence of its launch decision while it is
 still correlated with the decision.
 
+### 12.4.1 Generation barrier — the update runs when the sim is CLEAR (2026-11-19)
+
+Early runs fired the PPO update on a **tick count** (`rollout_len(N) = ROLLOUT·N`),
+so the weights swapped while bodies were mid-crouch or mid-air, and each body
+respawned on its own staggered schedule. The visible symptom was the periodic
+"freeze and reset" and a landing that never got to settle.
+
+Now the collector runs to a **barrier**: every env must finish its episode (all
+parked) before `ppo_update_system` fires. It then raises `swap_pending`;
+`ppo_reset_system` (next tick, `Actuate`) tears down and rebuilds **all** bodies
+together and clears the flag. So the new weights always land on a fresh,
+uniform generation — no body is ever mid-stroke across a weight change.
+
+The stall itself is real (the update is one synchronous `PpoTrainer::update` on
+the main thread, ~450 ms at N=32, ~620 ms at the old N=4 buffer sizing) but it is
+now **bounded and reported**: `Time<Virtual>` is clamped (`clamp_virtual_time`,
+`MAX_FRAME_MS`, default ≈ 2 ticks) so a long frame can never fast-forward the
+fixed clock — no catch-up burst after the hitch. The `PerfMeter` prints
+`fps | sim Hz | update_blocked ms` once a second (window title + log), so the
+hitch is measured, not mysterious. Measured after the barrier: `sim` reads
+≈ 51 Hz for the one blocked second then a clean 90.0 — never the old >90 lurch.
+
+### 12.4.2 Floor must cover the layout (bug found 2026-11-19)
+
+`FLOOR_HALF_LEN` was a **constant** 2400 (4800 px). At N=32 with `CHAR_SPACING
+=420` the bodies span 13 020 px (x ∈ [−6510, 6510]), so most of the row stood
+over **empty space** and could never land. The floor is now derived from the
+actual layout (`floor_half_len(n)` = layout half-extent + one spacing, floored at
+the old 2400). Verified: N=32 floor spans [−6930, 6930] vs bodies [−6510, 6510].
+
+### 12.4.3 The checkpoint is a TRAINER file; route it by SHAPE (bug found 2026-11-19)
+
+`walker_ppo` writes a **`PpoTrainer`** json; `walker_qa` reads a **`PolicyBundle`**.
+That cross-format load works (serde ignores the trainer's extra `config` field;
+regression: `a_trainer_checkpoint_loads_as_a_deployable_bundle`). But `walker_qa`
+used to wire *any* loaded checkpoint into the **walk** `LearnedCtrl` (obs 16 / act
+7). The trained jump file is obs **22** / act **5** (`JumpResidual`), so
+`learned.rs`'s width guard held it **inert** — the trained policy silently never
+ran. `walker_qa` now reads the checkpoint's `(obs_dim, action_dim)` and routes:
+22/5 → `JumpResidual`, 16/7 → `LearnedCtrl`, anything else → warn loudly.
+
 ### 12.5 Termination: measured fall only
 
 The earlier "optionally end the episode on predicted doom" is **removed**: a

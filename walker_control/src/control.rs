@@ -438,9 +438,11 @@ impl Default for ControlConfig {
             // Gate the authored Load→Launch on measured compression (§11).
             jump_fire_r: 0.8,
             jump_load_cap: 0.30,
-            // Landing is a window, not an instant: ~1 s of grounded time after
+            // Landing is a window, not an instant: 1.5 s of grounded time after
             // touchdown (absorb + a held rest stance) before the landing counts.
-            jump_land_hold: 1.0,
+            // On touchdown the body is still extended and carries momentum; 1 s
+            // was measured too short to settle.
+            jump_land_hold: 1.5,
             jump_land_lean: 0.35,
             stand_settle_rate: 40.0,
             move_threshold: 5.0,

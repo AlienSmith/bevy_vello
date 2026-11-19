@@ -763,6 +763,30 @@ mod tests {
     }
 
     #[test]
+    fn the_default_landing_window_is_one_and_a_half_seconds() {
+        // The shipped default (1.5 s) must survive a full stroke + hold without a
+        // timeout truncation, and must not complete before 1.5 s of ground.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.0,
+            ..ControlConfig::default()
+        };
+        assert_eq!(cfg.jump_land_hold, 1.5, "default hold is 1.5 s");
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        // 1.4 s of grounded stroke+hold: still short of 1.5 s.
+        run(&cfg, &mut ctrl, &standing(), 126);
+        assert!(
+            !ctrl.landing_complete(&cfg),
+            "1.4 s of ground is not yet 1.5 s of hold"
+        );
+        // Past 1.5 s it completes.
+        run(&cfg, &mut ctrl, &standing(), 40);
+        assert!(
+            ctrl.landing_complete(&cfg),
+            "the 1.5 s default hold completes"
+        );
+    }
+
+    #[test]
     fn a_toppling_body_never_completes_the_landing() {
         // The hold's lean band: a body that keeps tipping must never be declared
         // landed (the fall gate owns that failure). Drive a full stroke on a

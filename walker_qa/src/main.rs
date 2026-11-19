@@ -36,7 +36,8 @@ use std::sync::{Arc, RwLock};
 
 use walker_control::{
     emit::LegHandles,
-    learned::{LearnMode, LearnedCtrl},
+    jump_residual::{JumpResidual, JumpResidualConfig},
+    learned::{LearnMode, LearnedConfig, LearnedCtrl},
     observe::ObserveHandles,
     plugin::{
         AttachWalker, ScriptResource, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer,
@@ -606,18 +607,54 @@ fn attach_walker(
         // match the rig or the commanded feet float above the ground.
         config.lower.hip_height = 104.0;
         apply_lower_env(&mut config.lower);
-        // Deploy: a trained policy behind the same `Step` seam (plan §7). The
-        // `use_learned` flag routes a *move* command to `LocoMode::Learned`;
-        // `dir.y` in the command tells the policy which move — `Up`/`W` sets
-        // the jump intent, so the jump milestone deploys unchanged.
+        // Deploy a loaded checkpoint behind the same `Step` seam (plan §7).
+        //
+        // WHICH controller the checkpoint drives is decided by its SHAPE, not by
+        // assumption. `walker_ppo` trains the **JumpResidual** (obs 22 / act 5,
+        // the polar jump action space); the older walking `LearnedCtrl` is
+        // obs 16 / act 7. Wiring a jump checkpoint into `LearnedCtrl` used to
+        // load cleanly and then hold **inert** (`learned.rs` guards on the obs
+        // width), so the trained policy silently never ran. Route by dims and
+        // say so out loud.
         if let Some(bundle) = policy.0.clone() {
-            config.control.use_learned = true;
-            let lcfg = walker_control::learned::LearnedConfig {
-                hip_height: 104.0,
-                ..Default::default()
+            let (obs, act) = {
+                let g = bundle.read().unwrap();
+                (g.obs_dim(), g.action_dim())
             };
-            config.learned = Some(LearnedCtrl::with_policy(bundle, LearnMode::Deploy, lcfg));
-            info!("attached LEARNED walker to character {root:?}");
+            let jcfg = JumpResidualConfig {
+                hip_height: 104.0,
+                ..JumpResidualConfig::default()
+            };
+            if obs == jcfg.obs_dim && act == jcfg.action_dim {
+                // Jump checkpoint → residual on the authored stroke. Selected
+                // for `LocoMode::Jumping` (`Command::jump` / `jump_vertical`).
+                config.jump_residual = Some(JumpResidual::with_policy(
+                    bundle,
+                    LearnMode::Deploy,
+                    jcfg,
+                    &config.lower,
+                ));
+                info!(
+                    "attached LEARNED JUMP residual to character {root:?} \
+                     (obs {obs} / act {act})"
+                );
+            } else {
+                let lcfg = LearnedConfig {
+                    hip_height: 104.0,
+                    ..Default::default()
+                };
+                if obs != lcfg.obs_dim || act != lcfg.action_dim {
+                    warn!(
+                        "policy shape (obs {obs} / act {act}) matches NEITHER the jump \
+                         residual ({} / {}) nor the walk controller ({} / {}); attaching \
+                         as walk, where it will hold inert",
+                        jcfg.obs_dim, jcfg.action_dim, lcfg.obs_dim, lcfg.action_dim
+                    );
+                }
+                config.control.use_learned = true;
+                config.learned = Some(LearnedCtrl::with_policy(bundle, LearnMode::Deploy, lcfg));
+                info!("attached LEARNED walk controller to character {root:?} (obs {obs} / act {act})");
+            }
         }
         commands.trigger_targets(
             AttachWalker {

@@ -27,7 +27,11 @@ mod reward;
 
 use std::sync::{Arc, RwLock};
 
-use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
+use bevy::{
+    asset::AssetMetaCheck,
+    prelude::*,
+    window::{PresentMode, PrimaryWindow},
+};
 use bevy_vello::{
     collision::{path_to_ccw_quad_path, VelloCollisionWorld, VELLO_COLLISION_COOL_DOWN_TIME},
     integrations::physics::VelloConstraintWorld,
@@ -73,12 +77,32 @@ const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, -30.0, 100.0);
 const SPAWN_SCALE: Vec3 = Vec3::new(0.5, 0.5, 1.0);
 const FOOT_SURFACE_Y: f32 = 312.0;
 const FLOOR_HALF_THICKNESS: f32 = 20.0;
-const FLOOR_HALF_LEN: f64 = 2400.0;
+/// Minimum floor half-length (the old fixed value, 4800 px end to end). The
+/// real floor is `max(this, layout extent + margin)` — see [`floor_half_len`].
+/// It was a constant and became a bug at large `N`: 32 bodies at 420 px span
+/// 13 020 px, so most of the row stood over empty space and could never land.
+const FLOOR_HALF_LEN_MIN: f64 = 2400.0;
 
 /// Hip-to-hip spacing between characters. The rig is ~140 px wide at scale
 /// 0.5; 420 px keeps every pair disjoint in the GPU narrow phase (they share
 /// collision_group 1 with the QA convention, so bodies must never touch).
 const CHAR_SPACING: f32 = 420.0;
+
+/// Leftmost character x for `n` bodies laid out centred on the origin — the
+/// same formula [`spawn_characters`] uses, kept in one place so the floor can
+/// be sized to cover it.
+fn layout_x0(n: usize) -> f32 {
+    -((n.max(1) as f32 - 1.0) * CHAR_SPACING) / 2.0
+}
+
+/// Floor half-length, in world px, sized to the **actual** character layout so
+/// every body always has ground under it (plus one spacing of margin on each
+/// end). Never smaller than [`FLOOR_HALF_LEN_MIN`].
+fn floor_half_len(n: usize) -> f64 {
+    let half = ((n.max(1) as f32 - 1.0) * CHAR_SPACING) / 2.0;
+    // One full spacing of slack past the outermost body.
+    (half as f64 + CHAR_SPACING as f64).max(FLOOR_HALF_LEN_MIN)
+}
 
 /// Standing hip height (measured, same value QA sets on `config.lower`).
 const HIP_HEIGHT: f32 = 104.0;
@@ -138,7 +162,16 @@ fn horizon() -> u32 {
     if env_flag("EXPERT_ONLY") {
         env_usize("HORIZON").unwrap_or(u32::MAX as usize) as u32
     } else {
-        env_usize("HORIZON").unwrap_or(180) as u32
+        // The episode must be long enough to contain the whole stroke PLUS the
+        // landing window, or it times out before `landing_complete` can fire and
+        // the landing reward is never paid. Stroke ≈ 1.15 s (clip + a little
+        // flight), then `land_hold` seconds of grounded stabilization, plus
+        // slack. Derive it so widening `JUMP_LAND_HOLD` can never silently
+        // truncate the episode.
+        env_usize("HORIZON").unwrap_or_else(|| {
+            let secs = 1.15 + land_hold().max(0.0) + 0.55;
+            (secs * 90.0).ceil() as usize
+        }) as u32
     }
 }
 /// Collection window per update, summed across envs: `ROLLOUT` ticks/char.
@@ -176,10 +209,13 @@ fn v_gate() -> f32 {
 }
 /// Landing hold, seconds (`JUMP_LAND_HOLD`). Grounded time — counted from
 /// **touchdown**, so it includes the authored absorb — the body must put in
-/// before the landing counts as complete. One second by default. A negative
-/// value disables the hold and restores the re-hop loop.
+/// before the landing counts as complete. **1.5 s** by default: on touchdown the
+/// body is still extended and carries residual momentum, and 1 s was judged too
+/// short to settle. A negative value disables the hold and restores the re-hop
+/// loop. NOTE: [`horizon`] derives the episode length from this, so widening it
+/// cannot truncate the episode.
 fn land_hold() -> f32 {
-    env_f32("JUMP_LAND_HOLD").unwrap_or(1.0)
+    env_f32("JUMP_LAND_HOLD").unwrap_or(1.5)
 }
 /// Landing-hold stability band, radians (`JUMP_LAND_LEAN`). The hold only
 /// accrues while `|lean| ≤ this`.
@@ -267,6 +303,94 @@ fn reward_cfg() -> reward::RewardConfig {
 // Harness state
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Perf meter — is the simulation actually keeping up?
+// ---------------------------------------------------------------------------
+
+/// Render FPS **and** the physics tick rate, side by side.
+///
+/// Render FPS alone is not enough to judge this build: the PPO update blocks
+/// the main thread, and Bevy's fixed-step scheduler then runs a burst of
+/// catch-up ticks. A 60 fps readout can therefore sit on top of a physics
+/// timeline that stalls and then fast-forwards — which is precisely the "is the
+/// simulation broken?" question. So the meter tracks:
+///
+/// - `fps`  — `Update` iterations per wall second (what the window shows);
+/// - `sim`  — `FixedUpdate` iterations per wall second. The loop targets 90 Hz
+///   (`DT`), so a healthy run reads ≈ 90; a sustained drop means physics is not
+///   keeping up, and a spike above 90 is catch-up after a stall.
+/// - `stop` — the last PPO update's main-thread block, ms (0 if none yet).
+#[derive(Resource)]
+struct PerfMeter {
+    last: std::time::Instant,
+    frames: u32,
+    sim_ticks: u32,
+    pub fps: f32,
+    pub sim: f32,
+    /// Last `ppo_update_system` block, ms — the "freeze" cost, on screen.
+    pub stop: f32,
+    /// Wall-clock seconds since the last log line.
+    log_accum: f32,
+}
+
+impl Default for PerfMeter {
+    fn default() -> Self {
+        Self {
+            last: std::time::Instant::now(),
+            frames: 0,
+            sim_ticks: 0,
+            fps: 0.0,
+            sim: 0.0,
+            stop: 0.0,
+            log_accum: 0.0,
+        }
+    }
+}
+
+/// Count one physics tick. Lives in `FixedUpdate`, so it measures the scheduler
+/// under load — not the render loop.
+fn perf_count_sim(mut meter: ResMut<PerfMeter>) {
+    meter.sim_ticks += 1;
+}
+
+/// Once a second: fold the counts into rates, show them in the window title, and
+/// log them. The title needs no font asset (bevy_ui text would), so it works in
+/// every build.
+fn perf_report(
+    mut meter: ResMut<PerfMeter>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    n: Res<NChars>,
+) {
+    meter.frames += 1;
+    let elapsed = meter.last.elapsed().as_secs_f32();
+    meter.log_accum += elapsed;
+    meter.last = std::time::Instant::now();
+    if meter.log_accum < 1.0 {
+        return;
+    }
+    let secs = meter.log_accum;
+    meter.fps = meter.frames as f32 / secs;
+    meter.sim = meter.sim_ticks as f32 / secs;
+    meter.frames = 0;
+    meter.sim_ticks = 0;
+    meter.log_accum = 0.0;
+
+    let (fps, sim, stop) = (meter.fps, meter.sim, meter.stop);
+    if let Ok(mut window) = windows.single_mut() {
+        window.title = format!(
+            "Walker PPO | N={} | fps {fps:.0} | sim {sim:.0} Hz | update {stop:.0} ms",
+            n.0
+        );
+    }
+    info!("perf: fps {fps:.1} | sim {sim:.1} Hz (target 90) | update_blocked {stop:.1} ms");
+}
+
+/// Ignore the artifact of process startup: the first frame's `elapsed` is huge.
+fn perf_reset(mut meter: ResMut<PerfMeter>) {
+    meter.last = std::time::Instant::now();
+    meter.log_accum = 0.0;
+}
+
 /// Shared training state: the one trainer, the rollout buffer, and the policy
 /// snapshot behind the `Arc<RwLock<..>>` every character's `LearnedCtrl` reads.
 #[derive(Resource)]
@@ -283,6 +407,14 @@ struct PpoState {
     train_rows: Vec<String>,
     ep_rows: Vec<String>,
     best_mean_reward: f32,
+    /// **Generation swap handshake.** The update runs once, at a barrier where
+    /// every env has finished exactly one episode (see
+    /// [`ppo_update_system`]/[`ppo_reset_system`]). `ppo_update_system` sets
+    /// this the instant the new weights are broadcast; the NEXT tick's
+    /// `ppo_reset_system` despawns and respawns **all** bodies together and
+    /// clears it. Splitting the two means the swap lands on a fully parked
+    /// generation, never mid-stroke on a live body.
+    swap_pending: bool,
 }
 
 /// Per-character episode bookkeeping (env state the harness owns).
@@ -292,8 +424,12 @@ struct Env {
     /// collection, command is None.
     parked: bool,
     settle: u32,
-    /// Set when an episode ended. A parked body with this flag is torn down and
-    /// rebuilt; a freshly assembled body (flag clear) just settles and unparks.
+    /// Set when an episode ended. The body then waits at the **generation
+    /// barrier** — parked, standing, uncollected — until every other env has
+    /// finished too; `ppo_update_system` then swaps the weights and
+    /// `ppo_reset_system` tears this body down and rebuilds it in the same pass
+    /// as all the others. A freshly assembled body (flag clear) just settles and
+    /// unparks.
     respawn_pending: bool,
     /// World x the character spawns at; a respawn reuses it so the env keeps its
     /// place in the scene.
@@ -428,6 +564,7 @@ fn main() {
         .init_state::<PpoPhase>()
         .insert_resource(NChars(n_chars))
         .insert_resource(ExitAfter(exit_updates))
+        .init_resource::<PerfMeter>()
         .insert_resource(PpoState {
             trainer,
             rollout: Rollout::default(),
@@ -440,8 +577,22 @@ fn main() {
             train_rows: Vec::new(),
             ep_rows: Vec::new(),
             best_mean_reward: f32::NEG_INFINITY,
+            swap_pending: false,
         })
-        .add_systems(Startup, (setup_scene, apply_gravity, pause_physics).chain())
+        // `perf_reset` seeds the meter's clock ONCE: running it per-frame in
+        // `First` would zero `log_accum` before it could ever reach one second
+        // (and the readout would never print).
+        .add_systems(
+            Startup,
+            (
+                setup_scene,
+                apply_gravity,
+                pause_physics,
+                clamp_virtual_time,
+                perf_reset,
+            )
+                .chain(),
+        )
         .add_systems(
             Update,
             (
@@ -450,6 +601,10 @@ fn main() {
                 check_character_loaded.run_if(in_state(PpoPhase::Loading)),
                 attach_walkers.run_if(in_state(PpoPhase::Game)),
                 flush_rows_periodic.run_if(in_state(PpoPhase::Game)),
+                // Runs unconditionally (also while Loading) so the readout is
+                // live from the first second — a stalled or never-ticking sim is
+                // then visible immediately.
+                perf_report,
                 smoke_exit.run_if(in_state(PpoPhase::Game)),
             ),
         )
@@ -462,6 +617,9 @@ fn main() {
         .add_systems(
             FixedUpdate,
             (
+                // Counts scheduler ticks, whatever else is (or is not) running —
+                // the cheapest possible "is the sim still advancing?" probe.
+                perf_count_sim,
                 ppo_command_system.in_set(WalkerControlSet::Input),
                 ppo_collect_system
                     .in_set(WalkerControlSet::Observe)
@@ -495,16 +653,32 @@ fn pause_physics(mut collision: ResMut<VelloCollisionWorld>) {
     collision.paused = true;
 }
 
+/// Clamp the virtual clock so one long frame can never fast-forward the fixed
+/// clock. The PPO update blocks the main thread for hundreds of ms; without a
+/// cap the real delta is fed to `Time<Virtual>`, the fixed schedule then runs a
+/// catch-up **burst** of sim ticks right after the freeze (the "lurch" the perf
+/// log shows as a >90 Hz second). One sim tick of headroom is plenty: a normal
+/// frame advances 0–1 ticks, so this only trims the pathological post-stall
+/// frame. Tune with `MAX_FRAME_MS` (default ≈ 2 ticks at 90 Hz ≈ 22 ms).
+fn clamp_virtual_time(mut time: ResMut<Time<Virtual>>) {
+    let max_ms = env_f32("MAX_FRAME_MS").unwrap_or(1000.0 / 90.0 * 2.0);
+    time.set_max_delta(std::time::Duration::from_secs_f32(max_ms / 1000.0));
+}
+
 /// Camera at the scene origin: the rig sits at y ≈ 208 physics ⇒ −208 in Bevy
 /// y-up, so lift the view to frame bodies + floor.
-fn setup_scene(mut commands: Commands) {
+fn setup_scene(mut commands: Commands, n: Res<NChars>) {
     commands.spawn((Camera2d::default(), Transform::from_xyz(0.0, -60.0, 0.0)));
 
+    // Size the floor to the ACTUAL layout so every one of the N bodies always
+    // has ground under it — a fixed half-length silently stranded most of a
+    // 32-body row (see [`floor_half_len`]).
+    let half_len = floor_half_len(n.0);
     let floor_y = -(FOOT_SURFACE_Y + FLOOR_HALF_THICKNESS);
     let rect = Rect::new(
-        -FLOOR_HALF_LEN,
+        -half_len,
         -(FLOOR_HALF_THICKNESS as f64),
-        FLOOR_HALF_LEN,
+        half_len,
         FLOOR_HALF_THICKNESS as f64,
     );
     let shape = path_to_ccw_quad_path(&rect.to_path(0.1));
@@ -553,7 +727,12 @@ fn setup_scene(mut commands: Commands) {
             VELLO_COLLISION_COOL_DOWN_TIME,
         ),
     ));
-    info!("walker_ppo: floor surface y={FOOT_SURFACE_Y:.0}");
+    let (x0, x1) = (layout_x0(n.0), -layout_x0(n.0));
+    info!(
+        "walker_ppo: floor surface y={FOOT_SURFACE_Y:.0}, spans x=[{:.0}, {:.0}] \
+         (N={} bodies span [{x0:.0}, {x1:.0}])",
+        -half_len, half_len, n.0
+    );
 }
 
 /// Spawn the N character roots across the floor.
@@ -563,7 +742,7 @@ fn spawn_characters(mut commands: Commands, n: Res<NChars>, mut done: Local<bool
     }
     *done = true;
     let total = n.0;
-    let x0 = -((total as f32 - 1.0) * CHAR_SPACING) / 2.0;
+    let x0 = layout_x0(total);
     for i in 0..total {
         let x = x0 + i as f32 * CHAR_SPACING;
         commands.spawn((
@@ -954,7 +1133,15 @@ fn ppo_reset_system(
     mut commands: Commands,
     mut walkers: Query<(&mut Walker, &mut Env)>,
     roots: Query<&CharacterRoot>,
+    mut state: ResMut<PpoState>,
 ) {
+    // Respawning is gated on the **generation barrier**: when every env has
+    // finished its episode, `ppo_update_system` swapped the weights and set
+    // `swap_pending`. Only then does this system rebuild the whole generation at
+    // once — so the new policy always starts from identical fresh bodies, never
+    // mid-stroke. `EXPERT_ONLY` has no updates, so it respawns immediately.
+    let expert_only = env_flag("EXPERT_ONLY");
+    let reset_now = state.swap_pending || expert_only;
     for (mut walker, mut env) in walkers.iter_mut() {
         if !env.parked {
             continue;
@@ -972,6 +1159,11 @@ fn ppo_reset_system(
                 env.parked = false;
                 walker.observer = Default::default();
             }
+            continue;
+        }
+
+        // Finished, but the generation is incomplete: stand at the barrier.
+        if !reset_now {
             continue;
         }
 
@@ -1013,35 +1205,77 @@ fn ppo_reset_system(
             },
         ));
     }
+    // The whole generation has been despawned+re-spawned together; the barrier
+    // is discharged until the next full rollout is collected.
+    if state.swap_pending {
+        state.swap_pending = false;
+    }
 }
 
-/// The PPO update + weight broadcast + trainer CSV, once per full window.
-/// Runs in `Assemble` (after `assemble_system`), so telemetry stays coherent
-/// and the next tick's controllers read the new snapshot.
-fn ppo_update_system(mut state: ResMut<PpoState>, n: Res<NChars>) {
+/// The PPO update + weight broadcast + trainer CSV, once per complete
+/// **generation**.
+///
+/// Runs in `Assemble` (after `assemble_system`). The trigger is a **barrier, not
+/// a tick count**: every env must have finished its episode (all parked) before
+/// the update fires. Collecting to a barrier is what makes the swap safe — the
+/// new weights land on a generation that is entirely done, and
+/// `ppo_reset_system` then rebuilds all bodies at once (this system only sets
+/// `swap_pending`). No body is ever mid-crouch or mid-flight across a weight
+/// change.
+fn ppo_update_system(
+    mut state: ResMut<PpoState>,
+    walkers: Query<&Env>,
+    n: Res<NChars>,
+    mut meter: ResMut<PerfMeter>,
+) {
     // Viewing mode: never learn, never overwrite the checkpoint.
     if env_flag("EXPERT_ONLY") {
         return;
     }
-    let target = rollout_len(n.0);
-    if state.rollout.len() < target {
+    // Already swapped and waiting for the simultaneous respawn — do not collect
+    // or update again until the barrier is discharged.
+    if state.swap_pending {
+        return;
+    }
+    // The barrier: nothing is collectible until the last env finishes. A parked
+    // env with `respawn_pending` has completed its episode; a parked one without
+    // it is a fresh body still settling after the last respawn.
+    let n_envs = walkers.iter().count();
+    if n_envs == 0 {
+        return;
+    }
+    let generation_done = walkers.iter().all(|env| env.parked && env.respawn_pending);
+    if !generation_done {
+        return;
+    }
+    // Guard against a degenerate empty rollout (e.g. an env that never ran).
+    if state.rollout.len() < n.0 {
         return;
     }
     let rollout = std::mem::take(&mut state.rollout);
     // This runs **on the main thread inside FixedUpdate**, so it stalls the
-    // render loop for its whole duration — the visible "freeze" every rollout.
-    // Time it so the cost is on the record (knobs: `ROLLOUT`, `EPOCHS`, `N`).
+    // render loop for its whole duration — the visible "freeze" every
+    // generation. `Time<Virtual>` is clamped in `clamp_virtual_time` so the
+    // stall can never fast-forward the fixed clock (no catch-up burst after).
     let t0 = std::time::Instant::now();
     let stats = state.trainer.update(&rollout);
     let update_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    // Publish the block to the on-screen perf readout, so the periodic "freeze"
+    // is visible rather than mysterious.
+    meter.stop = update_ms as f32;
     state.updates += 1;
     let (updates, tick, n_ep) = (state.updates, state.tick, rollout.len());
+    let target = rollout_len(n.0);
 
     // Broadcast: freeze the new weights into the shared bundle (on-policy: the
-    // write happens once, between rollouts — never during collection).
+    // write happens once, between generations — never during collection).
     if let Ok(mut guard) = state.bundle.write() {
         *guard = PolicyBundle::from_trainer(&state.trainer);
     }
+    // Raise the generation barrier: the next `ppo_reset_system` (Actuate) tears
+    // down and rebuilds **every** body together, so the new policy starts from a
+    // clean, uniform generation instead of inheriting half-finished strokes.
+    state.swap_pending = true;
 
     let mean_ep = mean(&state.ep_rewards);
     let mean_len = mean(

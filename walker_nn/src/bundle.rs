@@ -111,6 +111,36 @@ mod tests {
     }
 
     #[test]
+    fn a_trainer_checkpoint_loads_as_a_deployable_bundle() {
+        // The real pipeline: `walker_ppo` writes a **PpoTrainer** json; `walker_qa`
+        // reads it back as a **PolicyBundle**. Those are different structs (the
+        // trainer json carries an extra `config` and skips its Adam buffers), so
+        // the cross-format load must be proven, not assumed.
+        let mut t = PpoTrainer::new(5, 2, &[8, 8], PpoConfig::default(), 21);
+        // Make the weights unmistakably non-default so a silent zero-load fails.
+        t.actor.zero_last_layer();
+        let obs = vec![0.3, -0.2, 0.5, 0.0, -0.4];
+        let expected = t.act_deterministic(&obs);
+        let path = "/tmp/walker_nn_trainer_as_bundle.json";
+        t.save_json(path).expect("trainer save");
+
+        let b = PolicyBundle::load_json(path).expect("bundle loads a trainer file");
+        assert_eq!(b.obs_dim(), 5, "obs width survives the cross-format load");
+        assert_eq!(
+            b.action_dim(),
+            2,
+            "action width survives the cross-format load"
+        );
+        assert_eq!(b.log_std, t.log_std, "log_std survives");
+        assert_eq!(
+            b.act_deterministic(&obs),
+            expected,
+            "the bundle deploys the exact trained weights"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn bundle_save_load_roundtrip() {
         let t = PpoTrainer::new(4, 3, &[6], PpoConfig::default(), 11);
         let b = PolicyBundle::from_trainer(&t);
