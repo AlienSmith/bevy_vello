@@ -323,6 +323,30 @@ that already worked, no policy surgery; then the residual's job is genuinely
 attitude/shape, not "wait for reality". This answers the "can replay give
 reasonable direction when physics diverges?" worry at its weakest seam.
 
+**Correction (2026-11-19) — the crouch couples `r` and `s`.** The first cut of
+the keyframed stroke held `s` fixed and shrank `r`, which is what a naive polar
+interpolation does. Measured consequence: each planted foot slid **10–12 px
+inward** (L x `−33 → −23.2`, R x `+39.5 → +27.9`) during the squash — exactly
+the drag-and-kick failure the old hardcoded stroke avoided by holding world x
+and moving only the depth. The invariant the clip must respect is therefore
+**the planted foot's world x**, and because `x = leg_len·r·s` that makes the
+two parameters coupled:
+
+```
+s_crouch = s_rest · r_rest / r_crouch
+```
+
+So the feet **splay outward in angle** as the body squashes and return to the
+rest angle at liftoff — the user's phrasing. Constants: rest `s = ∓33.0/110`,
+`39.5/110` (unit chord, so `r_rest = 1.0` reproduces the blueprint depths
+106/103); crouch `r = 0.76994` (L) / `0.79483` (R), `s = −0.38964` / `+0.45178`.
+The two legs get **different** crouch `r` because their rest x's differ and the
+crouch depth is common. Interpolating the endpoints is not exactly
+x-preserving (`s ∝ 1/r`), but the drift over the squash is ≤ **0.47 px**. Tests:
+`the_crouch_keeps_each_planted_foot_world_x`,
+`the_crouch_splays_the_feet_outward_in_angle`,
+`the_crouch_ramp_drifts_the_planted_x_by_under_a_pixel`.
+
 **Implemented (2026-11-19).** `ControlConfig::jump_fire_r` (default `0.8`;
 `≤ 0` disables ⇒ pure clock replay) plus `ControlConfig::jump_load_cap`
 (default `0.30 s`). The gate sits at the `Load→Launch` **boundary**, not inside

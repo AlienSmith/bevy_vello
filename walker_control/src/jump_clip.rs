@@ -21,12 +21,32 @@
 //! Normalized here (not px) so the clip is rig-scale agnostic; [`JumpCtrl`]
 //! multiplies by the live `leg_len` / `hip_height` when it builds the pose.
 //!
+//! # The invariant: the planted foot's world x does not move
+//! A crouching foot is friction-planted, so its **world x must not change** —
+//! measured earlier, sweeping the feet inward mid-crouch drags them and kicks
+//! the torso into a backflip (module docs of [`crate::jump`]). That makes
+//! `r` and `s` **coupled**, not independent: the foot's world x is
+//! `leg_len·r·s`, so
+//!
+//! ```text
+//! s_crouch = s_rest · r_rest / r_crouch      (x fixed, chord shrinks ⇒ s grows)
+//! ```
+//!
+//! The feet therefore splay **outward in angle** as the body squashes and
+//! return to the rest angle at liftoff. Holding `s` fixed while shrinking `r`
+//! (the first cut of this module) dragged each foot ~10 px inward — the exact
+//! failure the old hardcoded stroke avoided by holding x and moving only depth.
+//! The rest constants below are the blueprint's `(−33, 106)` / `(39.5, 103)`
+//! normalized by the **rest chord**, and `key_to_offsets` re-derives the same
+//! chord from `r`, so the rest key still lands back on those offsets.
+//!
 //! # The stroke (data)
-//! `stand → crouch → extend → land-absorb → stand`, eased. The numbers reproduce
-//! the previously hardcoded stroke: rest chord ≈ 110.8 px ⇒ `r ≈ 1.0`; crouch
-//! depth 78 px ⇒ `r ≈ 0.70`; the small `s` offsets reproduce the rest x-offsets
-//! (`−33`/`+39.5` over a 106 px depth ⇒ `s ≈ ∓0.30`, sign per vello y-down).
-//! `s_θ = 0` throughout: the hop is a pure vertical pencil.
+//! `stand → crouch → extend → land-absorb → stand`, eased, with `x` held:
+//! rest `r = 1.0` (chord = `leg_len`); crouch depth 78 px over that fixed x ⇒
+//! `r ≈ 0.770` (L) / `0.795` (R) and `s ≈ −0.390` / `+0.452`. The residual
+//! interpolation between them drifts the planted x by at most **0.47 px** —
+//! well under the strut's tolerance. `s_θ = 0` throughout: a pure vertical
+//! pencil.
 
 use glam::Vec2;
 use walker_math::{Clip, Easing, Key, Lerp};
@@ -40,12 +60,29 @@ use crate::jump::JumpPhase;
 /// absorbs everywhere else).
 pub const REST_R: f32 = 1.0;
 /// Standing rest `s` per leg: `sin φ = x / chord` of the v10 rest offsets
-/// (`chord = |(−33,106)|`, `|(39.5,103)|`). This is the *direction* of the
-/// hip→foot vector, exact regardless of the 1 px chord shortening.
-pub const REST_S_L: f32 = -33.0 / 111.02;
-pub const REST_S_R: f32 = 39.5 / 110.31;
-/// Crouch chord: depth 78 px over `leg_len 110` ⇒ `r ≈ 0.709`.
-pub const CROUCH_R: f32 = 78.0 / 110.0;
+/// (`chord = |(−33,106)|`, `|(39.5,103)|`).
+///
+/// These are defined on the **unit chord** (`leg_len`), not on the blueprint's
+/// slightly-short 111.02 / 110.31 chords: `key_to_offsets` derives the chord
+/// from `r`, so `r_rest = 1.0` must reproduce the blueprint depth. With the
+/// blueprint chord in the denominator the rest pair came out as depth 104.93 /
+/// 102.66 instead of 106 / 103, because `r` would have to exceed 1.0 to reach
+/// the real chord (and the residual's action clamp forbids it).
+pub const REST_S_L: f32 = -33.0 / 110.0;
+pub const REST_S_R: f32 = 39.5 / 110.0;
+
+/// Crouch: **depth 78 px with the planted world x held** `(−33, +39.5)`, so
+/// `r` and `s` move together (see the module docs). Left: chord
+/// `|(−33, 78)| = 84.694` ⇒ `r = 0.76994`, `s = −0.38964`. Right: chord
+/// `|(39.5, 78)| = 87.431` ⇒ `r = 0.79483`, `s = +0.45178`.
+///
+/// Note the two legs have **different** crouch `r`: holding each foot's own
+/// x while dropping to a common depth forces different chord lengths, because
+/// the rest x's differ. That asymmetry is real geometry, not a typo.
+pub const CROUCH_R_L: f32 = 84.693565 / 110.0;
+pub const CROUCH_R_R: f32 = 87.431402 / 110.0;
+pub const CROUCH_S_L: f32 = -33.0 / 84.693565;
+pub const CROUCH_S_R: f32 = 39.5 / 87.431402;
 
 /// One key of the jump clip: the polar 5-dim pose plus the stance flags.
 ///
@@ -92,9 +129,10 @@ impl Lerp for JumpKey {
 /// This track is the ground-phase reference the residual corrects.
 pub fn jump_clip() -> Clip<JumpKey> {
     let rest = JumpKey::new([REST_R, REST_S_L, REST_R, REST_S_R, 0.0], true);
-    // Crouch: same x-offsets (kept per the module docs — sweeping inward drags
-    // planted feet), shorter chord ⇒ hip descends.
-    let crouch = JumpKey::new([CROUCH_R, REST_S_L, CROUCH_R, REST_S_R, 0.0], true);
+    // Crouch: each foot keeps its own **world x** while the depth drops to
+    // 78 px, so `r` shrinks and `s` grows (module docs). The two legs get
+    // different `r` because their rest x's differ.
+    let crouch = JumpKey::new([CROUCH_R_L, CROUCH_S_L, CROUCH_R_R, CROUCH_S_R, 0.0], true);
     // Flight: extended shape, struts soft.
     let flight = JumpKey::new([REST_R, REST_S_L, REST_R, REST_S_R, 0.0], false);
     Clip::new(vec![
@@ -158,8 +196,88 @@ mod tests {
         assert!((stand.pose[0] - REST_R).abs() < 1e-6);
         assert!(stand.stance);
         let crouch = c.sample(0.22);
-        assert!((crouch.pose[0] - CROUCH_R).abs() < 1e-5);
+        assert!((crouch.pose[0] - CROUCH_R_L).abs() < 1e-4);
+        assert!((crouch.pose[2] - CROUCH_R_R).abs() < 1e-4);
         assert!(crouch.stance);
+    }
+
+    /// The whole point of this module: a planted foot keeps its **world x**
+    /// through the squash. This is the bug the first cut had — it held `s`
+    /// fixed, so shrinking the chord dragged each foot ~10 px inward.
+    #[test]
+    fn the_crouch_keeps_each_planted_foot_world_x() {
+        let c = jump_clip();
+        let rest = key_to_offsets(c.sample(0.0).pose, 110.0);
+        let crouch = key_to_offsets(c.sample(0.22).pose, 110.0);
+        assert!(
+            (crouch.0.x - rest.0.x).abs() < 0.01,
+            "left foot world x moved: {} -> {}",
+            rest.0.x,
+            crouch.0.x
+        );
+        assert!(
+            (crouch.1.x - rest.1.x).abs() < 0.01,
+            "right foot world x moved: {} -> {}",
+            rest.1.x,
+            crouch.1.x
+        );
+        // ... while the depth really did drop to the crouch target.
+        assert!(
+            (crouch.0.y - 78.0).abs() < 0.01,
+            "left depth {}",
+            crouch.0.y
+        );
+        assert!(
+            (crouch.1.y - 78.0).abs() < 0.01,
+            "right depth {}",
+            crouch.1.y
+        );
+    }
+
+    /// The feet splay **outward in angle** as the body squashes — `s` grows as
+    /// `r` shrinks, which is the physical half of the same invariant.
+    #[test]
+    fn the_crouch_splays_the_feet_outward_in_angle() {
+        let c = jump_clip();
+        let stand = c.sample(0.0);
+        let crouch = c.sample(0.22);
+        assert!(
+            crouch.pose[1].abs() > stand.pose[1].abs(),
+            "left s must grow: {} -> {}",
+            stand.pose[1],
+            crouch.pose[1]
+        );
+        assert!(
+            crouch.pose[3].abs() > stand.pose[3].abs(),
+            "right s must grow: {} -> {}",
+            stand.pose[3],
+            crouch.pose[3]
+        );
+        // And it must still stay inside the residual's invertible band.
+        assert!(crouch.pose[1].abs() < 0.866);
+        assert!(crouch.pose[3].abs() < 0.866);
+    }
+
+    /// Interpolating the two endpoints is *not* exactly x-preserving (`s ∝ 1/r`
+    /// is nonlinear), but the drift over the squash must stay sub-pixel.
+    #[test]
+    fn the_crouch_ramp_drifts_the_planted_x_by_under_a_pixel() {
+        let c = jump_clip();
+        let rest = key_to_offsets(c.sample(0.0).pose, 110.0);
+        for i in 0..=100 {
+            let u = i as f32 / 100.0;
+            let mid = key_to_offsets(c.sample(0.22 * u).pose, 110.0);
+            assert!(
+                (mid.0.x - rest.0.x).abs() < 1.0,
+                "left x drifted {} px at u={u}",
+                (mid.0.x - rest.0.x).abs()
+            );
+            assert!(
+                (mid.1.x - rest.1.x).abs() < 1.0,
+                "right x drifted {} px at u={u}",
+                (mid.1.x - rest.1.x).abs()
+            );
+        }
     }
 
     #[test]
@@ -177,9 +295,10 @@ mod tests {
     #[test]
     fn crouch_shortens_the_chord_below_rest() {
         let c = jump_clip();
-        // Mid-load: chord strictly between crouch and rest.
+        // Mid-load: chord strictly between crouch and rest, on both legs.
         let mid = c.sample(0.11);
-        assert!(mid.pose[0] < REST_R && mid.pose[0] > CROUCH_R);
+        assert!(mid.pose[0] < REST_R && mid.pose[0] > CROUCH_R_L);
+        assert!(mid.pose[2] < REST_R && mid.pose[2] > CROUCH_R_R);
     }
 
     #[test]
