@@ -434,12 +434,25 @@ The user's DCM suite, using the repo's own walking math
 p_center = (feet[0].x + feet[1].x) / 2 // geometric center of the two feet
 e_DCM    = |ξ − p_center| / leg_len
 
-r_land (per tick, inside the window) =
-    − w_dcm    · e_DCM                        // 1. primary balance judge
-    − w_xi     · |fd(ξ̇)| / v_scale           // 2. settle judge, FINITE-DIFFERENCED
+r_land  (CHECKPOINT, paid ONCE on the first grounded tick after flight) =
+    + w_land   · quality
+        quality = (1 − e_DCM) · (1 − |omega_com|/omega_scale) · (1 − ½·|height − target|)
+
+r_settle (per tick, inside the window — a NUDGE, not the verdict) =
+    − w_dcm    · e_DCM                        // 1. balance nudge
+    − w_xi     · |fd(ξ̇)| / v_scale           // 2. settle nudge, FINITE-DIFFERENCED
     − w_post   · |height − target|            // 3a. knees absorb, don't collapse
     − w_spin   · |omega_com| / omega_scale    // 3b. torso not spinning while feet plant
 ```
+
+**The `+ w_land · quality` line is the correction (§12.2.4).** The first
+implementation of this section had no positive term on the landing at all —
+checkpoint 2 was a 27-tick integral of purely negative shaping. That made a
+*completed, clean hop* read net-negative against a policy that just crouched and
+never launched (which collects `w_alive` every tick and opens no checkpoint).
+The policy duly learned to not jump: `mean_peak_height` collapsed 0.64 → 0.34
+and 0/300 episodes were positive-reward. The landing must be an **evaluation
+event that pays**, exactly as the design intends.
 
 Notes that pin the design:
 
@@ -455,9 +468,32 @@ Notes that pin the design:
   `ξ̇` is precisely the "absorb smoothly, don't wobble on the ankles" signal.
   Both are cheap; drop judge 2 by ablation if it measures out as dead weight.
 - Judge 3b is the same currency as checkpoint 1: the spin you land with was
-  purchased at liftoff. The Land-window spin penalty is the *delivery*, the
+  purchased at liftoff. The Land-window spin *nudge* is the *delivery*, the
   liftoff `L` penalty is the *price* — GAE connects them, so both get credit
-  for the same launch decision.
+  for the same launch decision. In the checkpoint-2 credit it enters as the
+  `(1 − |ω|/ω_scale)` **quality** factor, so a clean landing pays full and a
+  spun one pays little.
+
+### 12.2.4 The landing is a PAYMENT, not an integral (2026-11-19)
+
+Why "never jump" was optimal, in arithmetic (old weights, `w_alive = 0.03`,
+`~175` ticks/episode):
+
+| policy | earns | total |
+|---|---|---|
+| crouch, never launch | `w_alive × 175` | **+5.25**, opens no checkpoint |
+| real hop, clean landing | `+0.5` apex −`~0..0.4` `L` +`~1.15` peak | ≈ **+1.5**, then −5..−10 of land-window penalties |
+
+The degenerate optimum is a strict consequence of the shape of the reward, not a
+tuning accident. The fix (all in `reward.rs`):
+
+1. **Pay** `w_land · quality` once at the landing tick (`w_land = 1.5`).
+2. Demote the window to a nudge: `w_dcm 0.6→0.08`, `w_xi_dot 0.15→0.03`,
+   `w_post 0.2→0.05`, `w_land_spin 0.1→0.03`.
+3. Cut `w_alive 0.03→0.005` (and `pen_cap 0.02→0.002`) so a constant per-tick
+   bonus can never out-earn a real hop.
+4. Regression test `a_completed_hop_out_earns_standing_still` asserts a clean
+   hop beats 175 ticks of standing still — the test that would have caught it.
 
 ### 12.2.1 The landing window is a GRACE period (2026-11-19)
 

@@ -6,19 +6,31 @@
 //! exactly two moments, because the physics makes those moments decidable.
 //!
 //! ```text
-//!  last grounded tick ──► liftoff checkpoint          (the conserved purchase)
+//!  last grounded tick ──► CHECKPOINT 1 · liftoff       (the conserved purchase)
 //!      (v_com, L, ω)        r = +w_apex·apex_pred/target
 //!                              − w_L   · |L| / (hip_height·v_scale)
 //!                              − w_spin· |ω_com| / omega_scale
 //!  airborne ─────────────► flight: alive only, no shaping (§12.3)
-//!  first grounded ────────► Land window (~land_window_ts):
+//!  first grounded ────────► CHECKPOINT 2 · landing     (single-event CREDIT)
 //!                              ξ      = com.x + v_com.x/ω₀,  ω₀ = √(g/hip_height)
 //!                              e_DCM  = |ξ − p_center| / leg_len
-//!                              r −= w_dcm·e_DCM
-//!                                 + w_xi ·|ξ̇|/v_scale        (finite-diff)
-//!                                 + w_post·|height−target|/hip_height
-//!                                 + w_spin_land·|ω_com|/omega_scale
+//!                              quality = (1−e_DCM)·(1−|ω|/ω_s)·(1−½·post)
+//!                              r = +w_land · quality
+//!  └─ then a ~land_window_ts settle nudge (small negative shaping, a nudge
+//!     only — the verdict was already paid at the checkpoint).
 //! ```
+//!
+//! ## Why the landing must be a *payment*, not an *integral*
+//!
+//! Checkpoint 2 was originally implemented as a per-tick integral of purely
+//! negative terms. That silently inverted the objective: a whole landed hop then
+//! read *net-negative* against a policy that simply crouched and never launched
+//! (which collects `w_alive` every tick and opens neither checkpoint). The
+//! measured symptom was a collapse of `mean_peak_height` 0.64 → 0.34 with zero
+//! positive-reward episodes. The fix is to **pay one credit** at the landing
+//! tick, scaled by capture quality, and keep the window as a small nudge.
+//! `w_alive` is also kept *small* (it is a constant for any non-falling policy
+//! on a fixed horizon, so it must not dominate the event credits).
 //!
 //! `z₀ = hip_height` is **nominal** (not the live, knee-compressed `z`), so `ξ`
 //! stays a solid balance indicator while the legs do their job of changing
@@ -33,8 +45,10 @@ use walker_control::observe::Fiction;
 /// sane default; the harness overrides a few from env knobs.
 #[derive(Debug, Clone, Copy)]
 pub struct RewardConfig {
-    /// Constant per-tick alive bonus — the base objective, kept strictly above
-    /// the per-tick penalty cap so "stay alive" is always the better gradient.
+    /// Constant per-tick alive bonus. Kept **well below** the event credits and
+    /// strictly above the per-tick penalty cap: it is a constant on a fixed
+    /// horizon, so its only job is to make *falling* worse than *surviving* —
+    /// it must never out-earn a completed hop.
     pub w_alive: f32,
     /// Liftoff: positive credit for the height bought, `w_apex·apex_pred/target`.
     pub w_apex: f32,
@@ -44,13 +58,17 @@ pub struct RewardConfig {
     pub w_liftoff: f32,
     /// Liftoff (optional ablation): charge on the immediate `|ω_com|`.
     pub w_liftoff_spin: f32,
-    /// Land window: primary balance judge weight on `e_DCM`.
+    /// **Landing checkpoint**: single-event credit, paid once on the first
+    /// grounded tick after flight and scaled by `quality ∈ [0,1]`. This is the
+    /// term that makes "hop and land" beat "crouch and never launch".
+    pub w_land: f32,
+    /// Settle nudge: balance term on `e_DCM` (small — the verdict is `w_land`).
     pub w_dcm: f32,
-    /// Land window: settle judge weight on the finite-differenced `|ξ̇|`.
+    /// Settle nudge: finite-differenced `|ξ̇|` term.
     pub w_xi_dot: f32,
-    /// Land window: posture weight on `|height−target|`.
+    /// Settle nudge: posture term on `|height−target|`.
     pub w_post: f32,
-    /// Land window: spin-delivery weight on `|ω_com|`.
+    /// Settle nudge: spin-delivery term on `|ω_com|`.
     pub w_land_spin: f32,
     /// Per-tick horizontal-speed penalty weight (the lateral-flail killer).
     pub w_lateral: f32,
@@ -82,18 +100,23 @@ pub struct RewardConfig {
 impl Default for RewardConfig {
     fn default() -> Self {
         Self {
-            w_alive: 0.03,
+            // Small on purpose: ~175 ticks × 0.005 ≈ +0.88 for a full episode,
+            // which the landing + apex + peak credits (order +2..+3) dwarf.
+            w_alive: 0.005,
             w_apex: 0.5,
             apex_target: 40.0,
             w_liftoff: 0.3,
             w_liftoff_spin: 0.0,
-            w_dcm: 0.6,
-            w_xi_dot: 0.15,
-            w_post: 0.2,
-            w_land_spin: 0.1,
+            w_land: 1.5,
+            // The settle window is a NUDGE, not the verdict — these used to be
+            // 0.6/0.15/0.2/0.1 and summed to a −5..−10 charge over 27 ticks.
+            w_dcm: 0.08,
+            w_xi_dot: 0.03,
+            w_post: 0.05,
+            w_land_spin: 0.03,
             w_lateral: 0.02,
             w_act: 0.02,
-            pen_cap: 0.02,
+            pen_cap: 0.002,
             v_gate: 60.0,
             leg_len: 110.0,
             hip_height: 104.0,
@@ -223,9 +246,26 @@ impl JumpReward {
             }
             Phase::Flight => {
                 if f.grounded {
+                    // ---- CHECKPOINT 2 · landing (single payment) ----
+                    // One credit, on this tick, scaled by how well the body
+                    // captured its own momentum. Without this the whole hop
+                    // reads net-negative and the optimum is "never launch".
+                    let omega0 = (c.gravity / c.hip_height.max(1e-6)).max(1e-6).sqrt();
+                    let xi = f.com.x + f.v_com.x / omega0;
+                    let p_center = 0.5 * (f.feet[0].pos.x + f.feet[1].pos.x);
+                    let e_dcm = (xi - p_center).abs() / c.leg_len.max(1e-6);
+                    let post = (height_px - c.land_height_target).abs() / c.hip_height.max(1e-6);
+                    let spin = (f.omega_com.abs() / c.omega_scale).max(0.0);
+                    // quality ∈ [0,1]: perfect capture (ξ over the feet, still,
+                    // at standing height) pays the full `w_land`.
+                    let balance = (1.0 - e_dcm).clamp(0.0, 1.0);
+                    let settle = (1.0 - spin).clamp(0.0, 1.0);
+                    let posture = (1.0 - 0.5 * post).clamp(0.0, 1.0);
+                    r += c.w_land * balance * settle * posture;
+                    self.last_e_dcm = e_dcm;
                     self.phase = Phase::LandWindow;
                     self.land_ticks = 0;
-                    self.prev_xi = None;
+                    self.prev_xi = Some(xi);
                     events.landed = true;
                 }
             }
@@ -237,7 +277,9 @@ impl JumpReward {
             }
         }
 
-        // ---- Land-window shaping (this tick, if open) ----
+        // ---- Settle window (small NUDGE after the verdict was paid) ----
+        // The landing credit above is the reward; this only discourages a body
+        // that recovers its balance by toppling sideways after the fact.
         if self.phase == Phase::LandWindow {
             let omega0 = (c.gravity / c.hip_height.max(1e-6)).max(1e-6).sqrt();
             let xi = f.com.x + f.v_com.x / omega0;
@@ -362,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn flight_is_alive_only_then_land_window_shapes() {
+    fn flight_is_alive_only_then_the_landing_evaluates_capture() {
         let mut rw = JumpReward::new(RewardConfig::default());
         rw.step(
             &fiction(standing_hip(), standing_hip(), Vec2::ZERO, true),
@@ -390,17 +432,45 @@ mod tests {
         );
         assert_eq!(ev, RewardEvents::default());
         assert!((r - rw.cfg().w_alive).abs() < 1e-6, "flight unshaped: {r}");
-        // Touchdown: land window opens, and a big DCM error is charged.
-        let landed = fiction(
+        // Touchdown with a big DCM error (flying forward ⇒ ξ far from the feet):
+        // the checkpoint's `quality` collapses, so it pays essentially nothing —
+        // but it must NOT be a big negative (that was the collapse bug).
+        let bad = fiction(
             Vec2::new(0.0, SURFACE - HIP),
             Vec2::new(0.0, SURFACE - HIP),
-            Vec2::new(400.0, 0.0), // flying forward ⇒ ξ far from feet
+            Vec2::new(400.0, 0.0),
             true,
         );
-        let (r, ev) = rw.step(&landed, None);
+        let (r_bad, ev) = rw.step(&bad, None);
         assert!(ev.landed);
-        assert!(r < rw.cfg().w_alive, "DCM error must charge: {r}");
+        assert!(
+            r_bad > rw.cfg().w_alive - 0.2,
+            "a bad capture pays ~nothing but is not a huge charge: {r_bad}"
+        );
         assert!(rw.last_e_dcm > 0.0);
+
+        // A clean touchdown pays the full landing credit.
+        let mut rw2 = JumpReward::new(RewardConfig::default());
+        rw2.step(
+            &fiction(standing_hip(), standing_hip(), Vec2::ZERO, true),
+            None,
+        );
+        rw2.step(
+            &fiction(
+                Vec2::new(0.0, SURFACE - HIP - 5.0),
+                Vec2::new(0.0, SURFACE - HIP - 5.0),
+                Vec2::new(0.0, -100.0),
+                false,
+            ),
+            None,
+        );
+        let good = fiction(standing_hip(), standing_hip(), Vec2::ZERO, true);
+        let (r_good, ev) = rw2.step(&good, None);
+        assert!(ev.landed);
+        assert!(
+            r_good > rw2.cfg().w_land * 0.9,
+            "clean capture must pay: {r_good}"
+        );
     }
 
     #[test]
@@ -441,6 +511,68 @@ mod tests {
         assert!(
             r >= rw.cfg().w_alive - rw.cfg().pen_cap - 1e-6,
             "net-negative tick: {r}"
+        );
+    }
+
+    /// A clean, well-captured hop must out-earn simply crouching and standing
+    /// still for the same number of ticks. This is the **degenerate-optimum
+    /// guard**: the original per-tick-negative landing integral failed it, and
+    /// the policy learned to never launch (`mean_peak_height` collapsed).
+    #[test]
+    fn a_completed_hop_out_earns_standing_still() {
+        let cfg = RewardConfig::default();
+        let n = 175; // ≈ one episode at 90 Hz
+                     // --- baseline: never launch ---
+        let mut still = JumpReward::new(cfg);
+        let standing = fiction(standing_hip(), standing_hip(), Vec2::ZERO, true);
+        let mut still_total = 0.0;
+        for _ in 0..n {
+            still_total += still.step(&standing, None).0;
+        }
+        // --- a hop: launch, apex, descend, clean capture, settle ---
+        let mut hop = JumpReward::new(cfg);
+        let mut hop_total = 0.0;
+        hop_total += hop.step(&standing, None).0; // grounded
+                                                  // liftoff, rising fast
+        let air_up = fiction(
+            Vec2::new(0.0, SURFACE - HIP - 6.0),
+            Vec2::new(0.0, SURFACE - HIP - 6.0),
+            Vec2::new(0.0, -260.0),
+            false,
+        );
+        hop_total += hop.step(&air_up, None).0;
+        // apex / descent
+        for k in 0..8 {
+            let y = SURFACE - HIP - (30.0 - k as f32 * 4.0);
+            let f = fiction(
+                Vec2::new(0.0, y),
+                Vec2::new(0.0, y),
+                Vec2::new(0.0, 20.0 * k as f32),
+                false,
+            );
+            hop_total += hop.step(&f, None).0;
+        }
+        // touchdown: ξ over the feet (com.x 0, v_com.x 0) ⇒ perfect capture
+        let touch = fiction(
+            Vec2::new(0.0, SURFACE - HIP),
+            Vec2::new(0.0, SURFACE - HIP),
+            Vec2::ZERO,
+            true,
+        );
+        let (r_land, ev) = hop.step(&touch, None);
+        assert!(ev.landed, "touchdown must open the landing checkpoint");
+        assert!(
+            r_land > hop.cfg().w_land * 0.9,
+            "a clean capture must pay most of w_land: {r_land}"
+        );
+        hop_total += r_land;
+        // settle
+        for _ in 0..40 {
+            hop_total += hop.step(&touch, None).0;
+        }
+        assert!(
+            hop_total > still_total + 0.5,
+            "hop {hop_total:.3} must beat standing still {still_total:.3}"
         );
     }
 }

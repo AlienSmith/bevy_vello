@@ -257,6 +257,9 @@ fn reward_cfg() -> reward::RewardConfig {
     if let Some(v) = env_f32("W_LIFTOFF_SPIN") {
         c.w_liftoff_spin = v;
     }
+    if let Some(v) = env_f32("W_LAND") {
+        c.w_land = v;
+    }
     if let Some(v) = env_f32("W_DCM") {
         c.w_dcm = v;
     }
