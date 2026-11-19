@@ -190,6 +190,20 @@ impl JumpResidual {
         self.since
     }
 
+    /// Whether the underlying expert has finished landing (§12.2 land window +
+    /// the post-landing stabilization hold). Forwarded from the expert so the
+    /// harness can close the episode on a *completed landing* rather than on
+    /// mere touchdown.
+    pub fn landing_complete(&self, cfg: &crate::control::ControlConfig) -> bool {
+        self.expert.landing_complete(cfg)
+    }
+
+    /// The landing grace window (touchdown → hold elapsed). The harness keeps
+    /// the fall gate silent while this is open.
+    pub fn landing_window_open(&self, cfg: &crate::control::ControlConfig) -> bool {
+        self.expert.landing_window_open(cfg)
+    }
+
     fn facing_or_default(facing: f32) -> f32 {
         if facing == 0.0 {
             1.0

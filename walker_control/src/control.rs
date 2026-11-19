@@ -335,6 +335,31 @@ pub struct ControlConfig {
     /// healthy crouch fires on compression and only a body that never loads
     /// waits for the cap. Never a hang: the stroke always launches.
     pub jump_load_cap: f32,
+    /// Jump **landing hold**, seconds (`JUMP_LAND_HOLD`). Default `1.0`.
+    ///
+    /// Touchdown is the *start* of landing, not the end: the body still has to
+    /// absorb the impact, kill its vertical velocity, and stand back up. The
+    /// stroke's authored Land segment (`1.04 − 0.79 ≈ 0.25 s`, [`crate::jump_clip`])
+    /// plays that absorb, and the controller then holds the **rest stance**
+    /// while the body settles. The hold clock runs from **touchdown**, so this
+    /// one second includes the absorb — "one second with the feet on the
+    /// ground". The episode is only "landed" once the hold has elapsed **and**
+    /// the body is finally grounded and upright —
+    /// see [`crate::jump::JumpCtrl::landing_complete`].
+    ///
+    /// `0.0` restores the old behaviour (the stroke is over the moment the Land
+    /// segment plays out), which respawned the body the instant it touched down.
+    /// A **negative** value disables landing completion entirely, so the stroke
+    /// simply re-hops while the jump intent is held (the pre-hold loop).
+    pub jump_land_hold: f32,
+    /// Jump landing hold **stability gate**, radians (`JUMP_LAND_LEAN`). Default
+    /// `0.35`.
+    ///
+    /// The hold only counts as "landing properly" while the measured lean is
+    /// inside this band. A body that lands and then tips over keeps the hold
+    /// from completing, so landing is never declared on a toppling body — the
+    /// fall gate (elsewhere) owns that failure. `<= 0` disables the check.
+    pub jump_land_lean: f32,
     /// Attitude-loop closure: position gain on the MEASURED lean error
     /// (radians → radians). `0.0` keeps `upper_angle` a pure echo of the
     /// solver's model lean — the open loop whose damper (`−kd·ω`) sees fiction
@@ -413,6 +438,10 @@ impl Default for ControlConfig {
             // Gate the authored Load→Launch on measured compression (§11).
             jump_fire_r: 0.8,
             jump_load_cap: 0.30,
+            // Landing is a window, not an instant: ~1 s of grounded time after
+            // touchdown (absorb + a held rest stance) before the landing counts.
+            jump_land_hold: 1.0,
+            jump_land_lean: 0.35,
             stand_settle_rate: 40.0,
             move_threshold: 5.0,
             // Deliberately BELOW the gait's own cruise lean (~0.15 rad): the
@@ -1728,6 +1757,33 @@ impl Controller {
         match self {
             Controller::Learned(c) => c.take_last(),
             Controller::JumpResidual(c) => c.take_last(),
+            _ => None,
+        }
+    }
+
+    /// Whether the active jump controller has **completed a landing**: the
+    /// authored absorb played out and the body then held a stable grounded
+    /// stance for `ControlConfig::jump_land_hold`. `None` from any non-jump
+    /// controller, so a harness can tell "no landing concept" from "not yet
+    /// landed". Used to end a jump episode on a real landing, not on touchdown.
+    pub fn landing_complete(&self, cfg: &ControlConfig) -> Option<bool> {
+        match self {
+            // Only the authored stroke (`jump::JumpCtrl`) and its residual have
+            // a landing window; the legacy `control::JumpCtrl` does not.
+            Controller::Jumping(c) => Some(c.landing_complete(cfg)),
+            Controller::JumpResidual(c) => Some(c.landing_complete(cfg)),
+            _ => None,
+        }
+    }
+
+    /// Whether the landing **grace window** is still open (touchdown → hold
+    /// elapsed). The harness keeps the fall gate silent during it, so a body
+    /// that is folding/wobbling on impact is not cut down before it can land.
+    /// `None` from any non-jump controller.
+    pub fn landing_window_open(&self, cfg: &ControlConfig) -> Option<bool> {
+        match self {
+            Controller::Jumping(c) => Some(c.landing_window_open(cfg)),
+            Controller::JumpResidual(c) => Some(c.landing_window_open(cfg)),
             _ => None,
         }
     }

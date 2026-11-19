@@ -30,9 +30,7 @@ use std::sync::{Arc, RwLock};
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 use bevy_vello::{
     collision::{path_to_ccw_quad_path, VelloCollisionWorld, VELLO_COLLISION_COOL_DOWN_TIME},
-    integrations::physics::{
-        CharacterExternalPositionConstraintEvent, VelloConstraintWorld, VelloParticle,
-    },
+    integrations::physics::VelloConstraintWorld,
     prelude::*,
     vello::{
         kurbo::{Rect, Shape},
@@ -54,10 +52,7 @@ use walker_control::{
     jump_residual::{JumpResidual, JumpResidualConfig},
     learned::LearnMode,
     observe::ObserveHandles,
-    plugin::{
-        actuate_system, observe_system, AttachWalker, WalkerControlPlugin, WalkerControlSet,
-        WalkerRig,
-    },
+    plugin::{actuate_system, observe_system, AttachWalker, WalkerControlPlugin, WalkerControlSet},
     walker::Walker,
     walker::WalkerConfig,
 };
@@ -100,7 +95,6 @@ const SETTLE_TICKS: u32 = 45;
 
 /// Teleport stiffness (external position constraint compliance; the hip-pin
 /// rest value is the order of `1e-6`).
-const RESET_COMPLIANCE: f32 = 1e-6;
 
 // ---------------------------------------------------------------------------
 // Env-overridable tunables (plan §5)
@@ -128,8 +122,24 @@ fn win_hidden() -> bool {
     env_flag("WIN_HIDDEN")
 }
 /// Episode horizon (ticks). 180 ≈ 2 s.
+///
+/// There are **two** episode-end triggers in [`ppo_collect_system`]: this
+/// horizon (a timeout) and the measured-fall gate. The reset is a *teleport*
+/// (stiff position constraints in [`ppo_reset_system`]), which is what looks
+/// like the body "zipping" back to standing — that is the respawn, and in
+/// training it is exactly what should happen. The inconsistent timing is the
+/// fall trigger firing early on some strokes while the rest ride to the horizon.
+///
+/// In `EXPERT_ONLY` (viewing) the timeout is disabled: the expert's own re-hop
+/// rebases the clock after `flight_end + 0.25 s` while the jump intent is held,
+/// so the stroke loops crouch → hop → land → stand continuously and only a real
+/// fall respawns it. Set `HORIZON` explicitly to cap an episode if wanted.
 fn horizon() -> u32 {
-    env_usize("HORIZON").unwrap_or(180) as u32
+    if env_flag("EXPERT_ONLY") {
+        env_usize("HORIZON").unwrap_or(u32::MAX as usize) as u32
+    } else {
+        env_usize("HORIZON").unwrap_or(180) as u32
+    }
 }
 /// Collection window per update, summed across envs: `ROLLOUT` ticks/char.
 fn rollout_len(n: usize) -> usize {
@@ -163,6 +173,18 @@ fn fall_penalty() -> f32 {
 /// the measured-fall termination check.
 fn v_gate() -> f32 {
     env_f32("V_GATE").unwrap_or(60.0)
+}
+/// Landing hold, seconds (`JUMP_LAND_HOLD`). Grounded time — counted from
+/// **touchdown**, so it includes the authored absorb — the body must put in
+/// before the landing counts as complete. One second by default. A negative
+/// value disables the hold and restores the re-hop loop.
+fn land_hold() -> f32 {
+    env_f32("JUMP_LAND_HOLD").unwrap_or(1.0)
+}
+/// Landing-hold stability band, radians (`JUMP_LAND_LEAN`). The hold only
+/// accrues while `|lean| ≤ this`.
+fn land_lean() -> f32 {
+    env_f32("JUMP_LAND_LEAN").unwrap_or(0.35)
 }
 /// End-of-episode bonus per unit of peak height above standing. Prices the
 /// *event* (the apex we render) as a terminal term, gated on survival. Kept
@@ -266,9 +288,16 @@ struct PpoState {
 /// Per-character episode bookkeeping (env state the harness owns).
 #[derive(Component)]
 struct Env {
-    /// True while teleporting/settling — no collection; command is None.
+    /// True while the body is settling (initial spawn or respawn); no
+    /// collection, command is None.
     parked: bool,
     settle: u32,
+    /// Set when an episode ended. A parked body with this flag is torn down and
+    /// rebuilt; a freshly assembled body (flag clear) just settles and unparks.
+    respawn_pending: bool,
+    /// World x the character spawns at; a respawn reuses it so the env keeps its
+    /// place in the scene.
+    spawn_x: f32,
     /// Episode tick counter (collection ticks only).
     t: u32,
     ep_reward: f32,
@@ -300,7 +329,16 @@ struct ExitAfter(usize);
 
 fn main() {
     let hidden = win_hidden();
-    let n_chars = env_usize("N").unwrap_or(if env_flag("PPO_SMOKE") { 1 } else { 8 });
+    // `EXPERT_ONLY=1` is a **viewing** mode: the residual runs in `Deploy`
+    // mode against a zero-init actor, so `δ ≡ 0` and the controller replays the
+    // authored stroke exactly (`zero_residual_executes_the_expert`). No PPO
+    // update runs and no checkpoint is written — nothing is trained.
+    let expert_only = env_flag("EXPERT_ONLY");
+    let n_chars = env_usize("N").unwrap_or(if env_flag("PPO_SMOKE") || expert_only {
+        1
+    } else {
+        8
+    });
     let exit_updates = env_usize("UPDATES").unwrap_or(if env_flag("PPO_SMOKE") { 3 } else { 400 });
 
     // Build the trainer *before* the app: its shapes define the policy every
@@ -354,6 +392,12 @@ fn main() {
     // starts standing is the point of the milestone-1 de-risking.
     if std::env::var("ZERO_INIT").map(|v| v != "0").unwrap_or(true) {
         trainer.actor.zero_last_layer();
+    }
+    if expert_only {
+        info!(
+            "walker_ppo: EXPERT_ONLY — Deploy + zero-init ⇒ δ ≡ 0, so the residual \
+             replays the authored stroke. No update, no checkpoint write."
+        );
     }
     let bundle = Arc::new(RwLock::new(PolicyBundle::from_trainer(&trainer)));
 
@@ -610,6 +654,7 @@ fn attach_walkers(
         &SpineController,
         &LeftLegController,
         &RightLegController,
+        &Transform,
     )>,
     colliders: Query<(Entity, &Connectivity, &VelloCollider)>,
     walker_q: Query<(), With<Walker>>,
@@ -617,7 +662,7 @@ fn attach_walkers(
     n: Res<NChars>,
     mut attached: Local<std::collections::HashSet<Entity>>,
 ) {
-    for (root, _spine, left, right) in &roots {
+    for (root, _spine, left, right, root_tf) in &roots {
         if attached.contains(&root) || walker_q.get(root).is_ok() {
             continue;
         }
@@ -666,10 +711,22 @@ fn attach_walkers(
             leg_len: LEG_LEN,
             ..JumpResidualConfig::default()
         };
+        // `EXPERT_ONLY` runs the same controller deterministically: Deploy mode
+        // takes μ with no exploration noise, so a zero-init actor gives δ ≡ 0
+        // and the expert is what you see. Training mode would sample them.
+        let learn_mode = if env_flag("EXPERT_ONLY") {
+            LearnMode::Deploy
+        } else {
+            LearnMode::Train
+        };
         config.control.use_learned = false;
+        // A jump episode ends on a **completed landing** (absorb + stabilization
+        // hold), not on touchdown — see `JumpCtrl::landing_complete`.
+        config.control.jump_land_hold = land_hold();
+        config.control.jump_land_lean = land_lean();
         config.jump_residual = Some(JumpResidual::with_policy(
             state.bundle.clone(),
-            LearnMode::Train,
+            learn_mode,
             jcfg,
             &config.lower,
         ));
@@ -684,10 +741,13 @@ fn attach_walkers(
             },
             root,
         );
-        // Parked: settle-reset to the spawn pose before the first episode.
+        // Freshly assembled: settle briefly (a *respawn* body is already built
+        // at rest, so nothing is dragged), then open the first episode.
         commands.entity(root).insert(Env {
             parked: true,
             settle: SETTLE_TICKS,
+            respawn_pending: false,
+            spawn_x: root_tf.translation.x,
             t: 0,
             ep_reward: 0.0,
             peak: 0.0,
@@ -755,11 +815,59 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         let (mut reward, _events) = env.reward.step(&fiction, Some(&mu));
         // Termination: **measured fall only** (§12.5) — no predicted-doom cut,
         // which would invite the degenerate optimum of never launching.
-        let bad = fiction.lean.abs() > fall || height < min_height() || lateral > 3.0 * v_gate();
+        // A **vertical hop** is not a fall: while airborne the torso can lean or
+        // drift (the launch impulse torques the free body), and judging it there
+        // cut every episode at the apex — so the descent and landing were never
+        // rendered. Fall is a GROUNDED condition: the body has come back down and
+        // is not recovering. `height` also only means "sunk" when grounded (in
+        // flight the hip is legitimately far above the standing line).
+        // **Landing grace window**: between touchdown and the end of the hold the
+        // body is *supposed* to be folding, wobbling and recovering. Cutting it
+        // there is the "respawns too soon on landing / responds too fast after
+        // hitting the floor" failure. The stroke owns that window; the fall gate
+        // stays silent until it closes (`landing_window_open`).
+        let landing_grace = walker
+            .controller
+            .landing_window_open(&walker.config.control)
+            .unwrap_or(false);
+        let lean_bad = !landing_grace && fiction.grounded && fiction.lean.abs() > fall;
+        let height_bad = !landing_grace && fiction.grounded && height < min_height();
+        let lateral_bad = !landing_grace && fiction.grounded && lateral > 3.0 * v_gate();
+        let bad = lean_bad || height_bad || lateral_bad;
         env.fall_streak = if bad { env.fall_streak + 1 } else { 0 };
         let fallen = env.fall_streak >= fall_hold();
         let over = env.t + 1 >= horizon;
-        let done = fallen || over;
+        // **Landed** is its own terminal: the stroke played its absorb and the
+        // body then held a stable grounded stance for `JUMP_LAND_HOLD`
+        // (`JumpCtrl::landing_complete`). Touchdown alone is NOT the end of the
+        // episode — the body still has to land. The hold's own lean band means
+        // this cannot fire on a toppling body; that failure stays with the
+        // fall gate below.
+        let landed = walker
+            .controller
+            .landing_complete(&walker.config.control)
+            .unwrap_or(false);
+        let done = fallen || over || landed;
+        if done && env_flag("EXPERT_ONLY") {
+            // Which trigger ended the episode — a timeout, or the fall gate and
+            // *which* of its conditions. The reset is a stiff teleport, so an
+            // early `done` mid-flight is exactly what looks like the body
+            // "zipping" back to standing.
+            info!(
+                "EXPERT_ONLY episode end @t={} grounded={} over={over} fallen={fallen} \
+                 landed={landed} lean={:.3}({}) hip_y={:.1} h={:.3}({}) vx={:.1}({}) phase={:?}",
+                env.t,
+                fiction.grounded,
+                fiction.lean,
+                lean_bad,
+                fiction.hip.y,
+                height,
+                height_bad,
+                fiction.v_hip.x,
+                lateral_bad,
+                walker.controller.mode(),
+            );
+        }
         if fallen {
             reward -= fall_penalty();
         }
@@ -802,15 +910,18 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
                 env.t,
                 env.peak
             ));
-            // Reset on the spot (next tick's settle window).
+            // Park and flag for a full **respawn**: `ppo_reset_system` despawns
+            // this character and the factory rebuilds it at its rest pose. That
+            // is a real reset — no stiff pin dragging a live soft body.
             env.parked = true;
-            env.settle = SETTLE_TICKS;
+            env.respawn_pending = true;
+            env.settle = 0;
             env.t = 0;
             env.ep_reward = 0.0;
             env.peak = 0.0;
             env.fall_streak = 0;
             // Don't carry the phase machine or the action stream across the
-            // teleport: the first tick of a new episode starts grounded with
+            // respawn: the first tick of a new episode starts grounded with
             // no Δμ penalty.
             env.reward.reset();
         }
@@ -822,58 +933,85 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
     state.tick += 1;
 }
 
-/// The teleport reset: while parked, pin every rig particle at its blueprint
-/// spawn pose (`particle_init`) with stiff one-time external position
-/// constraints and zero its velocity — the engine's own public channels (same
-/// Law-1 queue-only idiom as the hip-pin drive), one pass per settle tick.
+/// The episode reset: **despawn and respawn the whole character**.
+///
+/// The previous version pinned every particle back to `particle_init.pos` with a
+/// `1e-6` compliance ("teleport"). That is not a respawn — the pins are stiff
+/// enough to *drag* a live soft body, so a reset mid-flight visibly deformed the
+/// character as it snapped home.
+///
+/// Despawning the root is the engine-sanctioned teardown:
+///  - removing `ConnectivityRoot` fires `on_remove_connectivity_root`, which
+///    despawns every part (and the joints, via `death_propegate`);
+///  - removing `VelloCharacterPhysicsRoot` tears down the physics group
+///    (`remove_group`), and removed colliders reach `remove_soft_body`, so no
+///    stale soft body survives.
+///
+/// A fresh `CharacterRoot` at the same spawn x then goes through the normal
+/// assembly path, so the new body is built at its blueprint rest pose — a true
+/// respawn, with nothing to drag.
 fn ppo_reset_system(
+    mut commands: Commands,
     mut walkers: Query<(&mut Walker, &mut Env)>,
-    particles: Query<&VelloParticle>,
-    mut world: ResMut<VelloConstraintWorld>,
-    rigs: Query<&WalkerRig>,
+    roots: Query<&CharacterRoot>,
 ) {
     for (mut walker, mut env) in walkers.iter_mut() {
         if !env.parked {
             continue;
         }
-        if env.settle == 0 {
-            // Settle done: re-open collection with a FRESH observer so the
-            // EMA/debounce cannot smear the teleport discontinuity into the
-            // first observation of the new episode.
-            env.parked = false;
-            walker.observer = Default::default();
+
+        // A freshly assembled body (initial spawn or the replacement we just
+        // spawned) only needs to settle. Never respawn it again — that would
+        // loop forever. Once the settle ticks out, open the episode with a
+        // fresh observer so the EMA/debounce cannot smear the spawn transient
+        // into the first observation.
+        if !env.respawn_pending {
+            if env.settle > 0 {
+                env.settle -= 1;
+            } else {
+                env.parked = false;
+                walker.observer = Default::default();
+            }
             continue;
         }
-        env.settle -= 1;
-        let Ok(rig) = rigs.get(env.root) else {
+
+        // `Walker`/`Env` live on the character ROOT entity (`on_attach_walker`
+        // inserts onto the trigger target), so one despawn retires the whole
+        // thing. Guard on the root still existing: deferred commands mean a
+        // parked walker can be observed once after its root is already gone.
+        let Ok(root_cfg) = roots.get(env.root) else {
             continue;
         };
-        // Every particle the rig knows: legs, feet, waist/hip (deduped).
-        let mut roster: Vec<Entity> = Vec::new();
-        roster.extend_from_slice(&rig.left.parts);
-        roster.extend_from_slice(&rig.right.parts);
-        roster.push(rig.handles.waist);
-        roster.push(rig.handles.hip);
-        roster.extend_from_slice(&rig.handles.feet);
-        roster.sort();
-        roster.dedup();
-        for entity in roster {
-            let Ok(p) = particles.get(entity) else {
-                continue;
-            };
-            world.queue_character_one_time_external_position_constraint(
-                &CharacterExternalPositionConstraintEvent {
-                    character_entity: env.root,
-                    joint_entity: entity,
-                    config: vello_physics::ExternalPositionConstraintConfig {
-                        target: p.particle_init.pos,
-                        compliance: RESET_COMPLIANCE,
-                        damping: 1.0,
-                    },
+        let (svg_id, bp_id, group) = (
+            root_cfg.svg_asset_id.clone(),
+            root_cfg.blueprint_asset_id.clone(),
+            root_cfg.collision_group,
+        );
+
+        // 1. Tear the old body down through the engine's own teardown hooks:
+        //    `ConnectivityRoot` removal despawns every part + joints, and
+        //    `VelloCharacterPhysicsRoot` removal frees the physics group.
+        commands.entity(env.root).despawn();
+
+        // 2. Spawn a brand-new character at the same place. The factory's
+        //    `OnAdd<CharacterRoot>` observer rebuilds particles, joints and
+        //    colliders at the blueprint rest pose, then `attach_walkers` gives
+        //    it a fresh `Walker` + `Env` (parked, so its settle runs first).
+        commands.spawn((
+            VelloSceneBundle {
+                transform: Transform {
+                    translation: Vec3::new(env.spawn_x, SPAWN_TRANSLATION.y, SPAWN_TRANSLATION.z),
+                    scale: SPAWN_SCALE,
+                    ..default()
                 },
-            );
-            world.queue_connect_particle_velocity(env.root, &entity, Vec2::ZERO);
-        }
+                ..default()
+            },
+            CharacterRoot {
+                svg_asset_id: svg_id,
+                blueprint_asset_id: bp_id,
+                collision_group: group,
+            },
+        ));
     }
 }
 
@@ -881,12 +1019,21 @@ fn ppo_reset_system(
 /// Runs in `Assemble` (after `assemble_system`), so telemetry stays coherent
 /// and the next tick's controllers read the new snapshot.
 fn ppo_update_system(mut state: ResMut<PpoState>, n: Res<NChars>) {
+    // Viewing mode: never learn, never overwrite the checkpoint.
+    if env_flag("EXPERT_ONLY") {
+        return;
+    }
     let target = rollout_len(n.0);
     if state.rollout.len() < target {
         return;
     }
     let rollout = std::mem::take(&mut state.rollout);
+    // This runs **on the main thread inside FixedUpdate**, so it stalls the
+    // render loop for its whole duration — the visible "freeze" every rollout.
+    // Time it so the cost is on the record (knobs: `ROLLOUT`, `EPOCHS`, `N`).
+    let t0 = std::time::Instant::now();
     let stats = state.trainer.update(&rollout);
+    let update_ms = t0.elapsed().as_secs_f64() * 1000.0;
     state.updates += 1;
     let (updates, tick, n_ep) = (state.updates, state.tick, rollout.len());
 
@@ -921,7 +1068,8 @@ fn ppo_update_system(mut state: ResMut<PpoState>, n: Res<NChars>) {
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
-         peak {mean_peak:.3} pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep}",
+         peak {mean_peak:.3} pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep} \
+         | update_blocked {update_ms:.1} ms",
         stats.policy_loss, stats.value_loss, stats.approx_kl, stats.clip_frac,
     );
     state.ep_rewards.clear();

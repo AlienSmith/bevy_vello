@@ -459,6 +459,56 @@ Notes that pin the design:
   liftoff `L` penalty is the *price* — GAE connects them, so both get credit
   for the same launch decision.
 
+### 12.2.1 The landing window is a GRACE period (2026-11-19)
+
+`land_window_ts` (the reward's Land window, ~0.3 s) and the **landing hold**
+(`ControlConfig::jump_land_hold`, 1.0 s) are two different things and both were
+needed:
+
+- **touchdown ≠ landed.** The user's framing: "the landing doesn't end the
+  second the character touches the ground… give it like one second after the
+  feet are on the ground." The body still has to absorb the impact, kill its
+  vertical velocity, and stand back up.
+- **The fall gate must be SILENT during that window.** First implementation
+  made `land_hold` accrue only while *stable*, so the body toppled at ~0.9 s
+  and the fall gate (`|lean| > FALL_LEAN` while grounded) killed the episode
+  before the 1 s hold could complete — which is exactly the visible "responds
+  too fast after hitting the floor" bug. Fix: `land_hold` is a **monotone clock
+  from touchdown**, and `JumpCtrl::landing_window_open` lets the harness
+  suppress the fall gate until it closes. Judged **once** at the end
+  (`landed = grounded && upright`); after that a topple goes back to the normal
+  gate.
+- The stroke is also **latched** (`landed` / `landing_resolved`): it never
+  re-hops out of a declared landing, so the episode ends on a real respawn.
+
+### 12.2.2 Env knobs
+
+| var | default | meaning |
+|---|---|---|
+| `JUMP_LAND_HOLD` | `1.0` | grounded seconds from touchdown before landing is complete. `< 0` restores the re-hop loop. |
+| `JUMP_LAND_LEAN` | `0.35` | \|lean\| band the body must be inside at the end of the window to count as "landed properly". `<= 0` disables. |
+
+### 12.2.3 Visualizing training (the freeze)
+
+The PPO update runs **synchronously on the main thread inside `FixedUpdate`**,
+so it stalls rendering for its whole duration — the periodic visible freeze,
+followed by a burst of catch-up physics ticks that looks like a reset.
+
+Measured on this box (`N=4`, `ROLLOUT=180`, `EPOCHS=8`, `buffer≈720`):
+
+| build | `update()` block |
+|---|---|
+| debug | **~1035 ms** |
+| release | **~78 ms** |
+
+So **watch training with the release binary**. `cargo build --release -p
+walker_ppo`, then run `./target/release/walker_ppo` with `WIN_HIDDEN=0`. The
+per-update `update_blocked X ms` field in the log line makes this auditable;
+`N`, `ROLLOUT`, and `EPOCHS` are the levers if it ever needs to be shorter.
+Moving the update to a worker thread is the real fix and is **not** done — it
+needs the on-policy freeze point preserved (weights are broadcast between
+rollouts only).
+
 ### 12.3 Flight ticks: no shaping
 
 Alive bonus only. The landing reward flows back through GAE to the launch

@@ -306,8 +306,20 @@ pub fn actuate_stage(
     // `J = Δv / inv_mass` from the live inverse mass. Idempotent: the solver
     // consumes and removes the impulse at the next step, so it never accumulates.
     if out.jump_impulse != 0.0 {
+        // The two legs SHARE their spine particles (hip = `left.particles[1]` =
+        // `right.particles[1]`, waist likewise), so iterating both part lists
+        // would apply the impulse to those shared particles twice: the apex
+        // doubles (measured 126 px for a 60 px target) and the uneven per-part
+        // velocities torque the torso into a lean, which then trips the fall
+        // gate mid-flight. Dedupe by entity so every body particle gets the
+        // target Δv exactly once.
+        let mut seen: Vec<Entity> = Vec::with_capacity(8);
         for leg in [left, right] {
             for part in leg.parts {
+                if seen.contains(&part) {
+                    continue;
+                }
+                seen.push(part);
                 if let Ok(p) = p_q.get(part) {
                     let inv_mass = p.particle.inv_mass;
                     if inv_mass <= 0.0 {

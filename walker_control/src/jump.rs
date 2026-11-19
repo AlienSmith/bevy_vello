@@ -105,6 +105,22 @@ pub struct JumpCtrl {
     /// transition from the clip itself.)
     load_end: f32,
     flight_end: f32,
+    /// End of the authored Land (absorb) segment — the clip's last key. The
+    /// landing hold starts counting only once the body has played the absorb
+    /// out to here (see [`Self::landing_complete`]).
+    land_end: f32,
+    /// Monotone **time since touchdown**, seconds. Starts when the stroke enters
+    /// `Land` and ticks every step regardless of contact, so the landing window
+    /// can never hang. This is the `ControlConfig::jump_land_hold` clock.
+    land_hold: f32,
+    /// Latched when the landing hold has **elapsed** and the body was upright:
+    /// the stroke is over and the body is standing. The episode may now respawn;
+    /// the stroke will not re-hop.
+    landed: bool,
+    /// Latched when the landing window has been judged (either way): the grace
+    /// period is over and the fall gate may speak again. Distinct from `landed`
+    /// so a body that fails to stabilize still leaves the window.
+    landing_resolved: bool,
     /// Chord length used to turn the normalized pose into px offsets.
     leg_len: f32,
 }
@@ -135,6 +151,11 @@ impl JumpCtrl {
             gravity: lower.gravity,
             load_end: ts.get(1).copied().unwrap_or(0.22),
             flight_end: ts.get(3).copied().unwrap_or(0.79),
+            // The clip's final key is the end of the land-absorb (1.04).
+            land_end: ts.last().copied().unwrap_or(1.04),
+            land_hold: 0.0,
+            landed: false,
+            landing_resolved: false,
             leg_len,
         }
     }
@@ -142,6 +163,28 @@ impl JumpCtrl {
     /// Completed hops (for tests and later telemetry).
     pub fn hops(&self) -> u32 {
         self.hops
+    }
+
+    /// True once a landing has been declared **complete**: the authored absorb
+    /// has played out and the body has then held a stable grounded stance for
+    /// `cfg.jump_land_hold` seconds (`plans/jump-ppo-residual-polar-action.md`
+    /// §12.2). This is the signal a harness uses to end the jump episode and
+    /// respawn — touchdown alone is not "landed", the body still has to absorb
+    /// the impact and settle.
+    ///
+    /// Returns `false` while the hold is disabled (`cfg.jump_land_hold < 0`), so
+    /// the old re-hop loop is preserved for stroke-only tests.
+    pub fn landing_complete(&self, cfg: &ControlConfig) -> bool {
+        cfg.jump_land_hold >= 0.0 && self.landed
+    }
+
+    /// True while the **landing grace window** is open: touchdown has happened
+    /// and the hold has not yet elapsed. The fall gate must stay silent during
+    /// it — the body is supposed to be folding, wobbling and recovering, and
+    /// cutting the episode there is exactly the "respawns too soon on landing"
+    /// failure. Closes on elapse (judged once, see [`Self::landing_complete`]).
+    pub fn landing_window_open(&self, cfg: &ControlConfig) -> bool {
+        cfg.jump_land_hold >= 0.0 && self.phase == JumpPhase::Land && !self.landing_resolved
     }
 
     /// Measured chord ratio over the **touching** feet: `mean(|foot − hip|) /
@@ -247,10 +290,64 @@ impl Step for JumpCtrl {
             self.t = self.flight_end;
             self.phase = JumpPhase::Land;
         }
-        // Re-hop: once the Land segment has played out while still grounded and
-        // the intent is held, rebase the clock to the top of the clip. The gate
-        // re-arms with it — every hop has to earn its own launch.
-        if self.phase == JumpPhase::Land && self.t >= self.flight_end + 0.25 && fiction.grounded {
+        // Landing is a **window**, not an instant (user: "the landing doesn't
+        // end the second the character touches the ground"). Three stages, all
+        // in the Land phase:
+        //   1. the authored absorb segment plays out (t: flight_end → land_end),
+        //      easing the stance back to rest and killing the impact;
+        //   2. once the absorb is done AND the body is grounded and upright, the
+        //      clock parks at `land_end` (holding the rest stance) and the
+        //      stable-grounded time accumulates into `land_hold`;
+        //   3. when `land_hold` reaches `cfg.jump_land_hold`, the landing is
+        //      *complete* — latch `landed`, report it via `landing_complete`.
+        //
+        // The re-hop below is the fallback when the hold is **disabled**
+        // (`jump_land_hold < 0`): the stroke loops instead of ever declaring a
+        // landing. That keeps the stroke-only tests (and any caller that wants a
+        // continuous hop loop) behaving exactly as before.
+        let hold_enabled = cfg.jump_land_hold >= 0.0;
+        let lean = fiction.lean.abs();
+        let upright = cfg.jump_land_lean <= 0.0 || lean <= cfg.jump_land_lean;
+        // The landing is a **grace window**, not an instant, and it must not be
+        // cut short by the fall gate while the body is still absorbing and
+        // recovering. So `land_hold` is a MONOTONE clock from touchdown (entering
+        // `Land`), independent of contact — it can never hang, and the harness
+        // suppresses the fall gate while the window is open.
+        //
+        // Stage 1 (t < land_end): the authored absorb plays out, easing the
+        // stance back to rest. Stage 2 (t pinned at land_end): hold that rest
+        // stance until the window elapses.
+        if hold_enabled && self.phase == JumpPhase::Land && !self.landing_resolved {
+            self.land_hold += dt;
+            if self.t < self.land_end {
+                self.t = (self.t + dt).min(self.land_end);
+            } else {
+                // Pinned at the last key: `clip.sample` clamps, so the rest
+                // stance is what holds.
+                self.t = self.land_end;
+            }
+            if self.land_hold >= cfg.jump_land_hold {
+                // Window elapsed — judge it ONCE, now:
+                //  - landed "properly" only if the body is upright on the ground
+                //    at the end of the window (`landed`);
+                //  - either way the grace window is over (`landing_resolved`), so
+                //    a topple past it goes back to the normal fall gate.
+                self.landing_resolved = true;
+                if fiction.grounded && upright {
+                    self.landed = true;
+                    self.hops += 1;
+                }
+            }
+        }
+        // Re-hop fallback: only when the landing hold is disabled, once the Land
+        // segment has played out while still grounded and the intent is held,
+        // rebase the clock to the top of the clip. The gate re-arms with it —
+        // every hop has to earn its own launch.
+        if !hold_enabled
+            && self.phase == JumpPhase::Land
+            && self.t >= self.flight_end + 0.25
+            && fiction.grounded
+        {
             self.hops += 1;
             self.t = 0.0;
             self.phase = JumpPhase::Load;
@@ -361,6 +458,18 @@ mod tests {
     fn clock_cfg() -> ControlConfig {
         ControlConfig {
             jump_fire_r: 0.0,
+            ..ControlConfig::default()
+        }
+    }
+
+    /// The re-hop loop: landing-hold **disabled** (`< 0`), so a held jump intent
+    /// keeps cycling the stroke instead of ever declaring a landing. This is
+    /// the behaviour the two `re_hop` tests assert; the hold is a deliberate
+    /// opt-in and has its own test.
+    fn hop_loop_cfg() -> ControlConfig {
+        ControlConfig {
+            jump_fire_r: 0.0,
+            jump_land_hold: -1.0,
             ..ControlConfig::default()
         }
     }
@@ -494,7 +603,7 @@ mod tests {
 
     #[test]
     fn a_held_command_re_hops() {
-        let cfg = clock_cfg();
+        let cfg = hop_loop_cfg();
         let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
         // One full hop ≈ load .22 + launch .12 + short flight + land .25.
         run(&cfg, &mut ctrl, &standing(), 26); // grounded throughout
@@ -606,6 +715,8 @@ mod tests {
         let cfg = ControlConfig {
             jump_fire_r: 0.8,
             jump_load_cap: 5.0,
+            // Re-hop loop: no landing hold, so the second hop can arm.
+            jump_land_hold: -1.0,
             ..ControlConfig::default()
         };
         let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
@@ -613,6 +724,63 @@ mod tests {
         run(&cfg, &mut ctrl, &crouched(0.7), 120);
         assert!(ctrl.hops() >= 1, "the compressed hop completed");
         assert!(!ctrl.fired, "the latch re-armed for the next hop");
+    }
+
+    #[test]
+    fn touchdown_is_not_the_end_of_the_landing() {
+        // The point of the landing hold: the stroke must NOT declare a landing
+        // on the touchdown tick. It plays the authored absorb, then holds a
+        // stable stance for `jump_land_hold` before `landing_complete` latches.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.0,
+            jump_land_hold: 1.0,
+            jump_land_lean: 0.35,
+            ..ControlConfig::default()
+        };
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        // Grounded throughout: the flight-clock ends early on contact, so the
+        // stroke lands, plays the absorb and then enters the hold.
+        // The hold runs 1.0 s ≈ 90 ticks from touchdown; the absorb (~0.25 s)
+        // is inside it. Stop at 80 ticks after entry: still short of the hold.
+        run(&cfg, &mut ctrl, &standing(), 80);
+        assert!(
+            !ctrl.landing_complete(&cfg),
+            "touchdown + absorb alone is not a completed landing"
+        );
+
+        // Now give it the remaining hold: the stroke reaches the 1 s mark within
+        // another 1.5 s of stable ground.
+        run(&cfg, &mut ctrl, &standing(), 140);
+        assert!(
+            ctrl.landing_complete(&cfg),
+            "after the hold the landing is complete"
+        );
+        assert_eq!(
+            ctrl.hops(),
+            1,
+            "exactly one hop, no re-hop past the landing"
+        );
+    }
+
+    #[test]
+    fn a_toppling_body_never_completes_the_landing() {
+        // The hold's lean band: a body that keeps tipping must never be declared
+        // landed (the fall gate owns that failure). Drive a full stroke on a
+        // heavily leaned fiction.
+        let cfg = ControlConfig {
+            jump_fire_r: 0.0,
+            jump_land_hold: 0.2,
+            jump_land_lean: 0.35,
+            ..ControlConfig::default()
+        };
+        let mut leaned = standing();
+        leaned.lean = 1.2; // well past the band
+        let mut ctrl = JumpCtrl::new(&walker_math::LowerBodyConfig::default());
+        run(&cfg, &mut ctrl, &leaned, 200);
+        assert!(
+            !ctrl.landing_complete(&cfg),
+            "a toppling body is never 'landed'"
+        );
     }
 
     #[test]
