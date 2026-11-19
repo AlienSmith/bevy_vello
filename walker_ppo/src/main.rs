@@ -517,7 +517,45 @@ fn main() {
         ppo_cfg.init_std = v;
     }
     let seed = env_usize("SEED").unwrap_or(0x5A17) as u64;
-    let mut trainer = PpoTrainer::new(jcfg.obs_dim, jcfg.action_dim, &jcfg.hidden, ppo_cfg, seed);
+    let fresh = PpoTrainer::new(jcfg.obs_dim, jcfg.action_dim, &jcfg.hidden, ppo_cfg, seed);
+    // ------------------------------------------------------------------
+    // RESUME — continue a run from a checkpoint.
+    // ------------------------------------------------------------------
+    // Weights are restored; the Adam moments are NOT (see
+    // `PpoTrainer::save_json`: `#[serde(skip)]`), so the first update after a
+    // resume takes a slightly different step than the uninterrupted run would
+    // have. That is a documented, accepted approximation — valuable because a
+    // run that dies at update 3000 can still be continued instead of restarted.
+    let mut trainer = match std::env::var("RESUME") {
+        Ok(path) if !path.trim().is_empty() => match PpoTrainer::load_json(path.trim()) {
+            // A shape mismatch means the checkpoint was trained against a
+            // different obs/action space; silently loading it would feed the
+            // policy garbage, so refuse and start fresh.
+            Ok(t) if t.actor.dims == fresh.actor.dims && t.critic.dims == fresh.critic.dims => {
+                // `eprintln!`, not `info!` — Bevy's LogPlugin is not installed
+                // until `DefaultPlugins` builds, which is AFTER this point, so
+                // an `info!` here is silently dropped and the operator cannot
+                // tell whether a resume actually happened.
+                eprintln!("walker_ppo: RESUMED from {path} (Adam moments reset)");
+                t
+            }
+            Ok(t) => {
+                eprintln!(
+                    "walker_ppo: {path} is {}→{} but this env is {}→{}; starting FRESH",
+                    t.actor.dims[0],
+                    t.actor.dims[t.actor.dims.len() - 1],
+                    jcfg.obs_dim,
+                    jcfg.action_dim
+                );
+                fresh
+            }
+            Err(e) => {
+                eprintln!("walker_ppo: RESUME load failed ({e}); starting FRESH");
+                fresh
+            }
+        },
+        _ => fresh,
+    };
     if let Some(v) = env_f32("LR") {
         trainer.set_lr(v);
     }
@@ -1319,8 +1357,18 @@ fn ppo_update_system(
         stats.approx_kl,
         stats.clip_frac
     ));
-    if !state.ep_rewards.is_empty() {
-        state.best_mean_reward = state.best_mean_reward.max(mean_ep);
+    // ---- checkpointing ----
+    // Three artifacts, because each answers a different question:
+    //   policy.json          — ALWAYS the latest. Warm-resume a dead run.
+    //   policy_snapshot.json — every `SNAPSHOT_EVERY` updates (default 100), so
+    //                          an interrupted or diverged run loses at most
+    //                          that many updates, not everything.
+    //   policy_best.json     — the highest mean episode reward seen. The
+    //                          artifact you actually DEPLOY. Without it a late
+    //                          collapse silently overwrites the good policy.
+    let is_best = !state.ep_rewards.is_empty() && mean_ep > state.best_mean_reward;
+    if is_best {
+        state.best_mean_reward = mean_ep;
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
@@ -1333,8 +1381,29 @@ fn ppo_update_system(
     state.ep_peaks.clear();
 
     flush_state(&state);
-    if let Err(e) = state.trainer.save_json("tmp/walker_ppo/policy.json") {
-        warn!("walker_ppo: checkpoint save failed: {e}");
+    let snapshot_every = env_usize("SNAPSHOT_EVERY").unwrap_or(100).max(1);
+    let mut saves = vec!["tmp/walker_ppo/policy.json"];
+    if is_best {
+        saves.push("tmp/walker_ppo/policy_best.json");
+    }
+    let do_snapshot = updates % snapshot_every == 0;
+    for path in saves {
+        if let Err(e) = state.trainer.save_json(path) {
+            warn!("walker_ppo: checkpoint save failed ({path}): {e}");
+        }
+    }
+    if do_snapshot {
+        if let Err(e) = state
+            .trainer
+            .save_json("tmp/walker_ppo/policy_snapshot.json")
+        {
+            warn!("walker_ppo: snapshot save failed: {e}");
+        }
+        info!(
+            "walker_ppo: snapshot @update {updates} (every {snapshot_every}); \
+             best mean reward {:.3} @update {}",
+            state.best_mean_reward, state.updates
+        );
     }
 }
 
