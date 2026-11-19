@@ -382,9 +382,13 @@ impl Step for JumpResidual {
         let pose = self.reconstruct(&action, &prop, facing);
         ControlOut {
             pose,
-            // The residual commands a pose, not a velocity.
+            // The residual commands a pose, not a velocity — but the launch
+            // impulse belongs to the EXPERT, not the policy: it is the one
+            // piece of authority the legs cannot express (only ~5.5 px of
+            // extension left at standing). Dropping it here is what left the
+            // residual path with no hop at all.
             hip_vel: Vec2::ZERO,
-            jump_impulse: 0.0,
+            jump_impulse: proposal_out.jump_impulse,
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::Jumping,
             debug: None,

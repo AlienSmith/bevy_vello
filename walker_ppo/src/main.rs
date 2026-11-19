@@ -51,7 +51,8 @@ use game_lib::{
 use walker_control::{
     control::Command,
     emit::LegHandles,
-    learned::{LearnMode, LearnedConfig, LearnedCtrl},
+    jump_residual::{JumpResidual, JumpResidualConfig},
+    learned::LearnMode,
     observe::ObserveHandles,
     plugin::{
         actuate_system, observe_system, AttachWalker, WalkerControlPlugin, WalkerControlSet,
@@ -303,13 +304,23 @@ fn main() {
     let exit_updates = env_usize("UPDATES").unwrap_or(if env_flag("PPO_SMOKE") { 3 } else { 400 });
 
     // Build the trainer *before* the app: its shapes define the policy every
-    // controller adopts at attach time.
-    let lcfg = LearnedConfig {
+    // controller adopts at attach time. These are the **JumpResidual** dims
+    // (obs 22 / act 5 in the polar action space), NOT the walking `LearnedCtrl`
+    // dims (16 / 7) — the residual is what this app trains
+    // (`plans/jump-ppo-residual-polar-action.md` §3).
+    let jcfg = JumpResidualConfig {
         hip_height: HIP_HEIGHT,
         leg_len: LEG_LEN,
-        ..LearnedConfig::default()
+        ..JumpResidualConfig::default()
     };
     let mut ppo_cfg = PpoConfig::default();
+    // The residual acts in a *normalized* space (deltas are already divided by
+    // `r_scale`/`s_scale`/`theta_scale` in `jump_residual.rs`), so a 0.5 std is
+    // half the full action range per dimension — far too noisy for a residual
+    // that should stay near the expert. 0.3 keeps early exploration inside the
+    // scales; override with `INIT_STD` (`plans/jump-ppo-residual-polar-action.md`
+    // §3, blocker 4).
+    ppo_cfg.init_std = 0.3;
     if let Some(v) = env_f32("GAMMA") {
         ppo_cfg.gamma = v;
     }
@@ -329,7 +340,7 @@ fn main() {
         ppo_cfg.init_std = v;
     }
     let seed = env_usize("SEED").unwrap_or(0x5A17) as u64;
-    let mut trainer = PpoTrainer::new(lcfg.obs_dim, lcfg.action_dim, &lcfg.hidden, ppo_cfg, seed);
+    let mut trainer = PpoTrainer::new(jcfg.obs_dim, jcfg.action_dim, &jcfg.hidden, ppo_cfg, seed);
     if let Some(v) = env_f32("LR") {
         trainer.set_lr(v);
     }
@@ -645,16 +656,22 @@ fn attach_walkers(
 
         let mut config = WalkerConfig::default();
         config.lower.hip_height = HIP_HEIGHT;
-        config.control.use_learned = true;
-        let lcfg = LearnedConfig {
+        // The **residual** is what trains here, not the walking policy:
+        // `use_learned = false` keeps the FSM on the authored paths, and
+        // `control_stage` swaps in `JumpResidual` whenever the machine enters
+        // `LocoMode::Jumping` (`plans/jump-ppo-residual-polar-action.md` §3).
+        // The dims must match the trainer built in `main()`.
+        let jcfg = JumpResidualConfig {
             hip_height: HIP_HEIGHT,
             leg_len: LEG_LEN,
-            ..LearnedConfig::default()
+            ..JumpResidualConfig::default()
         };
-        config.learned = Some(LearnedCtrl::with_policy(
+        config.control.use_learned = false;
+        config.jump_residual = Some(JumpResidual::with_policy(
             state.bundle.clone(),
             LearnMode::Train,
-            lcfg,
+            jcfg,
+            &config.lower,
         ));
 
         commands.trigger_targets(

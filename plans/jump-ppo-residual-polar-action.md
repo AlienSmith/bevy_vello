@@ -115,13 +115,42 @@ torso:            θ = asin(clamp(s_θ, −1, 1))                // range ±60°
   Cartesian foot channels, and **append the expert proposal** (`r_prop,
   s_prop_L, s_prop_R, θ_prop, phase`) so the policy sees the baseline it
   corrects against.
-- **`LocoMode::Jumping`** stays; `Controller::Jumping` swaps `JumpCtrl` for
-  `JumpResidual` when `use_learned && residual_jump` (a new `ControlConfig`
-  flag; **default off ⇒ `use_learned=false` walks/deploy and the pure `JumpCtrl`
-  expert path are bit-for-bit untouched**).
+- **`LocoMode::Jumping`** stays; `walker_control::control_stage` swaps `JumpCtrl`
+  for `JumpResidual` whenever `WalkerConfig::jump_residual` is `Some` and the
+  machine enters `Jumping` (`jump_residual` is `None` by default, so the pure
+  `JumpCtrl` expert path is bit-for-bit untouched in QA/deploy).
 - **`walker_ppo`** harness: `ppo_command_system` already holds a `Command::jump`;
-  `ppo_collect_system` reward is reused (alive + gated climb + peak bonus −
-  penalties). `JumpResidual::take_last` feeds the rollout like `LearnedCtrl`.
+  `ppo_collect_system` reward is reused. `Controller::take_last` dispatches to
+  `JumpResidual`, which feeds the rollout like `LearnedCtrl`.
+
+### 3.1 Training-readiness blockers — removed (2026-11-19)
+
+Four issues would have made the first run train the wrong net; all four are now
+fixed, and **training has not been started** (deliberate).
+
+1. **Routing / dims.** The trainer was built at the `LearnedConfig` dims
+   (obs 16 / act 7) while the residual acts at `JumpResidualConfig` dims
+   (obs 22 / act 5), and `attach_walkers` set `use_learned = true`, which routes
+   `LocoMode::Jumping` to the learned walker (`control.rs` `decide`:
+   `Jumping` needs `!use_learned`) so the residual was never injected. Fixed:
+   `walker_ppo/src/main.rs` builds `PpoTrainer::new(jcfg.obs_dim,
+   jcfg.action_dim, …)`, sets `config.control.use_learned = false`, and injects
+   `config.jump_residual = Some(JumpResidual::with_policy(…, LearnMode::Train,
+   jcfg, …))`.
+2. **No launch authority.** Both `jump.rs` and `jump_residual.rs` hardcoded
+   `jump_impulse: 0.0`, and the strut has only ~5.5 px of extension budget at
+   standing — a hop was physically impossible. Fixed: `JumpCtrl` now emits the
+   impulse on the single Launch→Flight tick (knob semantics preserved: `> 0`
+   literal, `== 0` derive `sqrt(2·g·apex)` from the measured rise, `< 0`
+   disabled), and `JumpResidual` forwards `proposal_out.jump_impulse` (the
+   impulse belongs to the expert, not the policy).
+3. **Exploration noise.** `PpoConfig::init_std` was 0.5 — half the normalized
+   action range per dim, far too wide for a residual that should stay near the
+   expert. Set to **0.3** in `walker_ppo/src/main.rs` (still overridable with
+   `INIT_STD`).
+4. **Reward balance — OPEN.** `w_alive` pays per tick (≈5.4 per 180-tick
+   episode) while `w_apex` pays once (≈0.5), so "never jump" may be the
+   optimum. Not changed; flagged for the first run's diagnostics.
 
 ## 5. Files read for this design (line anchors)
 

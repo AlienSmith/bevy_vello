@@ -87,11 +87,23 @@ pub struct JumpCtrl {
     /// rising again (that is the extension), so an unlatched condition would
     /// yank the cursor back to the crouch key forever.
     fired: bool,
-    /// Stroke-local phase boundaries (seconds): load end, launch end, flight
-    /// end. From [`crate::jump_clip::jump_clip`]; kept here so a re-hop can
-    /// rebase `t` cheaply.
+    /// Set on the single tick the power stroke is released; consumed by the
+    /// same tick's output as [`ControlOut::jump_impulse`]. The strut alone
+    /// cannot launch the hop (standing already sits at ~104.5 of 110 px, so
+    /// there are only ~5.5 px of extension left — see
+    /// `plans/walker-jump-findings.md`), so the height is handed to the body
+    /// as one vertical impulse, exactly as the pre-clip stroke did.
+    launch_pending: bool,
+    /// Loop-2's design apex (px above standing) — the impulse target when
+    /// `jump_launch_impulse == 0` (derive from the apex).
+    jump_apex: f32,
+    /// Gravity (px/s²), for that same derivation.
+    gravity: f32,
+    /// Stroke-local phase boundaries (seconds): load end and flight end. From
+    /// [`crate::jump_clip::jump_clip`]; kept here so a re-hop can rebase `t`
+    /// cheaply. (Launch end needs no field: `phase_at(self.t)` derives every
+    /// transition from the clip itself.)
     load_end: f32,
-    launch_end: f32,
     flight_end: f32,
     /// Chord length used to turn the normalized pose into px offsets.
     leg_len: f32,
@@ -118,8 +130,10 @@ impl JumpCtrl {
             seeded: false,
             gate_wait: 0.0,
             fired: false,
+            launch_pending: false,
+            jump_apex: lower.jump_apex,
+            gravity: lower.gravity,
             load_end: ts.get(1).copied().unwrap_or(0.22),
-            launch_end: ts.get(2).copied().unwrap_or(0.34),
             flight_end: ts.get(3).copied().unwrap_or(0.79),
             leg_len,
         }
@@ -216,7 +230,15 @@ impl Step for JumpCtrl {
         // entry tick still reads the feet touching, which is the *launch*, not
         // a landing).
         let was_flight = self.phase == JumpPhase::Flight;
+        let was_launch = self.phase == JumpPhase::Launch;
         self.phase = crate::jump_clip::phase_at(self.t);
+        // Release: the single tick the power stroke ends (Launch→Flight) is
+        // the jump's one real authority. The strut cannot lift the body (only
+        // ~5.5 px of extension left at standing), so arm the vertical impulse
+        // here and emit it below.
+        if was_launch && self.phase == JumpPhase::Flight {
+            self.launch_pending = true;
+        }
         let contact = fiction.feet.iter().any(|f| f.touching);
         if was_flight && self.phase == JumpPhase::Flight && contact {
             // Touchdown: skip ahead to the clip's Land segment. The wrap keeps
@@ -234,6 +256,7 @@ impl Step for JumpCtrl {
             self.phase = JumpPhase::Load;
             self.fired = false;
             self.gate_wait = 0.0;
+            self.launch_pending = false;
         }
 
         // Shape: sample the authored clip at the current stroke time. Stance is
@@ -266,6 +289,29 @@ impl Step for JumpCtrl {
             self.seeded = false;
             fiction.hip
         };
+        // Consume the launch: `JUMP_IMPULSE` semantics match the pre-clip
+        // stroke — > 0 literal speed, == 0 derive `sqrt(2·g·apex)` so
+        // `JUMP_APEX` alone still produces the whole hop, < 0 disabled (the
+        // pure-strut control experiment). vello y is down, so an upward
+        // launch is a NEGATIVE Δv_y.
+        let jump_impulse = if self.launch_pending {
+            self.launch_pending = false;
+            let v0 = if cfg.jump_launch_impulse > 0.0 {
+                cfg.jump_launch_impulse
+            } else if cfg.jump_launch_impulse == 0.0 {
+                // Apex measured from the CURRENT rise, not a blind constant:
+                // the body may still be below standing when the stroke fires.
+                let rise = (fiction.hip.y - self.anchor.y).max(0.0);
+                let apex_needed = (self.jump_apex - rise).max(1.0);
+                (2.0 * self.gravity.max(1.0) * apex_needed).sqrt()
+            } else {
+                0.0
+            };
+            -v0.max(0.0)
+        } else {
+            0.0
+        };
+
         ControlOut {
             pose: Pose {
                 hip,
@@ -286,7 +332,7 @@ impl Step for JumpCtrl {
             // No horizontal intent: the hip_vel target is zero so telemetry
             // reads the stroke as in-place.
             hip_vel: Vec2::ZERO,
-            jump_impulse: 0.0,
+            jump_impulse,
             plan: [Vec2::new(f32::NAN, f32::NAN); 2],
             mode: LocoMode::Jumping,
             debug: None,
