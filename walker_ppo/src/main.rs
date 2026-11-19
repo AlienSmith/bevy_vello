@@ -23,6 +23,8 @@
 //! - `tmp/walker_ppo/policy.json`  — latest checkpoint (deploy with
 //!   `POLICY=tmp/walker_ppo/policy.json cargo run -p walker_qa`)
 
+mod reward;
+
 use std::sync::{Arc, RwLock};
 
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
@@ -153,77 +155,89 @@ fn min_height() -> f32 {
 fn fall_penalty() -> f32 {
     env_f32("FALL_PENALTY").unwrap_or(0.5)
 }
-/// Height-reward weight per unit of height above the standing line, per tick.
-/// A jump's apex is brief, so this integrates the *area* above standing — a
-/// big/quick extension pays more than a small slow one.
-fn r_height() -> f32 {
-    env_f32("R_HEIGHT").unwrap_or(0.3)
-}
-/// Constant per-tick alive bonus. Without it a barely-crouching body scores ≈0
-/// every tick and the −fall penalty dominates, so the policy collapses to
-/// "stand very carefully" and never attempts the crouch→extend (measured:
-/// peak stuck ≈0.1 after 150 updates). The bonus makes *surviving to horizon*
-/// the dominant reward, so the policy first learns not to fall, then to rise.
-fn r_alive() -> f32 {
-    env_f32("R_ALIVE").unwrap_or(0.03)
-}
-/// Cap on the per-tick penalty SUM (lateral + Δμ). Runs 8/9 exposed the
-/// mirror-image failure of the flail: with penalties riding *measured* motion
-/// — which the Gaussian exploration noise itself jitters — every surviving
-/// tick can go net-negative, and then the optimal move is to die as early as
-/// possible (episode length collapsed 150→16 and reward pinned at the "fast
-/// death" value). Capping the penalty strictly below the alive bonus keeps
-/// "stay alive" *always* the better gradient, and the shaping terms still
-/// rank surviving policies against each other up to the cap.
-fn pen_cap() -> f32 {
-    env_f32("PEN_CAP").unwrap_or(0.02)
-}
-/// Weight on the **upward hip velocity** (vello y-down ⇒ −v_hip.y), per tick.
-/// The apex of a jump is brief; a height-only term gives credit far from the
-/// cause. The velocity term is dense: it pays the *extension* itself the
-/// moment the legs push, so the crouch→extend transition gets gradient long
-/// before any apex is reached.
-fn r_up() -> f32 {
-    env_f32("R_UP").unwrap_or(0.02)
-}
-/// Penalty weight on **horizontal** hip speed per tick (per 100 px/s). Run 4's
-/// deploy render showed the pathology this milestone has to kill: a *lateral
-/// flail* — the body rocks side-to-side at ±250 px/s, and every bob registers
-/// as "height above standing" + "upward velocity", so the rate-based reward
-/// pays the flail more than a controlled stance. Lateral speed is pure error
-/// for a straight vertical jump; charge it.
-fn r_lateral() -> f32 {
-    env_f32("R_LATERAL").unwrap_or(0.02)
-}
-/// Hip |v_x| under which the body is considered "vertical": only then do the
-/// upward-velocity and height terms pay out (gated so a sideways hop-bob
-/// cannot earn them), and above `3·` the gate the episode counts as failing
-/// toward a fall termination (out of control is out of control).
+/// Hip |v_x| under which the body is considered "vertical". Above `3·` the
+/// gate the episode counts as failing toward a fall termination (out of
+/// control is out of control). The dense climb/lateral shaping that used this
+/// gate now lives in [`reward::JumpReward`]; the collector keeps it only for
+/// the measured-fall termination check.
 fn v_gate() -> f32 {
     env_f32("V_GATE").unwrap_or(60.0)
 }
-/// End-of-episode bonus per unit of peak height above standing. The dense
-/// height term integrates the (brief) apex area, so it barely pays for one
-/// big rise; this terminal term prices the *event* — what we actually render.
-/// Weighted so one clean jump (peak ≈0.25) beats the flail's whole surviving.
+/// End-of-episode bonus per unit of peak height above standing. Prices the
+/// *event* (the apex we render) as a terminal term, gated on survival. Kept
+/// separate from the per-tick two-checkpoint reward because it is the one
+/// term still keyed to the whole-episode peak.
 fn r_peak() -> f32 {
     env_f32("R_PEAK").unwrap_or(3.0)
 }
-/// Penalty per unit of **policy-mean change** between consecutive ticks (L1
-/// over the 7 μ dims). Run 6's render exposed the dither optimum: the policy
-/// flips the stance gates and foot targets every single tick (hip velocity
-/// ±200 px/s at the Nyquist rate, feet never leaving the floor), harvesting
-/// the alive bonus without moving the body. A rate penalty makes vibration
-/// strictly worse than standing calm — and a real jump (a smooth crouch →
-/// extend ramp) pays almost none of it. The penalty rides Δμ, NOT Δa of the
-/// sampled action: the Gaussian exploration noise alone is ~4 L1 units/tick
-/// at σ≈0.5, so penalizing samples punishes exploration itself and drives σ
-/// to zero (measured: run7 reward pinned at −6, value loss 1.8, learning
-/// nothing). μ is recomputed exactly: the bundle's actor weights are frozen
-/// for the whole rollout, so `actor.forward(obs)` reproduces the mean the
-/// controller sampled from.
-fn r_act() -> f32 {
-    env_f32("R_ACT").unwrap_or(0.02)
+
+/// Assemble the two-checkpoint [`reward::RewardConfig`] from the shared env
+/// knobs. Every unset knob falls back to [`reward::RewardConfig::default`], so
+/// `cargo run -p walker_ppo` behaves without any env.
+fn reward_cfg() -> reward::RewardConfig {
+    let mut c = reward::RewardConfig {
+        leg_len: LEG_LEN,
+        hip_height: HIP_HEIGHT,
+        gravity: GRAVITY.y,
+        foot_surface_y: FOOT_SURFACE_Y,
+        land_height_target: HIP_HEIGHT,
+        ..reward::RewardConfig::default()
+    };
+    if let Some(v) = env_f32("W_ALIVE") {
+        c.w_alive = v;
+    }
+    if let Some(v) = env_f32("W_APEX") {
+        c.w_apex = v;
+    }
+    if let Some(v) = env_f32("APEX_TARGET") {
+        c.apex_target = v;
+    }
+    if let Some(v) = env_f32("W_LIFTOFF") {
+        c.w_liftoff = v;
+    }
+    if let Some(v) = env_f32("W_LIFTOFF_SPIN") {
+        c.w_liftoff_spin = v;
+    }
+    if let Some(v) = env_f32("W_DCM") {
+        c.w_dcm = v;
+    }
+    if let Some(v) = env_f32("W_XI_DOT") {
+        c.w_xi_dot = v;
+    }
+    if let Some(v) = env_f32("W_POST") {
+        c.w_post = v;
+    }
+    if let Some(v) = env_f32("W_LAND_SPIN") {
+        c.w_land_spin = v;
+    }
+    if let Some(v) = env_f32("W_LATERAL") {
+        c.w_lateral = v;
+    }
+    if let Some(v) = env_f32("W_ACT") {
+        c.w_act = v;
+    }
+    if let Some(v) = env_f32("PEN_CAP") {
+        c.pen_cap = v;
+    }
+    if let Some(v) = env_f32("V_GATE") {
+        c.v_gate = v;
+    }
+    if let Some(v) = env_f32("V_SCALE") {
+        c.v_scale = v;
+    }
+    if let Some(v) = env_f32("OMEGA_SCALE") {
+        c.omega_scale = v;
+    }
+    if let Some(v) = env_f32("LAND_WINDOW_TS") {
+        c.land_window_ts = v;
+    }
+    if let Some(v) = env_f32("LAND_WINDOW_E") {
+        c.land_window_e = v;
+    }
+    if let Some(v) = env_f32("LAND_HEIGHT_TARGET") {
+        c.land_height_target = v;
+    }
+    c
 }
 
 // ---------------------------------------------------------------------------
@@ -260,8 +274,10 @@ struct Env {
     peak: f32,
     /// Consecutive ticks of the fall condition (see [`fall_hold`]).
     fall_streak: u32,
-    /// Last tick's policy mean μ(s) — the action-rate penalty (anti-dither).
-    prev_mu: Option<Vec<f32>>,
+    /// The two-checkpoint jump reward (`plans/jump-ppo-residual-polar-action.md`
+    /// §12). Owns the phase machine, the Δμ anti-dither state, and the
+    /// finite-differenced `ξ̇` history.
+    reward: reward::JumpReward,
     root: Entity,
 }
 
@@ -659,7 +675,7 @@ fn attach_walkers(
             ep_reward: 0.0,
             peak: 0.0,
             fall_streak: 0,
-            prev_mu: None,
+            reward: reward::JumpReward::new(reward_cfg()),
             root,
         });
         attached.insert(root);
@@ -711,45 +727,17 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         }
         let fiction = *walker.fiction();
         let height = (FOOT_SURFACE_Y - fiction.hip.y) / HIP_HEIGHT;
-        // "Vertical" gate: the jump must be UP, not sideways. Run 4's render
-        // exposed the loophole — the policy rocks the body laterally at
-        // ±250 px/s and harvests the height/upward-velocity terms on every
-        // bob. Above the gate the climb terms pay nothing and the flail is
-        // charged as error.
         let lateral = fiction.v_hip.x.abs();
-        let vertical = lateral < v_gate();
-        // Alive bonus every tick (dominant term, so survival-to-horizon is the
-        // base objective) + height-above-standing area (the climb) + dense
-        // upward-velocity credit (pays the extension itself, not just apex) —
-        // both climb terms gated on the body moving *up*, not *sideways*.
-        let v_up = (-fiction.v_hip.y).max(0.0) / 100.0;
-        let climb = if vertical {
-            (height - 1.0).max(0.0) * r_height() + v_up * r_up()
-        } else {
-            0.0
-        };
-        // Action-rate penalty (anti-dither, see [`r_act`]): L1 |Δμ| vs last
-        // tick's policy mean. Run 6's deploy render showed the new
-        // optimum — stance/foot commands flipping every tick (hip vx ±200
-        // px/s at the Nyquist rate, feet never leaving the floor) while the
-        // body survives without ever jumping. μ is recomputed from the
-        // recorded obs against the FROZEN bundle (weights constant across a
-        // rollout ⇒ identical to the controller's forward).
+        // The **two-checkpoint reward** (`plans/jump-ppo-residual-polar-action.md`
+        // §12): liftoff prices the conserved purchase, the Land window judges
+        // capture, flight is alive-only. All the physics reuse lives in
+        // [`reward::JumpReward`]; this site only recomputes μ (against the
+        // FROZEN bundle — identical to the controller's forward) so the
+        // anti-dither term rides the same mean the action was sampled from.
         let mu = state.bundle.read().unwrap().act_deterministic(&last.obs);
-        let d_action = match &env.prev_mu {
-            Some(prev) => prev
-                .iter()
-                .zip(mu.iter())
-                .map(|(p, m): (&f32, &f32)| (m - p).abs())
-                .sum::<f32>(),
-            None => 0.0,
-        };
-        env.prev_mu = Some(mu);
-        // Penalty cap (see [`pen_cap`]): a surviving tick must NEVER read net-
-        // negative, or the fastest escape from punishment is to fall on
-        // purpose (runs 8/9 collapsed episode length 150→16 this way).
-        let pen = ((lateral / 100.0) * r_lateral() + d_action * r_act()).min(pen_cap());
-        let mut reward = r_alive() + climb - pen;
+        let (mut reward, _events) = env.reward.step(&fiction, Some(&mu));
+        // Termination: **measured fall only** (§12.5) — no predicted-doom cut,
+        // which would invite the degenerate optimum of never launching.
         let bad = fiction.lean.abs() > fall || height < min_height() || lateral > 3.0 * v_gate();
         env.fall_streak = if bad { env.fall_streak + 1 } else { 0 };
         let fallen = env.fall_streak >= fall_hold();
@@ -804,9 +792,10 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
             env.ep_reward = 0.0;
             env.peak = 0.0;
             env.fall_streak = 0;
-            // Don't carry the action stream across the teleport: the first
-            // tick of a new episode has no Δμ penalty.
-            env.prev_mu = None;
+            // Don't carry the phase machine or the action stream across the
+            // teleport: the first tick of a new episode starts grounded with
+            // no Δμ penalty.
+            env.reward.reset();
         }
     }
     staged.sort_by_key(|(idx, _)| *idx);
