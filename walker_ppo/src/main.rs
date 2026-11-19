@@ -1050,8 +1050,10 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
                 walker.controller.mode(),
             );
         }
+        let mut fall_pen = 0.0;
         if fallen {
-            reward -= fall_penalty();
+            fall_pen = fall_penalty();
+            reward -= fall_pen;
         }
         // Terminal peak-height bonus: pay for the EVENT, not the rate — the
         // apex is too brief for dense terms to price it, and the flail cannot
@@ -1060,8 +1062,10 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         // bonus as "hop, then land" — with exploration noise tripping most
         // episodes, the crash-hop was the practiced behavior and the policy
         // plateaued at a small hop followed by a forward face-plant.
+        let mut peak_bonus = 0.0;
         if done && !fallen {
-            reward += env.peak.max(0.0) * r_peak();
+            peak_bonus = env.peak.max(0.0) * r_peak();
+            reward += peak_bonus;
         }
 
         env.t += 1;
@@ -1085,12 +1089,27 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
             state.ep_lens.push(env.t);
             state.ep_peaks.push(env.peak);
             state.ep_rows.push(format!(
-                "{},{},{:.4},{},{:.3}",
+                "{},{},{:.4},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                 tick,
                 env.root.index(),
                 env.ep_reward,
                 env.t,
-                env.peak
+                env.peak,
+                env.reward.liftoffs,
+                env.reward.landings,
+                env.reward.sum_land_pay,
+                env.reward.sum_apex_pay,
+                if env.reward.min_e_dcm == f32::MAX {
+                    -1.0
+                } else {
+                    env.reward.min_e_dcm
+                },
+                env.reward.sum_alive,
+                -env.reward.sum_pen,
+                env.reward.sum_settle,
+                env.reward.sum_liftoff_charge,
+                -fall_pen,
+                peak_bonus,
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
             // this character and the factory rebuilds it at its rest pose. That
@@ -1329,7 +1348,7 @@ fn mean(v: &[f32]) -> f32 {
 
 const TRAIN_HEADER: &str =
     "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,policy_loss,value_loss,entropy,approx_kl,clip_frac";
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height";
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height,liftoffs,landings,land_pay,apex_pay,min_e_dcm,alive,pen,settle,liftoff_chg,fall_pen,peak_bonus";
 
 fn write_rows(path: &str, header: &str, rows: &[String]) {
     if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {

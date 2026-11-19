@@ -474,6 +474,37 @@ Notes that pin the design:
   `(1 − |ω|/ω_scale)` **quality** factor, so a clean landing pays full and a
   spun one pays little.
 
+### 12.2.5 The settle window must be CLAMPED (2026-11-19)
+
+Same class of bug, one layer down. After the payment above, per-episode
+accounting (`episodes.csv` now logs `alive, pen, settle, liftoff_chg, land_pay,
+apex_pay, fall_pen, peak_bonus`) showed:
+
+```
+settle      -4.594   ← still the dominant term
+land_pay    +0.368
+apex_pay    +0.062
+peak_bonus  +0.534
+ep_reward   -3.437
+```
+
+`e_DCM = |ξ − p_center| / leg_len` is **unbounded** — mid-window it measured
+mean ≈ 2.0. At `w_dcm 0.08` × 27 ticks that is `−4.3`, four times the landing
+credit. The `quality` factors were clamped to `[0,1]` but the nudge was not.
+Fix: clamp every nudge term to `[0,1]` before weighting **and** cap the summed
+nudge at `pen_cap` per tick — the nudge can never out-earn a credit. Test:
+`the_settle_window_is_capped_at_the_penalty_cap_per_tick`.
+
+Result (same 90 s, N=32):
+
+| | before | after |
+|---|---|---|
+| `mean_ep_reward` | −4.69 | **+0.19** |
+| `settle` / ep | −4.59 | −0.13 |
+| `value_loss` | 0.28 | **0.011** |
+| positive episodes | 178/701 | **277/821** |
+| `mean_peak_height` | 0.64 | 0.69 |
+
 ### 12.2.4 The landing is a PAYMENT, not an integral (2026-11-19)
 
 Why "never jump" was optimal, in arithmetic (old weights, `w_alive = 0.03`,

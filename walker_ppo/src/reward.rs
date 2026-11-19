@@ -168,6 +168,24 @@ pub struct JumpReward {
     pub last_apex_pred: f32,
     /// The most recent `e_DCM` inside a Land window.
     pub last_e_dcm: f32,
+    /// The **best** (smallest) `e_DCM` seen at any landing this episode.
+    pub min_e_dcm: f32,
+    /// The `w_land·quality` credit paid on the most recent landing (0 outside).
+    pub last_land_pay: f32,
+    /// The `w_apex·apex` credit paid on the most recent liftoff (0 outside).
+    pub last_apex_pay: f32,
+    /// Episode-cumulative `w_land·quality` paid across all landings.
+    pub sum_land_pay: f32,
+    /// Episode-cumulative `w_apex·apex` paid across all liftoffs.
+    pub sum_apex_pay: f32,
+    /// Lifetime count of liftoffs / landings for this episode (reset()).
+    pub liftoffs: u32,
+    pub landings: u32,
+    // ---- episode-cumulative component accounting (for telemetry only) ----
+    pub sum_alive: f32,
+    pub sum_pen: f32,
+    pub sum_settle: f32,
+    pub sum_liftoff_charge: f32,
 }
 
 impl JumpReward {
@@ -181,6 +199,17 @@ impl JumpReward {
             last_liftoff_l: 0.0,
             last_apex_pred: 0.0,
             last_e_dcm: 0.0,
+            min_e_dcm: f32::MAX,
+            last_land_pay: 0.0,
+            last_apex_pay: 0.0,
+            sum_land_pay: 0.0,
+            sum_apex_pay: 0.0,
+            liftoffs: 0,
+            landings: 0,
+            sum_alive: 0.0,
+            sum_pen: 0.0,
+            sum_settle: 0.0,
+            sum_liftoff_charge: 0.0,
         }
     }
 
@@ -198,6 +227,17 @@ impl JumpReward {
         self.last_liftoff_l = 0.0;
         self.last_apex_pred = 0.0;
         self.last_e_dcm = 0.0;
+        self.min_e_dcm = f32::MAX;
+        self.last_land_pay = 0.0;
+        self.last_apex_pay = 0.0;
+        self.sum_land_pay = 0.0;
+        self.sum_apex_pay = 0.0;
+        self.liftoffs = 0;
+        self.landings = 0;
+        self.sum_alive = 0.0;
+        self.sum_pen = 0.0;
+        self.sum_settle = 0.0;
+        self.sum_liftoff_charge = 0.0;
     }
 
     /// One tick of reward. `mu` is the policy mean that produced the action
@@ -224,6 +264,9 @@ impl JumpReward {
 
         let mut events = RewardEvents::default();
         let mut r = c.w_alive;
+        self.sum_alive += c.w_alive;
+        self.last_land_pay = 0.0;
+        self.last_apex_pay = 0.0;
 
         // ---- phase transitions ----
         match self.phase {
@@ -237,49 +280,53 @@ impl JumpReward {
                     let l_norm = (f.ang_momentum.abs() / (c.hip_height * c.v_scale)).max(0.0);
                     let spin = (f.omega_com.abs() / c.omega_scale).max(0.0);
                     let apex = (apex_pred / c.apex_target.max(1e-6)).clamp(0.0, 1.0);
-                    r += c.w_apex * apex - c.w_liftoff * l_norm - c.w_liftoff_spin * spin;
+                    let charge = -c.w_liftoff * l_norm - c.w_liftoff_spin * spin;
+                    r += c.w_apex * apex + charge;
+                    self.sum_liftoff_charge += charge;
                     self.last_liftoff_l = f.ang_momentum;
                     self.last_apex_pred = apex_pred;
+                    self.last_apex_pay = c.w_apex * apex;
+                    self.sum_apex_pay += self.last_apex_pay;
+                    self.liftoffs += 1;
                     events.liftoff = true;
                     self.phase = Phase::Flight;
                 }
             }
             Phase::Flight => {
                 if f.grounded {
-                    // ---- CHECKPOINT 2 · landing (single payment) ----
-                    // One credit, on this tick, scaled by how well the body
-                    // captured its own momentum. Without this the whole hop
-                    // reads net-negative and the optimum is "never launch".
-                    let omega0 = (c.gravity / c.hip_height.max(1e-6)).max(1e-6).sqrt();
-                    let xi = f.com.x + f.v_com.x / omega0;
-                    let p_center = 0.5 * (f.feet[0].pos.x + f.feet[1].pos.x);
-                    let e_dcm = (xi - p_center).abs() / c.leg_len.max(1e-6);
-                    let post = (height_px - c.land_height_target).abs() / c.hip_height.max(1e-6);
-                    let spin = (f.omega_com.abs() / c.omega_scale).max(0.0);
-                    // quality ∈ [0,1]: perfect capture (ξ over the feet, still,
-                    // at standing height) pays the full `w_land`.
-                    let balance = (1.0 - e_dcm).clamp(0.0, 1.0);
-                    let settle = (1.0 - spin).clamp(0.0, 1.0);
-                    let posture = (1.0 - 0.5 * post).clamp(0.0, 1.0);
-                    r += c.w_land * balance * settle * posture;
-                    self.last_e_dcm = e_dcm;
+                    // ---- CHECKPOINT 2 OPENS · touchdown ----
+                    // No payment here. On the impact tick the CoM is still
+                    // travelling forward of the feet (that is *why* the feet
+                    // hit the ground), so `e_DCM` is at its worst exactly when
+                    // the body looks least captured. Judging here paid ~0 for
+                    // every real landing (measured: mean `min_e_dcm` 0.62 —
+                    // quality clamped to zero, 1/672 episodes ever paid).
+                    // The verdict is taken at the END of the settle window.
                     self.phase = Phase::LandWindow;
                     self.land_ticks = 0;
-                    self.prev_xi = Some(xi);
+                    let omega0 = (c.gravity / c.hip_height.max(1e-6)).max(1e-6).sqrt();
+                    self.prev_xi = Some(f.com.x + f.v_com.x / omega0);
                     events.landed = true;
                 }
             }
             Phase::LandWindow => {
                 if !f.grounded {
-                    // Bounced back airborne: no shaping, just carry the window.
+                    // Bounced back airborne before the capture settled: the
+                    // window is BROKEN and earns no landing credit. (Mirrors
+                    // the mean-reversion reality: a body that ricochets off the
+                    // floor has not landed, it has failed to land.)
                     self.phase = Phase::Flight;
+                    self.land_ticks = 0;
+                    self.prev_xi = None;
                 }
             }
         }
 
-        // ---- Settle window (small NUDGE after the verdict was paid) ----
-        // The landing credit above is the reward; this only discourages a body
-        // that recovers its balance by toppling sideways after the fact.
+        // ---- CHECKPOINT 2 · the settle window, then one PAYMENT ----
+        // Inside the window we only charge a small nudge. The credit is paid
+        // ONCE, at the tick the window closes *successfully* (full duration,
+        // never crashed) — that is the moment "the body has landed" becomes
+        // decidable.
         if self.phase == Phase::LandWindow {
             let omega0 = (c.gravity / c.hip_height.max(1e-6)).max(1e-6).sqrt();
             let xi = f.com.x + f.v_com.x / omega0;
@@ -292,20 +339,46 @@ impl JumpReward {
             self.prev_xi = Some(xi);
             let post = (height_px - c.land_height_target).abs() / c.hip_height.max(1e-6);
             let spin = (f.omega_com.abs() / c.omega_scale).max(0.0);
-            r += -c.w_dcm * e_dcm
-                - c.w_xi_dot * xi_dot / c.v_scale
-                - c.w_post * post
-                - c.w_land_spin * spin;
+            // Every term is clamped to `[0,1]` *before* weighting, exactly as
+            // the verdict's `quality` factors are. `e_DCM` is `|ξ−p|/leg_len`
+            // and routinely exceeds 1 (measured mean ≈ 2.0 mid-window), so
+            // unclamped it charges −0.17/tick and the window sums to −4.6 per
+            // episode — larger than every credit combined. The nudge must be a
+            // nudge: it is capped at `pen_cap` per tick like the rest.
+            let nudge = -c.w_dcm * e_dcm.min(1.0)
+                - c.w_xi_dot * (xi_dot / c.v_scale).min(1.0)
+                - c.w_post * post.min(1.0)
+                - c.w_land_spin * spin.min(1.0);
+            let settle = nudge.max(-c.pen_cap);
+            r += settle;
+            self.sum_settle += settle;
             self.last_e_dcm = e_dcm;
+            self.min_e_dcm = self.min_e_dcm.min(e_dcm);
             self.land_ticks += 1;
-            // Window closes on timeout, or early on a measured crash.
             let timed_out = (self.land_ticks as f32) * dt >= c.land_window_ts;
-            if e_dcm > c.land_window_e || timed_out {
+            let crashed = e_dcm > c.land_window_e;
+            if crashed || timed_out {
+                // ---- the verdict ----
+                // A crash pays nothing. A complete settle pays `w_land·quality`
+                // where quality is judged on the *settled* state, not the
+                // impact state.
+                if timed_out && !crashed {
+                    let balance = (1.0 - e_dcm).clamp(0.0, 1.0);
+                    let settle = (1.0 - spin).clamp(0.0, 1.0);
+                    let posture = (1.0 - 0.5 * post).clamp(0.0, 1.0);
+                    self.last_land_pay = c.w_land * balance * settle * posture;
+                    r += self.last_land_pay;
+                    self.sum_land_pay += self.last_land_pay;
+                    self.landings += 1;
+                }
                 self.phase = Phase::Grounded;
+                self.prev_xi = None;
+                self.land_ticks = 0;
             }
         }
 
         r -= pen;
+        self.sum_pen += pen;
         (r, events)
     }
 }
@@ -432,9 +505,9 @@ mod tests {
         );
         assert_eq!(ev, RewardEvents::default());
         assert!((r - rw.cfg().w_alive).abs() < 1e-6, "flight unshaped: {r}");
-        // Touchdown with a big DCM error (flying forward ⇒ ξ far from the feet):
-        // the checkpoint's `quality` collapses, so it pays essentially nothing —
-        // but it must NOT be a big negative (that was the collapse bug).
+        // Touchdown does NOT pay — the CoM is still ahead of the feet on the
+        // impact tick, so judging here is the bug that paid ~0 for every real
+        // landing. It only OPENS the settle window.
         let bad = fiction(
             Vec2::new(0.0, SURFACE - HIP),
             Vec2::new(0.0, SURFACE - HIP),
@@ -443,13 +516,13 @@ mod tests {
         );
         let (r_bad, ev) = rw.step(&bad, None);
         assert!(ev.landed);
+        assert!(rw.sum_land_pay == 0.0, "touchdown must not pay yet");
         assert!(
             r_bad > rw.cfg().w_alive - 0.2,
-            "a bad capture pays ~nothing but is not a huge charge: {r_bad}"
+            "the impact tick is not a huge charge either: {r_bad}"
         );
-        assert!(rw.last_e_dcm > 0.0);
 
-        // A clean touchdown pays the full landing credit.
+        // A clean settle pays the full credit when the window closes.
         let mut rw2 = JumpReward::new(RewardConfig::default());
         rw2.step(
             &fiction(standing_hip(), standing_hip(), Vec2::ZERO, true),
@@ -465,12 +538,101 @@ mod tests {
             None,
         );
         let good = fiction(standing_hip(), standing_hip(), Vec2::ZERO, true);
-        let (r_good, ev) = rw2.step(&good, None);
+        let (_, ev) = rw2.step(&good, None);
         assert!(ev.landed);
+        assert_eq!(rw2.sum_land_pay, 0.0, "not paid on touchdown");
+        // Ride out the settle window held perfectly still over the feet.
+        let ticks = (rw2.cfg().land_window_ts / (1.0 / 90.0)).ceil() as u32 + 2;
+        for _ in 0..ticks {
+            rw2.step(&good, None);
+        }
+        assert_eq!(rw2.landings, 1, "the window must close as one landing");
         assert!(
-            r_good > rw2.cfg().w_land * 0.9,
-            "clean capture must pay: {r_good}"
+            rw2.sum_land_pay > rw2.cfg().w_land * 0.9,
+            "a clean settled capture must pay: {}",
+            rw2.sum_land_pay
         );
+    }
+
+    /// The settle nudge must never out-charge the landing credit. `e_DCM` is
+    /// unbounded (it is `|ξ−p|/leg_len`), so an unclamped nudge summed to −4.6
+    /// per episode against a `w_land` of 1.5 — the same "landing is a net
+    /// liability" trap as the original integral, just 4× smaller.
+    #[test]
+    fn the_settle_window_is_capped_at_the_penalty_cap_per_tick() {
+        let c = RewardConfig::default();
+        let mut rw = JumpReward::new(c);
+        rw.step(
+            &fiction(standing_hip(), standing_hip(), Vec2::ZERO, true),
+            None,
+        );
+        rw.step(
+            &fiction(
+                Vec2::new(0.0, SURFACE - HIP - 5.0),
+                Vec2::new(0.0, SURFACE - HIP - 5.0),
+                Vec2::new(0.0, -100.0),
+                false,
+            ),
+            None,
+        );
+        // Touch down in the worst possible state and stay there: huge DCM
+        // error, high lateral speed, spinning hard.
+        let mut awful = fiction(
+            Vec2::new(0.0, SURFACE - HIP + 60.0),
+            Vec2::new(0.0, SURFACE - HIP + 60.0),
+            Vec2::new(900.0, 0.0),
+            true,
+        );
+        awful.omega_com = 9.0;
+        rw.step(&awful, None);
+        let ticks = (c.land_window_ts / (1.0 / 90.0)).ceil() as u32 + 2;
+        let before = rw.sum_settle;
+        for _ in 0..ticks {
+            rw.step(&awful, None);
+        }
+        let per_tick = (rw.sum_settle - before) / ticks as f32;
+        assert!(
+            per_tick >= -c.pen_cap - 1e-4,
+            "settle {per_tick:.4}/tick must be capped at -pen_cap ({}): total {}",
+            c.pen_cap,
+            rw.sum_settle
+        );
+    }
+
+    /// The settle window is what makes "landing" decidable: a body that
+    /// ricochets straight back off the floor has NOT landed and earns nothing.
+    #[test]
+    fn a_bounce_off_the_floor_earns_no_landing_credit() {
+        let mut rw = JumpReward::new(RewardConfig::default());
+        rw.step(
+            &fiction(standing_hip(), standing_hip(), Vec2::ZERO, true),
+            None,
+        );
+        rw.step(
+            &fiction(
+                Vec2::new(0.0, SURFACE - HIP - 5.0),
+                Vec2::new(0.0, SURFACE - HIP - 5.0),
+                Vec2::new(0.0, -100.0),
+                false,
+            ),
+            None,
+        );
+        // Touch down, then immediately leave the ground again.
+        rw.step(
+            &fiction(standing_hip(), standing_hip(), Vec2::ZERO, true),
+            None,
+        );
+        let bounce = fiction(
+            Vec2::new(0.0, SURFACE - HIP - 8.0),
+            Vec2::new(0.0, SURFACE - HIP - 8.0),
+            Vec2::new(0.0, -50.0),
+            false,
+        );
+        for _ in 0..10 {
+            rw.step(&bounce, None);
+        }
+        assert_eq!(rw.landings, 0, "a bounce is not a landing");
+        assert_eq!(rw.sum_land_pay, 0.0);
     }
 
     #[test]
@@ -559,17 +721,17 @@ mod tests {
             Vec2::ZERO,
             true,
         );
-        let (r_land, ev) = hop.step(&touch, None);
+        let (_, ev) = hop.step(&touch, None);
         assert!(ev.landed, "touchdown must open the landing checkpoint");
-        assert!(
-            r_land > hop.cfg().w_land * 0.9,
-            "a clean capture must pay most of w_land: {r_land}"
-        );
-        hop_total += r_land;
-        // settle
+        // Ride the settle window to its close — the verdict is paid there.
         for _ in 0..40 {
             hop_total += hop.step(&touch, None).0;
         }
+        assert!(
+            hop.sum_land_pay > hop.cfg().w_land * 0.9,
+            "a clean settled capture must pay most of w_land: {}",
+            hop.sum_land_pay
+        );
         assert!(
             hop_total > still_total + 0.5,
             "hop {hop_total:.3} must beat standing still {still_total:.3}"
