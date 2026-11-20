@@ -222,49 +222,20 @@ fn land_lean() -> f32 {
 /// knob falls back to [`reward::RewardConfig::default`], so
 /// `cargo run -p walker_ppo` behaves without any env.
 ///
-/// The landing window is **derived from `JUMP_LAND_HOLD`** rather than configured
-/// separately: the reward's verdict and the harness's "landed" episode boundary
-/// must be the same moment, or the policy gets paid for a hold that never ends.
+/// **Two knobs**, and that is the whole reward:
+///   `V_LIFTOFF`  CoM rise-rate a launch must reach (also the minimum height)
+///   `R_LAND`     the one positive number: paid for landing after a real launch
+///
+/// "Feet close to the ground before liftoff" is not a knob: a lift starts from
+/// contact by construction, so it is a fact about the trace rather than a limit to
+/// tune (a geometric version was measured vacuous — see `reward.rs`).
 fn reward_cfg() -> reward::RewardConfig {
-    let mut c = reward::RewardConfig {
-        land_window_ts: land_hold().max(0.3),
-        ..reward::RewardConfig::default()
-    };
-    if let Some(v) = env_f32("W_LIFTOFF") {
-        c.w_liftoff = v;
+    let mut c = reward::RewardConfig::default();
+    if let Some(v) = env_f32("V_LIFTOFF") {
+        c.v_liftoff = v;
     }
-    if let Some(v) = env_f32("V_JUMP") {
-        c.v_jump = v;
-    }
-    if let Some(v) = env_f32("V_MIN") {
-        c.v_min = v;
-    }
-    if let Some(v) = env_f32("APEX_TARGET") {
-        c.apex_target = v;
-    }
-    if let Some(v) = env_f32("APEX_GATE") {
-        c.apex_gate = v;
-    }
-    if let Some(v) = env_f32("W_AIR") {
-        c.w_air = v;
-    }
-    if let Some(v) = env_f32("HOLD_SHARE") {
-        c.hold_share = v;
-    }
-    if let Some(v) = env_f32("FALL_PENALTY") {
-        c.w_fall = v;
-    }
-    if let Some(v) = env_f32("W_SUCCESS") {
-        c.w_success = v;
-    }
-    if let Some(v) = env_f32("W_STAND") {
-        c.w_stand = v;
-    }
-    if let Some(v) = env_f32("LEAN_FAIL") {
-        c.lean_fail = v;
-    }
-    if let Some(v) = env_f32("LAND_WINDOW_TS") {
-        c.land_window_ts = v;
+    if let Some(v) = env_f32("R_LAND") {
+        c.r_land = v;
     }
     c
 }
@@ -374,12 +345,12 @@ struct PpoState {
     ep_rewards: Vec<f32>,
     ep_lens: Vec<u32>,
     ep_peaks: Vec<f32>,
-    /// 1.0 if the episode completed a landing window (`landings > 0`).
+    /// 1.0 if the episode was paid for landing.
     ep_lands: Vec<f32>,
-    /// The episode's still-standing credit (`R_stand`, 0 if it fell).
-    ep_stands: Vec<f32>,
-    /// The landing quality seen at the most recent window close (0 if none).
-    ep_quality: Vec<f32>,
+    /// 1.0 if the episode produced a real launch.
+    ep_launch: Vec<f32>,
+    /// The launch velocity measured at that launch (px/s); 0 if there was none.
+    ep_vup: Vec<f32>,
     train_rows: Vec<String>,
     ep_rows: Vec<String>,
     best_mean_reward: f32,
@@ -611,8 +582,8 @@ fn main() {
             ep_lens: Vec::new(),
             ep_peaks: Vec::new(),
             ep_lands: Vec::new(),
-            ep_stands: Vec::new(),
-            ep_quality: Vec::new(),
+            ep_launch: Vec::new(),
+            ep_vup: Vec::new(),
             train_rows: Vec::new(),
             ep_rows: Vec::new(),
             best_mean_reward: f32::NEG_INFINITY,
@@ -1030,7 +1001,9 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         // gate, and a landing window that pays for a settled capture. Standing
         // still pays exactly 0, so there is no do-nothing optimum to fall into;
         // the only charges are the harness's measured-fall gate below.
-        let (mut reward, events) = env.reward.step(&fiction);
+        // The reward has no per-tick term (that is the point): `step` only detects
+        // the launch event and returns 0.
+        let (mut reward, _events) = env.reward.step(&fiction);
         // Termination: **measured fall only** (§12.5) — no predicted-doom cut,
         // which would invite the degenerate optimum of never launching.
         // A **vertical hop** is not a fall: while airborne the torso can lean or
@@ -1093,34 +1066,21 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
                 walker.controller.mode(),
             );
         }
-        // A fall is charged by the reward module, which claws back **every credit
-        // the episode banked** and adds `w_fall`. So a fallen episode nets exactly
-        // `-w_fall` whatever the hop height was: worse than standing still by
-        // construction, not by weight tuning (the old flat 3.0 dominated the whole
-        // objective and taught the policy not to jump).
-        let mut fall_pen = 0.0;
-        let mut clawback = 0.0;
-        let mut stand_pay = 0.0;
-        if fallen {
-            clawback = env.reward.credits();
-            fall_pen = env.reward.fall_charge();
-            reward -= fall_pen;
-        } else if done && !events.landed {
-            // The episode ended **without** a fall: the body is still on its feet.
-            // The 1.5 s hold may not have finished (the physics wobbles), but a
-            // policy that kept the character upright has earned something —
-            // `apex_ratio · upright · w_stand`. Standing still earns 0 here too,
-            // because the credit scales with the apex.
-            stand_pay = env.reward.pay_stand(&fiction);
-            reward += stand_pay;
+        // ---- the only payment ----
+        // `R_LAND` if the launch was real and the episode did not end in a fall.
+        // A fall pays 0 — there is no penalty term at all, so no policy can be
+        // pushed into "never jump" to dodge one (that happened twice before).
+        let mut land_pay = 0.0;
+        if done {
+            land_pay = env.reward.pay_land(&fiction, fallen);
+            reward += land_pay;
         }
         env.t += 1;
         env.ep_reward += reward;
-        // `peak` is the reward's own monotone CoM apex ratio, so the metric the
-        // checkpoint is selected on (`mean_peak_height`) is the SAME number the
-        // reward prices. The old metric was the hip rise, which the reward never
-        // saw — measured, 56% of 70 px flights were paid for a 3.5 px rise.
-        env.peak = env.reward.apex_ratio();
+        // Log-only: the ballistic rise the launch bought (`v_up²/2g`, in units of
+        // the standing hip height). It is decided at takeoff, so this metric cannot
+        // be inflated by anything the body does afterwards.
+        env.peak = env.reward.launch_apex / HIP_HEIGHT;
         staged.push((
             env.root.index(),
             Transition {
@@ -1138,31 +1098,21 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
             state.ep_rewards.push(env.ep_reward);
             state.ep_lens.push(env.t);
             state.ep_peaks.push(env.peak);
+            state.ep_lands.push(if land_pay > 0.0 { 1.0 } else { 0.0 });
             state
-                .ep_lands
-                .push(if env.reward.landings > 0 { 1.0 } else { 0.0 });
-            state.ep_stands.push(env.reward.sum_stand_pay);
-            state.ep_quality.push(env.reward.last_quality());
+                .ep_launch
+                .push(if env.reward.launched() { 1.0 } else { 0.0 });
+            state.ep_vup.push(env.reward.launch_v_up);
             state.ep_rows.push(format!(
-                "{},{},{:.4},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.0},{}",
+                "{},{},{:.4},{},{:.3},{},{:.0},{:.3}",
                 tick,
                 env.root.index(),
                 env.ep_reward,
                 env.t,
                 env.peak,
-                env.reward.liftoffs,
-                env.reward.landings,
-                env.reward.sum_liftoff_pay,
-                env.reward.sum_air_pay,
-                env.reward.sum_land_pay,
-                env.reward.sum_success_pay,
-                env.reward.sum_stand_pay,
-                env.reward.apex_ratio(),
-                env.reward.last_quality(),
-                -fall_pen,
-                clawback,
-                env.reward.max_v_up,
-                env.reward.window_ticks,
+                if env.reward.launched() { 1 } else { 0 },
+                env.reward.launch_v_up,
+                land_pay,
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
             // this character and the factory rebuilds it at its rest pose. That
@@ -1364,28 +1314,25 @@ fn ppo_update_system(
     // ---- outcome metrics: the thing the task is actually about ----
     // `landed_pct` is the fraction of episodes that completed the 1.5 s landing
     // window; `stand_pct` is the fraction that ended the episode on their feet
-    // without a fall (`R_stand`). These are what tell you, from the csv alone,
-    // whether a run is on a wrong path — reward alone cannot, because the credit
-    // is event-based and a policy can look good for a few hundred updates.
+    // without a fall. Together with `launch_pct` these are what tell you, from the
+    // csv alone, whether a run is on a wrong path — reward alone cannot.
     let landed_pct = mean(&state.ep_lands);
-    // Mean `R_stand` credit, NOT the fraction of episodes that got one: the
-    // credit scales with `apex_ratio · upright`, so a micro-hop that ends upright
-    // contributes ≈ 0 and cannot be farmed by idling.
-    let mean_stand = mean(&state.ep_stands);
-    let mean_quality = mean(&state.ep_quality);
-    // Composite **task-outcome** score, used for the deployable checkpoint.
-    // `landed_pct` alone is too coarse (1/32 = 3.1 % resolution, and one lucky
-    // episode blocked a much better policy — measured at update 20 vs 22), while
-    // `mean_stand` is continuous and monotone in "ended upright, with height".
-    let success = landed_pct + 0.5 * mean_stand;
+    // Fraction of episodes that produced a **real launch** (the precondition for
+    // any payment). This is the first thing to look at: if it collapses, the policy
+    // has learned to suppress the jump, whatever the reward says.
+    let launch_pct = mean(&state.ep_launch);
+    let mean_vup = mean(&state.ep_vup);
+    // Composite outcome score for the deployable checkpoint: landings first, then
+    // "did it actually jump". `landed_pct` alone is 1/32 coarse and noisy.
+    let success = landed_pct + 0.5 * launch_pct;
     state.train_rows.push(format!(
-        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.3},{:.5},{:.5},{:.4},{:.4},{:.3}",
+        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.1},{:.5},{:.5},{:.4},{:.4},{:.3}",
         mean_ep,
         mean_len,
         mean_peak,
+        launch_pct,
         landed_pct,
-        mean_stand,
-        mean_quality,
+        mean_vup,
         stats.policy_loss,
         stats.value_loss,
         stats.entropy,
@@ -1403,11 +1350,8 @@ fn ppo_update_system(
     //                          collapse silently overwrites the good policy.
     //
     // The selector must NOT be pure `mean_ep_reward`: that is the quantity the
-    // policy games. It must also not be `mean_peak_height` any more — that
-    // saturates at 1.0 once `apex_target` is calibrated (measured: 0.9998 over
-    // 128 episodes), which would silently fall back to reward. Rank on the
-    // **task outcome** instead: completed landings, then still-standing ends,
-    // then reward.
+    // policy games. Rank on the **task outcome** instead — completed landings,
+    // then "did it launch at all", then reward.
     let is_best = if state.ep_rewards.is_empty() {
         false
     } else {
@@ -1419,13 +1363,14 @@ fn ppo_update_system(
         state.best_mean_reward = mean_ep;
         state.best_mean_peak = mean_peak;
         state.best_landed = success;
-        state.best_stand = mean_stand;
+        state.best_stand = launch_pct;
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
-         peak {mean_peak:.3} landed {:.0}% stand {mean_stand:.2} succ {success:.3} \
-         q {mean_quality:.3} pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep} \
+         peak {mean_peak:.3} launch {:.0}% landed {:.0}% v_up {mean_vup:.0} succ {success:.3} \
+         pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep} \
          | update_blocked {update_ms:.1} ms",
+        launch_pct * 100.0,
         landed_pct * 100.0,
         stats.policy_loss,
         stats.value_loss,
@@ -1436,8 +1381,8 @@ fn ppo_update_system(
     state.ep_lens.clear();
     state.ep_peaks.clear();
     state.ep_lands.clear();
-    state.ep_stands.clear();
-    state.ep_quality.clear();
+    state.ep_launch.clear();
+    state.ep_vup.clear();
 
     flush_state(&state);
     // Default 10, not 100: the interesting part of a jump run is the FIRST ~50
@@ -1484,8 +1429,8 @@ fn mean(v: &[f32]) -> f32 {
     }
 }
 
-const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,landed_pct,mean_stand,mean_quality,policy_loss,value_loss,entropy,approx_kl,clip_frac";
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height,liftoffs,landings,liftoff_pay,air_pay,land_pay,success_pay,stand_pay,apex_ratio,quality,fall_pen,clawback,v_up,window_ticks";
+const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,landed_pct,mean_v_up,policy_loss,value_loss,entropy,approx_kl,clip_frac";
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height,launch,v_up,land_pay";
 
 fn write_rows(path: &str, header: &str, rows: &[String]) {
     if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
