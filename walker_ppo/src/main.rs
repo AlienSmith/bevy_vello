@@ -374,6 +374,13 @@ struct PpoState {
     trace_env: Option<Entity>,
     /// Trace finished + written; never trace again.
     trace_done: bool,
+    /// Episodes traced so far, stand hip of the current one, and its lowest hip.
+    trace_ep: usize,
+    trace_stand: f32,
+    trace_min: f32,
+    /// One row per traced episode: `ep,ticks,stand_hip,min_hip,rise,landed,fallen`.
+    /// The spread of `rise` is what "is this start state stable?" means.
+    trace_summary: Vec<String>,
     train_rows: Vec<String>,
     ep_rows: Vec<String>,
     best_mean_reward: f32,
@@ -610,6 +617,10 @@ fn main() {
             trace_rows: Vec::new(),
             trace_env: None,
             trace_done: false,
+            trace_ep: 0,
+            trace_stand: f32::NAN,
+            trace_min: f32::INFINITY,
+            trace_summary: Vec::new(),
             train_rows: Vec::new(),
             ep_rows: Vec::new(),
             best_mean_reward: f32::NEG_INFINITY,
@@ -1115,15 +1126,21 @@ fn ppo_collect_system(
         // One env, its first episode, every body channel — so a deploy in
         // `walker_qa` can be diffed against what the trainer actually did.
         if trace_on && !state.trace_done && state.trace_rows.len() < TRACE_MAX_ROWS {
-            let mine = match state.trace_env {
-                Some(e) => e == env.root,
-                None => {
-                    state.trace_env = Some(env.root);
-                    true
-                }
-            };
+            // A respawn DESPAWNS and rebuilds the character, so the traced
+            // entity changes every episode: re-target at each episode start
+            // (rows are empty exactly then).
+            let mut mine = state.trace_env == Some(env.root);
+            if !mine && state.trace_rows.is_empty() {
+                state.trace_env = Some(env.root);
+                mine = true;
+            }
             if mine {
                 let tick = state.tick;
+                if state.trace_rows.is_empty() {
+                    state.trace_stand = fiction.hip.y;
+                    state.trace_min = fiction.hip.y;
+                }
+                state.trace_min = state.trace_min.min(fiction.hip.y);
                 state.trace_rows.push(format!(
                     "{},{},{:.2},{:.2},{:.1},{:.2},{:.2},{:.1},{:.2},{:.2},{},{},{}",
                     env.t,
@@ -1159,13 +1176,32 @@ fn ppo_collect_system(
 
         if done {
             if state.trace_env == Some(env.root) && !state.trace_done && trace_on {
-                state.trace_done = true;
+                let (ep, ticks) = (state.trace_ep, state.trace_rows.len());
+                let (stand_hip, min_hip) = (state.trace_stand, state.trace_min);
+                let rise = stand_hip - min_hip;
+                state.trace_summary.push(format!(
+                    "{ep},{ticks},{stand_hip:.2},{min_hip:.2},{rise:.1},{},{}",
+                    landed as u8, fallen as u8,
+                ));
                 write_rows(TRACE_PATH, TRACE_HEADER, &state.trace_rows);
                 info!(
-                    "walker_ppo: TRACE wrote {} ticks of env {} to {TRACE_PATH}",
-                    state.trace_rows.len(),
-                    env.root.index()
+                    "walker_ppo: TRACE ep {ep}: {ticks} ticks, stand hip {stand_hip:.1}, \
+                     min {min_hip:.1}, rise {rise:.1}, landed={landed} fallen={fallen}"
                 );
+                state.trace_ep += 1;
+                let want = env_usize("TRACE_EPISODES").unwrap_or(8);
+                if state.trace_ep >= want {
+                    state.trace_done = true;
+                    write_rows(
+                        TRACE_SUMMARY_PATH,
+                        TRACE_SUMMARY_HEADER,
+                        &state.trace_summary,
+                    );
+                    info!("walker_ppo: TRACE summary ({want} episodes) -> {TRACE_SUMMARY_PATH}");
+                } else {
+                    // Next episode starts fresh; the start state is the respawn's.
+                    state.trace_rows.clear();
+                }
             }
             let tick = state.tick;
             state.ep_rewards.push(env.ep_reward);
@@ -1512,6 +1548,9 @@ const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,foot_pen,land_pay";
 const TRACE_HEADER: &str =
     "t,tick,hip_x,hip_y,hip_vy,com_x,com_y,com_vy,foot_l_y,foot_r_y,touch_l,touch_r,lifted_off";
 const TRACE_PATH: &str = "tmp/walker_ppo/trace.csv";
+/// One row per traced episode (see `PpoState::trace_summary`).
+const TRACE_SUMMARY_PATH: &str = "tmp/walker_ppo/trace_summary.csv";
+const TRACE_SUMMARY_HEADER: &str = "ep,ticks,stand_hip,min_hip,rise,landed,fallen";
 /// 900 ticks = 10 s at 90 Hz, well past the horizon.
 const TRACE_MAX_ROWS: usize = 900;
 
