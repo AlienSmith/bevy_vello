@@ -270,6 +270,8 @@ struct PerfMeter {
     pub sim: f32,
     /// Last `ppo_update_system` block, ms — the "freeze" cost, on screen.
     pub stop: f32,
+    /// Process start, so the title can show how long the run has been going.
+    pub start: std::time::Instant,
     /// Wall-clock seconds since the last log line.
     log_accum: f32,
 }
@@ -283,6 +285,7 @@ impl Default for PerfMeter {
             fps: 0.0,
             sim: 0.0,
             stop: 0.0,
+            start: std::time::Instant::now(),
             log_accum: 0.0,
         }
     }
@@ -301,6 +304,8 @@ fn perf_report(
     mut meter: ResMut<PerfMeter>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     n: Res<NChars>,
+    state: Res<PpoState>,
+    exit: Res<ExitAfter>,
 ) {
     meter.frames += 1;
     let elapsed = meter.last.elapsed().as_secs_f32();
@@ -317,13 +322,25 @@ fn perf_report(
     meter.log_accum = 0.0;
 
     let (fps, sim, stop) = (meter.fps, meter.sim, meter.stop);
+    // Wall-clock time since the process started, `m:ss` (or `h:mm:ss`).
+    let secs = meter.start.elapsed().as_secs();
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    let elapsed = if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    };
     if let Ok(mut window) = windows.single_mut() {
         window.title = format!(
-            "Walker PPO | N={} | fps {fps:.0} | sim {sim:.0} Hz | update {stop:.0} ms",
-            n.0
+            "Walker PPO | N={} | upd {}/{} | {elapsed} | fps {fps:.0} | sim {sim:.0} Hz",
+            n.0, state.updates, exit.0,
         );
     }
-    info!("perf: fps {fps:.1} | sim {sim:.1} Hz (target 90) | update_blocked {stop:.1} ms");
+    info!(
+        "perf: upd {}/{} | {elapsed} | fps {fps:.1} | sim {sim:.1} Hz (target 90) | \
+         update_blocked {stop:.1} ms",
+        state.updates, exit.0,
+    );
 }
 
 /// Ignore the artifact of process startup: the first frame's `elapsed` is huge.
@@ -618,7 +635,7 @@ fn main() {
                 // live from the first second — a stalled or never-ticking sim is
                 // then visible immediately.
                 perf_report,
-                smoke_exit.run_if(in_state(PpoPhase::Game)),
+                run_exit.run_if(in_state(PpoPhase::Game)),
             ),
         )
         .add_systems(OnEnter(PpoPhase::Game), spawn_characters)
@@ -1462,17 +1479,19 @@ fn flush_rows_periodic(state: Res<PpoState>, mut last: Local<usize>) {
     }
 }
 
-/// The smoke exit: with `PPO_SMOKE=1`, after `UPDATES` (default 3) updates
-/// assert every logged stat stayed finite, print PASS/FAIL, close the app.
-/// A real run never exits — Ctrl-C / window close ends it, and the periodic
-/// flush means everything through the last update is on disk.
-fn smoke_exit(
+/// The run exit: after `UPDATES` updates (default 400; 3 under `PPO_SMOKE`),
+/// flush the CSVs and close the app. `PPO_SMOKE=1` additionally asserts every
+/// logged stat stayed finite and prints PASS/FAIL.
+///
+/// This used to bail out unless `PPO_SMOKE` was set, so `UPDATES=100` was
+/// silently ignored in a real (windowed) run and it never stopped.
+fn run_exit(
     state: Res<PpoState>,
     exit_after: Res<ExitAfter>,
     mut exit: EventWriter<AppExit>,
     mut done: Local<bool>,
 ) {
-    if *done || !env_flag("PPO_SMOKE") {
+    if *done {
         return;
     }
     if state.updates < exit_after.0 {
@@ -1480,6 +1499,14 @@ fn smoke_exit(
     }
     *done = true;
     flush_state(&state);
+    if !env_flag("PPO_SMOKE") {
+        info!(
+            "walker_ppo: finished {}/{} updates | best succ {:.3} (landed {:.3} + launch {:.3}) | reward {:.4}",
+            state.updates, exit_after.0, state.best_landed, state.best_landed, state.best_stand, state.best_mean_reward,
+        );
+        exit.write(AppExit::Success);
+        return;
+    }
     let finite = state
         .train_rows
         .iter()
