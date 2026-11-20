@@ -113,9 +113,23 @@ const LEG_LEN: f32 = 110.0;
 /// `v_scale`). Fixed this milestone — the intent channel just says "jump".
 const DEFAULT_JUMP_SPEED: f32 = 100.0;
 
-/// Teleport settle window (ticks of stiff position constraints before the
-/// episode re-opens). ~0.5 s at 90 Hz.
-const SETTLE_TICKS: u32 = 45;
+/// Settle window before an episode opens: **the idle standing pose**.
+///
+/// This must be long enough for the drop onto the floor to finish relaxing,
+/// because the start pose decides the stroke: the feet are seen at different
+/// heights for ~1 s after spawn (`d(L−R)` swings ±3 px), and the stroke always
+/// lifts the HIGHER foot — so a short settle picks the support leg by phase.
+/// Measured with the same checkpoint (policy 70), rise vs settle:
+///
+/// | settle | ticks | rise (px) |
+/// |---|---|---|
+/// | 0.5 s | 45 | 52.6 – 67.3 (all left-footed) |
+/// | 1.2 s | 110 | 23.0 – 61.7, QA-shaped (23–39 typical) |
+///
+/// `walker_qa` stands ≥1 s before a scripted jump, so 110 ticks (1.22 s) is
+/// the value that makes training start where the game idles. Override with
+/// `SETTLE`.
+const SETTLE_TICKS: u32 = 110;
 
 /// Teleport stiffness (external position constraint compliance; the hip-pin
 /// rest value is the order of `1e-6`).
@@ -210,6 +224,16 @@ fn v_gate() -> f32 {
 /// short to settle. A negative value disables the hold and restores the re-hop
 /// loop. NOTE: [`horizon`] derives the episode length from this, so widening it
 /// cannot truncate the episode.
+/// Settle window before an episode opens, ticks (`SETTLE`, default
+/// [`SETTLE_TICKS`]). The idle standing pose is what the jump must start from
+/// (it is the game's idle state), and 45 ticks (0.5 s) stops *mid-relaxation*:
+/// the feet are still swinging, and which of them sits higher — hence which one
+/// the stroke lifts — depends on the phase. `walker_qa` stands for ≥1 s, so a
+/// `SETTLE` of ~110 ticks (1.2 s) matches it.
+fn settle_ticks() -> u32 {
+    env_usize("SETTLE").unwrap_or(SETTLE_TICKS as usize) as u32
+}
+
 fn land_hold() -> f32 {
     env_f32("JUMP_LAND_HOLD").unwrap_or(1.5)
 }
@@ -974,7 +998,7 @@ fn attach_walkers(
         // at rest, so nothing is dragged), then open the first episode.
         commands.entity(root).insert(Env {
             parked: true,
-            settle: SETTLE_TICKS,
+            settle: settle_ticks(),
             respawn_pending: false,
             spawn_x: root_tf.translation.x,
             t: 0,
