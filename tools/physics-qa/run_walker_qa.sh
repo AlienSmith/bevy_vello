@@ -10,7 +10,12 @@
 #                       WIN_HIDDEN (default 1 — no OS window; the whole
 #                       pipeline still runs), ASSET_ROOT,
 #                       SCRIPT=path.json — a command track that drives the
-#                       walker and self-exits the app when the track ends.
+#                       walker and self-exits the app when the track ends,
+#                       POLICY=path.json — a trained checkpoint (obs22/act5 is
+#                       wired as the jump residual),
+#                       CAM_FOLLOW=xy|x|none — which axes chase the hip. `xy`
+#                       (default) is the walking view and *cancels a vertical
+#                       hop on screen*; use `x` to see a jump's real height.
 #                       CSV_PATH is fixed by the binary.
 #   RUN_SECS            hard backstop kill, seconds (default 600). A scripted
 #                       run exits on its own; RUN_SECS only guards a hung

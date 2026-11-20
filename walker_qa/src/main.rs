@@ -135,6 +135,9 @@ fn main() {
         .flatten();
     App::default()
         .insert_resource(PolicySlot(policy))
+        // `CAM_FOLLOW=xy|x|none` — `xy` (default) cancels a vertical hop on
+        // screen; `x` keeps the hop at its true height while still panning.
+        .insert_resource(CamFollowMode::from_env())
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
@@ -740,6 +743,46 @@ fn keyboard_intent(keys: Res<ButtonInput<KeyCode>>, mut intents: Query<&mut Walk
     }
 }
 
+/// Which axes the QA camera springs toward the hip.
+///
+/// `xy` (default) is the walking view: the body stays pinned to the centre, so
+/// a **vertical hop is cancelled on screen** — the floor slides down instead of
+/// the body rising, which makes a real 30 px hop look like a twitch. That is a
+/// render artefact, not the policy: the measured rise is unaffected. For a jump
+/// use `x` (pan horizontally, hold y) or `none` (freeze both after the first
+/// snap). `walker_ppo`'s camera is fixed, which is why a hop reads at its true
+/// height there.
+#[derive(Clone, Copy, PartialEq, Eq, Resource)]
+enum CamFollowMode {
+    Xy,
+    X,
+    None,
+}
+
+impl CamFollowMode {
+    fn from_env() -> Self {
+        match std::env::var("CAM_FOLLOW")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "x" => Self::X,
+            "none" | "off" | "fixed" | "0" => Self::None,
+            _ => Self::Xy,
+        }
+    }
+
+    /// Does this mode chase the given axis (`vertical = false` ⇒ x)?
+    fn follows(self, vertical: bool) -> bool {
+        match (self, vertical) {
+            (Self::Xy, _) => true,
+            (Self::X, false) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Spring-follow camera state: position + velocity in Bevy world coords
 /// (y-up; the walker's measured hip lives in physics y-down, negated here).
 #[derive(Component)]
@@ -759,6 +802,7 @@ fn camera_follow(
     mut cam_q: Query<(&mut CamFollow, &mut Transform)>,
     walkers: Query<&Walker>,
     time: Res<Time>,
+    mode: Res<CamFollowMode>,
 ) {
     let Some(walker) = walkers.iter().next() else {
         return;
@@ -766,16 +810,24 @@ fn camera_follow(
     // Physics y-down → Bevy y-up (what the render pass shows for the particle).
     let hip = walker.fiction().hip;
     let target = Vec2::new(hip.x, -hip.y);
+    let (follow_x, follow_y) = (mode.follows(false), mode.follows(true));
     let dt = time.delta_secs().min(1.0 / 30.0);
     for (mut cam, mut transform) in cam_q.iter_mut() {
         if !cam.live {
+            // First sight of the body: centre it once on both axes, so a frozen
+            // axis is frozen at the spawn pose rather than at the origin.
             cam.pos = target;
             cam.vel = Vec2::ZERO;
             cam.live = true;
         } else {
+            // A frozen axis has zero error ⇒ the spring leaves it alone.
+            let goal = Vec2::new(
+                if follow_x { target.x } else { cam.pos.x },
+                if follow_y { target.y } else { cam.pos.y },
+            );
             let k = 12.0f32; // spring stiffness (1/s²); damping = critical
             let (p0, v0) = (cam.pos, cam.vel);
-            let accel = (target - p0) * k - v0 * (2.0 * k.sqrt());
+            let accel = (goal - p0) * k - v0 * (2.0 * k.sqrt());
             let v1 = v0 + accel * dt;
             cam.pos = p0 + v1 * dt;
             cam.vel = v1;

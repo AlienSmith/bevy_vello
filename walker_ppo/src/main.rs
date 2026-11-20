@@ -368,6 +368,12 @@ struct PpoState {
     ep_launch: Vec<f32>,
     /// The foot-margin cost of the episode (positive number = charged).
     ep_footpen: Vec<f32>,
+    /// `TRACE=1` buffer: one env's per-tick particle state, first episode only.
+    trace_rows: Vec<String>,
+    /// The env being traced (fixed at its first collected tick).
+    trace_env: Option<Entity>,
+    /// Trace finished + written; never trace again.
+    trace_done: bool,
     train_rows: Vec<String>,
     ep_rows: Vec<String>,
     best_mean_reward: f32,
@@ -601,6 +607,9 @@ fn main() {
             ep_lands: Vec::new(),
             ep_launch: Vec::new(),
             ep_footpen: Vec::new(),
+            trace_rows: Vec::new(),
+            trace_env: None,
+            trace_done: false,
             train_rows: Vec::new(),
             ep_rows: Vec::new(),
             best_mean_reward: f32::NEG_INFINITY,
@@ -994,9 +1003,15 @@ fn ppo_command_system(mut walkers: Query<(&mut Walker, &Env)>) {
 /// last control action, and the controller's `last` still holds that action's
 /// `(obs, a, logp, value)` — the Law-2 pairing (controller reports, harness
 /// collects reward/done).
-fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: ResMut<PpoState>) {
+fn ppo_collect_system(
+    mut walkers: Query<(&mut Walker, &mut Env)>,
+    mut state: ResMut<PpoState>,
+    mut trace_on: Local<Option<bool>>,
+) {
     let horizon = horizon();
     let fall = fall_lean();
+    // Read `TRACE` once, not 90×N times a second.
+    let trace_on = *trace_on.get_or_insert_with(|| env_flag("TRACE"));
     // Determinism (D1): query order is unstable across runs, so buffer the
     // tick's transitions and push them in sorted root order — the rollout (and
     // thus the float-summed gradients) then reproduces bit-for-bit.
@@ -1096,6 +1111,37 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         }
         env.t += 1;
         env.ep_reward += reward;
+        // ---- optional per-tick trace (`TRACE=1`) ----
+        // One env, its first episode, every body channel — so a deploy in
+        // `walker_qa` can be diffed against what the trainer actually did.
+        if trace_on && !state.trace_done && state.trace_rows.len() < TRACE_MAX_ROWS {
+            let mine = match state.trace_env {
+                Some(e) => e == env.root,
+                None => {
+                    state.trace_env = Some(env.root);
+                    true
+                }
+            };
+            if mine {
+                let tick = state.tick;
+                state.trace_rows.push(format!(
+                    "{},{},{:.2},{:.2},{:.1},{:.2},{:.2},{:.1},{:.2},{:.2},{},{},{}",
+                    env.t,
+                    tick,
+                    fiction.hip.x,
+                    fiction.hip.y,
+                    fiction.v_hip.y,
+                    fiction.com.x,
+                    fiction.com.y,
+                    fiction.v_com.y,
+                    fiction.feet[0].pos.y,
+                    fiction.feet[1].pos.y,
+                    fiction.feet[0].touching as u8,
+                    fiction.feet[1].touching as u8,
+                    env.reward.lifted_off() as u8,
+                ));
+            }
+        }
         // Log-only diagnostic (no reward consults it): the CoM height as a fraction
         // of the standing hip height, so a run's actual jump height is still visible.
         env.peak = env.peak.max((FOOT_SURFACE_Y - fiction.com.y) / HIP_HEIGHT);
@@ -1112,6 +1158,15 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         ));
 
         if done {
+            if state.trace_env == Some(env.root) && !state.trace_done && trace_on {
+                state.trace_done = true;
+                write_rows(TRACE_PATH, TRACE_HEADER, &state.trace_rows);
+                info!(
+                    "walker_ppo: TRACE wrote {} ticks of env {} to {TRACE_PATH}",
+                    state.trace_rows.len(),
+                    env.root.index()
+                );
+            }
             let tick = state.tick;
             state.ep_rewards.push(env.ep_reward);
             state.ep_lens.push(env.t);
@@ -1450,6 +1505,15 @@ fn mean(v: &[f32]) -> f32 {
 
 const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,landed_pct,mean_foot_pen,policy_loss,value_loss,entropy,approx_kl,clip_frac";
 const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,foot_pen,land_pay";
+/// `TRACE=1`: per-tick particle state of ONE env, for its first episode. The
+/// trainer otherwise writes only per-update / per-episode aggregates, so a
+/// checkpoint's actual stroke could not be inspected at all — this is the
+/// trainer-side counterpart of `walker_qa`'s telemetry, same channels.
+const TRACE_HEADER: &str =
+    "t,tick,hip_x,hip_y,hip_vy,com_x,com_y,com_vy,foot_l_y,foot_r_y,touch_l,touch_r,lifted_off";
+const TRACE_PATH: &str = "tmp/walker_ppo/trace.csv";
+/// 900 ticks = 10 s at 90 Hz, well past the horizon.
+const TRACE_MAX_ROWS: usize = 900;
 
 fn write_rows(path: &str, header: &str, rows: &[String]) {
     if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
