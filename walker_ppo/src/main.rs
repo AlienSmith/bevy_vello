@@ -222,17 +222,17 @@ fn land_lean() -> f32 {
 /// knob falls back to [`reward::RewardConfig::default`], so
 /// `cargo run -p walker_ppo` behaves without any env.
 ///
-/// **Two knobs**, and that is the whole reward:
-///   `V_LIFTOFF`  CoM rise-rate a launch must reach (also the minimum height)
-///   `R_LAND`     the one positive number: paid for landing after a real launch
-///
-/// "Feet close to the ground before liftoff" is not a knob: a lift starts from
-/// contact by construction, so it is a fact about the trace rather than a limit to
-/// tune (a geometric version was measured vacuous — see `reward.rs`).
+/// **Three knobs**, and that is the whole reward:
+///   `FOOT_MARGIN`    how far (px) the feet may stray above the floor pre-liftoff
+///   `FOOT_PENALTY`   cost per px per tick of straying beyond it
+///   `R_LAND`         the one positive number: paid for landing after a lift-off
 fn reward_cfg() -> reward::RewardConfig {
     let mut c = reward::RewardConfig::default();
-    if let Some(v) = env_f32("V_LIFTOFF") {
-        c.v_liftoff = v;
+    if let Some(v) = env_f32("FOOT_MARGIN") {
+        c.foot_margin = v;
+    }
+    if let Some(v) = env_f32("FOOT_PENALTY") {
+        c.foot_penalty = v;
     }
     if let Some(v) = env_f32("R_LAND") {
         c.r_land = v;
@@ -349,8 +349,8 @@ struct PpoState {
     ep_lands: Vec<f32>,
     /// 1.0 if the episode produced a real launch.
     ep_launch: Vec<f32>,
-    /// The launch velocity measured at that launch (px/s); 0 if there was none.
-    ep_vup: Vec<f32>,
+    /// The foot-margin cost of the episode (positive number = charged).
+    ep_footpen: Vec<f32>,
     train_rows: Vec<String>,
     ep_rows: Vec<String>,
     best_mean_reward: f32,
@@ -583,7 +583,7 @@ fn main() {
             ep_peaks: Vec::new(),
             ep_lands: Vec::new(),
             ep_launch: Vec::new(),
-            ep_vup: Vec::new(),
+            ep_footpen: Vec::new(),
             train_rows: Vec::new(),
             ep_rows: Vec::new(),
             best_mean_reward: f32::NEG_INFINITY,
@@ -1072,15 +1072,16 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
         // pushed into "never jump" to dodge one (that happened twice before).
         let mut land_pay = 0.0;
         if done {
-            land_pay = env.reward.pay_land(&fiction, fallen);
+            // Keyed to the harness's own landing verdict, not "did not fall": a body
+            // that lifts off and wobbles to the horizon never landed.
+            land_pay = env.reward.pay_land(fallen, landed);
             reward += land_pay;
         }
         env.t += 1;
         env.ep_reward += reward;
-        // Log-only: the ballistic rise the launch bought (`v_up²/2g`, in units of
-        // the standing hip height). It is decided at takeoff, so this metric cannot
-        // be inflated by anything the body does afterwards.
-        env.peak = env.reward.launch_apex / HIP_HEIGHT;
+        // Log-only diagnostic (no reward consults it): the CoM height as a fraction
+        // of the standing hip height, so a run's actual jump height is still visible.
+        env.peak = env.peak.max((FOOT_SURFACE_Y - fiction.com.y) / HIP_HEIGHT);
         staged.push((
             env.root.index(),
             Transition {
@@ -1101,17 +1102,16 @@ fn ppo_collect_system(mut walkers: Query<(&mut Walker, &mut Env)>, mut state: Re
             state.ep_lands.push(if land_pay > 0.0 { 1.0 } else { 0.0 });
             state
                 .ep_launch
-                .push(if env.reward.launched() { 1.0 } else { 0.0 });
-            state.ep_vup.push(env.reward.launch_v_up);
+                .push(if env.reward.lifted_off() { 1.0 } else { 0.0 });
+            state.ep_footpen.push(env.reward.foot_pen);
             state.ep_rows.push(format!(
-                "{},{},{:.4},{},{:.3},{},{:.0},{:.3}",
+                "{},{},{:.4},{},{},{:.3},{:.3}",
                 tick,
                 env.root.index(),
                 env.ep_reward,
                 env.t,
-                env.peak,
-                if env.reward.launched() { 1 } else { 0 },
-                env.reward.launch_v_up,
+                if env.reward.lifted_off() { 1 } else { 0 },
+                env.reward.foot_pen,
                 land_pay,
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
@@ -1321,18 +1321,20 @@ fn ppo_update_system(
     // any payment). This is the first thing to look at: if it collapses, the policy
     // has learned to suppress the jump, whatever the reward says.
     let launch_pct = mean(&state.ep_launch);
-    let mean_vup = mean(&state.ep_vup);
+    // Mean foot-margin cost (positive = charged). This is the constraint working:
+    // it should be small once the policy stops flicking the feet.
+    let mean_footpen = mean(&state.ep_footpen);
     // Composite outcome score for the deployable checkpoint: landings first, then
     // "did it actually jump". `landed_pct` alone is 1/32 coarse and noisy.
     let success = landed_pct + 0.5 * launch_pct;
     state.train_rows.push(format!(
-        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.1},{:.5},{:.5},{:.4},{:.4},{:.3}",
+        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.4},{:.5},{:.5},{:.4},{:.4},{:.3}",
         mean_ep,
         mean_len,
         mean_peak,
         launch_pct,
         landed_pct,
-        mean_vup,
+        mean_footpen,
         stats.policy_loss,
         stats.value_loss,
         stats.entropy,
@@ -1367,7 +1369,7 @@ fn ppo_update_system(
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
-         peak {mean_peak:.3} launch {:.0}% landed {:.0}% v_up {mean_vup:.0} succ {success:.3} \
+         peak {mean_peak:.3} launch {:.0}% landed {:.0}% footpen {mean_footpen:.3} succ {success:.3} \
          pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep} \
          | update_blocked {update_ms:.1} ms",
         launch_pct * 100.0,
@@ -1382,7 +1384,7 @@ fn ppo_update_system(
     state.ep_peaks.clear();
     state.ep_lands.clear();
     state.ep_launch.clear();
-    state.ep_vup.clear();
+    state.ep_footpen.clear();
 
     flush_state(&state);
     // Default 10, not 100: the interesting part of a jump run is the FIRST ~50
@@ -1429,8 +1431,8 @@ fn mean(v: &[f32]) -> f32 {
     }
 }
 
-const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,landed_pct,mean_v_up,policy_loss,value_loss,entropy,approx_kl,clip_frac";
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,peak_height,launch,v_up,land_pay";
+const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,landed_pct,mean_foot_pen,policy_loss,value_loss,entropy,approx_kl,clip_frac";
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,foot_pen,land_pay";
 
 fn write_rows(path: &str, header: &str, rows: &[String]) {
     if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
