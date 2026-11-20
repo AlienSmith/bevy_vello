@@ -62,8 +62,6 @@ pub struct RewardConfig {
     /// Paid once when the episode ends on the harness's landing verdict after a
     /// lift-off.
     pub r_land: f32,
-    /// Fallback fixed step when the fiction carries `dt == 0`.
-    pub dt: f32,
 }
 
 impl Default for RewardConfig {
@@ -80,7 +78,6 @@ impl Default for RewardConfig {
             // it cannot dominate.
             foot_penalty: 0.002,
             r_land: 1.0,
-            dt: 1.0 / 90.0,
         }
     }
 }
