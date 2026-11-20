@@ -20,6 +20,9 @@
 //! - `boost` — (schema ready, controller pending) hold a **launch** command:
 //!   the machine runs it through [`crate::control::LocoMode::BoostStart`]
 //!   until the *measured* speed clears the exit threshold.
+//! - `jump` — hold the trained vertical-hop intent (`dir = (1, −1)`), which
+//!   selects `LocoMode::Jumping` and therefore the loaded jump residual.
+//!   `{ "jump": { "dur": 2.0 } }`; optional `"speed"` (default 100).
 //!
 //! The playhead is tick-clocked (plan Law 3): it advances by the fixed-step
 //! `dt`, exactly like the walker chain it feeds. A finished track keeps
@@ -48,6 +51,22 @@ pub struct StandArgs {
     pub dur: f32,
 }
 
+/// A `jump` cell: hold the **PPO jump intent** for `dur` seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct JumpArgs {
+    /// Hold duration, seconds. One stroke + landing window is ~2 s; holding
+    /// past `jump_land_hold` makes the expert re-hop (see [`Cell::Jump`]).
+    pub dur: f32,
+    /// Speed magnitude on the intent (`dir = (1, −1)`, the training command).
+    #[serde(default = "default_jump_speed")]
+    pub speed: f32,
+}
+
+/// The trained harness's jump speed (`walker_ppo`'s `DEFAULT_JUMP_SPEED`).
+fn default_jump_speed() -> f32 {
+    100.0
+}
+
 /// One script cell. Externally tagged, matching the harness's existing
 /// `command.rs` style: `{ "stand": { .. } }`.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -58,8 +77,16 @@ pub enum Cell {
     Move(MoveArgs),
     /// A move that launches through BoostStart (the `boost` verb).
     Boost(MoveArgs),
-    /// An in-place vertical hop (the `jump` verb) — `LocoMode::Jump`.
-    Jump(StandArgs),
+    /// An in-place vertical hop (the `jump` verb).
+    ///
+    /// Emits [`Command::jump_vertical`] — `dir = (1, −1)`, the **same intent
+    /// `walker_ppo` trains on**. That matters: the FSM routes `c.jump` to
+    /// `LocoMode::Jump` (the authored stroke) but `c.is_jump()` to
+    /// `LocoMode::Jumping`, and only **Jumping** consults
+    /// `WalkerConfig::jump_residual`. A plain `Command::jump()` (dir `ZERO`)
+    /// would therefore silently replay the pure expert and never run a loaded
+    /// checkpoint.
+    Jump(JumpArgs),
 }
 
 impl Cell {
@@ -88,7 +115,7 @@ impl Cell {
                 boost: true,
                 jump: false,
             }),
-            Cell::Jump(_) => Some(Command::jump()),
+            Cell::Jump(a) => Some(Command::jump_vertical(a.speed)),
         }
     }
 
@@ -231,18 +258,30 @@ mod tests {
     }"#;
 
     #[test]
-    fn the_jump_cell_holds_a_jump_command() {
-        // The `jump` verb drives the loop-2 vertical stroke, not the gait:
-        // `plans/jump_script.json` uses exactly this shape.
+    fn the_jump_cell_holds_the_ppo_jump_intent() {
+        // The `jump` verb must emit the *trained* intent (`dir = (1, −1)`),
+        // because only `is_jump()` reaches `LocoMode::Jumping`, the one mode
+        // that consults the loaded jump residual. `plans/jump_script.json`
+        // uses exactly this shape.
         let t = ScriptTrack::from_json(r#"{ "script": [ { "jump": { "dur": 0.8 } } ] }"#)
             .expect("jump script parses");
         assert_eq!(t.cells.len(), 1);
         let c = t.cells[0].command().expect("jump emits a command");
-        assert!(c.jump);
+        assert!(c.is_jump(), "up-channel intent (dir.y < -0.5)");
+        assert!(!c.jump, "not the authored-stroke flag");
         assert!(!c.boost, "a hop is not a horizontal launch");
-        assert_eq!(c.vx(), 0.0, "the hop is in place");
+        assert_eq!(c.vx(), 100.0, "default jump speed on the intent");
         assert_eq!(t.cells[0].kind(), "jump");
         assert!((t.cells[0].dur() - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_jump_cell_takes_an_optional_speed() {
+        let t = ScriptTrack::from_json(
+            r#"{ "script": [ { "jump": { "dur": 1.0, "speed": 70.0 } } ] }"#,
+        )
+        .expect("speed override parses");
+        assert_eq!(t.cells[0].command().expect("command").vx(), 70.0);
     }
 
     #[test]

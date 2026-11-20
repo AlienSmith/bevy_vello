@@ -2,17 +2,17 @@
     "script": [
         {
             "stand": {
-                "dur": 1.0
+                "dur": 1.25
             }
         },
         {
             "jump": {
-                "dur": 3.0
+                "dur": 2.5
             }
         },
         {
             "stand": {
-                "dur": 1.5
+                "dur": 2.5
             }
         }
     ]
