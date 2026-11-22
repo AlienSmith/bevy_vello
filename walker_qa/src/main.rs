@@ -35,6 +35,9 @@ use game_lib::{
     flush_rows, CharacterRoot, Connectivity, LeftLegController, RightLegController,
     SpineController, SpineDriveEnabled, VelloCharacterPlugin,
 };
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use walker_control::{
@@ -43,11 +46,13 @@ use walker_control::{
     learned::{LearnMode, LearnedConfig, LearnedCtrl},
     observe::ObserveHandles,
     plugin::{
-        AttachWalker, ScriptResource, WalkerControlPlugin, WalkerIntent, WalkerTelemetryBuffer,
+        AttachWalker, ScriptResource, WalkerControlPlugin, WalkerControlSet, WalkerIntent,
+        WalkerTelemetryBuffer,
     },
     script::ScriptTrack,
     walker::{Walker, WalkerConfig},
 };
+use walker_nn::dataset::{self, DatasetMeta};
 use walker_nn::PolicyBundle;
 
 // The character rig is resolved at startup by `CharacterAssetPaths` (default:
@@ -103,6 +108,11 @@ const CSV_PATH: &str = "tmp/walker_qa/walk.csv";
 /// buffer stays whole while the app runs.
 const FLUSH_EVERY_ROWS: usize = 90;
 
+/// `DUMP_OBS` manifest refresh cadence: rewrite the `<tag>.manifest.json`
+/// every ~5.7 s of ticks (~512 · 90 Hz) so a killed run still carries a
+/// near-true row count (there is no reliable teardown hook on exit).
+const DUMP_MANIFEST_EVERY: usize = 512;
+
 /// `WIN_HIDDEN=1` runs the full pipeline (render + physics + walker) with no
 /// OS window — the same idiom as `visual_arm_pd`. Only the surface is
 /// suppressed; every system still runs on the fixed clock.
@@ -153,8 +163,14 @@ fn main() {
             }
         })
         .flatten();
+    // Distill plan §2 (Stage 1, inputs only): `DUMP_OBS=<path>` appends the
+    // exact obs vector the residual controller fed the policy each fixed tick
+    // (LE f32, 22 per row) plus a `<tag>.manifest.json` sidecar. Absent ⇒ the
+    // collector stays inert (enabled=false).
+    let obs_dump = ObsDump::from_env(&policy);
     App::default()
         .insert_resource(PolicySlot(policy))
+        .insert_resource(obs_dump)
         // `CAM_FOLLOW=xy|x|none` — `xy` (default) cancels a vertical hop on
         // screen; `x` keeps the hop at its true height while still panning.
         .insert_resource(CamFollowMode::from_env())
@@ -193,6 +209,12 @@ fn main() {
         .init_state::<WalkerState>()
         .insert_resource(assets)
         .add_systems(Startup, (setup_scene, apply_gravity, pause_physics).chain())
+        // The collector appends AFTER the control stage stamped this tick's
+        // `LastStep`, so the dumped row is exactly the vector the policy saw.
+        .add_systems(
+            FixedUpdate,
+            dump_obs_driver.after(WalkerControlSet::Control),
+        )
         .add_systems(
             Update,
             (
@@ -711,6 +733,7 @@ fn flush_telemetry(buf: Res<WalkerTelemetryBuffer>, mut last: Local<usize>) {
 fn script_exit(
     script: Option<Res<ScriptResource>>,
     buf: Res<WalkerTelemetryBuffer>,
+    mut dump: Option<ResMut<ObsDump>>,
     mut exit: EventWriter<AppExit>,
     mut done: Local<bool>,
 ) {
@@ -721,8 +744,255 @@ fn script_exit(
     if script.0.done() {
         *done = true;
         flush_rows(CSV_PATH, &buf.header, &buf.rows);
+        // Flush + refresh the DUMP_OBS manifest on the way out.
+        if let Some(mut d) = dump.as_deref_mut() {
+            obs_dump_finalize(&mut d);
+        }
         info!("walker_qa: script finished — exiting");
         exit.write(AppExit::Success);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DUMP_OBS collector (distill plan §2, Stage 1: inputs only)
+// ---------------------------------------------------------------------------
+
+/// Append the exact obs vectors the residual controller consumed, every fixed
+/// tick, into `<path>.obs` in the plan's `.obs` layout (LE f32, one
+/// `obs_dim`-wide row per record). `DUMP_OBS=<path>` enables it; the manifest
+/// sidecar (`<path>.manifest.json`) is refreshed as rows grow and at exit so a
+/// killed run still carries a near-true row count.
+#[derive(Resource)]
+struct ObsDump {
+    enabled: bool,
+    path: PathBuf,
+    obs_dim: usize,
+    action_dim: usize,
+    hidden: Vec<usize>,
+    created_ts: u64,
+    writer: Option<BufWriter<File>>,
+    /// Rows written by this process.
+    rows: usize,
+    /// Rows already in the file when the writer opened (append-only semantics).
+    pre_existing: usize,
+    /// Rows since the last manifest refresh.
+    since_manifest: usize,
+    finalized: bool,
+    broken: bool,
+}
+
+impl ObsDump {
+    /// Build from `DUMP_OBS`. Shape fields come from the loaded policy bundle
+    /// when one exists (the residual is the only controller that produces a
+    /// `LastStep`), else zero/empty until the first captured row pins them.
+    fn from_env(policy: &Option<Arc<RwLock<PolicyBundle>>>) -> Self {
+        let Some(path) = std::env::var("DUMP_OBS")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+        else {
+            return Self {
+                enabled: false,
+                path: PathBuf::new(),
+                obs_dim: 0,
+                action_dim: 0,
+                hidden: Vec::new(),
+                created_ts: 0,
+                writer: None,
+                rows: 0,
+                pre_existing: 0,
+                since_manifest: 0,
+                finalized: false,
+                broken: false,
+            };
+        };
+        let path = PathBuf::from(path);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut obs_dim = 0;
+        let mut action_dim = 0;
+        let mut hidden = Vec::new();
+        if let Some(bundle) = policy {
+            if let Ok(g) = bundle.read() {
+                let d = &g.actor.dims;
+                obs_dim = g.obs_dim();
+                action_dim = g.action_dim();
+                if d.len() >= 2 {
+                    hidden = d[1..d.len() - 1].to_vec();
+                }
+            }
+        }
+        Self {
+            enabled: true,
+            path,
+            obs_dim,
+            action_dim,
+            hidden,
+            created_ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            writer: None,
+            rows: 0,
+            pre_existing: 0,
+            since_manifest: 0,
+            finalized: false,
+            broken: false,
+        }
+    }
+
+    fn manifest_meta(&self) -> DatasetMeta {
+        let tag = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        DatasetMeta {
+            obs_dim: self.obs_dim,
+            action_dim: self.action_dim,
+            hidden: self.hidden.clone(),
+            rows: self.pre_existing + self.rows,
+            tag,
+            source: "walker_qa DUMP_OBS".into(),
+            created_ts: self.created_ts,
+            replaced_by: None,
+        }
+    }
+
+    fn update_manifest(&self) {
+        let mp = dataset::manifest_path_for(&self.path);
+        match dataset::write_manifest(mp.to_str().unwrap_or_default(), &self.manifest_meta()) {
+            Ok(_) => {}
+            Err(e) => warn!("walker_qa: DUMP_OBS manifest write failed: {e}"),
+        }
+    }
+}
+
+/// Flush + finalize the manifest at a scripted run's exit ([`script_exit`]).
+/// For a keyboard run there is no reliable teardown hook, so the periodic
+/// refresh in [`dump_obs_driver`] keeps the manifest within
+/// [`DUMP_MANIFEST_EVERY`] rows of the truth.
+fn obs_dump_finalize(dump: &mut ObsDump) {
+    if dump.finalized {
+        return;
+    }
+    dump.finalized = true;
+    if let Some(w) = dump.writer.as_mut() {
+        let _ = w.flush();
+    }
+    dump.update_manifest();
+    info!(
+        "walker_qa: DUMP_OBS wrote {} rows ({} total incl {} pre-existing) to {}",
+        dump.rows,
+        dump.pre_existing + dump.rows,
+        dump.pre_existing,
+        dump.path.display()
+    );
+}
+
+/// Fixed-tick driver: after the control stage, drain each walker's recorded
+/// `LastStep.obs` (the exact vector fed to the policy that tick) into the open
+/// `.obs` file. Only the residual/learned controller ever produces a
+/// `LastStep`, so the dump naturally samples the on-support distribution.
+fn dump_obs_driver(mut dump: ResMut<ObsDump>, mut walkers: Query<(Entity, &mut Walker)>) {
+    if !dump.enabled || dump.finalized || dump.broken {
+        return;
+    }
+    let mut ordered: Vec<(Entity, Mut<Walker>)> = walkers.iter_mut().collect();
+    ordered.sort_by_key(|(e, _)| *e);
+    let mut rows_this_tick: Vec<Vec<f32>> = Vec::new();
+    for i in 0..ordered.len() {
+        let w = &mut ordered[i].1;
+        if let Some(last) = w.controller.take_last() {
+            rows_this_tick.push(last.obs);
+        }
+    }
+    if rows_this_tick.is_empty() {
+        return;
+    }
+
+    // Lazy-open on the first captured row; the width is whatever `build_obs`
+    // produced this run (the plan's invariant 3, not an assumption).
+    if dump.writer.is_none() {
+        let obs_dim = rows_this_tick[0].len();
+        for row in &rows_this_tick {
+            if row.len() != obs_dim {
+                warn!("walker_qa: DUMP_OBS mixed row widths at open; aborting collection");
+                dump.broken = true;
+                return;
+            }
+        }
+        let pre_existing =
+            dataset::row_count(dump.path.to_str().unwrap_or_default(), obs_dim).unwrap_or(0);
+        match std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&dump.path)
+        {
+            Ok(f) => {
+                info!(
+                    "walker_qa: DUMP_OBS {} (append; {} rows already present)",
+                    dump.path.display(),
+                    pre_existing
+                );
+                dump.obs_dim = obs_dim;
+                dump.pre_existing = pre_existing;
+                dump.since_manifest = 0;
+                dump.writer = Some(BufWriter::new(f));
+            }
+            Err(e) => {
+                warn!(
+                    "walker_qa: DUMP_OBS cannot open {}: {e}",
+                    dump.path.display()
+                );
+                dump.broken = true;
+                return;
+            }
+        }
+    }
+    // Width consistency: a policy shape change mid-run must not mix rows.
+    for row in &rows_this_tick {
+        if row.len() != dump.obs_dim {
+            warn!(
+                "walker_qa: DUMP_OBS row width {} != {}; aborting collection",
+                row.len(),
+                dump.obs_dim
+            );
+            dump.broken = true;
+            return;
+        }
+    }
+    // Append the rows; any write error hard-aborts the collector.
+    let write_ok = {
+        let Some(w) = dump.writer.as_mut() else {
+            return;
+        };
+        let mut ok = true;
+        'rows: for row in &rows_this_tick {
+            for v in row {
+                if let Err(e) = w.write_all(&v.to_le_bytes()) {
+                    warn!("walker_qa: DUMP_OBS write failed ({e}); aborting collection");
+                    ok = false;
+                    break 'rows;
+                }
+            }
+        }
+        ok
+    };
+    if !write_ok {
+        dump.broken = true;
+        return;
+    }
+    dump.rows += rows_this_tick.len();
+    dump.since_manifest += rows_this_tick.len();
+    if dump.since_manifest >= DUMP_MANIFEST_EVERY {
+        // Short, separate borrow so the counter writes above are not live
+        // during the flush.
+        if let Some(w) = dump.writer.as_mut() {
+            let _ = w.flush();
+        }
+        dump.update_manifest();
+        dump.since_manifest = 0;
     }
 }
 

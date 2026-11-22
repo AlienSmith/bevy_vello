@@ -25,9 +25,16 @@
 //! - `tmp/walker_ppo/episodes.csv` — one line per finished episode
 //! - `tmp/walker_ppo/policy.json`  — latest checkpoint (deploy with
 //!   `POLICY=tmp/walker_ppo/policy.json cargo run -p walker_qa`)
+//!
+//! `DUMP_OBS=<path.obs>` turns on the distill-plan input collector: every PPO
+//! update, before the trainer consumes the rollout, its `obs` rows are appended
+//! to `<path>.obs` + a manifest sidecar — the exact vectors the composite (B+A)
+//! policy was fed, bit-for-bit consistent with the checkpoint written at the
+//! same update (`plans/distill-single-model.md` §2, Stage 1, primary hook).
 
 mod reward;
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use bevy::{
@@ -64,6 +71,7 @@ use walker_control::{
     walker::Walker,
     walker::WalkerConfig,
 };
+use walker_nn::dataset::{self, DatasetMeta};
 use walker_nn::{PolicyBundle, PpoConfig, PpoTrainer, Rollout, Transition};
 
 // ---------------------------------------------------------------------------
@@ -429,6 +437,267 @@ struct PpoState {
     /// clears it. Splitting the two means the swap lands on a fully parked
     /// generation, never mid-stroke on a live body.
     swap_pending: bool,
+    /// `DUMP_OBS=<path.obs>` training-time input collector (see [`ObsDrain`]):
+    /// set when the env var is present, drained every [`ppo_update_system`].
+    obs_drain: Option<ObsDrain>,
+}
+
+/// `DUMP_OBS=<path.obs>` — the **training-time** input collector
+/// (`plans/distill-single-model.md` §2 stage 1). Installations that ran before
+/// distillation used a `walker_qa` probe (`DUMP_OBS` there too) to sample the
+/// obs a few seconds of one script produces; that only covers a sliver of the
+/// policy's reachable states. This drain is the real thing: every obs the
+/// composite (B+A) policy was actually fed **this run** — stored in the rollout
+/// that the very same checkpoint was trained on — is appended to the dataset,
+/// so the inputs are *bit-for-bit consistent with the checkpoints* (§7). That
+/// is exactly the property the distiller's `gen`/`fit` pair need: the student
+/// regresses the composite's output on the inputs the composite truly saw.
+///
+/// Written rows are the raw `Transition.obs` vectors; the manifest sidecar
+/// records the producing shapes (`obs_dim`/`action_dim`/`hidden`) so a later
+/// `distill fit` can assert student-consistency across generations.
+struct ObsDrain {
+    enabled: bool,
+    path: PathBuf,
+    /// `<stem>.windows.csv` — the update→end_row sidecar that lets a later
+    /// `distill` slice the dataset to "rows up to checkpoint update K" (see
+    /// [`walker_nn::dataset::windows_path_for`]). Rows after the promoted
+    /// checkpoint are a *different* (later) authority, so they must be cut.
+    windows: PathBuf,
+    /// Mirror the trainer's `SNAPSHOT_EVERY` cadence: every this many updates a
+    /// self-contained `<stem>_ckpt_NNNN.obs` (a copy of the stream so far at
+    /// that update, with its own manifest) is emitted — *one input file per
+    /// checkpoint*, so `ckpt_0010.obs` holds updates 1..=10's obs and there is
+    /// no later slicing to get checkpoint-consistent inputs.
+    snapshot_every: usize,
+    obs_dim: usize,
+    action_dim: usize,
+    hidden: Vec<usize>,
+    created_ts: u64,
+    /// Rows appended by this drain (across the whole run).
+    rows: usize,
+    /// Rows that were already in the file when the run started (append-only).
+    pre_existing: usize,
+    /// Whether `pre_existing` has been measured. A `0` here is ambiguous with
+    /// "not yet measured" (a fresh file legitimately starts at 0), so gate on
+    /// this flag, not the counter, or the second drain would re-count the first
+    /// update's rows as pre-existing.
+    pre_existing_measured: bool,
+    finalized: bool,
+    broken: bool,
+}
+
+impl ObsDrain {
+    /// Build from `DUMP_OBS`, reading the shape straight off the trainer's
+    /// actor (the net this run is training, so the width is authoritative even
+    /// before any collection happens).
+    fn from_env(trainer: &PpoTrainer) -> Option<Self> {
+        let path = std::env::var("DUMP_OBS")
+            .ok()
+            .filter(|p| !p.trim().is_empty())?;
+        let path = PathBuf::from(path);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let windows = dataset::windows_path_for(&path);
+        // Same cadence as the trainer's indexed checkpoint snapshots
+        // (`ppo_update_system`): a `ckpt_NNNN.obs` is emitted every this many
+        // updates, so each checkpoint has its OWN input file — no later slicing
+        // is needed to get checkpoint-consistent inputs (user's chosen design).
+        let snapshot_every = env_usize("SNAPSHOT_EVERY").unwrap_or(10).max(1);
+        let dims = &trainer.actor.dims;
+        let mut hidden = Vec::new();
+        if dims.len() >= 2 {
+            hidden = dims[1..dims.len() - 1].to_vec();
+        }
+        Some(Self {
+            enabled: true,
+            path,
+            windows,
+            snapshot_every,
+            obs_dim: dims[0],
+            action_dim: dims.last().copied().unwrap_or(0),
+            hidden,
+            created_ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            rows: 0,
+            pre_existing: 0,
+            pre_existing_measured: false,
+            finalized: false,
+            broken: false,
+        })
+    }
+
+    fn manifest_meta(&self) -> DatasetMeta {
+        let tag = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        DatasetMeta {
+            obs_dim: self.obs_dim,
+            action_dim: self.action_dim,
+            hidden: self.hidden.clone(),
+            rows: self.pre_existing + self.rows,
+            tag,
+            source: "walker_ppo rollout drain".into(),
+            created_ts: self.created_ts,
+            replaced_by: None,
+        }
+    }
+
+    fn update_manifest(&self) {
+        let mp = dataset::manifest_path_for(&self.path);
+        match dataset::write_manifest(mp.to_str().unwrap_or_default(), &self.manifest_meta()) {
+            Ok(_) => {}
+            Err(e) => warn!("walker_ppo: DUMP_OBS manifest write failed: {e}"),
+        }
+    }
+
+    /// Append one update window's raw obs vectors to the dataset. `update` is
+    /// the 1-based PPO update number this generation belongs to. Called with
+    /// the exact rollout the update consumed, so the file always matches the
+    /// checkpoint written at that same update — and a row-boundary record is
+    /// appended so a later `distill --upto` can slice to exactly this update.
+    fn drain(&mut self, rollout: &[Transition], update: usize) {
+        if !self.enabled || self.finalized || self.broken {
+            return;
+        }
+        let mut rows: Vec<Vec<f32>> = Vec::with_capacity(rollout.len());
+        for tr in rollout {
+            if tr.obs.len() != self.obs_dim {
+                warn!(
+                    "walker_ppo: DUMP_OBS row width {} != {}; aborting collection",
+                    tr.obs.len(),
+                    self.obs_dim
+                );
+                self.broken = true;
+                return;
+            }
+            rows.push(tr.obs.clone());
+        }
+        if rows.is_empty() {
+            return;
+        }
+        // First drain only: count rows already in the file (resume/append
+        // case) so the manifest's `rows` counts the whole file, not just this
+        // process. Gated on the measured flag — the counter legitimately stays
+        // at 0 for a fresh file, so gating on it would re-count the first
+        // update's rows as pre-existing on the second drain.
+        if !self.pre_existing_measured {
+            self.pre_existing_measured = true;
+            self.pre_existing =
+                dataset::row_count(self.path.to_str().unwrap_or_default(), self.obs_dim)
+                    .unwrap_or(0);
+        }
+        match dataset::append_rows(self.path.to_str().unwrap_or_default(), self.obs_dim, &rows) {
+            Ok(()) => {
+                self.rows += rows.len();
+                // Record the row boundary for THIS update (cumulative end_row
+                // into the file): `--upto` uses it to cut the dataset at the
+                // checkpoint this run promoted.
+                let end_row = self.pre_existing + self.rows;
+                if let Err(e) = dataset::append_window(
+                    self.windows.to_str().unwrap_or_default(),
+                    update,
+                    end_row,
+                ) {
+                    warn!("walker_ppo: DUMP_OBS window record failed ({e})");
+                }
+                self.update_manifest();
+                self.emit_checkpoint(update);
+            }
+            Err(e) => {
+                warn!("walker_ppo: DUMP_OBS append failed ({e}); aborting collection");
+                self.broken = true;
+            }
+        }
+    }
+
+    /// The self-contained checkpoint input file for one update:
+    /// `<stem>_ckpt_{update:04}.obs` in the same directory as the stream.
+    fn ckpt_path(&self, update: usize) -> PathBuf {
+        let stem = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.path
+            .with_file_name(format!("{stem}_ckpt_{update:04}.obs"))
+    }
+
+    /// Emit ONE self-contained input file per checkpoint (the user's chosen
+    /// design). At every `snapshot_every`-th update the stream-so-far is copied
+    /// to `_ckpt_NNNN.obs` and given its own manifest, so `ckpt_0010.obs` holds
+    /// updates 1..=10's obs with its own `rows` and no later slicing. The
+    /// trainer writes `policy_NNNN.json` in the same update, so the pair
+    /// (`ckpt_NNNN.obs`, `policy_NNNN.json`) is checkpoint-consistent: the file
+    /// is exactly the obs that produced that checkpoint.
+    fn emit_checkpoint(&mut self, update: usize) {
+        if !self.enabled || self.finalized || self.broken {
+            return;
+        }
+        if update % self.snapshot_every != 0 {
+            return;
+        }
+        let ckpt = self.ckpt_path(update);
+        if let Some(dir) = ckpt.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Flush the stream's manifest first so `rows` matches the copied bytes.
+        self.update_manifest();
+        match std::fs::copy(&self.path, &ckpt) {
+            Ok(_) => {
+                let rows = self.pre_existing + self.rows;
+                let tag = ckpt
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let meta = DatasetMeta {
+                    obs_dim: self.obs_dim,
+                    action_dim: self.action_dim,
+                    hidden: self.hidden.clone(),
+                    rows,
+                    tag,
+                    source: "walker_ppo checkpoint snapshot".into(),
+                    created_ts: self.created_ts,
+                    replaced_by: None,
+                };
+                let mp = dataset::manifest_path_for(&ckpt);
+                match dataset::write_manifest(mp.to_str().unwrap_or_default(), &meta) {
+                    Ok(_) => info!(
+                        "walker_ppo: checkpoint {update} -> {} ({rows} rows)",
+                        ckpt.display()
+                    ),
+                    Err(e) => warn!(
+                        "walker_ppo: DUMP_OBS ckpt manifest write failed for {}: {e}",
+                        ckpt.display()
+                    ),
+                }
+            }
+            Err(e) => warn!(
+                "walker_ppo: DUMP_OBS checkpoint copy failed for {}: {e}",
+                ckpt.display()
+            ),
+        }
+    }
+
+    fn finalize(&mut self) {
+        if !self.enabled || self.finalized {
+            return;
+        }
+        self.finalized = true;
+        self.update_manifest();
+        info!(
+            "walker_ppo: DUMP_OBS wrote {} rows ({} total incl {} pre-existing) to {}",
+            self.rows,
+            self.pre_existing + self.rows,
+            self.pre_existing,
+            self.path.display()
+        );
+    }
 }
 
 /// Per-character episode bookkeeping (env state the harness owns).
@@ -621,6 +890,9 @@ fn main() {
         );
     }
     let bundle = Arc::new(RwLock::new(PolicyBundle::from_trainer(&trainer)));
+    // Training-time input collector: read the shape off the trainer *before*
+    // `trainer` moves into `PpoState`.
+    let obs_drain = ObsDrain::from_env(&trainer);
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
@@ -677,6 +949,7 @@ fn main() {
             best_landed: -1.0,
             best_stand: -1.0,
             swap_pending: false,
+            obs_drain,
         })
         // `perf_reset` seeds the meter's clock ONCE: running it per-frame in
         // `First` would zero `log_accum` before it could ever reach one second
@@ -1438,6 +1711,20 @@ fn ppo_update_system(
         return;
     }
     let rollout = std::mem::take(&mut state.rollout);
+    // Training-time input collector: the rollout just drained holds the EXACT
+    // obs vectors the composite (B+A) policy was fed this generation — the
+    // very inputs the checkpoint written below was trained on. Append them to
+    // `DUMP_OBS` so the distill dataset is bit-for-bit consistent with the
+    // checkpoints (§7), then train on the same buffer.
+    // `state.updates` here is the count BEFORE this generation's update runs
+    // (it increments just below), so the 1-based update number of the
+    // generation being drained is `next_update` — the same number the
+    // checkpoint below gets stamped with. Read it before the mutable borrow on
+    // `obs_drain`.
+    let next_update = state.updates + 1;
+    if let Some(drain) = state.obs_drain.as_mut() {
+        drain.drain(&rollout.items, next_update);
+    }
     // This runs **on the main thread inside FixedUpdate**, so it stalls the
     // render loop for its whole duration — the visible "freeze" every
     // generation. `Time<Virtual>` is clamped in `clamp_virtual_time` so the
@@ -1641,7 +1928,7 @@ fn flush_rows_periodic(state: Res<PpoState>, mut last: Local<usize>) {
 /// This used to bail out unless `PPO_SMOKE` was set, so `UPDATES=100` was
 /// silently ignored in a real (windowed) run and it never stopped.
 fn run_exit(
-    state: Res<PpoState>,
+    mut state: ResMut<PpoState>,
     exit_after: Res<ExitAfter>,
     mut exit: EventWriter<AppExit>,
     mut done: Local<bool>,
@@ -1654,6 +1941,9 @@ fn run_exit(
     }
     *done = true;
     flush_state(&state);
+    if let Some(drain) = state.obs_drain.as_mut() {
+        drain.finalize();
+    }
     if !env_flag("PPO_SMOKE") {
         info!(
             "walker_ppo: finished {}/{} updates | best succ {:.3} (landed {:.3} + launch {:.3}) | reward {:.4}",

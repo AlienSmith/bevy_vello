@@ -81,6 +81,89 @@ The game needs a GPU: if `/dev/dri` is not accessible to the process it falls
 back to llvmpipe, where the renderer panics on a buffer binding limit. Run the
 capture with access to the GPU device nodes.
 
+## Distilling a single model (RL → expert merge)
+
+The plan at `plans/distill-single-model.md` keeps **one** deployable
+`policy.json` that accumulates every accepted residual: instead of stacking
+runtime policy outputs (a `tanh` MLP cannot be merged by adding weights), the
+authority `δ_B + δ_A` is **regenerated as supervised targets and fitted** into
+a single net. The loop is three stages, all but the first physics-free:
+
+**Stage 1 — collect inputs only.** Two collectors, one `.obs` format:
+
+Primary — **the training run itself** (`walker_ppo`). Setting `DUMP_OBS` on a
+training run appends every rollout obs the composite (B+A) policy was fed, once
+per PPO update, *before* that same update trains on the buffer — so the dataset
+is bit-for-bit consistent with the checkpoint written at the same update:
+```bash
+DUMP_OBS=tmp/distill/<tag>.obs cargo run -p walker_ppo --release
+```
+Because it drains the in-memory rollout, it captures the whole reachable state
+space — including the reward-hacked mid-run states a scripted probe never
+visits. The manifest (`tmp/distill/<tag>.manifest.json`, source
+`walker_ppo rollout drain`) records shape + row count and is finalized on exit.
+
+Every `SNAPSHOT_EVERY` updates (default 10) the collector also writes a
+**self-contained per-checkpoint input file**: `tmp/distill/<tag>_ckpt_0070.obs`
+(+ its own manifest) is the stream cut to update 70 — the exact rows the
+composite policy was fed to produce `policy_0070`. So picking a best checkpoint
+(`snap/policy_NNNN.json`) means feeding its `_ckpt_NNNN.obs` straight into
+`gen`/`fit`, with no later slicing. A `<tag>.windows.csv` sidecar
+(`update,end_row`) still backs `distill --upto` for resumed/append-only runs.
+
+Complement — a **scripted QA probe** (`walker_qa`, ~90 Hz), to thicken data
+around a curated `A*` or post-hoc verify a deployed policy:
+```bash
+tools/physics-qa/run_walker_qa.sh ckpt01 \
+  POLICY=plans/policy_0070.json \
+  SCRIPT=plans/walker_jump_hop_script.json \
+  DUMP_OBS=tmp/distill/jump01.obs
+```
+Appends the exact obs vector the residual controller fed the policy each tick
+(LE `f32`, 22 per row) plus `tmp/distill/jump01.manifest.json` (shape + row
+count). `DUMP_OBS` is env-forwarded like any `KEY=VALUE`; a scripted run
+finalizes the manifest on exit. Both sources merge into one dataset, so the
+`gen`/`fit` steps below never care which produced the rows.
+
+**Stage 2 — generate targets** (`distill gen`, no physics, re-runnable): the
+target for each row is the functional sum `μ_B(s) + μ_A(s)`:
+```bash
+cargo run -p walker_nn --bin distill -- gen \
+  --obs tmp/distill/jump01.obs \
+  --expert tmp/walker_ppo/policy_B.json \
+  --best   tmp/walker_ppo/best_checkpoint.json \
+  --out    tmp/distill/jump01.target
+```
+Dim guards reject a bundle whose shape drifted from the last generation. Picking
+a better `A*` only reruns this step.
+
+**Stage 3 — fit the student** (`distill fit`; student = clone of `B`'s actor,
+MSE + Adam, val split):
+```bash
+cargo run -p walker_nn --bin distill -- fit \
+  --obs tmp/distill/jump01.obs \
+  --targets tmp/distill/jump01.target \
+  --expert tmp/walker_ppo/policy_B.json \
+  --out tmp/walker_ppo/policy_new.json \
+  --report tmp/distill/distill_report.csv
+```
+Writes `policy_new.json` in the exact `PolicyBundle` shape `POLICY=` /
+`RESUME=` load (`critic` + `log_std` copied from `B`), plus a per-epoch
+report. The report's val MSE is informational; **the behavioural gate decides
+promotion**.
+
+**Gate (acceptance, human in the loop):** run the distilled net and the
+composite on the same fixed script and compare the QA summary — peak height,
+single-lift-off count, landing verdict, grounded fraction:
+```bash
+tools/physics-qa/run_walker_qa.sh gate_policy_new \
+  POLICY=tmp/walker_ppo/policy_new.json \
+  SCRIPT=plans/walker_jump_hop_script.json
+```
+Promotion is `B ← A*` (functional) with the distilled `policy_new` becoming the
+new `B` for the next generation — never a weight average. On regress, revert to
+the last accepted `B`.
+
 ## Judging: metrics decide, vision explains
 
 **Objective metrics are the gate.** `metrics.py` measures the arena (excluding

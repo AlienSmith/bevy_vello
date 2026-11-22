@@ -20,6 +20,15 @@
 #                       walker and self-exits the app when the track ends,
 #                       POLICY=path.json — a trained checkpoint (obs22/act5 is
 #                       wired as the jump residual),
+#                       DUMP_OBS=path.obs — distill-plan collector (plans/
+#                       distill-single-model.md §2, Stage 1): append the exact
+#                       obs per tick (this QA probe; the PRIMARY collector is
+#                       the walker_ppo rollout drain, same env var — see the
+#                       plan §2 Stage 1),
+#                       obs vector the policy saw each fixed tick (LE f32, 22
+#                       per row) + a path.manifest.json sidecar. Env-var
+#                       forwarded like any KEY=VALUE; useful for the
+#                       collect -> distill gen -> distill fit loop.
 #                       CAM_FOLLOW=xy|x|none — which axes chase the hip. `xy`
 #                       (default) is the walking view and *cancels a vertical
 #                       hop on screen*; use `x` to see a jump's real height.
@@ -81,7 +90,7 @@ fi
 # TAG=walk names the tag file onto the raw one: mv would be "same file" and
 # die non-zero under set -e. Skip the move when source and dest are the same.
 [ "$RAW_CSV" -ef "$CSV" ] || mv "$RAW_CSV" "$CSV"
-grep -E 'character assets|attached|floor|wrote' "$OUTDIR/$TAG.log" | tail -4
+grep -E 'character assets|attached|floor|wrote|DUMP_OBS' "$OUTDIR/$TAG.log" | tail -5
 
 echo "== plot"
 python3 tools/physics-qa/plot_p3.py "$CSV" "$PNG"
