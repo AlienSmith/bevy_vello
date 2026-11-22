@@ -511,3 +511,14 @@ tools/physics-qa/run_walker_qa.sh 2 SCRIPT=tmp/walker_qa/walkv60-120-60.json STA
 The stance foot's world x is pinned by default (`STANCE_PIN` on; `STANCE_PIN=0`
 disables it) — see `plans/actuator-frame-divergence.md` for what that does and
 what it does not fix.
+
+
+```
+tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=tmp/walker_ppo/snap/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
+```
+
+```
+tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=tmp/walker_ppo/snap/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
+```
+EXPERT_ONLY=1 N=1 RESUME=tmp/walker_ppo/snap/policy_0070.json ./target/release/walker_ppo
+```
