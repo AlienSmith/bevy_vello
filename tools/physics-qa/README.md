@@ -495,7 +495,7 @@ The command used to look at the walking scene with the current tuning — real
 window, a 1.3 px stance press, `HIP_HEIGHT=98`, and a strong launch thrust:
 
 ```
-tools/physics-qa/run_walker_qa.sh 2 SCRIPT=tmp/walker_qa/walkv60-120-60.json STANCE_DEPTH=1.0 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=6000 STANCE_TS=0.27 SWING_TS=0.27
+tools/physics-qa/run_walker_qa.sh 2 SCRIPT=plans/walker_v60_120_60.json STANCE_DEPTH=1.0 WIN_HIDDEN=0 HIP_HEIGHT=98 BOOST_HIP_ACCEL=6000 STANCE_TS=0.27 SWING_TS=0.27
 ```
 
 | argument | effect |
@@ -514,11 +514,12 @@ what it does not fix.
 
 
 ```
-tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=tmp/walker_ppo/snap/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
+tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=plans/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
 ```
 
 ```
 tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=tmp/walker_ppo/snap/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
 ```
-EXPERT_ONLY=1 N=1 RESUME=tmp/walker_ppo/snap/policy_0070.json ./target/release/walker_ppo
+cargo build -p walker_ppo --release
+EXPERT_ONLY=1 N=1 RESUME=plans/policy_0070.json ./target/release/walker_ppo
 ```

@@ -33,8 +33,17 @@ workspaces here, and the path dependencies are relative by design.
 ## 2. System packages
 
 ```bash
-sudo apt install xvfb x11-utils imagemagick
-python3 -m pip install numpy pillow
+sudo apt install xvfb x11-utils imagemagick python3-numpy python3-matplotlib python3-pil
+```
+
+On a PEP 668 system (Ubuntu 24.04+, Debian 12+), `/usr/bin/python3` has no
+usable `pip` and `ensurepip` is patched to refuse. The run scripts call
+`python3` directly, so either use the apt packages above or install into the
+user site-packages from the pip wheel the distro ships — no root, no venv:
+
+```bash
+python3 /usr/share/python-wheels/pip-24.0-py3-none-any.whl/pip install \
+  --user --break-system-packages numpy matplotlib pillow
 ```
 
 | package | needed for |
@@ -42,7 +51,8 @@ python3 -m pip install numpy pillow
 | `xvfb` | the off-screen display the game renders into |
 | `x11-utils` | `xwininfo` / `xdpyinfo`, to find and target the game window |
 | `imagemagick` | `import`, to capture the window |
-| `numpy`, `pillow` | `metrics.py` |
+| `numpy`, `matplotlib` | `plot_p3.py`, `metrics.py` (hip/feet plots) |
+| `pillow` | `metrics.py` (image capture analysis) |
 
 `xdotool` is only needed to inject input (`--input`, `x11_input.sh`). Where you
 cannot install packages, fetch Xvfb and xdotool into a local prefix instead —
