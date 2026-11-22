@@ -103,11 +103,13 @@ if (-not (Test-Path $Bin)) { Fail "missing $Bin" }
 
 # --- env for the child process --------------------------------------------------
 # WIN_HIDDEN defaults to 1; a WIN_HIDDEN=... override wins (later assignment).
-# ASSET_ROOT must be pinned on Windows: walker_qa's fallback is a hardcoded
-# /home/ubuntu path (see run_walk.ps1 for the same idiom).
+# ASSET_ROOT + CHARACTER_JSON pin the rig explicitly (the binary's
+# CharacterAssetPaths default is the build checkout; pinning keeps QA in lock
+# step with whatever walker_ppo trained on and makes it visible in the log).
 $EnvSet = @{
     WIN_HIDDEN = '1'
     ASSET_ROOT = (Join-Path $Repo 'examples\collision_detection\assets')
+    CHARACTER_JSON = (Join-Path $Repo 'examples\collision_detection\assets\character\v10.character.json')
 }
 foreach ($k in $EnvOver.Keys) { $EnvSet[$k] = $EnvOver[$k] }
 

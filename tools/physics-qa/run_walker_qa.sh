@@ -9,6 +9,13 @@
 #   KEY=VALUE           env overrides forwarded to walker_qa. Known levers:
 #                       WIN_HIDDEN (default 1 — no OS window; the whole
 #                       pipeline still runs), ASSET_ROOT,
+#                       CHARACTER_JSON=path.json / CHARACTER_SVG=path.svg /
+#                       CHARACTER_ASSET=path.[json|svg] — pin WHICH rig this
+#                       run loads (resolved by game_lib's CharacterAssetPaths).
+#                       Default: the repo's character/v10.character.* — the
+#                       same files walker_ppo trains on, so QA and training
+#                       cannot silently drift onto different rigs. Pass the
+#                       exact path to reproduce a given training run.
 #                       SCRIPT=path.json — a command track that drives the
 #                       walker and self-exits the app when the track ends,
 #                       POLICY=path.json — a trained checkpoint (obs22/act5 is
@@ -56,10 +63,14 @@ echo "== run: $TAG (${ENVARGS[*]:-<defaults>}) — backstop ${RUN_SECS}s"
 # walker_qa writes its telemetry to tmp/walker_qa/walk.csv; move it to the tag.
 RAW_CSV=$OUTDIR/walk.csv
 rm -f "$RAW_CSV"
-# WIN_HIDDEN defaults to 1; ASSET_ROOT is pinned repo-relative (the binary's
-# fallback is a hardcoded path). Env overrides come later, so a KEY=VALUE
-# argument wins over these defaults.
+# Pin the rig explicitly: the binary resolves it as CharacterAssetPaths
+# (defaults are identical), but an explicit CHARACTER_JSON makes the resolved
+# path visible in the log and guards against the fallback ever drifting from
+# whatever walker_ppo trained on. Env overrides come later, so a KEY=VALUE
+# argument still wins over the defaults below.
+CHARACTER_JSON="$REPO/examples/collision_detection/assets/character/v10.character.json"
 env WIN_HIDDEN=1 ASSET_ROOT="$REPO/examples/collision_detection/assets" \
+  CHARACTER_JSON="$CHARACTER_JSON" \
   ${ENVARGS[@]+"${ENVARGS[@]}"} timeout "$RUN_SECS" "$BIN" \
   > "$OUTDIR/$TAG.log" 2>&1 || true
 if [ ! -f "$RAW_CSV" ]; then
@@ -70,7 +81,7 @@ fi
 # TAG=walk names the tag file onto the raw one: mv would be "same file" and
 # die non-zero under set -e. Skip the move when source and dest are the same.
 [ "$RAW_CSV" -ef "$CSV" ] || mv "$RAW_CSV" "$CSV"
-grep -E 'attached|floor|wrote' "$OUTDIR/$TAG.log" | tail -3
+grep -E 'character assets|attached|floor|wrote' "$OUTDIR/$TAG.log" | tail -4
 
 echo "== plot"
 python3 tools/physics-qa/plot_p3.py "$CSV" "$PNG"

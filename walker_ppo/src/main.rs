@@ -15,6 +15,9 @@
 //! WIN_HIDDEN=1 cargo run -p walker_ppo --release
 //! PPO_SMOKE=1 cargo run -p walker_ppo            # fast exit + sanity check
 //! N=8 ROLLOUT=120 HORIZON=180 cargo run -p walker_ppo --release
+//! # Point training at the exact rig QA uses (default is the repo's v10):
+//! ./target/release/walker_ppo --character \
+//!     examples/collision_detection/assets/character/v10.character.json
 //! ```
 //!
 //! Outputs (relative to the working directory):
@@ -44,8 +47,9 @@ use bevy_vello::{
 };
 use game_lib::{
     character_asset::{
-        BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
-        SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
+        paths::CharacterAssetPaths, BlueprintCharacterAsset, BlueprintCharacterAssetManager,
+        BlueprintCharacterAssetMetaData, SvgCharacterAsset, SvgCharacterAssetManager,
+        SvgCharacterAssetMetaData,
     },
     CharacterRoot, Connectivity, LeftLegController, RightLegController, SpineController,
     SpineDriveEnabled, VelloCharacterPlugin,
@@ -63,14 +67,14 @@ use walker_control::{
 use walker_nn::{PolicyBundle, PpoConfig, PpoTrainer, Rollout, Transition};
 
 // ---------------------------------------------------------------------------
-// Scene constants — the v10 QA rig verbatim (the env MUST be the QA env so a
-// trained policy drops into `walker_qa` with zero retuning).
+// Scene constants — the QA rig (the env MUST be the QA env so a trained policy
+// drops into `walker_qa` with zero retuning).
+//
+// The *rig files themselves* are not constants: `CharacterAssetPaths` resolves
+// them at startup (default `character/v10.character.*` under the repo's
+// `examples/collision_detection/assets`), so `--character`/`CHARACTER_JSON`
+// points training and QA at the very same SVG + blueprint.
 // ---------------------------------------------------------------------------
-
-const SVG_ASSET: &str = "v10.character.svg";
-const BP_ASSET: &str = "v10.character.json";
-const SVG_PATH: &str = "character/v10.character.svg";
-const BP_PATH: &str = "character/v10.character.json";
 
 const GRAVITY: Vec2 = Vec2::new(0.0, 980.0);
 const SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, -30.0, 100.0);
@@ -473,6 +477,26 @@ struct ExitAfter(usize);
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // Which rig this run opens is a startup decision, not a compile-time one.
+    // Resolving it before Bevy boots keeps `AssetPlugin.file_path` and the
+    // `CharacterRoot` ids in sync, and turns a missing file into an immediate
+    // error here instead of a permanent hang in `PpoPhase::Loading` (Bevy 0.16
+    // has no `AssetEvent::Failed`). The same resolver runs in `walker_qa`, so
+    // both harnesses open the identical SVG + blueprint.
+    let assets = match CharacterAssetPaths::from_env_and_args()
+        .and_then(|paths| paths.validate().map(|()| paths))
+    {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("walker_ppo: {err}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!(
+        "walker_ppo: character assets (shared with walker_qa)\n{}",
+        assets.describe()
+    );
+
     let hidden = win_hidden();
     // `EXPERT_ONLY=1` is a **viewing** mode: the residual runs in `Deploy`
     // mode against a zero-init actor, so `δ ≡ 0` and the controller replays the
@@ -613,7 +637,7 @@ fn main() {
                 })
                 .set(AssetPlugin {
                     meta_check: AssetMetaCheck::Never,
-                    file_path: asset_root().into(),
+                    file_path: assets.root_string(),
                     ..default()
                 }),
         )
@@ -623,6 +647,7 @@ fn main() {
         .add_plugins(VelloCollisionResponsePlugin)
         .insert_resource(SpineDriveEnabled(false))
         .init_state::<PpoPhase>()
+        .insert_resource(assets)
         .insert_resource(NChars(n_chars))
         .insert_resource(ExitAfter(exit_updates))
         .init_resource::<PerfMeter>()
@@ -705,15 +730,6 @@ fn main() {
             ),
         )
         .run();
-}
-
-fn asset_root() -> String {
-    std::env::var("ASSET_ROOT")
-        .ok()
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| {
-            "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets".to_string()
-        })
 }
 
 /// Gravity on (the world boots at zero — same as QA).
@@ -810,7 +826,12 @@ fn setup_scene(mut commands: Commands, n: Res<NChars>) {
 }
 
 /// Spawn the N character roots across the floor.
-fn spawn_characters(mut commands: Commands, n: Res<NChars>, mut done: Local<bool>) {
+fn spawn_characters(
+    mut commands: Commands,
+    n: Res<NChars>,
+    assets: Res<CharacterAssetPaths>,
+    mut done: Local<bool>,
+) {
     if *done {
         return;
     }
@@ -829,8 +850,8 @@ fn spawn_characters(mut commands: Commands, n: Res<NChars>, mut done: Local<bool
                 ..default()
             },
             CharacterRoot {
-                svg_asset_id: SVG_ASSET.to_owned(),
-                blueprint_asset_id: BP_ASSET.to_owned(),
+                svg_asset_id: assets.svg_id().to_owned(),
+                blueprint_asset_id: assets.json_id().to_owned(),
                 collision_group: 1,
             },
         ));
@@ -845,6 +866,7 @@ fn spawn_characters(mut commands: Commands, n: Res<NChars>, mut done: Local<bool
 fn register_character_assets(
     mut svg: ResMut<SvgCharacterAssetManager>,
     mut bp: ResMut<BlueprintCharacterAssetManager>,
+    assets: Res<CharacterAssetPaths>,
     server: Res<AssetServer>,
     mut done: Local<bool>,
 ) {
@@ -853,14 +875,20 @@ fn register_character_assets(
     }
     *done = true;
     svg.push(
-        server.load(SVG_PATH),
+        server.load(assets.svg_path()),
         SvgCharacterAssetMetaData::default(),
-        SVG_ASSET,
+        assets.svg_id(),
     );
     bp.push(
-        server.load(BP_PATH),
+        server.load(assets.json_path()),
         BlueprintCharacterAssetMetaData::default(),
-        BP_ASSET,
+        assets.json_id(),
+    );
+    info!(
+        "character assets: svg={} json={} (root {})",
+        assets.svg_path(),
+        assets.json_path(),
+        assets.root().display()
     );
 }
 

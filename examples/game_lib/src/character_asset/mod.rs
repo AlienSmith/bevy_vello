@@ -1,4 +1,6 @@
 mod asset_loader;
+/// Shared resolution of *which* character rig a harness opens (env + CLI).
+pub mod paths;
 pub mod plugin;
 
 use bevy::{platform::collections::HashMap, prelude::*};

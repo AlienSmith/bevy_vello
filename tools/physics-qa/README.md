@@ -521,5 +521,18 @@ tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=plans/policy_0070.json     SCRIP
 tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=tmp/walker_ppo/snap/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
 ```
 cargo build -p walker_ppo --release
-EXPERT_ONLY=1 N=1 RESUME=plans/policy_0070.json ./target/release/walker_ppo
+EXPERT_ONLY=1 N=1 RESUME=plans/policy_0070.json ./target/release/walker_ppo --character examples/collision_detection/assets/character/v10.character.json
+```
+
+`walker_qa` and `walker_ppo` resolve *which* character rig they open through
+`game_lib::character_asset::paths` (default: the repo's
+`character/v10.character.*`, logged at startup). Point training and QA at one
+explicit rig — the asset root defaults to the build checkout, so a moved binary
+should pass the path rather than copy assets next to it:
+
+```sh
+./target/release/walker_ppo --character \
+    examples/collision_detection/assets/character/v10.character.json
+CHARACTER_JSON=$PWD/examples/collision_detection/assets/character/v10.character.json \
+    tools/physics-qa/run_walker_qa.sh
 ```

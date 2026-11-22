@@ -8,6 +8,8 @@
 //!
 //! ```sh
 //! cargo run -p walker_qa
+//! # the rig is resolved at startup (CharacterAssetPaths); force a specific one:
+//! cargo run -p walker_qa -- --character path/to/v10.character.json
 //! ```
 //!
 //! This opens a window like the tuning app. The character stands — the walking
@@ -26,8 +28,9 @@ use bevy_vello::{
 };
 use game_lib::{
     character_asset::{
-        BlueprintCharacterAsset, BlueprintCharacterAssetManager, BlueprintCharacterAssetMetaData,
-        SvgCharacterAsset, SvgCharacterAssetManager, SvgCharacterAssetMetaData,
+        paths::CharacterAssetPaths, BlueprintCharacterAsset, BlueprintCharacterAssetManager,
+        BlueprintCharacterAssetMetaData, SvgCharacterAsset, SvgCharacterAssetManager,
+        SvgCharacterAssetMetaData,
     },
     flush_rows, CharacterRoot, Connectivity, LeftLegController, RightLegController,
     SpineController, SpineDriveEnabled, VelloCharacterPlugin,
@@ -47,12 +50,11 @@ use walker_control::{
 };
 use walker_nn::PolicyBundle;
 
-/// Character asset ids (must match `CharacterRoot` and the blueprint controller
-/// bindings: `left_leg`/`right_leg` particles + `PLLL`/`PRLL` colliders).
-const SVG_ASSET: &str = "v10.character.svg";
-const BP_ASSET: &str = "v10.character.json";
-const SVG_PATH: &str = "character/v10.character.svg";
-const BP_PATH: &str = "character/v10.character.json";
+// The character rig is resolved at startup by `CharacterAssetPaths` (default:
+// `character/v10.character.*` under the repo's `examples/collision_detection/
+// assets`). `--character`/`CHARACTER_JSON` makes QA open exactly the files
+// the PPO trainer used. The blueprint must still bind the controller to the
+// `left_leg`/`right_leg` particles and the `PLLL`/`PRLL` foot colliders.
 
 /// Gravity magnitude (px/s²), Vello y-down. 100 px = 1 m ⇒ Earth-like. The
 /// fixed clock (90 Hz) is owned by `VelloCollisionResponsePlugin` itself.
@@ -111,6 +113,24 @@ fn win_hidden() -> bool {
 }
 
 fn main() {
+    // Resolve the rig before Bevy boots: the asset root and the `CharacterRoot`
+    // ids come from one place, so QA and `walker_ppo` cannot drift onto
+    // different files, and a missing file exits here instead of hanging in
+    // `WalkerState::Loading` forever (Bevy 0.16 has no `AssetEvent::Failed`).
+    let assets = match CharacterAssetPaths::from_env_and_args()
+        .and_then(|paths| paths.validate().map(|()| paths))
+    {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("walker_qa: {err}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!(
+        "walker_qa: character assets (shared with walker_ppo)\n{}",
+        assets.describe()
+    );
+
     let hidden = win_hidden();
     // Deploy path (plan §7): `POLICY=path.json` loads a trained bundle; the
     // attach system then wires a Deploy-mode `LearnedCtrl` behind the seam.
@@ -152,7 +172,7 @@ fn main() {
                 })
                 .set(AssetPlugin {
                     meta_check: AssetMetaCheck::Never,
-                    file_path: asset_root().into(),
+                    file_path: assets.root_string(),
                     ..default()
                 }),
         )
@@ -171,6 +191,7 @@ fn main() {
         // it cannot fight the actuator (same rule as the hip-pin tuning app).
         .insert_resource(SpineDriveEnabled(false))
         .init_state::<WalkerState>()
+        .insert_resource(assets)
         .add_systems(Startup, (setup_scene, apply_gravity, pause_physics).chain())
         .add_systems(
             Update,
@@ -188,15 +209,6 @@ fn main() {
         )
         .add_systems(OnEnter(WalkerState::Game), spawn_character)
         .run();
-}
-
-fn asset_root() -> String {
-    std::env::var("ASSET_ROOT")
-        .ok()
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| {
-            "/home/ubuntu/bender/bevy_vello/examples/collision_detection/assets".to_string()
-        })
 }
 
 /// Optional env override of an f32 (empty/invalid ⇒ `None`).
@@ -458,7 +470,7 @@ fn setup_scene(mut commands: Commands) {
 
 /// Spawn the character root; the assembly factories do the rest (particles,
 /// joints, colliders are inserted `Added` and picked up by the physics plugin).
-fn spawn_character(mut commands: Commands) {
+fn spawn_character(mut commands: Commands, assets: Res<CharacterAssetPaths>) {
     commands.spawn((
         VelloSceneBundle {
             transform: Transform {
@@ -469,8 +481,8 @@ fn spawn_character(mut commands: Commands) {
             ..default()
         },
         CharacterRoot {
-            svg_asset_id: SVG_ASSET.to_owned(),
-            blueprint_asset_id: BP_ASSET.to_owned(),
+            svg_asset_id: assets.svg_id().to_owned(),
+            blueprint_asset_id: assets.json_id().to_owned(),
             collision_group: 1,
         },
         WalkerIntent::default(),
@@ -485,6 +497,7 @@ fn spawn_character(mut commands: Commands) {
 fn register_character_assets(
     mut svg: ResMut<SvgCharacterAssetManager>,
     mut bp: ResMut<BlueprintCharacterAssetManager>,
+    assets: Res<CharacterAssetPaths>,
     server: Res<AssetServer>,
     mut done: Local<bool>,
 ) {
@@ -493,14 +506,20 @@ fn register_character_assets(
     }
     *done = true;
     svg.push(
-        server.load(SVG_PATH),
+        server.load(assets.svg_path()),
         SvgCharacterAssetMetaData::default(),
-        SVG_ASSET,
+        assets.svg_id(),
     );
     bp.push(
-        server.load(BP_PATH),
+        server.load(assets.json_path()),
         BlueprintCharacterAssetMetaData::default(),
-        BP_ASSET,
+        assets.json_id(),
+    );
+    info!(
+        "character assets: svg={} json={} (root {})",
+        assets.svg_path(),
+        assets.json_path(),
+        assets.root().display()
     );
 }
 

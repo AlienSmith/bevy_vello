@@ -135,10 +135,23 @@ branch. See step 1.
 **`no game source at .../examples/collision_detection`** — `bevy_vello` is on
 `main`. Check out `ray_trace`.
 
-**`Path not found: .../target/release/assets/...`** — the game resolves assets
-relative to the executable. `run_capture.sh` syncs them automatically; if you run
-the binary by hand, copy `examples/collision_detection/assets` to
-`target/release/assets` first, or set `BEVY_ASSET_ROOT`.
+**`character svg/blueprint not found` (exit code 2, no hang)** — a moved or
+stale release binary could not find the rig. `walker_qa` and `walker_ppo`
+resolve the character through `game_lib::character_asset::paths` and exit
+before Bevy boots, so a missing file is never a silent `Loading` hang. Point
+them at the exact files you want:
+
+```sh
+./target/release/walker_ppo --character \
+    /path/to/examples/collision_detection/assets/character/v10.character.json
+./target/release/walker_qa --asset-root /path/to/examples/collision_detection/assets
+```
+
+The default asset root is the build checkout's
+`examples/collision_detection/assets` (from `CARGO_MANIFEST_DIR`, never a
+hardcoded `/home/...`), so only a binary moved off that machine needs an
+explicit path. There is no `target/release/assets` copy step anymore — that was
+how a release build silently read a different rig than QA.
 
 **`preflight failed` with exit code 6** — read the listed items; each carries the
 command that fixes it.

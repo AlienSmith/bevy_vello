@@ -36,6 +36,7 @@ pub use crate::{
         RightArmController, RightLegController, SpineConfig, SpineController, SpineDriveEnabled,
         SpineIndicator, StringPool, WhichLimb,
     },
+    character_asset::paths::CharacterAssetPaths,
     character_factory::{CharacterPartEvent, CharacterRoot},
     damage::{AttackStats, Damageable, PartKind, TotalHealth},
     decorations::{Decoration, DecorationAnchor},
