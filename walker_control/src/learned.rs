@@ -405,6 +405,7 @@ mod tests {
                 },
             ],
             grounded: touching[0] || touching[1],
+            body_contact: false,
         }
     }
 

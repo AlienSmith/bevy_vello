@@ -1789,6 +1789,19 @@ impl Controller {
             _ => None,
         }
     }
+
+    /// Whether the active jump controller has closed its authored **launch
+    /// window** (the power stroke was released and the stroke is now in Flight
+    /// or Land). `None` from any non-jump controller. The jump reward consumes
+    /// this for the §3 launch-missed termination:
+    /// [`crate::jump::JumpCtrl::launch_window_over`].
+    pub fn launch_window_over(&self) -> Option<bool> {
+        match self {
+            Controller::Jumping(c) => Some(c.launch_window_over()),
+            Controller::JumpResidual(c) => Some(c.launch_window_over()),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Controller {
@@ -2051,6 +2064,7 @@ mod tests {
                 },
             ],
             grounded: touching[0] || touching[1],
+            body_contact: false,
         }
     }
 

@@ -196,31 +196,6 @@ fn horizon() -> u32 {
 fn rollout_len(n: usize) -> usize {
     env_usize("ROLLOUT").unwrap_or(180).max(16) * n
 }
-/// |lean| beyond which the episode is over (fallen).
-fn fall_lean() -> f32 {
-    env_f32("FALL_LEAN").unwrap_or(0.7)
-}
-/// Consecutive failed ticks before the fall gate fires. A real collapse
-/// accelerates and stays failed for ≫ this window; a raw-exploration spike
-/// (the random policy yanking `upper_angle` for one tick) recovers in 1–2,
-/// so without the hold every episode dies at t=2 and PPO never sees the
-/// crouch→extend sequence it needs to discover.
-fn fall_hold() -> u32 {
-    env_usize("FALL_HOLD").unwrap_or(6) as u32
-}
-/// Hip height (fraction of standing) below which the body has sunk — one of
-/// the two fall conditions.
-fn min_height() -> f32 {
-    env_f32("MIN_HEIGHT").unwrap_or(0.5)
-}
-/// Hip |v_x| under which the body is considered "vertical". Above `3·` the
-/// gate the episode counts as failing toward a fall termination (out of
-/// control is out of control). The dense climb/lateral shaping that used this
-/// gate now lives in [`reward::JumpReward`]; the collector keeps it only for
-/// the measured-fall termination check.
-fn v_gate() -> f32 {
-    env_f32("V_GATE").unwrap_or(60.0)
-}
 /// Landing hold, seconds (`JUMP_LAND_HOLD`). Grounded time — counted from
 /// **touchdown**, so it includes the authored absorb — the body must put in
 /// before the landing counts as complete. **1.5 s** by default: on touchdown the
@@ -246,24 +221,43 @@ fn land_hold() -> f32 {
 fn land_lean() -> f32 {
     env_f32("JUMP_LAND_LEAN").unwrap_or(0.35)
 }
-/// Assemble the task-outcome [`reward::RewardConfig`] from env knobs. Every unset
+/// Assemble the 3-stage [`reward::RewardConfig`] from env knobs. Every unset
 /// knob falls back to [`reward::RewardConfig::default`], so
-/// `cargo run -p walker_ppo` behaves without any env.
+/// `cargo run -p walker_ppo` behaves without any env (`plans/reward_plan.md`).
 ///
-/// **Three knobs**, and that is the whole reward:
-///   `FOOT_MARGIN`    how far (px) the feet may stray above the floor pre-liftoff
-///   `FOOT_PENALTY`   cost per px per tick of straying beyond it
-///   `R_LAND`         the one positive number: paid for landing after a lift-off
+/// Env names: `R_BASE`, `K_SPIN`, `W_UPRIGHT`, `W_ANG`, `K_TILT`, `K_MOM`,
+/// `RECOVERY_WINDOW`, `R_SURVIVE`, `FALL_ANGLE_DEG` (degrees), `APEX_CLEARANCE`.
 fn reward_cfg() -> reward::RewardConfig {
     let mut c = reward::RewardConfig::default();
-    if let Some(v) = env_f32("FOOT_MARGIN") {
-        c.foot_margin = v;
+    if let Some(v) = env_f32("R_BASE") {
+        c.r_base = v;
     }
-    if let Some(v) = env_f32("FOOT_PENALTY") {
-        c.foot_penalty = v;
+    if let Some(v) = env_f32("K_SPIN") {
+        c.k_spin = v;
     }
-    if let Some(v) = env_f32("R_LAND") {
-        c.r_land = v;
+    if let Some(v) = env_f32("W_UPRIGHT") {
+        c.w_upright = v;
+    }
+    if let Some(v) = env_f32("W_ANG") {
+        c.w_ang = v;
+    }
+    if let Some(v) = env_f32("K_TILT") {
+        c.k_tilt = v;
+    }
+    if let Some(v) = env_f32("K_MOM") {
+        c.k_mom = v;
+    }
+    if let Some(v) = env_f32("RECOVERY_WINDOW") {
+        c.recovery_window = v;
+    }
+    if let Some(v) = env_f32("R_SURVIVE") {
+        c.r_survive = v;
+    }
+    if let Some(v) = env_f32("FALL_ANGLE_DEG") {
+        c.fall_angle = v.to_radians();
+    }
+    if let Some(v) = env_f32("APEX_CLEARANCE") {
+        c.apex_clearance = v;
     }
     c
 }
@@ -390,12 +384,10 @@ struct PpoState {
     ep_rewards: Vec<f32>,
     ep_lens: Vec<u32>,
     ep_peaks: Vec<f32>,
-    /// 1.0 if the episode was paid for landing.
-    ep_lands: Vec<f32>,
-    /// 1.0 if the episode produced a real launch.
+    /// 1.0 if the recovery window completed (landed + survived the 1.5 s).
+    ep_survived: Vec<f32>,
+    /// 1.0 if the episode produced a real launch (liftoff gate fired).
     ep_launch: Vec<f32>,
-    /// The foot-margin cost of the episode (positive number = charged).
-    ep_footpen: Vec<f32>,
     /// `TRACE=1` buffer: one env's per-tick particle state, first episode only.
     trace_rows: Vec<String>,
     /// The env being traced (fixed at its first collected tick).
@@ -415,11 +407,11 @@ struct PpoState {
     /// Highest `mean_peak_height` seen (kept for the log; it SATURATES at 1.0
     /// once the apex target is calibrated, so it is no longer a selector).
     best_mean_peak: f32,
-    /// Highest composite outcome score (`landed_pct + 0.5·mean_stand`) — the
+    /// Highest composite outcome score (`survived_pct + 0.5·launch_pct`) — the
     /// `policy_best` key. Named for what it replaced; it is the *score*, not the
-    /// landing fraction.
+    /// survival fraction alone.
     best_landed: f32,
-    /// The mean `R_stand` credit at the best checkpoint (for the log line).
+    /// The mean launch fraction at the best checkpoint (for the log line).
     best_stand: f32,
     /// **Generation swap handshake.** The update runs once, at a barrier where
     /// every env has finished exactly one episode (see
@@ -452,10 +444,8 @@ struct Env {
     t: u32,
     ep_reward: f32,
     peak: f32,
-    /// Consecutive ticks of the fall condition (see [`fall_hold`]).
-    fall_streak: u32,
-    /// The task-outcome jump reward. Owns the phase machine, the one-tick CoM
-    /// rise-rate history, and the episode's measured standing CoM reference.
+    /// The 3-stage jump reward (`plans/reward_plan.md`). Owns the phase
+    /// machine, the standing floor/CoM references, and the recovery clock.
     reward: reward::JumpReward,
     root: Entity,
 }
@@ -660,9 +650,8 @@ fn main() {
             ep_rewards: Vec::new(),
             ep_lens: Vec::new(),
             ep_peaks: Vec::new(),
-            ep_lands: Vec::new(),
+            ep_survived: Vec::new(),
             ep_launch: Vec::new(),
-            ep_footpen: Vec::new(),
             trace_rows: Vec::new(),
             trace_env: None,
             trace_done: false,
@@ -1032,7 +1021,6 @@ fn attach_walkers(
             t: 0,
             ep_reward: 0.0,
             peak: 0.0,
-            fall_streak: 0,
             reward: reward::JumpReward::new(reward_cfg()),
             root,
         });
@@ -1072,7 +1060,6 @@ fn ppo_collect_system(
     mut trace_on: Local<Option<bool>>,
 ) {
     let horizon = horizon();
-    let fall = fall_lean();
     // Read `TRACE` once, not 90×N times a second.
     let trace_on = *trace_on.get_or_insert_with(|| env_flag("TRACE"));
     // Determinism (D1): query order is unstable across runs, so buffer the
@@ -1090,88 +1077,30 @@ fn ppo_collect_system(
             continue; // shouldn't happen while unparked; drop the record
         }
         let fiction = *walker.fiction();
-        let height = (FOOT_SURFACE_Y - fiction.hip.y) / HIP_HEIGHT;
-        let lateral = fiction.v_hip.x.abs();
-        // The **task-outcome reward**: takeoff CoM velocity, a monotone CoM apex
-        // gate, and a landing window that pays for a settled capture. Standing
-        // still pays exactly 0, so there is no do-nothing optimum to fall into;
-        // the only charges are the harness's measured-fall gate below.
-        // The reward has no per-tick term (that is the point): `step` only detects
-        // the launch event and returns 0.
-        let (mut reward, _events) = env.reward.step(&fiction);
-        // Termination: **measured fall only** (§12.5) — no predicted-doom cut,
-        // which would invite the degenerate optimum of never launching.
-        // A **vertical hop** is not a fall: while airborne the torso can lean or
-        // drift (the launch impulse torques the free body), and judging it there
-        // cut every episode at the apex — so the descent and landing were never
-        // rendered. Fall is a GROUNDED condition: the body has come back down and
-        // is not recovering. `height` also only means "sunk" when grounded (in
-        // flight the hip is legitimately far above the standing line).
-        // **Landing grace window**: between touchdown and the end of the hold the
-        // body is *supposed* to be folding, wobbling and recovering. Cutting it
-        // there is the "respawns too soon on landing / responds too fast after
-        // hitting the floor" failure. The stroke owns that window; the fall gate
-        // stays silent until it closes (`landing_window_open`).
-        let landing_grace = walker
-            .controller
-            .landing_window_open(&walker.config.control)
-            .unwrap_or(false);
-        let lean_bad = !landing_grace && fiction.grounded && fiction.lean.abs() > fall;
-        // A DEEP CROUCH is not a fall. The absorb after touchdown legitimately
-        // sinks the hip (measured: the landing is the wobblies part of the whole
-        // stroke), so "sunk" only counts together with a lean — otherwise the
-        // gate fires on a body that is merely folding its knees.
-        let height_bad = !landing_grace
-            && fiction.grounded
-            && height < min_height()
-            && fiction.lean.abs() > land_lean();
-        let lateral_bad = !landing_grace && fiction.grounded && lateral > 3.0 * v_gate();
-        let bad = lean_bad || height_bad || lateral_bad;
-        env.fall_streak = if bad { env.fall_streak + 1 } else { 0 };
-        let fallen = env.fall_streak >= fall_hold();
+
+        // The 3-stage reward (`plans/reward_plan.md`). The expert owns the jump;
+        // the reward watches the physics (liftoff, flight, touchdown, recovery)
+        // and its own §3 terminations.
+        let out = env.reward.step(&fiction);
+        let reward = out.reward;
+
+        // The only endings: the reward says so (failure or recovery completion),
+        // or the horizon times out.
         let over = env.t + 1 >= horizon;
-        // **Landed** is its own terminal: the stroke played its absorb and the
-        // body then held a stable grounded stance for `JUMP_LAND_HOLD`
-        // (`JumpCtrl::landing_complete`). Touchdown alone is NOT the end of the
-        // episode — the body still has to land. The hold's own lean band means
-        // this cannot fire on a toppling body; that failure stays with the
-        // fall gate below.
-        let landed = walker
-            .controller
-            .landing_complete(&walker.config.control)
-            .unwrap_or(false);
-        let done = fallen || over || landed;
+        let done = over || out.termination != reward::Termination::None;
         if done && env_flag("EXPERT_ONLY") {
-            // Which trigger ended the episode — a timeout, or the fall gate and
-            // *which* of its conditions. The reset is a stiff teleport, so an
-            // early `done` mid-flight is exactly what looks like the body
-            // "zipping" back to standing.
             info!(
-                "EXPERT_ONLY episode end @t={} grounded={} over={over} fallen={fallen} \
-                 landed={landed} lean={:.3}({}) hip_y={:.1} h={:.3}({}) vx={:.1}({}) phase={:?}",
+                "EXPERT_ONLY episode end @t={} term={:?} over={over} lean={:.3} \
+                 hip_y={:.1} com_z={:.1} grounded={}",
                 env.t,
-                fiction.grounded,
+                out.termination,
                 fiction.lean,
-                lean_bad,
                 fiction.hip.y,
-                height,
-                height_bad,
-                fiction.v_hip.x,
-                lateral_bad,
-                walker.controller.mode(),
+                FOOT_SURFACE_Y - fiction.com.y,
+                fiction.grounded,
             );
         }
-        // ---- the only payment ----
-        // `R_LAND` if the launch was real and the episode did not end in a fall.
-        // A fall pays 0 — there is no penalty term at all, so no policy can be
-        // pushed into "never jump" to dodge one (that happened twice before).
-        let mut land_pay = 0.0;
-        if done {
-            // Keyed to the harness's own landing verdict, not "did not fall": a body
-            // that lifts off and wobbles to the horizon never landed.
-            land_pay = env.reward.pay_land(fallen, landed);
-            reward += land_pay;
-        }
+
         env.t += 1;
         env.ep_reward += reward;
         // ---- optional per-tick trace (`TRACE=1`) ----
@@ -1207,7 +1136,7 @@ fn ppo_collect_system(
                     fiction.feet[1].pos.y,
                     fiction.feet[0].touching as u8,
                     fiction.feet[1].touching as u8,
-                    env.reward.lifted_off() as u8,
+                    env.reward.launched() as u8,
                 ));
             }
         }
@@ -1231,14 +1160,20 @@ fn ppo_collect_system(
                 let (ep, ticks) = (state.trace_ep, state.trace_rows.len());
                 let (stand_hip, min_hip) = (state.trace_stand, state.trace_min);
                 let rise = stand_hip - min_hip;
+                let survived = out.events.survived;
+                let crashed = matches!(
+                    out.termination,
+                    reward::Termination::TiltedOver | reward::Termination::BodyContact
+                );
                 state.trace_summary.push(format!(
                     "{ep},{ticks},{stand_hip:.2},{min_hip:.2},{rise:.1},{},{}",
-                    landed as u8, fallen as u8,
+                    survived as u8, crashed as u8,
                 ));
                 write_rows(TRACE_PATH, TRACE_HEADER, &state.trace_rows);
                 info!(
                     "walker_ppo: TRACE ep {ep}: {ticks} ticks, stand hip {stand_hip:.1}, \
-                     min {min_hip:.1}, rise {rise:.1}, landed={landed} fallen={fallen}"
+                     min {min_hip:.1}, rise {rise:.1}, term={:?}",
+                    out.termination
                 );
                 state.trace_ep += 1;
                 let want = env_usize("TRACE_EPISODES").unwrap_or(8);
@@ -1256,23 +1191,23 @@ fn ppo_collect_system(
                 }
             }
             let tick = state.tick;
+            let survived = if out.events.survived { 1.0 } else { 0.0 };
             state.ep_rewards.push(env.ep_reward);
             state.ep_lens.push(env.t);
             state.ep_peaks.push(env.peak);
-            state.ep_lands.push(if land_pay > 0.0 { 1.0 } else { 0.0 });
+            state.ep_survived.push(survived);
             state
                 .ep_launch
-                .push(if env.reward.lifted_off() { 1.0 } else { 0.0 });
-            state.ep_footpen.push(env.reward.foot_pen);
+                .push(if env.reward.launched() { 1.0 } else { 0.0 });
             state.ep_rows.push(format!(
-                "{},{},{:.4},{},{},{:.3},{:.3}",
+                "{},{},{:.4},{},{},{:.1},{}",
                 tick,
                 env.root.index(),
                 env.ep_reward,
                 env.t,
-                if env.reward.lifted_off() { 1 } else { 0 },
-                env.reward.foot_pen,
-                land_pay,
+                if env.reward.launched() { 1 } else { 0 },
+                survived,
+                term_label(out.termination, over),
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
             // this character and the factory rebuilds it at its rest pose. That
@@ -1283,10 +1218,8 @@ fn ppo_collect_system(
             env.t = 0;
             env.ep_reward = 0.0;
             env.peak = 0.0;
-            env.fall_streak = 0;
-            // Don't carry the phase machine or the action stream across the
-            // respawn: the first tick of a new episode starts grounded with
-            // no Δμ penalty.
+            // Don't carry the 3-stage machine across the respawn: the first tick
+            // of a new episode starts on the ground in Stage 1.
             env.reward.reset();
         }
     }
@@ -1472,29 +1405,23 @@ fn ppo_update_system(
     );
     let mean_peak = mean(&state.ep_peaks);
     // ---- outcome metrics: the thing the task is actually about ----
-    // `landed_pct` is the fraction of episodes that completed the 1.5 s landing
-    // window; `stand_pct` is the fraction that ended the episode on their feet
-    // without a fall. Together with `launch_pct` these are what tell you, from the
-    // csv alone, whether a run is on a wrong path — reward alone cannot.
-    let landed_pct = mean(&state.ep_lands);
-    // Fraction of episodes that produced a **real launch** (the precondition for
-    // any payment). This is the first thing to look at: if it collapses, the policy
-    // has learned to suppress the jump, whatever the reward says.
+    // `survived_pct` is the fraction of episodes that lifted off, returned, and
+    // survived the full 1.5 s recovery window (the completed landing). Together
+    // with `launch_pct` these tell you from the csv alone whether a run is on a
+    // wrong path — reward alone cannot.
+    let survived_pct = mean(&state.ep_survived);
+    // Fraction of episodes that produced a **real launch** (liftoff gate fired).
     let launch_pct = mean(&state.ep_launch);
-    // Mean foot-margin cost (positive = charged). This is the constraint working:
-    // it should be small once the policy stops flicking the feet.
-    let mean_footpen = mean(&state.ep_footpen);
-    // Composite outcome score for the deployable checkpoint: landings first, then
-    // "did it actually jump". `landed_pct` alone is 1/32 coarse and noisy.
-    let success = landed_pct + 0.5 * launch_pct;
+    // Composite outcome score for the deployable checkpoint: completed recovery
+    // first, then "did it actually launch".
+    let success = survived_pct + 0.5 * launch_pct;
     state.train_rows.push(format!(
-        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.4},{:.5},{:.5},{:.4},{:.4},{:.3}",
+        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.5},{:.5},{:.4},{:.4},{:.3}",
         mean_ep,
         mean_len,
         mean_peak,
         launch_pct,
-        landed_pct,
-        mean_footpen,
+        survived_pct,
         stats.policy_loss,
         stats.value_loss,
         stats.entropy,
@@ -1529,11 +1456,11 @@ fn ppo_update_system(
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
-         peak {mean_peak:.3} launch {:.0}% landed {:.0}% footpen {mean_footpen:.3} succ {success:.3} \
+         peak {mean_peak:.3} launch {:.0}% survived {:.0}% succ {success:.3} \
          pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep} \
          | update_blocked {update_ms:.1} ms",
         launch_pct * 100.0,
-        landed_pct * 100.0,
+        survived_pct * 100.0,
         stats.policy_loss,
         stats.value_loss,
         stats.approx_kl,
@@ -1542,9 +1469,8 @@ fn ppo_update_system(
     state.ep_rewards.clear();
     state.ep_lens.clear();
     state.ep_peaks.clear();
-    state.ep_lands.clear();
+    state.ep_survived.clear();
     state.ep_launch.clear();
-    state.ep_footpen.clear();
 
     flush_state(&state);
     // Default 10, not 100: the interesting part of a jump run is the FIRST ~50
@@ -1591,8 +1517,25 @@ fn mean(v: &[f32]) -> f32 {
     }
 }
 
-const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,landed_pct,mean_foot_pen,policy_loss,value_loss,entropy,approx_kl,clip_frac";
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,foot_pen,land_pay";
+/// A stable CSV label for why an episode ended. A horizon timeout is the only
+/// ending the reward itself does not own.
+fn term_label(term: reward::Termination, over: bool) -> &'static str {
+    match term {
+        reward::Termination::Completed => "Completed",
+        reward::Termination::TiltedOver => "TiltedOver",
+        reward::Termination::BodyContact => "BodyContact",
+        reward::Termination::None => {
+            if over {
+                "Timeout"
+            } else {
+                "None"
+            }
+        }
+    }
+}
+
+const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,survived_pct,policy_loss,value_loss,entropy,approx_kl,clip_frac";
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,survived,term";
 /// `TRACE=1`: per-tick particle state of ONE env, for its first episode. The
 /// trainer otherwise writes only per-update / per-episode aggregates, so a
 /// checkpoint's actual stroke could not be inspected at all — this is the
@@ -1602,7 +1545,7 @@ const TRACE_HEADER: &str =
 const TRACE_PATH: &str = "tmp/walker_ppo/trace.csv";
 /// One row per traced episode (see `PpoState::trace_summary`).
 const TRACE_SUMMARY_PATH: &str = "tmp/walker_ppo/trace_summary.csv";
-const TRACE_SUMMARY_HEADER: &str = "ep,ticks,stand_hip,min_hip,rise,landed,fallen";
+const TRACE_SUMMARY_HEADER: &str = "ep,ticks,stand_hip,min_hip,rise,survived,crashed";
 /// 900 ticks = 10 s at 90 Hz, well past the horizon.
 const TRACE_MAX_ROWS: usize = 900;
 

@@ -1,225 +1,307 @@
-//! The jump reward: **one payment, one constraint, three knobs.**
+//! The **3-stage jump & landing reward** (`plans/reward_plan.md`), simplified so
+//! the expert owns the jump and the residual learns only what it can change.
+//!
+//! The expert controller already performs a clean, repeatable jump from episode
+//! one; it simply cannot land. So the reward must NOT re-gate the launch with
+//! velocity / clearance thresholds and it must NOT terminate on a "launch miss":
+//! those only kill the expert's own jump. The residual's two real jobs are
+//!
+//!   1. avoid CoM rotation at liftoff, and
+//!   2. survive the landing.
 //!
 //! ```text
-//!   LIFTOFF (once per episode) = the FIRST tick on which BOTH feet are off the floor
-//!                                (latched; later lift-offs change nothing)
+//!   Stage 1 — Launch   (r = 0, feet on the ground)
+//!            ── physical liftoff (both feet off) ─▶ +R_base·exp(−k·ω²)
 //!
-//!   before liftoff, per tick   = −foot_penalty · max(0, height_above_floor − foot_margin)
-//!                                (the feet are constrained to the ground; straying costs)
+//!   Stage 2 — Flight
+//!            r = w_upright·exp(−k1·tilt²) − w_ang·ω²    (per tick)
+//!            ── passed apex AND a foot is down ─▶ Stage 3
 //!
-//!   episode ends               = +R_LAND  if it lifted off AND ended on the harness's
-//!                                          LANDING verdict (settled and upright)
-//!                                0        otherwise (no lift-off / fell / timed out)
+//!   Stage 3 — Recovery (1.5 s window after touchdown)
+//!            r = w_upright·exp(−k1·tilt²)·exp(−k2·‖v_xy‖²)   (per tick)
+//!            ── window survives ─▶ +R_survive, terminated=Completed
 //! ```
 //!
-//! Three knobs: [`RewardConfig::foot_margin`], [`RewardConfig::foot_penalty`],
-//! [`RewardConfig::r_land`].
+//! # Termination (`terminated = true`, §3)
 //!
-//! # Why these two mechanisms
+//! The step returns a [`Termination`] and the harness must end the episode on
+//! anything other than [`Termination::None`]:
 //!
-//! Every previous attempt was gamed by **feet leaving the floor**, because "off the
-//! ground" was the one thing the reward responded to:
+//! - `TiltedOver`   — `|lean| > [`RewardConfig::fall_angle`]`
+//! - `BodyContact`  — *(disabled for now)* a non-foot body link touches the
+//!   floor; the live collider set still misreports this while standing, so it
+//!   must not end an episode until the foot-vs-body distinction is reliable
+//! - `Completed`    — the recovery window elapsed without tipping (success)
 //!
-//! - a per-tick air credit paid for *hang time* → the body learned to hover/bounce;
-//! - an apex measured as a sampled max against the first tick's CoM → "stand up out
-//!   of the settled crouch" reached the apex without jumping (`liftoffs = 0`);
-//! - a liftoff credit paid **per** takeoff → the body bounced first and banked 3×
-//!   (`liftoff_pay 3.000` from 3 takeoffs).
+//! There is **no negative crash penalty**: a crash simply cuts off all the
+//! remaining positive `r_flight` / `r_land` through `terminated = true`. A
+//! failure tick returns `reward = 0`.
 //!
-//! So the reward now *constrains* the feet instead of paying for them: while the body
-//! has not jumped, the feet belong on the floor within `foot_margin`, and every px
-//! above that is charged. Wobbling is no longer a strategy that might pay — it is a
-//! cost. And the one thing that does pay is the completed landing, judged by the
-//! harness's own verdict (`JumpCtrl::landing_complete`), not by "did not fall".
+//! # Frames and signs
 //!
-//! The last point matters: a body that launches and then wobbles reaches the horizon
-//! without ever landing, and "did not fall" would have paid it (measured: several
-//! lift-offs keep `grounded` flickering, which delays the hold and keeps the fall
-//! gate quiet). Keying the payment to the landing verdict makes surviving worth 0.
+//! [`Fiction`] is Vello **y-down**. The plan's vertical axis is "up", so:
 //!
-//! There is **no negative terminal**: a fall pays the same as standing still, so no
-//! policy can be pushed into "never jump" to dodge a penalty — which is what killed
-//! both previous designs (the fall charge was the only term large enough to steer).
+//! - `com_pos_z` (upward CoM height)  = `floor − com.y`
+//! - `tilt`  = `fiction.lean` (hip→waist attitude)
+//! - `ω`     = `fiction.omega_com` (whole-body spin rate about the CoM — the
+//!   rotation a push-off torque excites; `lean_rate` is only the stick's rate)
+//! - `v_xy`  = `fiction.v_com.x` (the horizontal component in this 2-D rig)
+//!
+//! `z_standing` and `floor` are captured on the episode's first tick from the
+//! actual body, not from world constants, so the reward is rig-agnostic.
 
 use walker_control::observe::Fiction;
 
-/// The three knobs, plus a fixed-step fallback.
-#[derive(Debug, Clone, Copy)]
-pub struct RewardConfig {
-    /// The feet may be at most this far above their standing height (px) before the
-    /// lift-off. The floor reference is the higher foot on the episode's first tick,
-    /// i.e. the standing pose — no world constant, and no drift from soft-body
-    /// penetration (a running minimum was tried and measured wrong).
-    pub foot_margin: f32,
-    /// The same constraint **after touchdown**, deliberately more generous (px):
-    /// the landing absorb folds the knees and rolls the feet, which is legitimate,
-    /// while a *second jump* leaves the floor by tens of px. Since the lift-off is
-    /// already latched, that second jump can never pay — this makes it cost.
-    pub land_margin: f32,
-    /// Cost per px per tick of straying above [`Self::foot_margin`], pre-lift-off.
-    /// Small on purpose: a 20 px lift for 100 ticks costs ~0.2 against `R_LAND = 1`.
-    pub foot_penalty: f32,
-    /// Paid once when the episode ends on the harness's landing verdict after a
-    /// lift-off.
-    pub r_land: f32,
+use std::f32::consts::FRAC_PI_3;
+
+/// How an episode ended, per the [`crate::reward`] module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    /// Still running.
+    None,
+    /// The 1.5 s recovery window elapsed without tipping over. Success.
+    Completed,
+    /// `|lean| > fall_angle`.
+    TiltedOver,
+    /// A non-foot body link touched the floor. Disabled for now (see the module
+    /// docs): the check is constructed again once the collider set is reliable.
+    #[allow(dead_code)]
+    BodyContact,
 }
 
-impl Default for RewardConfig {
-    fn default() -> Self {
-        Self {
-            // A foot a few px off the floor while standing is physics noise; tens of
-            // px is a deliberate flick. Measured in the sim: during a planted stance
-            // the feet stay within ~1-2 px of their standing height.
-            foot_margin: 12.0,
-            // ~2.5x the pre-launch margin: the absorb legitimately folds the legs.
-            land_margin: 30.0,
-            // Per-tick cap of the margin charge. At 180 ticks an always-offending
-            // episode costs 0.36, i.e. a third of the landing payment: it shapes,
-            // it cannot dominate.
-            foot_penalty: 0.002,
-            r_land: 1.0,
-        }
-    }
+/// One reward tick's product.
+#[derive(Debug, Clone, Copy)]
+pub struct StepOut {
+    /// The per-tick reward (including one-time bonuses awarded this tick).
+    pub reward: f32,
+    /// Milestones fired this tick.
+    pub events: RewardEvents,
+    /// Non-`None` ⇒ the harness must end the episode now.
+    pub termination: Termination,
 }
 
 /// Milestones the harness logs / branches on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RewardEvents {
-    /// This tick was the **first** tick with both feet off the floor.
+    /// Physical liftoff fired this tick (Stage 1 → 2, both feet off the floor).
     pub lift_off: bool,
+    /// The body passed apex and regained a foot (Stage 2 → 3).
+    pub touch_down: bool,
+    /// The recovery window completed this tick (Stage 3 → done, `+R_survive`).
+    pub survived: bool,
+}
+
+/// The reward knobs. Every field maps to a symbol in `plans/reward_plan.md`.
+#[derive(Debug, Clone, Copy)]
+pub struct RewardConfig {
+    /// Liftoff bonus scale (`R_base`).
+    pub r_base: f32,
+    /// Liftoff bonus sharpness on `ω²` (`k`).
+    pub k_spin: f32,
+    /// Flight/recovery upright weight (`w_upright`).
+    pub w_upright: f32,
+    /// Flight angular-velocity damping weight (`w_ang`).
+    pub w_ang: f32,
+    /// Tilt sharpness on `tilt²` (`k_1`).
+    pub k_tilt: f32,
+    /// Recovery horizontal-momentum sharpness on `‖v_xy‖²` (`k_2`).
+    pub k_mom: f32,
+    /// Recovery window length, seconds (1.5 s in the plan).
+    pub recovery_window: f32,
+    /// Completion bonus (`R_survive`).
+    pub r_survive: f32,
+    /// Torso tilt beyond which the episode is over, radians (`60°`).
+    pub fall_angle: f32,
+    /// How far the CoM must descend from its flight peak before a foot-down
+    /// counts as touchdown, px (prevents a flap on the way up from ending flight).
+    pub apex_clearance: f32,
+}
+
+impl Default for RewardConfig {
+    fn default() -> Self {
+        Self {
+            r_base: 1.0,
+            k_spin: 0.5,
+            w_upright: 0.01,
+            w_ang: 0.002,
+            k_tilt: 8.0,
+            // Characteristic horizontal speed √(1/k₂) ≈ 158 px/s.
+            k_mom: 4e-5,
+            recovery_window: 1.5,
+            r_survive: 1.0,
+            fall_angle: FRAC_PI_3,
+            apex_clearance: 2.0,
+        }
+    }
 }
 
 /// Where the episode is in its one arc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Before the jump: the feet are constrained to `foot_margin`.
-    PreLaunch,
-    /// The single legitimate flight: the feet are free.
+    /// Stage 1: on the ground before liftoff, `r = 0`.
+    Launch,
+    /// Stage 2: airborne before touchdown.
     Flight,
-    /// Back on the ground: the feet are constrained again, to `land_margin`.
-    Landed,
+    /// Stage 3: the 1.5 s window after touchdown.
+    Recovery,
 }
 
-/// Per-character state: where the feet belong, and whether the jump happened.
+/// Per-character 3-stage reward state.
 #[derive(Debug, Clone)]
 pub struct JumpReward {
     cfg: RewardConfig,
-    /// Standing foot height (world y, vello y-down), captured on the first tick.
-    floor: Option<f32>,
-    /// One arc: `PreLaunch → Flight → Landed`. No timers, no re-entry to Flight.
     phase: Phase,
+    /// Standing floor reference (vello y-down: `min` foot y = the higher foot),
+    /// captured on the first tick.
+    floor: Option<f32>,
+    /// Standing CoM height above the floor (upward), captured on the first tick.
+    standing_z: Option<f32>,
+    /// Peak upward CoM height seen during Flight (apex tracking).
+    peak_z: f32,
+    /// Seconds elapsed inside the Recovery window.
+    recovery_t: f32,
     // ---- introspection (logged, never acted on) ----
-    /// The summed foot-margin cost this episode (positive number = charged).
-    pub foot_pen: f32,
-    /// The `R_LAND` paid on the episode's last tick (0 if it was not paid).
-    pub land_pay: f32,
+    /// `R_liftoff` paid on the liftoff tick.
+    pub liftoff_bonus: f32,
+    /// Summed Stage-2 reward.
+    pub flight_reward: f32,
+    /// Summed Stage-3 reward (excluding `R_survive`).
+    pub recovery_reward: f32,
+    /// `R_survive` paid on the completion tick.
+    pub survive_pay: f32,
+    /// The last non-`None` termination this episode produced (for the CSV).
+    pub term_reason: Option<Termination>,
 }
 
 impl JumpReward {
     pub fn new(cfg: RewardConfig) -> Self {
         Self {
             cfg,
+            phase: Phase::Launch,
             floor: None,
-            phase: Phase::PreLaunch,
-            foot_pen: 0.0,
-            land_pay: 0.0,
+            standing_z: None,
+            peak_z: 0.0,
+            recovery_t: 0.0,
+            liftoff_bonus: 0.0,
+            flight_reward: 0.0,
+            recovery_reward: 0.0,
+            survive_pay: 0.0,
+            term_reason: None,
         }
     }
 
-    #[cfg(test)]
-    pub fn cfg(&self) -> &RewardConfig {
-        &self.cfg
-    }
-
-    /// Whether the body has left the floor in this episode.
-    pub fn lifted_off(&self) -> bool {
-        self.phase != Phase::PreLaunch
+    /// True once liftoff has fired this episode.
+    pub fn launched(&self) -> bool {
+        self.phase != Phase::Launch
     }
 
     /// Reset at an episode boundary (respawn). Carries nothing across.
     pub fn reset(&mut self) {
-        self.floor = None;
-        self.phase = Phase::PreLaunch;
-        self.foot_pen = 0.0;
-        self.land_pay = 0.0;
+        *self = Self::new(self.cfg);
     }
 
-    /// One tick. Returns the foot-margin charge (≤ 0) and the lift-off event.
-    pub fn step(&mut self, f: &Fiction) -> (f32, RewardEvents) {
+    /// One tick: advance the stage machine and return the reward / termination.
+    pub fn step(&mut self, f: &Fiction) -> StepOut {
         let mut events = RewardEvents::default();
+        let mut reward = 0.0;
 
-        // The floor is where the feet stand on the episode's first tick. Vello is
-        // y-DOWN, so `min` of the two foot y's is the HIGHER foot.
-        let higher = f.feet[0].pos.y.min(f.feet[1].pos.y);
-        let floor = *self.floor.get_or_insert(higher);
+        // ---- standing references, captured from the body on the first tick ----
+        // Vello y-down: smaller y is higher, so `min` picks the higher foot.
+        let higher_foot = f.feet[0].pos.y.min(f.feet[1].pos.y);
+        let floor = *self.floor.get_or_insert(higher_foot);
+        let com_z = floor - f.com.y; // upward CoM height
+        let _standing_z = *self.standing_z.get_or_insert(com_z);
 
-        // Height of the HIGHER foot above the standing floor (vello y-down: the
-        // smaller y is the higher foot, so `min` picks it).
-        let above = (floor - higher).max(0.0);
-        let both_off = !f.feet[0].touching && !f.feet[1].touching;
+        let v_xy_sq = f.v_com.x * f.v_com.x;
+        let tilt = f.lean;
+        let omega = f.omega_com;
 
-        let mut r = 0.0;
+        // ---- §3 failure terminations (any phase): cut the positives, pay 0 ----
+        if tilt.abs() > self.cfg.fall_angle {
+            return self.fail(Termination::TiltedOver);
+        }
+        // BodyContact termination is deliberately disabled for now: the live
+        // collider set attributes the standing feet (or their props) to
+        // non-foot colliders, so this fired on every episode's first tick and
+        // killed the expert's jump before it could start. `Fiction.body_contact`
+        // stays plumbed so the check can return once the collider set is fixed.
+
+        let upright = (-self.cfg.k_tilt * tilt * tilt).exp();
+
         match self.phase {
-            Phase::PreLaunch => {
-                // ---- constraint 1: the feet belong on the ground ----
-                r += self.charge(above, self.cfg.foot_margin);
-                // ---- the one event: the FIRST tick both feet are off the floor ----
-                // Raw per-foot contact, not the OR-of-feet `grounded` flag: a single
-                // lifted foot must not count as a jump.
-                if both_off {
+            Phase::Launch => {
+                // Stage 1 pays nothing: no per-tick term to stall or camp on.
+                // Liftoff is a PHYSICAL event (both feet off the floor), not a
+                // cheated velocity/clearance gate. The expert owns the jump
+                // timing; the residual's job on this frame is a clean, low-spin
+                // push-off, which the one-time bonus prices directly.
+                if !f.grounded {
                     self.phase = Phase::Flight;
+                    self.peak_z = com_z;
                     events.lift_off = true;
+                    let bonus = self.cfg.r_base * (-self.cfg.k_spin * omega * omega).exp();
+                    reward += bonus;
+                    self.liftoff_bonus += bonus;
                 }
             }
             Phase::Flight => {
-                // The single legitimate flight: feet free, no constraint.
-                if f.grounded {
-                    self.phase = Phase::Landed;
+                self.peak_z = self.peak_z.max(com_z);
+                let r = self.cfg.w_upright * upright - self.cfg.w_ang * omega * omega;
+                reward += r;
+                self.flight_reward += r;
+
+                // Touchdown: the body has passed its flight apex and a foot is
+                // back on the ground (the debounced `grounded`, not the raw flag).
+                let passed_apex = (self.peak_z - com_z) > self.cfg.apex_clearance;
+                if passed_apex && f.grounded {
+                    self.phase = Phase::Recovery;
+                    self.recovery_t = 0.0;
+                    events.touch_down = true;
                 }
             }
-            Phase::Landed => {
-                // ---- constraint 2: keep the feet on the ground again ----
-                // More generous, because the absorb folds the knees. A second jump
-                // leaves by tens of px, so it costs and can never pay (the lift-off
-                // is latched and the verdict is keyed to the harness's hold).
-                r += self.charge(above, self.cfg.land_margin);
+            Phase::Recovery => {
+                let momentum_decay = (-self.cfg.k_mom * v_xy_sq).exp();
+                let r = self.cfg.w_upright * upright * momentum_decay;
+                reward += r;
+                self.recovery_reward += r;
+
+                self.recovery_t += f.dt;
+                if self.recovery_t >= self.cfg.recovery_window {
+                    // Reaching the end of the window means the body never tipped,
+                    // never touched a body link, and therefore survived.
+                    events.survived = true;
+                    reward += self.cfg.r_survive;
+                    self.survive_pay = self.cfg.r_survive;
+                    return self.finish(reward, events, Termination::Completed);
+                }
             }
         }
 
-        (r, events)
-    }
-
-    /// Charge for straying above `margin`, and book it. Returns a non-positive
-    /// number.
-    ///
-    /// The charge is **bounded per tick** at `foot_penalty`: it ramps linearly from
-    /// 0 at the margin to the cap at `excess == margin`, and never exceeds it. An
-    /// unbounded per-px charge was measured at **6.0 per episode against a landing
-    /// payment of 1** — a soft body's feet sit tens of px up for hundreds of ticks,
-    /// so the constraint swamped the reward and handed the policy a large,
-    /// unavoidable negative (the exact trap that made "never jump" optimal before).
-    fn charge(&mut self, above: f32, margin: f32) -> f32 {
-        let margin = margin.max(1e-6);
-        let excess = (above - margin).max(0.0);
-        if excess <= 0.0 {
-            return 0.0;
+        StepOut {
+            reward,
+            events,
+            termination: Termination::None,
         }
-        let pen = self.cfg.foot_penalty * (excess / margin).min(1.0);
-        self.foot_pen += pen;
-        -pen
     }
 
-    /// The episode's last tick: `R_LAND` if the body lifted off and ended on the
-    /// harness's **landing verdict** (`landed`, from `JumpCtrl::landing_complete`).
-    /// `fallen` only has to veto a contradictory verdict; it carries no penalty.
-    pub fn pay_land(&mut self, fallen: bool, landed: bool) -> f32 {
-        let pay = if self.lifted_off() && landed && !fallen {
-            self.cfg.r_land
-        } else {
-            0.0
-        };
-        self.land_pay = pay;
-        pay
+    /// A failure termination: record it and return a zero-reward tick.
+    fn fail(&mut self, reason: Termination) -> StepOut {
+        self.term_reason = Some(reason);
+        StepOut {
+            reward: 0.0,
+            events: RewardEvents::default(),
+            termination: reason,
+        }
+    }
+
+    /// A terminal success: record it and return the tick's total reward.
+    fn finish(&mut self, reward: f32, events: RewardEvents, reason: Termination) -> StepOut {
+        self.term_reason = Some(reason);
+        StepOut {
+            reward,
+            events,
+            termination: reason,
+        }
     }
 }
 
@@ -230,26 +312,30 @@ mod tests {
     use walker_control::observe::FootState;
 
     const SURFACE: f32 = 312.0;
+    const STAND_Z: f32 = 104.0; // standing CoM height above the floor
     const DT: f32 = 1.0 / 90.0;
 
-    fn com_at(rise: f32) -> Vec2 {
-        Vec2::new(0.0, SURFACE - 104.0 - rise)
-    }
-
-    /// `feet_lift` is how far the feet are above the floor; `touching` is set per
-    /// foot from the same value so the raw contact flags stay consistent.
-    fn fiction(com: Vec2, feet_lift: [f32; 2]) -> Fiction {
+    /// `rise` is how far the CoM is above standing; `v_up` is the upward CoM
+    /// velocity; `feet_lift` how far the feet are above the floor (0 = planted).
+    fn fiction(
+        rise: f32,
+        v_up: f32,
+        lean: f32,
+        omega: f32,
+        feet_lift: [f32; 2],
+        body_contact: bool,
+    ) -> Fiction {
         let touching = [feet_lift[0] <= 0.5, feet_lift[1] <= 0.5];
         Fiction {
             dt: DT,
-            hip: com,
+            hip: Vec2::ZERO,
             v_hip: Vec2::ZERO,
-            lean: 0.0,
+            lean,
             lean_rate: 0.0,
-            com,
-            v_com: Vec2::ZERO,
+            com: Vec2::new(0.0, SURFACE - STAND_Z - rise),
+            v_com: Vec2::new(0.0, -v_up), // vello y-down ⇒ upward is −y
             ang_momentum: 0.0,
-            omega_com: 0.0,
+            omega_com: omega,
             feet: [
                 FootState {
                     pos: Vec2::new(-20.0, SURFACE - feet_lift[0]),
@@ -263,200 +349,203 @@ mod tests {
                 },
             ],
             grounded: touching[0] || touching[1],
+            body_contact,
         }
     }
 
     fn standing() -> Fiction {
-        fiction(com_at(0.0), [0.0, 0.0])
+        fiction(0.0, 0.0, 0.0, 0.0, [0.0, 0.0], false)
     }
 
-    fn cfg() -> RewardConfig {
-        RewardConfig::default()
+    /// Both feet clear of the floor: the physical liftoff event.
+    fn airborne(omega: f32) -> Fiction {
+        fiction(STAND_Z * 0.2, 100.0, 0.0, omega, [6.0, 6.0], false)
     }
 
-    /// Run `f` for `n` ticks and return the summed reward.
-    fn run(rw: &mut JumpReward, f: &Fiction, n: usize) -> f32 {
-        let mut total = 0.0;
-        for _ in 0..n {
-            total += rw.step(f).0;
+    fn run(rw: &mut JumpReward, f: &Fiction, n: usize) -> Vec<StepOut> {
+        (0..n).map(|_| rw.step(f)).collect()
+    }
+
+    /// Sum the rewards of a run.
+    fn total(outs: &[StepOut]) -> f32 {
+        outs.iter().map(|o| o.reward).sum()
+    }
+
+    /// Step through the whole arc from liftoff through recovery completion and
+    /// assert the milestones fire in order with the expected one-time payments.
+    #[test]
+    fn the_three_stages_play_in_order_and_pay_each_bonus() {
+        let mut rw = JumpReward::new(RewardConfig::default());
+        rw.step(&standing()); // capture standing references
+
+        // Stage 1: free, no event.
+        assert_eq!(run(&mut rw, &standing(), 50).len(), 50usize);
+        assert!(!rw.launched());
+        assert_eq!(rw.liftoff_bonus, 0.0);
+
+        // Liftoff: one-time bonus, scaled by ω. ω = 0 ⇒ full R_base.
+        let gate = rw.step(&airborne(0.0));
+        assert!(gate.events.lift_off);
+        assert_eq!(gate.reward, RewardConfig::default().r_base);
+        assert!(rw.launched());
+        assert_eq!(rw.liftoff_bonus, RewardConfig::default().r_base);
+        assert_eq!(gate.termination, Termination::None);
+
+        // Flight: upright per-tick reward at ω = 0.
+        let flight = rw.step(&airborne(0.0));
+        assert_eq!(flight.reward, RewardConfig::default().w_upright);
+        assert_eq!(flight.termination, Termination::None);
+
+        // Touchdown: after apex. Apex was set at the liftoff tick's com_z; now
+        // the body descends (rise smaller), apex passed, feet down.
+        let down = fiction(STAND_Z * 0.05, -60.0, 0.0, 0.0, [0.0, 0.0], false);
+        let touch = rw.step(&down);
+        assert!(touch.events.touch_down);
+
+        // Recovery: run out the 1.5 s window and complete.
+        let mut last = None;
+        for _ in 0..(135 + 1) {
+            last = Some(rw.step(&down));
         }
-        total
+        let done = last.unwrap();
+        assert!(done.events.survived);
+        assert_eq!(done.termination, Termination::Completed);
+        assert_eq!(rw.survive_pay, RewardConfig::default().r_survive);
+        assert!(rw.recovery_reward > 0.0);
     }
 
     #[test]
-    fn standing_still_is_free_and_is_not_a_lift_off() {
-        let mut rw = JumpReward::new(cfg());
-        assert_eq!(run(&mut rw, &standing(), 200), 0.0, "no per-tick reward");
-        assert!(!rw.lifted_off());
-        assert_eq!(rw.foot_pen, 0.0);
-        // Never lifted off ⇒ no landing payment, even with a landing verdict.
-        assert_eq!(rw.pay_land(false, true), 0.0);
+    fn standing_is_free_and_is_not_a_liftoff() {
+        let mut rw = JumpReward::new(RewardConfig::default());
+        let outs = run(&mut rw, &standing(), 200);
+        assert_eq!(total(&outs), 0.0, "Stage 1 has no per-tick reward");
+        assert!(!rw.launched());
+        assert!(outs.iter().all(|o| !o.events.lift_off));
     }
 
-    /// One foot up is **not** a lift-off, and the constraint charges for it.
     #[test]
-    fn lifting_one_foot_is_charged_and_is_not_a_lift_off() {
-        let mut rw = JumpReward::new(cfg());
+    fn liftoff_is_feet_leaving_the_ground() {
+        let cfg = RewardConfig::default();
+
+        // Feet planted even while rising fast and clear: no liftoff yet.
+        let mut rw = JumpReward::new(cfg);
         rw.step(&standing());
-        let one_up = fiction(com_at(0.0), [30.0, 0.0]);
-        let charged = run(&mut rw, &one_up, 10);
-        assert!(charged < 0.0, "a lifted foot must cost: {charged}");
-        assert!(!rw.lifted_off(), "one foot down is still on the ground");
-        // Bounded per tick: at 30 px with a 12 px margin the ramp saturates, so the
-        // cost is exactly `foot_penalty` per tick over the 10 ticks.
+        let tiptoe = fiction(STAND_Z * 0.3, 100.0, 0.0, 0.0, [0.0, 0.0], false);
+        assert!(!rw.step(&tiptoe).events.lift_off);
+
+        // One foot clear: still not a liftoff.
+        let mut rw = JumpReward::new(cfg);
+        rw.step(&standing());
+        let one = fiction(STAND_Z * 0.2, 100.0, 0.0, 0.0, [6.0, 0.0], false);
+        assert!(!rw.step(&one).events.lift_off);
+
+        // Both feet clear with zero upward velocity: liftoff is the physical
+        // event, not a velocity/clearance gate. The expert owns the jump timing.
+        let mut rw = JumpReward::new(cfg);
+        rw.step(&standing());
+        let clear = fiction(STAND_Z * 0.2, 0.0, 0.0, 0.0, [6.0, 6.0], false);
+        assert!(rw.step(&clear).events.lift_off);
+    }
+
+    #[test]
+    fn the_liftoff_bonus_is_scaled_by_spin() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
+        rw.step(&standing());
+        // ω = 1 rad/s ⇒ discount exp(−k).
+        let gate = rw.step(&airborne(1.0));
+        let expected = cfg.r_base * (-cfg.k_spin).exp();
         assert!(
-            (rw.foot_pen - cfg().foot_penalty * 10.0).abs() < 1e-5,
-            "penalty is capped per tick: {}",
-            rw.foot_pen
+            (gate.reward - expected).abs() < 1e-5,
+            "liftoff bonus {:.6} vs {expected:.6}",
+            gate.reward
         );
     }
 
-    /// The exploit that broke the previous design: rising out of the settled crouch
-    /// with the feet planted. No velocity, no apex, no pay.
     #[test]
-    fn standing_up_is_not_a_jump() {
-        let mut rw = JumpReward::new(cfg());
+    fn flight_reward_rewards_upright_and_damps_spin() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
         rw.step(&standing());
-        for k in 0..40 {
-            rw.step(&fiction(com_at(k as f32 * 2.5), [0.0, 0.0]));
-        }
-        assert!(!rw.lifted_off());
-        assert_eq!(rw.foot_pen, 0.0, "the feet never left the ground");
-        assert_eq!(rw.pay_land(false, true), 0.0, "standing up pays nothing");
+        rw.step(&airborne(0.0)); // enter Flight
+
+        let calm = rw.step(&airborne(0.0)).reward;
+        let spin = rw
+            .step(&fiction(STAND_Z * 0.2, 0.0, 0.0, 2.0, [6.0, 6.0], false))
+            .reward;
+        let lean = rw
+            .step(&fiction(STAND_Z * 0.2, 0.0, 0.5, 0.0, [6.0, 6.0], false))
+            .reward;
+        assert!(calm > spin, "spin must lower the flight reward");
+        assert!(calm > lean, "lean must lower the flight reward");
     }
 
-    /// Both feet off the floor is the lift-off, and it latches: a second hop, a
-    /// bounce, or a wobble afterwards changes nothing.
     #[test]
-    fn lift_off_is_the_first_both_feet_off_tick_and_latches() {
-        let mut rw = JumpReward::new(cfg());
+    fn touchdown_needs_a_real_passed_apex() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
         rw.step(&standing());
-        let (r, ev) = rw.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        assert!(ev.lift_off, "both feet off the floor is the lift-off");
-        assert!(r <= 0.0, "the lift-off tick is not a reward in itself");
-        assert!(rw.lifted_off());
-        // Land, bounce, lift again: no second event, nothing paid per hop.
-        rw.step(&standing());
-        let (_, ev) = rw.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        assert!(!ev.lift_off, "the lift-off is latched: one per episode");
-    }
-
-    /// A second jump after touchdown is charged (and can never pay): the landed
-    /// margin is loose enough for the absorb, tight enough for another hop.
-    #[test]
-    fn a_second_jump_after_landing_is_charged() {
-        let mut rw = JumpReward::new(cfg());
-        rw.step(&standing());
-        rw.step(&fiction(com_at(1.0), [3.0, 3.0])); // lift off  → Flight
-        rw.step(&fiction(com_at(0.0), [0.0, 0.0])); // touchdown → Landed
-        assert!(rw.lifted_off());
-        // A second hop: both feet 45 px up, beyond `land_margin` (30).
-        let (r, ev) = rw.step(&fiction(com_at(1.0), [45.0, 45.0]));
-        assert!(!ev.lift_off, "the lift-off is latched");
-        assert!(r < 0.0, "a second jump must cost: {r}");
-        // 45 px against a 30 px margin is half a ramp ⇒ half the per-tick cap.
+        // Enter Flight at 10 px above standing.
         assert!(
-            (rw.foot_pen - 0.5 * cfg().foot_penalty).abs() < 1e-5,
-            "charged against the landed margin: {}",
-            rw.foot_pen
+            rw.step(&fiction(10.0, 60.0, 0.0, 0.0, [6.0, 6.0], false))
+                .events
+                .lift_off
         );
+        // A foot goes down while the CoM has only descended 1 px from its apex:
+        // within `apex_clearance`, so this is a flap (or a second hop), not a
+        // real post-apex touchdown.
+        let flap = fiction(9.0, 0.0, 0.0, 0.0, [0.0, 0.0], false);
+        assert!(!rw.step(&flap).events.touch_down);
 
-        // The absorb itself is free: a few px above the floor for a few ticks.
-        let mut absorb = JumpReward::new(cfg());
-        absorb.step(&standing());
-        absorb.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        absorb.step(&fiction(com_at(0.0), [0.0, 0.0]));
-        assert_eq!(
-            run(&mut absorb, &fiction(com_at(-3.0), [8.0, 8.0]), 10),
+        // Now the CoM descends 5 px past the apex: touchdown.
+        let down = fiction(5.0, -60.0, 0.0, 0.0, [0.0, 0.0], false);
+        assert!(rw.step(&down).events.touch_down);
+    }
+
+    #[test]
+    fn tilt_failure_terminates_and_pays_nothing() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
+        rw.step(&standing());
+        rw.step(&airborne(0.0)); // enter Flight
+
+        let tipped = fiction(
+            STAND_Z * 0.2,
             0.0,
-            "a normal landing absorb must not be charged"
-        );
-    }
-
-    /// The only positive outcome.
-    #[test]
-    fn a_landed_jump_pays_once() {
-        let mut rw = JumpReward::new(cfg());
-        rw.step(&standing());
-        rw.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        assert_eq!(rw.pay_land(false, true), cfg().r_land);
-    }
-
-    #[test]
-    fn a_crashed_jump_pays_nothing() {
-        let mut rw = JumpReward::new(cfg());
-        rw.step(&standing());
-        rw.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        assert_eq!(rw.pay_land(true, false), 0.0);
-    }
-
-    /// The reason the payment keys on the landing verdict: a body that lifts off and
-    /// then wobbles to the horizon has "not fallen", and must still earn nothing.
-    #[test]
-    fn a_wobble_that_never_lands_pays_nothing() {
-        let mut rw = JumpReward::new(cfg());
-        rw.step(&standing());
-        rw.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        // 150 ticks of bouncing on the ground, feet flicking on and off.
-        for k in 0..150 {
-            let up = if k % 4 == 0 { 6.0 } else { 0.0 };
-            rw.step(&fiction(com_at(0.0), [up, up]));
-        }
-        assert_eq!(
-            rw.pay_land(false, false),
+            cfg.fall_angle + 0.05,
             0.0,
-            "surviving to the horizon is not landing"
+            [6.0, 6.0],
+            false,
         );
+        let out = rw.step(&tipped);
+        assert_eq!(out.reward, 0.0, "a crash tick pays nothing");
+        assert_eq!(out.termination, Termination::TiltedOver);
+        assert_eq!(rw.term_reason, Some(Termination::TiltedOver));
+    }
+
+    #[test]
+    fn body_contact_is_ignored_for_now() {
+        let cfg = RewardConfig::default();
+        let mut rw = JumpReward::new(cfg);
+        rw.step(&standing());
+        // Body contact is not yet a termination: the live collider set fires it
+        // while standing, and ending an episode on the ground would kill the
+        // expert's jump before it starts.
+        let out = rw.step(&fiction(0.0, 0.0, 0.0, 0.0, [0.0, 0.0], true));
+        assert_eq!(out.reward, 0.0, "Stage 1 still pays nothing");
+        assert_eq!(out.termination, Termination::None);
     }
 
     #[test]
     fn reset_starts_a_fresh_episode() {
-        let mut rw = JumpReward::new(cfg());
+        let mut rw = JumpReward::new(RewardConfig::default());
         rw.step(&standing());
-        rw.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        assert!(rw.lifted_off());
+        rw.step(&airborne(0.0));
+        assert!(rw.launched());
         rw.reset();
-        assert!(!rw.lifted_off());
-        assert_eq!(rw.foot_pen, 0.0);
-        rw.step(&standing());
-        assert_eq!(rw.pay_land(false, true), 0.0);
-    }
-
-    /// Decoy suite: every cheap non-jump earns 0 and, where the feet stray, is
-    /// actually charged — while the only positive outcome is a landed jump.
-    #[test]
-    fn no_decoy_beats_a_landed_jump() {
-        // real jump, landed
-        let mut real = JumpReward::new(cfg());
-        real.step(&standing());
-        real.step(&fiction(com_at(1.0), [3.0, 3.0]));
-        let real_pay = real.pay_land(false, true);
-
-        // crouch: CoM down, feet planted
-        let mut crouch = JumpReward::new(cfg());
-        crouch.step(&standing());
-        for k in 0..30 {
-            crouch.step(&fiction(com_at(-(k as f32) * 1.5), [0.0, 0.0]));
-        }
-        assert_eq!(crouch.pay_land(false, true), 0.0);
-
-        // tiptoe: CoM up, feet still touching (the old apex exploit)
-        let mut tiptoe = JumpReward::new(cfg());
-        tiptoe.step(&standing());
-        for k in 0..30 {
-            tiptoe.step(&fiction(com_at(k as f32 * 2.0), [0.0, 0.0]));
-        }
-        assert_eq!(tiptoe.pay_land(false, true), 0.0);
-
-        // bounce on the spot: both feet leave for one tick, then it never lands
-        let mut bounce = JumpReward::new(cfg());
-        bounce.step(&standing());
-        for k in 0..60 {
-            let up = if k % 3 == 0 { 8.0 } else { 0.0 };
-            bounce.step(&fiction(com_at(0.0), [up, up]));
-        }
-        assert_eq!(bounce.pay_land(false, false), 0.0);
-
-        assert!(real_pay > 0.0, "only a landed jump pays: {real_pay}");
+        assert!(!rw.launched());
+        assert_eq!(rw.liftoff_bonus, 0.0);
+        assert_eq!(rw.survive_pay, 0.0);
+        assert_eq!(rw.term_reason, None);
     }
 }

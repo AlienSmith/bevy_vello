@@ -81,6 +81,12 @@ pub struct Fiction {
     /// the clock claimed stance while both feet floated 48.9 % of ticks
     /// (`plans/vertical-stabilizer.md` §0).
     pub grounded: bool,
+    /// A body part **other than a foot** touches non-character geometry this
+    /// tick (knee, hip, torso, arm…). Raw contact, no EMA — the same "this
+    /// tick" contract as the per-foot [`FootState::touching`] flag. Consumed by
+    /// the jump-reward termination rule (`plans/reward_plan.md` §3): any
+    /// non-foot link touching the ground ends the episode.
+    pub body_contact: bool,
 }
 
 impl Default for Fiction {
@@ -97,6 +103,7 @@ impl Default for Fiction {
             omega_com: 0.0,
             feet: [FootState::default(); 2],
             grounded: false,
+            body_contact: false,
         }
     }
 }
@@ -151,6 +158,8 @@ pub struct RealitySample<'a> {
     pub feet: [FootSample; 2],
     /// All character particles (arms included), for the mass-weighted CoM.
     pub body: &'a [ParticleSample],
+    /// A non-foot character collider touched the floor this tick.
+    pub body_contact: bool,
 }
 
 /// Owned [`RealitySample`]: the adapter builds this from the ECS, then
@@ -161,6 +170,7 @@ pub struct OwnedRealitySample {
     pub hip: HipSample,
     pub feet: [FootSample; 2],
     pub body: Vec<ParticleSample>,
+    pub body_contact: bool,
 }
 
 impl OwnedRealitySample {
@@ -171,6 +181,7 @@ impl OwnedRealitySample {
             hip: self.hip,
             feet: self.feet,
             body: &self.body,
+            body_contact: self.body_contact,
         }
     }
 }
@@ -493,6 +504,7 @@ impl Observer {
             omega_com: self.omega_com,
             feet,
             grounded,
+            body_contact: s.body_contact,
         };
         self.fiction = fiction;
         fiction
@@ -557,6 +569,9 @@ pub fn sample(
     let touching = batch
         .map(|b| contacts_for_feet(b, colliders, handles.foot_colliders))
         .unwrap_or([false; 2]);
+    let body_contact = batch
+        .map(|b| contacts_for_body(b, colliders, handles.foot_colliders))
+        .unwrap_or(false);
 
     // Whole-character particle sweep (CoM body). `VelloParticle.root_entity`
     // identifies the character, so no game-side component types are needed.
@@ -606,7 +621,39 @@ pub fn sample(
         },
         feet,
         body,
+        body_contact,
     }
+}
+
+/// Raw-contact attribution: does any **non-foot** soft collider touch the floor
+/// this tick? The twin of [`contacts_for_feet`], returning true for any
+/// character collider that is not one of the two foot colliders — the
+/// "knee/hip/torso hit the deck" signal the jump reward terminates on
+/// (`plans/reward_plan.md` §3).
+pub fn contacts_for_body(
+    batch: &bevy_vello::collision::CollisionEventBatch,
+    colliders: &bevy::prelude::Query<&bevy_vello::VelloCollider>,
+    foot_colliders: [bevy::prelude::Entity; 2],
+) -> bool {
+    for entry in &batch.entries {
+        let ev = &entry.event;
+        let a_soft = colliders
+            .get(ev.entity_a)
+            .map(|c| c.is_soft_body())
+            .unwrap_or(false);
+        let b_soft = colliders
+            .get(ev.entity_b)
+            .map(|c| c.is_soft_body())
+            .unwrap_or(false);
+        if a_soft == b_soft {
+            continue; // character vs character (or static vs static)
+        }
+        let soft_entity = if a_soft { ev.entity_a } else { ev.entity_b };
+        if !foot_colliders.contains(&soft_entity) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Raw-contact attribution for the two foot colliders from last tick's batch:
@@ -698,6 +745,7 @@ mod tests {
                 },
             ],
             body,
+            body_contact: false,
         }
     }
 
@@ -743,6 +791,7 @@ mod tests {
             omega_com: 0.0,
             feet: [FootState::default(); 2],
             grounded: false,
+            body_contact: false,
         };
         // Ripple: alternating 400 / 200 → true average 300.
         for i in 0..90 {

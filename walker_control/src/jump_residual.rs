@@ -204,6 +204,13 @@ impl JumpResidual {
         self.expert.landing_window_open(cfg)
     }
 
+    /// Forwarded from the expert: has the authored launch window closed (power
+    /// stroke released)? The harness asks the reward to terminate a launch-miss
+    /// once this is true and the liftoff gate has still not fired.
+    pub fn launch_window_over(&self) -> bool {
+        self.expert.launch_window_over()
+    }
+
     fn facing_or_default(facing: f32) -> f32 {
         if facing == 0.0 {
             1.0
@@ -443,6 +450,7 @@ mod tests {
                 },
             ],
             grounded: touching[0] || touching[1],
+            body_contact: false,
         }
     }
 

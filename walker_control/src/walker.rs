@@ -384,6 +384,7 @@ mod tests {
                 },
             ],
             grounded: true,
+            body_contact: false,
         }
     }
 

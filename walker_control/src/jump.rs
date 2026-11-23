@@ -187,6 +187,16 @@ impl JumpCtrl {
         cfg.jump_land_hold >= 0.0 && self.phase == JumpPhase::Land && !self.landing_resolved
     }
 
+    /// True once the authored stroke has crossed Launch and entered Flight (or
+    /// Land) — i.e. the expert's **launch window** has closed. After the
+    /// push-off impulse is released there is no more propulsion to climb on, so
+    /// a body that still has not passed the reward's liftoff gate will never
+    /// leave the ground from this stroke (`plans/reward_plan.md` §3). The
+    /// harness feeds this to the reward as the launch-missed termination signal.
+    pub fn launch_window_over(&self) -> bool {
+        matches!(self.phase, JumpPhase::Flight | JumpPhase::Land)
+    }
+
     /// Measured chord ratio over the **touching** feet: `mean(|foot − hip|) /
     /// leg_len`. `None` when neither foot reports contact (airborne ⇒ nothing
     /// to gate on). This is the reality signal the §11 Load→Launch gate reads.
@@ -517,6 +527,7 @@ mod tests {
                 },
             ],
             grounded: true,
+            body_contact: false,
         }
     }
 

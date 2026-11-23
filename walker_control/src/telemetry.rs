@@ -727,6 +727,7 @@ mod tests {
                 },
             ],
             grounded,
+            body_contact: false,
         }
     }
 
