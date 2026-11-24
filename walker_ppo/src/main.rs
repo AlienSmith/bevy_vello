@@ -4,12 +4,14 @@
 //! phase, XPBD solver, 90 Hz fixed clock — but N characters share ONE policy
 //! (multi-env) and the harness closes transitions after every observe tick.
 //!
-//! First milestone: a **straight vertical jump** (plan §0). The held command
-//! is `Command::jump`; the reward is hip height above the standing line; an
-//! episode ends on the horizon or a fall, then the character is teleported
-//! back to its blueprint rest pose with stiff one-time external position
-//! constraints + zeroed velocities (the engine's own public channels — the
-//! same Law-1 idiom as the hip-pin drive), and re-parked for a settle window.
+//! Task: a **straight vertical jump and landing** (plan §0). The held command is
+//! `Command::jump`; the reward is the 3-stage machine in [`reward`] — launch →
+//! flight → a 1.5 s recovery window that opens on the **first ground contact**
+//! after liftoff. Episodes end on the reward's own verdicts (`Completed`,
+//! `LaunchMissed`, `TiltedOver`); the horizon is only a safety net and every
+//! ending is terminal (`done`, no further reward). On a boundary the character
+//! is despawned and rebuilt at its blueprint rest pose (a real respawn, not a
+//! teleport that drags the soft body), then re-parked for a settle window.
 //!
 //! ```sh
 //! WIN_HIDDEN=1 cargo run -p walker_ppo --release
@@ -163,14 +165,28 @@ fn env_flag(key: &str) -> bool {
 fn win_hidden() -> bool {
     env_flag("WIN_HIDDEN")
 }
-/// Episode horizon (ticks). 180 ≈ 2 s.
+/// Episode horizon (ticks): a **safety net**, not the normal ending.
 ///
-/// There are **two** episode-end triggers in [`ppo_collect_system`]: this
-/// horizon (a timeout) and the measured-fall gate. The reset is a *teleport*
-/// (stiff position constraints in [`ppo_reset_system`]), which is what looks
-/// like the body "zipping" back to standing — that is the respawn, and in
-/// training it is exactly what should happen. The inconsistent timing is the
-/// fall trigger firing early on some strokes while the rest ride to the horizon.
+/// The reward owns the real endings ([`ppo_collect_system`]):
+///
+/// - `Completed` — first ground contact + `RECOVERY_WINDOW` (1.5 s),
+/// - `LaunchMissed` — the launch window closed and the body stayed grounded,
+/// - `TiltedOver` — `|lean| > FALL_ANGLE`.
+///
+/// This horizon only catches pathologies (a stroke that never releases, a body
+/// that never returns to the floor). When it fires the step is **just as
+/// terminal as a reward verdict**: the episode is over and no further reward is
+/// granted, so GAE bootstraps `V = 0` at the boundary like any other `done`.
+///
+/// Budget = touchdown lead-in + the **reward's** recovery window + slack, with a
+/// floor of [`MIN_HORIZON_TICKS`] (450 ticks = 5 s). The floor is free: every
+/// real ending terminates long before it, so the horizon is only a guard against
+/// a pathological body (a stuck stroke, a physics blow-up that leaves the
+/// character airborne forever). It stays finite so the generation barrier can
+/// never hang.
+///
+/// It is deliberately NOT derived from `JUMP_LAND_HOLD`: that is the expert's own
+/// hold, a different clock.
 ///
 /// In `EXPERT_ONLY` (viewing) the timeout is disabled: the expert's own re-hop
 /// rebases the clock after `flight_end + 0.25 s` while the jump intent is held,
@@ -180,29 +196,34 @@ fn horizon() -> u32 {
     if env_flag("EXPERT_ONLY") {
         env_usize("HORIZON").unwrap_or(u32::MAX as usize) as u32
     } else {
-        // The episode must be long enough to contain the whole stroke PLUS the
-        // landing window, or it times out before `landing_complete` can fire and
-        // the landing reward is never paid. Stroke ≈ 1.15 s (clip + a little
-        // flight), then `land_hold` seconds of grounded stabilization, plus
-        // slack. Derive it so widening `JUMP_LAND_HOLD` can never silently
-        // truncate the episode.
         env_usize("HORIZON").unwrap_or_else(|| {
-            let secs = 1.15 + land_hold().max(0.0) + 0.55;
-            (secs * 90.0).ceil() as usize
+            // Generous worst-case stroke to the first contact: load (0.22) +
+            // load-gate cap (0.30) + launch (0.12) + a full flight at the
+            // design apex (~0.6) + touchdown detection. The reward's window is
+            // then added in full, plus 0.75 s of slack — and never below
+            // `MIN_HORIZON_TICKS`.
+            let touchdown_budget = 1.75_f32;
+            let secs = touchdown_budget + reward_cfg().recovery_window + 0.75;
+            ((secs * 90.0).ceil() as usize).max(MIN_HORIZON_TICKS)
         }) as u32
     }
 }
+
+/// Lower bound on the safety horizon: 450 ticks = 5 s at 90 Hz. Real endings are
+/// terminal and fire well inside the stroke, so a larger net only costs wall
+/// time in pathological episodes — it never changes a normal one.
+const MIN_HORIZON_TICKS: usize = 450;
 /// Collection window per update, summed across envs: `ROLLOUT` ticks/char.
 fn rollout_len(n: usize) -> usize {
     env_usize("ROLLOUT").unwrap_or(180).max(16) * n
 }
 /// Landing hold, seconds (`JUMP_LAND_HOLD`). Grounded time — counted from
 /// **touchdown**, so it includes the authored absorb — the body must put in
-/// before the landing counts as complete. **1.5 s** by default: on touchdown the
-/// body is still extended and carries residual momentum, and 1 s was judged too
-/// short to settle. A negative value disables the hold and restores the re-hop
-/// loop. NOTE: [`horizon`] derives the episode length from this, so widening it
-/// cannot truncate the episode.
+/// before the *expert* considers the landing complete. **1.5 s** by default: on
+/// touchdown the body is still extended and carries residual momentum, and 1 s
+/// was judged too short to settle. A negative value disables the hold and
+/// restores the re-hop loop. This is the expert's clock; the episode-ending
+/// window is the reward's `RECOVERY_WINDOW` (both 1.5 s by default).
 /// Settle window before an episode opens, ticks (`SETTLE`, default
 /// [`SETTLE_TICKS`]). The idle standing pose is what the jump must start from
 /// (it is the game's idle state), and 45 ticks (0.5 s) stops *mid-relaxation*:
@@ -226,7 +247,9 @@ fn land_lean() -> f32 {
 /// `cargo run -p walker_ppo` behaves without any env (`plans/reward_plan.md`).
 ///
 /// Env names: `R_BASE`, `K_SPIN`, `W_UPRIGHT`, `W_ANG`, `K_TILT`, `K_MOM`,
-/// `RECOVERY_WINDOW`, `R_SURVIVE`, `FALL_ANGLE_DEG` (degrees), `APEX_CLEARANCE`.
+/// `RECOVERY_WINDOW`, `R_SURVIVE`, `FALL_ANGLE_DEG` (degrees),
+/// `LAUNCH_MISS_GRACE`. Note `W_UPRIGHT` and `W_ANG` are **per second** (the
+/// per-tick reward is `rate · dt`), so they do not scale with the 90 Hz rate.
 fn reward_cfg() -> reward::RewardConfig {
     let mut c = reward::RewardConfig::default();
     if let Some(v) = env_f32("R_BASE") {
@@ -256,8 +279,8 @@ fn reward_cfg() -> reward::RewardConfig {
     if let Some(v) = env_f32("FALL_ANGLE_DEG") {
         c.fall_angle = v.to_radians();
     }
-    if let Some(v) = env_f32("APEX_CLEARANCE") {
-        c.apex_clearance = v;
+    if let Some(v) = env_f32("LAUNCH_MISS_GRACE") {
+        c.launch_miss_grace = v;
     }
     c
 }
@@ -388,6 +411,9 @@ struct PpoState {
     ep_survived: Vec<f32>,
     /// 1.0 if the episode produced a real launch (liftoff gate fired).
     ep_launch: Vec<f32>,
+    /// Per-episode reward decomposition (absolute paid values, one array per
+    /// finished episode) for the window-level reward-mix report.
+    ep_mix: Vec<RewardMix>,
     /// `TRACE=1` buffer: one env's per-tick particle state, first episode only.
     trace_rows: Vec<String>,
     /// The env being traced (fixed at its first collected tick).
@@ -413,6 +439,10 @@ struct PpoState {
     best_landed: f32,
     /// The mean launch fraction at the best checkpoint (for the log line).
     best_stand: f32,
+    /// Update index at which the best outcome score was set (patience anchor).
+    best_update: usize,
+    /// Patience exhausted: stop training and keep the best checkpoint.
+    early_stop: bool,
     /// **Generation swap handshake.** The update runs once, at a barrier where
     /// every env has finished exactly one episode (see
     /// [`ppo_update_system`]/[`ppo_reset_system`]). `ppo_update_system` sets
@@ -652,6 +682,7 @@ fn main() {
             ep_peaks: Vec::new(),
             ep_survived: Vec::new(),
             ep_launch: Vec::new(),
+            ep_mix: Vec::new(),
             trace_rows: Vec::new(),
             trace_env: None,
             trace_done: false,
@@ -665,6 +696,8 @@ fn main() {
             best_mean_peak: -1.0,
             best_landed: -1.0,
             best_stand: -1.0,
+            best_update: 0,
+            early_stop: false,
             swap_pending: false,
         })
         // `perf_reset` seeds the meter's clock ONCE: running it per-frame in
@@ -1058,10 +1091,13 @@ fn ppo_collect_system(
     mut walkers: Query<(&mut Walker, &mut Env)>,
     mut state: ResMut<PpoState>,
     mut trace_on: Local<Option<bool>>,
+    mut reward_debug: Local<Option<bool>>,
 ) {
     let horizon = horizon();
     // Read `TRACE` once, not 90×N times a second.
     let trace_on = *trace_on.get_or_insert_with(|| env_flag("TRACE"));
+    // `REWARD_DEBUG=1`: one info line per episode with its reward decomposition.
+    let reward_debug = *reward_debug.get_or_insert_with(|| env_flag("REWARD_DEBUG"));
     // Determinism (D1): query order is unstable across runs, so buffer the
     // tick's transitions and push them in sorted root order — the rollout (and
     // thus the float-summed gradients) then reproduces bit-for-bit.
@@ -1077,15 +1113,20 @@ fn ppo_collect_system(
             continue; // shouldn't happen while unparked; drop the record
         }
         let fiction = *walker.fiction();
+        // The expert's launch window (closed once the power stroke is released)
+        // is the reward's launch-miss signal: no propulsion is left after it.
+        let launch_window_over = walker.controller.launch_window_over().unwrap_or(false);
 
         // The 3-stage reward (`plans/reward_plan.md`). The expert owns the jump;
-        // the reward watches the physics (liftoff, flight, touchdown, recovery)
-        // and its own §3 terminations.
-        let out = env.reward.step(&fiction);
+        // the reward watches the physics (liftoff, flight, first ground contact,
+        // recovery) and owns the real terminations: `LaunchMissed`, `TiltedOver`
+        // and `Completed` (first contact + `RECOVERY_WINDOW`).
+        let out = env.reward.step(&fiction, launch_window_over);
         let reward = out.reward;
 
-        // The only endings: the reward says so (failure or recovery completion),
-        // or the horizon times out.
+        // The horizon is only a SAFETY NET (a stroke that never releases, a body
+        // that never comes back). It is a terminal like any other: the episode is
+        // over and no further reward is granted, so the value is not bootstrapped.
         let over = env.t + 1 >= horizon;
         let done = over || out.termination != reward::Termination::None;
         if done && env_flag("EXPERT_ONLY") {
@@ -1163,7 +1204,9 @@ fn ppo_collect_system(
                 let survived = out.events.survived;
                 let crashed = matches!(
                     out.termination,
-                    reward::Termination::TiltedOver | reward::Termination::BodyContact
+                    reward::Termination::TiltedOver
+                        | reward::Termination::BodyContact
+                        | reward::Termination::LaunchMissed
                 );
                 state.trace_summary.push(format!(
                     "{ep},{ticks},{stand_hip:.2},{min_hip:.2},{rise:.1},{},{}",
@@ -1192,6 +1235,8 @@ fn ppo_collect_system(
             }
             let tick = state.tick;
             let survived = if out.events.survived { 1.0 } else { 0.0 };
+            // Read the reward decomposition BEFORE `reset()` below wipes it.
+            let mix = RewardMix::of(&env.reward);
             state.ep_rewards.push(env.ep_reward);
             state.ep_lens.push(env.t);
             state.ep_peaks.push(env.peak);
@@ -1199,15 +1244,44 @@ fn ppo_collect_system(
             state
                 .ep_launch
                 .push(if env.reward.launched() { 1.0 } else { 0.0 });
+            state.ep_mix.push(mix);
+            if reward_debug {
+                info!(
+                    "walker_ppo: ep env {} @tick {tick} term {} len {} R={:.3} | \
+                     launch {:.3} flight {:.3} recovery {:.3} survive {:.3} | \
+                     dom {} {:.0}% (stage ticks {}/{}/{})",
+                    env.root.index(),
+                    term_label(out.termination, over),
+                    env.t,
+                    env.ep_reward,
+                    mix.launch,
+                    mix.flight,
+                    mix.recovery,
+                    mix.survive,
+                    mix.dominant_name(),
+                    mix.dominant_share() * 100.0,
+                    env.reward.launch_ticks,
+                    env.reward.flight_ticks,
+                    env.reward.recovery_ticks,
+                );
+            }
             state.ep_rows.push(format!(
-                "{},{},{:.4},{},{},{:.1},{}",
-                tick,
+                "{tick},{},{:.4},{},{},{:.1},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.3}",
                 env.root.index(),
                 env.ep_reward,
                 env.t,
                 if env.reward.launched() { 1 } else { 0 },
                 survived,
                 term_label(out.termination, over),
+                mix.launch,
+                mix.flight,
+                mix.recovery,
+                mix.survive,
+                env.reward.launch_ticks,
+                env.reward.flight_ticks,
+                env.reward.recovery_ticks,
+                mix.dominant_name(),
+                mix.dominant_share(),
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
             // this character and the factory rebuilds it at its rest pose. That
@@ -1404,6 +1478,10 @@ fn ppo_update_system(
             .collect::<Vec<f32>>(),
     );
     let mean_peak = mean(&state.ep_peaks);
+    // ---- reward mix: which term actually paid these episodes ----
+    // Per-episode detail is in `episodes.csv`; this is the window summary that
+    // makes degeneration visible update-over-update (see `RewardMix` docs).
+    let (mix, mix_dom) = window_mix(&state.ep_mix);
     // ---- outcome metrics: the thing the task is actually about ----
     // `survived_pct` is the fraction of episodes that lifted off, returned, and
     // survived the full 1.5 s recovery window (the completed landing). Together
@@ -1416,7 +1494,8 @@ fn ppo_update_system(
     // first, then "did it actually launch".
     let success = survived_pct + 0.5 * launch_pct;
     state.train_rows.push(format!(
-        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.5},{:.5},{:.4},{:.4},{:.3}",
+        "{updates},{tick},{:.4},{:.1},{:.3},{:.3},{:.3},{:.5},{:.5},{:.4},{:.4},{:.3},\
+         {:.1},{:.1},{:.1},{:.1},{mix_dom}",
         mean_ep,
         mean_len,
         mean_peak,
@@ -1426,7 +1505,11 @@ fn ppo_update_system(
         stats.value_loss,
         stats.entropy,
         stats.approx_kl,
-        stats.clip_frac
+        stats.clip_frac,
+        mix[0],
+        mix[1],
+        mix[2],
+        mix[3],
     ));
     // ---- checkpointing ----
     // Three artifacts, because each answers a different question:
@@ -1453,14 +1536,20 @@ fn ppo_update_system(
         state.best_mean_peak = mean_peak;
         state.best_landed = success;
         state.best_stand = launch_pct;
+        state.best_update = updates;
     }
     info!(
         "update {updates} @tick {tick}/{target}: reward {mean_ep:.3} len {mean_len:.0} \
          peak {mean_peak:.3} launch {:.0}% survived {:.0}% succ {success:.3} \
+         mix L{:.0}% F{:.0}% R{:.0}% S{:.0}% dom {mix_dom} \
          pi {:.5} v {:.5} kl {:.4} clip {:.2} | buffer {n_ep} \
          | update_blocked {update_ms:.1} ms",
         launch_pct * 100.0,
         survived_pct * 100.0,
+        mix[0],
+        mix[1],
+        mix[2],
+        mix[3],
         stats.policy_loss,
         stats.value_loss,
         stats.approx_kl,
@@ -1471,6 +1560,7 @@ fn ppo_update_system(
     state.ep_peaks.clear();
     state.ep_survived.clear();
     state.ep_launch.clear();
+    state.ep_mix.clear();
 
     flush_state(&state);
     // Default 10, not 100: the interesting part of a jump run is the FIRST ~50
@@ -1507,6 +1597,33 @@ fn ppo_update_system(
             state.best_landed
         );
     }
+
+    // ---- patience stop: do not keep training a collapsed policy ----
+    // `policy_best.json` already holds the best weights. If the outcome score has
+    // not improved for `PATIENCE` updates AND has fallen well below the best,
+    // stop and restore `policy.json` from the best, so the artifact a deploy
+    // picks up is the good one rather than the degenerate tail.
+    let patience = env_usize("PATIENCE").unwrap_or(20).max(1);
+    let stale = updates.saturating_sub(state.best_update) >= patience;
+    let degraded = success < state.best_landed - 0.15;
+    if stale && degraded {
+        state.early_stop = true;
+        let restored = std::fs::copy(
+            "tmp/walker_ppo/policy_best.json",
+            "tmp/walker_ppo/policy.json",
+        )
+        .is_ok();
+        warn!(
+            "walker_ppo: EARLY STOP @update {updates}: best {:.3} @update {}, now {:.3} \
+             ({} updates without improvement) -> policy.json restored from best: {}",
+            state.best_landed,
+            state.best_update,
+            success,
+            updates.saturating_sub(state.best_update),
+            restored,
+        );
+        flush_state(&state);
+    }
 }
 
 fn mean(v: &[f32]) -> f32 {
@@ -1517,12 +1634,125 @@ fn mean(v: &[f32]) -> f32 {
     }
 }
 
-/// A stable CSV label for why an episode ended. A horizon timeout is the only
-/// ending the reward itself does not own.
+/// The four additive terms of the 3-stage reward, in fixed CSV order. `launch`
+/// is the receipt paid on **touchdown** (scaled by the liftoff spin), not at
+/// liftoff — see the reward module docs.
+const REWARD_TERMS: [&str; 4] = ["launch", "flight", "recovery", "survive"];
+
+/// One episode's **paid** reward, split by the term that produced it.
+///
+/// Sums to the episode reward: every tick is paid by exactly one term, and a
+/// tick that ends on tilt / launch-miss pays 0 (so it contributes to none).
+/// This is the per-episode answer to "where did the reward come from?", which is
+/// what identifies degeneration (a policy learning one term and ignoring the
+/// rest) after training.
+#[derive(Clone, Copy, Default, Debug)]
+struct RewardMix {
+    launch: f32,
+    flight: f32,
+    recovery: f32,
+    survive: f32,
+}
+
+impl RewardMix {
+    /// Snapshot the [`reward::JumpReward`] introspection counters. Must be taken
+    /// before the harness calls `reset()` for the next episode.
+    fn of(rw: &reward::JumpReward) -> Self {
+        Self {
+            launch: rw.liftoff_bonus,
+            flight: rw.flight_reward,
+            recovery: rw.recovery_reward,
+            survive: rw.survive_pay,
+        }
+    }
+
+    fn terms(&self) -> [f32; 4] {
+        [self.launch, self.flight, self.recovery, self.survive]
+    }
+
+    fn total(&self) -> f32 {
+        self.terms().iter().sum()
+    }
+
+    /// Index into [`REWARD_TERMS`] of the largest paid term. `None` when the
+    /// episode paid nothing (launch miss / immediate tip-over).
+    fn dominant(&self) -> Option<usize> {
+        let terms = self.terms();
+        let (mut idx, mut val) = (0usize, f32::NEG_INFINITY);
+        for (i, &v) in terms.iter().enumerate() {
+            if v > val {
+                idx = i;
+                val = v;
+            }
+        }
+        (val > 1e-9).then_some(idx)
+    }
+
+    /// The dominant term's share of this episode's reward, `0..1`.
+    fn dominant_share(&self) -> f32 {
+        let total = self.total();
+        if total <= 1e-9 {
+            return 0.0;
+        }
+        self.dominant().map_or(0.0, |i| self.terms()[i] / total)
+    }
+
+    fn dominant_name(&self) -> &'static str {
+        self.dominant().map_or("none", |i| REWARD_TERMS[i])
+    }
+}
+
+/// Window-level reward mix: sum every episode's signed terms and express each as
+/// a **signed share of the gross reward magnitude** (`Σ |term|`), plus the
+/// largest positive term.
+///
+/// Gross (not net) denominators keep the shares meaningful when a shaping term
+/// is negative: a spinning policy has `flight < 0`, and a net-based share would
+/// report nonsense like `L 133% / F −33%` (measured). Gross shares read as
+/// "of all reward paid or charged, this term contributed X%".
+///
+/// Read this as a **degeneration tripwire**:
+/// - `launch` → ~all: it landed (earned the receipt) but never finished the
+///   window — it tips inside the 1.5 s;
+/// - `flight` / `none` with no `launch` payment: **launch-and-die** (the arc
+///   ended before touchdown); this was the measured collapse mode before the
+///   launch receipt was moved to touchdown;
+/// - `flight` → **negative** is normal spin: the angular penalty is outrunning
+///   the upright term, so the policy is rotating in flight;
+/// - `survive` large with `recovery` ~0: survived the clock without the upright
+///   term ever paying (slamming through the window);
+/// - `recovery` → all: parked upright on the ground after a tiny hop (the
+///   recovery term is the only one that pays for simply standing).
+fn window_mix(mixes: &[RewardMix]) -> ([f32; 4], &'static str) {
+    let mut sums = [0.0f32; 4];
+    for m in mixes {
+        for (s, v) in sums.iter_mut().zip(m.terms()) {
+            *s += v;
+        }
+    }
+    let gross: f32 = sums.iter().map(|v| v.abs()).sum();
+    if gross <= 1e-9 {
+        return ([0.0; 4], "none");
+    }
+    let mut pct = [0.0f32; 4];
+    let mut best: Option<(usize, f32)> = None;
+    for (i, p) in pct.iter_mut().enumerate() {
+        *p = 100.0 * sums[i] / gross;
+        if sums[i] > 1e-9 && best.is_none_or(|(_, b)| sums[i] > b) {
+            best = Some((i, sums[i]));
+        }
+    }
+    let dom = best.map_or("none", |(i, _)| REWARD_TERMS[i]);
+    (pct, dom)
+}
+
+/// A stable CSV label for why an episode ended. Every ending is terminal; a
+/// horizon cut is labelled `Timeout` so the cause is visible in the log.
 fn term_label(term: reward::Termination, over: bool) -> &'static str {
     match term {
         reward::Termination::Completed => "Completed",
         reward::Termination::TiltedOver => "TiltedOver",
+        reward::Termination::LaunchMissed => "LaunchMissed",
         reward::Termination::BodyContact => "BodyContact",
         reward::Termination::None => {
             if over {
@@ -1534,8 +1764,28 @@ fn term_label(term: reward::Termination, over: bool) -> &'static str {
     }
 }
 
-const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,survived_pct,policy_loss,value_loss,entropy,approx_kl,clip_frac";
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,survived,term";
+/// Per-update aggregates. The last five columns are the **reward mix**:
+/// `launch_share_pct..survive_share_pct` are each term's **signed share of the
+/// window's gross reward magnitude** (`Σ|term|`), and `reward_dom` is the
+/// largest positive term (see [`window_mix`]). Watch this line for degeneration:
+/// a term share jumping toward 100% while `survived_pct` stays flat is the policy
+/// learning that one term only; a *negative* `flight_share_pct` means the angular
+/// penalty is outrunning the upright term (the body is spinning).
+const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_height,launch_pct,survived_pct,policy_loss,value_loss,entropy,approx_kl,clip_frac,launch_share_pct,flight_share_pct,recovery_share_pct,survive_share_pct,reward_dom";
+/// Per-episode rows. `r_*` are the **absolute** rewards each term paid (their
+/// sum is `ep_reward`; `r_launch` is the touchdown receipt, 0 if it never
+/// landed), `*_ticks` are the stage durations, and `dom`/`dom_pct` answer
+/// "which term paid most, and what share of the episode".
+///
+/// Reading a degenerate run starts here:
+/// - `dom = launch` → landed, but tipped inside the 1.5 s (no `survive`);
+/// - `dom = flight` / `none` with `r_launch = 0` → **launch-and-die** (no
+///   touchdown; only flight shaping, often a spin penalty);
+/// - `dom = recovery` → parked upright after a micro-hop (only term that pays
+///   for standing);
+/// - `dom = survive` with `r_recovery ≈ 0` → survived the clock without the
+///   upright term ever paying.
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,survived,term,r_launch,r_flight,r_recovery,r_survive,launch_ticks,flight_ticks,recovery_ticks,dom,dom_pct";
 /// `TRACE=1`: per-tick particle state of ONE env, for its first episode. The
 /// trainer otherwise writes only per-update / per-episode aggregates, so a
 /// checkpoint's actual stroke could not be inspected at all — this is the
@@ -1592,15 +1842,21 @@ fn run_exit(
     if *done {
         return;
     }
-    if state.updates < exit_after.0 {
+    if !state.early_stop && state.updates < exit_after.0 {
         return;
     }
     *done = true;
     flush_state(&state);
     if !env_flag("PPO_SMOKE") {
         info!(
-            "walker_ppo: finished {}/{} updates | best succ {:.3} (landed {:.3} + launch {:.3}) | reward {:.4}",
-            state.updates, exit_after.0, state.best_landed, state.best_landed, state.best_stand, state.best_mean_reward,
+            "walker_ppo: finished {}/{} updates{} | best succ {:.3} (landed {:.3} + launch {:.3}) | reward {:.4}",
+            state.updates,
+            exit_after.0,
+            if state.early_stop { " [early stop; policy.json = best]" } else { "" },
+            state.best_landed,
+            state.best_landed,
+            state.best_stand,
+            state.best_mean_reward,
         );
         exit.write(AppExit::Success);
         return;
@@ -1620,5 +1876,79 @@ fn run_exit(
         exit.write(AppExit::Error(
             std::num::NonZeroU8::new(1).expect("nonzero"),
         ));
+    }
+}
+
+#[cfg(test)]
+mod reward_mix_tests {
+    use super::*;
+
+    #[test]
+    fn dominant_picks_the_largest_paid_term() {
+        let m = RewardMix {
+            launch: 1.0,
+            flight: 0.2,
+            recovery: 0.3,
+            survive: 0.9,
+        };
+        assert_eq!(m.dominant(), Some(0));
+        assert_eq!(m.dominant_name(), "launch");
+        assert!((m.dominant_share() - 1.0 / 2.4).abs() < 1e-5);
+
+        // A tie keeps the earlier term (fixed CSV order), deterministically.
+        let tie = RewardMix {
+            launch: 1.0,
+            survive: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(tie.dominant(), Some(0));
+    }
+
+    #[test]
+    fn window_mix_reports_percentages_and_the_top_term() {
+        let a = RewardMix {
+            launch: 2.0,
+            ..Default::default()
+        };
+        let b = RewardMix {
+            recovery: 6.0,
+            ..Default::default()
+        };
+        let (pct, dom) = window_mix(&[a, b]);
+        assert_eq!(dom, "recovery");
+        assert!((pct[0] - 25.0).abs() < 1e-4);
+        assert!((pct[2] - 75.0).abs() < 1e-4);
+        assert!((pct.iter().sum::<f32>() - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn window_mix_handles_negative_shaping() {
+        // A spinning policy: flight is net negative. The share must stay
+        // interpretable (signed share of gross magnitude), not report >100%.
+        let launch = RewardMix {
+            launch: 1.0,
+            ..Default::default()
+        };
+        let spin = RewardMix {
+            flight: -0.5,
+            ..Default::default()
+        };
+        let (pct, dom) = window_mix(&[launch, spin]);
+        assert_eq!(dom, "launch");
+        assert!((pct[0] - 100.0 / 1.5).abs() < 1e-4, "launch {}", pct[0]);
+        assert!((pct[1] + 100.0 / 3.0).abs() < 1e-4, "flight {}", pct[1]);
+        // Signed shares of gross sum to the net fraction, not 100%.
+        assert!((pct.iter().sum::<f32>() - 100.0 / 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zero_reward_episode_has_no_dominant_term() {
+        let m = RewardMix::default();
+        assert_eq!(m.dominant(), None);
+        assert_eq!(m.dominant_name(), "none");
+        assert_eq!(m.dominant_share(), 0.0);
+        let (pct, dom) = window_mix(&[m]);
+        assert_eq!(dom, "none");
+        assert_eq!(pct, [0.0; 4]);
     }
 }

@@ -93,7 +93,9 @@ pub struct Transition {
     /// `log π(a|s)` under the policy that *collected* this transition.
     pub old_logp: f32,
     pub reward: f32,
-    /// True when this step ended an episode (the env reset afterwards).
+    /// True when this step ended an episode (the env reset afterwards). Every
+    /// ending — reward verdict or the harness's safety horizon — is terminal:
+    /// no further reward is granted from this episode, so GAE bootstraps `V = 0`.
     pub done: bool,
     /// `V(s)` recorded at collection (the old-policy estimate; GAE's base).
     pub value: f32,
@@ -267,6 +269,9 @@ impl PpoTrainer {
 
     /// GAE(λ) over the rollout: returns `(advantage, return-to-go)`, split
     /// into episodes at every `done`.
+    ///
+    /// Every `done` is terminal: the harness grants no reward after it (reward
+    /// verdict or safety horizon), so the value after the last step is 0.
     fn gae(&self, rollout: &Rollout) -> (Vec<f32>, Vec<f32>) {
         let n = rollout.items.len();
         let mut adv = vec![0.0f32; n];
@@ -284,10 +289,9 @@ impl PpoTrainer {
             i += 1;
         }
         if start < n {
-            // Trailing partial episode (no `done` yet): bootstrap the next V at
-            // the tail's own `value` is the usual fix, but the training app
-            // closes the buffer on a true `done`, so the conservative 0 here
-            // only touches a mid-rollout slice on the very last update.
+            // Trailing partial episode (no `done` at all): the training app
+            // closes the buffer on a true `done`, so this only touches a
+            // mid-rollout slice on the very last update — bootstrap 0.
             self.gae_segment(&rollout.items[start..], start, &mut adv, &mut ret, g, l);
         }
         (adv, ret)
