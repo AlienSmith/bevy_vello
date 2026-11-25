@@ -520,8 +520,41 @@ tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=plans/policy_0070.json     SCRIP
 ```
 tools/physics-qa/run_walker_qa.sh ckpt70 POLICY=tmp/walker_ppo/snap/policy_0070.json     SCRIPT=plans/walker_jump_hop_script.json WIN_HIDDEN=0
 ```
+```
 cargo build -p walker_ppo --release
 EXPERT_ONLY=1 N=1 RESUME=plans/policy_0070.json ./target/release/walker_ppo --character examples/collision_detection/assets/character/v10.character.json
+```
+
+### Jump-and-land checkpoint
+
+`checkpoints/jump_land_u90/policy.json` is the residual policy that jumps and
+lands (see its README for provenance and the checks it passed). Deploy it in QA
+(stand → jump → stand, headless; add `WIN_HIDDEN=0` for a window):
+
+```
+tools/physics-qa/run_walker_qa.sh jump_u90 POLICY=checkpoints/jump_land_u90/policy.json SCRIPT=plans/walker_jump_hop_script.json
+```
+
+Outputs: `tmp/walker_qa/jump_u90.csv` (telemetry; `tP3*` is the hip particle,
+`tPLLL*` / `tPRLL*` the two feet), `jump_u90.hips_feet.png` (hip + feet plot)
+and `jump_u90.log`. Judge the landing from the end of the CSV/plot: a landing
+returns the hip to the standing height (~y 204) with `meas_theta` near 0; a fall
+ends with the hip near y 290 and `meas_theta` near ±1.65 rad. The QA run is
+deterministic, so a checkpoint reproduces exactly — vary the `stand` `dur` in a
+copy of the script to test other launch poses.
+
+Replay it in the trainer's environment (no learning, no checkpoint written):
+
+```
+EXPERT_ONLY=1 N=1 RESUME=checkpoints/jump_land_u90/policy.json ./target/release/walker_ppo
+```
+
+Train a new one (snapshots every 10 updates land in `tmp/walker_ppo/snap/`, so
+QA each one — the training survival% is measured with sampling noise and does
+not track how the deployed mean policy behaves):
+
+```
+LR=1e-4 SEED=7 N=64 UPDATES=150 PATIENCE=100000 WIN_HIDDEN=1 ./target/release/walker_ppo
 ```
 
 `walker_qa` and `walker_ppo` resolve *which* character rig they open through

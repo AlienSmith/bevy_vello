@@ -155,6 +155,14 @@ pub struct RewardConfig {
     /// Flight angular-velocity damping weight (`w_ang`), **per second**
     /// (multiplied by `ω² · dt`).
     pub w_ang: f32,
+    /// Pre-liftoff spin penalty (`w_launch_spin`), **per second**: in Stage 1 the
+    /// tick pays `−w_launch_spin·min(ω²,cap)·dt`. Dense feedback on the one thing
+    /// the residual can still change before liftoff — the CoM rotation. Booked
+    /// under the `launch` term.
+    pub w_launch_spin: f32,
+    /// Recovery upright weight (`w_recover`), **per second**. Separate from the
+    /// flight `w_upright` so surviving 1.4 s pays clearly more than 0.2 s.
+    pub w_recover: f32,
     /// Tilt sharpness on `tilt²` (`k_1`).
     pub k_tilt: f32,
     /// Recovery horizontal-momentum sharpness on `‖v_xy‖²` (`k_2`).
@@ -183,11 +191,13 @@ impl Default for RewardConfig {
             // completing the window (R_survive) stays the dominant payoff.
             w_upright: 0.4,
             w_ang: 0.1,
+            w_launch_spin: 2.0,
+            w_recover: 1.0,
             k_tilt: 8.0,
             // Characteristic horizontal speed √(1/k₂) ≈ 158 px/s.
             k_mom: 4e-5,
             recovery_window: 1.5,
-            r_survive: 1.0,
+            r_survive: 2.0,
             fall_angle: FRAC_PI_3,
             launch_miss_grace: 0.20,
         }
@@ -301,7 +311,12 @@ impl JumpReward {
         match self.phase {
             Phase::Launch => {
                 self.launch_ticks += 1;
-                // Stage 1 pays nothing: no per-tick term to stall or camp on.
+                // Dense spin penalty (bounded, per second × dt). The expert owns
+                // the launch timing, so this cannot be dodged by stalling: the
+                // window closes and liftoff happens regardless.
+                let pen = self.cfg.w_launch_spin * (omega * omega).min(SPIN_SQ_CAP) * f.dt;
+                reward -= pen;
+                self.liftoff_bonus -= pen;
                 // Liftoff is a PHYSICAL event (both feet off the floor), but only
                 // once the expert has released the power stroke and the feet stay
                 // off for a few ticks: the contact channel is edge-triggered and
@@ -363,7 +378,7 @@ impl JumpReward {
                 let momentum_decay = (-self.cfg.k_mom * v_xy_sq).exp();
                 // Per-second rate × dt (see the module docs): the whole 1.5 s
                 // window is worth `w_upright · 1.5` at best, not 135 ticks of it.
-                let r = self.cfg.w_upright * upright * momentum_decay * f.dt;
+                let r = self.cfg.w_recover * upright * momentum_decay * f.dt;
                 reward += r;
                 self.recovery_reward += r;
 

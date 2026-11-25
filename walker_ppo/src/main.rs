@@ -264,6 +264,12 @@ fn reward_cfg() -> reward::RewardConfig {
     if let Some(v) = env_f32("W_ANG") {
         c.w_ang = v;
     }
+    if let Some(v) = env_f32("W_LAUNCH_SPIN") {
+        c.w_launch_spin = v;
+    }
+    if let Some(v) = env_f32("W_RECOVER") {
+        c.w_recover = v;
+    }
     if let Some(v) = env_f32("K_TILT") {
         c.k_tilt = v;
     }
