@@ -474,7 +474,9 @@ fn spawn_character(mut commands: Commands, assets: Res<CharacterAssetPaths>) {
     commands.spawn((
         VelloSceneBundle {
             transform: Transform {
-                translation: SPAWN_TRANSLATION,
+                // TEMPORARY `SPAWN_X=<px>` shifts the body along the floor.
+                translation: SPAWN_TRANSLATION
+                    + Vec3::new(env_f32("SPAWN_X").unwrap_or(0.0), 0.0, 0.0),
                 scale: SPAWN_SCALE,
                 ..default()
             },

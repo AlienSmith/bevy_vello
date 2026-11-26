@@ -342,6 +342,7 @@ mod tests {
                 pos,
                 velocity: vel,
                 inv_mass: 1.0,
+                ..Default::default()
             },
             root_entity: Entity::PLACEHOLDER,
             fk_target: None,

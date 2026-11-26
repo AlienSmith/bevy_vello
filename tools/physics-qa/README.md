@@ -543,12 +543,6 @@ ends with the hip near y 290 and `meas_theta` near ±1.65 rad. The QA run is
 deterministic, so a checkpoint reproduces exactly — vary the `stand` `dur` in a
 copy of the script to test other launch poses.
 
-Replay it in the trainer's environment (no learning, no checkpoint written):
-
-```
-EXPERT_ONLY=1 N=1 RESUME=checkpoints/jump_land_u90/policy.json ./target/release/walker_ppo
-```
-
 Train a new one (snapshots every 10 updates land in `tmp/walker_ppo/snap/`, so
 QA each one — the training survival% is measured with sampling noise and does
 not track how the deployed mean policy behaves):

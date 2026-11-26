@@ -1,129 +1,202 @@
-# The jump expert is bimodal (investigation notes, 2026-11-25)
+# The jump expert diverges under the collision physics (investigation notes)
 
-**Status: the behaviour is characterised, the root cause is NOT found.**
+Started 2026-11-25, updated 2026-11-26.
 
-## Summary
+**Status (2026-11-26): the jump expert is now consistent. The cause was the light foot being driven into the floor by the heavy hip through the leg's constraints; a depth-driven "contact mass" on the feet fixes it (branches `jump-contact-mass` / `contact-mass`). Walking is not yet re-validated with it.**
 
-The authored jump expert (`walker_control::jump::JumpCtrl`, no policy) does not
-produce one jump. Depending on the character's spawn x it leaves the floor in
-one of two modes:
+The sections below up to "Resolution" are the investigation that led there: the
+original physics behaves inconsistently under the stroke, and the diagnostic experiments
+on friction, the spin estimate and contact reporting were run on the original masses.
 
-| mode | peak CoM spin after liftoff | what the body does |
+## Headline
+
+The authored jump expert (`walker_control::jump::JumpCtrl`, no policy) is
+deterministic code: it issues the same stroke every time. The *physics response*
+to that stroke is not consistent. Tiny differences in the start (a 0.001 px change
+in spawn x) send the same stroke to very different outcomes, so the expert's
+behaviour diverges a lot from run to run even though the expert itself does not
+change. This is what the PPO residual has been fighting.
+
+With the original physics the expert's peak spin after liftoff is either
+~1.5 - 1.8 rad/s ("high") or ~0.3 - 0.6 rad/s ("low"), and it falls in both modes.
+
+## Where the divergence comes from
+
+All of this is in the frame collision response
+(`FrameCollisionConstraint::solve` in `constraints.rs`) and in how contacts are
+produced for it. Confirmed means "removing/changing it changes the outcome as
+stated"; the rest is observed but not shown to be causal.
+
+**Confirmed**
+
+1. **Angular friction saturates at full strength.** The gain was
+   `friction * |penetration|`, clamped at 1: the whole measured body spin was
+   cancelled in one step for any foot more than ~3 px deep (friction 0.35). The
+   feet are 8 - 20 px deep during the push-off. Removing only this term cut the
+   spread of peak spin across spawn positions from 1.39 to 0.14; capping the gain
+   gave a smooth sweep (0.06 at gain 0.03, 0.20 at 0.1, 0.58 at 0.25, 0.85 at 0.5,
+   1.39 uncapped). It amplifies a difference that already exists; it does not
+   create it.
+2. **The spin estimate treats deformation as rotation.** It is
+   `sum(r x v_rel) / sum(r^2)` over four frame particles that move relative to
+   each other as the crouch compresses the frame. Logged at the contacts it read
+   2 - 8x the body's real spin (median 2.3x at x=0, 4.2x at x=0.001), so a nominal
+   gain of 1 is an effective gain well above 1 and overshoots by an unpredictable
+   amount. Estimating the spin from the spine axis only (spine_base -> spine_mid)
+   makes the original strong friction usable: the expert alone then ends standing.
+
+**Observed, not proven causal**
+
+3. **Contact flicker.** The GPU narrow phase reports one contact per collider pair
+   per tick. A flat-bottomed foot has several nearly-equally-deep curves, and the
+   reported curve flips between them (2, 4, 6) from tick to tick. Two runs started
+   0.001 px apart already have different contact sets at tick 8 (the first ground
+   contact), and while standing the count alternates between 1 and 2. This is the
+   best candidate for the selector that friction then amplifies.
+4. **Stale contact and a wandering contact point.** A contact is detected one tick
+   before it is applied and its position on the curve is found by projecting that
+   stale point onto the current curve. The curve parameter `t` jumps (0.00, 0.99,
+   0.20, ...) and the penetration measured there jumps with it (4 -> 16 -> 10 -> 20
+   px). Using the deepest point of the curve instead makes `t` continuous, and the
+   split did not change, so this is not the selector.
+5. **The frame solver averages over however many contacts exist**, and the count
+   differed between modes (4/2/1 against 1/1/2 at ticks 143 - 145). Some ticks also
+   contain two identical constraints in one solve. The sum-versus-average test was
+   interrupted and not run.
+
+**Unexplained**
+
+6. A single-tick sideways kick of 8 - 17 px (hip and both feet) at the
+   Launch -> Flight release tick (t = 1.60 s). It survives friction = 0, deeper
+   substeps and the other changes below, so friction does not cause it. The launch
+   impulse in `walker.rs` is purely vertical.
+
+## Experiments and results
+
+Expert only, `walker_qa`, `plans/walker_jump_hop_script.json`. "Spread" = max - min
+of peak spin over the spawn positions tested (x = 0, 0.001, 20, 60, 140, 200, 220,
+300 unless stated).
+
+| change | result |
+|---|---|
+| original physics | two modes, spread 1.39; falls in both |
+| frame angular friction removed | spread 0.14 (one mode, falls) |
+| frame tangential friction removed | spread 2.73 (worse) |
+| fine tangential friction removed | spread 1.30 (no change) |
+| angular gain capped as a rate (`ANGULAR_FRICTION_RATE_MAX = 10/s`, ~0.1 per 90 Hz tick) | spread 0.16; 31 positions: spin 0.94 - 1.42, stdev 0.14; falls consistently |
+| Coulomb friction at the contact point (friction cone, effective mass), full stick | spread 1.33 (still bimodal) |
+| Coulomb with the slip correction scaled by 0.5 / 0.25 / 0.1 | spread 0.87 / 0.48 / 0.40 |
+| original friction + spine-axis spin estimate | expert alone STANDS in 7 of 31 positions (23%); the landings are lateral hops of 150 - 190 px, not vertical |
+| deepest-point contact parameter | spread unchanged (1.26 with original friction) |
+| solver substeps 1 / 2 / 4 / 8 | penetration 17-21 -> 7-9 px, kick and spread not reduced |
+
+Ruled out as causes: number of bodies, floor position / length / shape, GPU
+collision coordinates (shifting them by +/-210 px changed nothing), contact normals
+(median 0.000 deg off vertical; forcing them vertical changed nothing), the arms
+(100x lighter, same split; the committed v10 rig is restored), which foot is lifted.
+`STANCE_PIN` is not tested: it only exists in the walking controller.
+
+Determinism: repeated runs at the same x are identical through the jump (until
+t ~ 2.9 s or later); after the body has fallen a small non-determinism appears
+(cause unchecked, `vello_physics` builds with `parallel`).
+
+## Resolution for the jump: contact mass (2026-11-26)
+
+Reading the rig showed the hip is 20x heavier than the feet (`inv_mass` 0.05 vs 1.0).
+The leg's distance/angular constraints split a correction by inverse mass, so when
+the stroke lengthens the leg ~95% of it drives the light foot into the floor and the
+hip barely rises. That is where the 8 - 20 px penetration came from (the contact
+solver only removes a fraction of the depth per tick), and the friction terms scale
+with that depth. Probe with the foot `inv_mass` edited in the rig (expert alone,
+8 positions): feet x10 heavier -> depth 11 px, 5/8 stand; x100 -> 4 px, **8/8 stand**,
+nearly vertical; x1000 -> 3.7 px, 8/8 but a lower posture and jump; adding heavier
+knees made it worse. Constant heavy feet break walking, so the heaviness is applied
+only in contact.
+
+Implementation (`study_vello`, `vello_physics`): a particle flag `contact_mass_max`
+(blueprint, default off; set to 100 on `PLLL`/`PRLL` in `v10.character.json`). After
+every substep, each flagged skeleton particle takes the **deepest** penetration seen by
+the frame collision constraints of the soft bodies it is connected to (mass has no
+direction, so the maximum), maps it through a smoothstep between `D0 = 0.3` px and
+`D1 = 1.5` px (world px; a resting foot already shows ~2 px, so this means "heavy
+whenever the foot touches"), keeps the level with a hold (`decay 0.99` per substep,
+half-life ~0.8 s) and sets `inv_mass = base / (1 + (M-1) * level)`. The hold matters:
+without it the mass toggles every tick on ticks where a contact is not reported, which
+was unstable; gating on depth alone (D0 5, D1 9) was too late and gave a much higher
+jump. Env overrides: `CONTACT_MASS_D0`, `CONTACT_MASS_D1`, `CONTACT_MASS_DECAY`.
+
+Expert alone, 31 spawn positions (x = 0 - 400 in 20 px steps plus 0.001 - 10 nudges),
+original physics, no environment overrides:
+
+| | mass update off | new defaults |
 |---|---|---|
-| high-spin | ~1.5 - 1.8 rad/s | tumbles (-81 deg at touchdown), ends lying down |
-| low-spin | ~0.3 - 0.6 rad/s | spins less but slides sideways (~285 px), also ends lying down |
+| ends standing | 0 / 31 | **29 / 31** (still falls at x = 0.001 and 0.1) |
+| peak spin | two clusters (13 at 0.3 - 0.6, 15 at 1.5 - 1.9); largest gap 0.86 | one spread 0.25 - 1.24; largest gap 0.16 |
+| spin stdev | 0.61 | 0.30 |
+| peak foot depth (median) | 19.0 px | 3.6 px |
+| foot slide in the push-off (median / max) | 18.5 / 22 px | 8.1 / 24 px |
+| hip sideways travel (median) | 63 px | 36 px |
+| apex rise (median) | 73 px | 44 px |
 
-The expert fails to land in **both** modes. Which mode you get is
-deterministic and reproducible for a given spawn x, but it is
-hypersensitive: a 0.001 px change in x can flip it.
+Caveats: the earlier friction/estimator/contact-flicker experiments above were run on the
+original masses; they were diagnostics and their switches are not in this branch. The
+jump is lower than before (apex 44 vs 73 px) so the launch impulse may need re-tuning.
+Walking has not been re-checked with the flagged feet; the plan is to train one PPO model
+on both. Two positions still fall.
 
-This matters for the residual-PPO task (`walker_ppo`): a residual policy has to
-cancel the expert's spin, and the right correction for one mode overshoots in
-the other.
+## Consequences for PPO
 
-## Evidence
+- Old physics: u90 (`checkpoints/jump_land_u90`) lands in QA at the default start,
+  but that start is a high-spin one; vs the expert's mode at the same x it landed
+  9 of 11 high-spin starts and 1 of 6 low-spin starts. Trainer survival % mixed
+  both modes and was not a usable bar.
+- Capped-gain physics (expert consistent): snapshots 10 - 110 fail everywhere,
+  u130 lands at 4 of 5 positions (fragile; neighbours land 1 - 2 of 5). u130 is
+  saved but NOT committed in `checkpoints/jump_land_u130_physfix` (trained on a
+  light-arm rig).
+- Low-noise run (`INIT_STD=0.15 STD_MAX=0.15`): sampled survival reached 55 - 72%
+  but the deterministic policy fails (0/5 at every snapshot but one; 1 - 2% in the
+  trainer's own deterministic evaluation). The policy depends on the exploration
+  noise; nothing from this run is deployable.
+- Compare deterministic and sampled behaviour before trusting any survival number.
 
-All numbers are from `walker_qa` with `SCRIPT=plans/walker_jump_hop_script.json`
-(stand 1.25 s -> jump 2.5 s -> stand 2.5 s), expert only unless stated.
-"Peak spin" = max |omega_com| in the 0.3 s after liftoff.
+## State of the code
 
-**1. Spin is bimodal in spawn x** (20 px steps, x = 0..400, original arms):
-0:1.70 20:0.31 40:1.60 60:1.52 80:1.59 100:1.64 120:1.54 140:0.42 160:0.35
-180:0.47 200:0.42 220:0.39 240:0.40 260:0.40 280:0.39 300:1.48 320:0.62
-340:0.37 360:1.67 380:1.67 400:1.48 - 10 high, 11 low. With the four arm
-particles 100x lighter (`inv_mass` 10 -> 1000): 23 high, 8 low of 31.
+Two repos, committed on paired branches (the `bevy_vello` workspace depends on the sibling
+`../study_vello` by path, so check out both):
 
-**2. Hypersensitive.** x = 0 -> 1.70, x = 0.001 -> 0.38, x = 0.01 -> 1.69.
+- `study_vello` branch `contact-mass`: the contact-mass flag and update in
+  `integrations/vello_physics` (defaults as above; everything else is the original physics).
+- `bevy_vello` branch `jump-contact-mass`: the rig flag on the feet, a `walker_qa`
+  `SPAWN_X=<px>` knob (default 0), a `Default` fix in `game_lib`, and
+  `tools/physics-qa/compare_runs.py`.
 
-**3. Deterministic through the jump.** Repeated runs at the same x are identical
-for every row until t ~ 2.9 s or later (after the body has fallen); a small
-non-determinism then appears (28-36 columns drift). Cause not checked
-(`vello_physics` is built with `parallel`).
+The diagnostic switches used in the investigation above (`FRAME_FRICTION_MODEL`,
+`FRAME_OMEGA_EST`, `COLLISION_SHIFT_X`, `PHYS_SUBSTEPS`, ...) were reverted and are not in
+either branch.
 
-**4. The mode is set at one tick.** At the Launch -> Flight release tick
-(t = 1.600 s) the hip and both feet are displaced 8 - 17 px sideways in a single
-tick, the foot velocity spikes to ~ -1400 px/s for one frame, and the lean steps
-by 1 - 2 deg. At that moment the feet are 16 - 21 px below the floor top
-surface (y = 312). The size of the kick is similar in both modes; the lean step
-correlates with the mode (about -2 deg high-spin, -1 deg low-spin) but not
-cleanly (one light-arm run, x = 220, is high-spin with -1.1 deg).
+## Open questions / next steps
 
-**5. The policy is not the cause, it reacts to it.** Expert vs u90
-(`checkpoints/jump_land_u90`) at the same x: identical for all 113 standing
-frames, diverging from the first jump tick. u90 injects a counter-spin before the
-kick (omega ~ +0.95 at t = 1.55 s) so it leaves with ~ -0.35 rad/s instead of
--1.7. Matching u90 against the expert's mode at the same x (single body, QA):
-
-| expert mode at that x | u90 landed | u90 fell |
-|---|---|---|
-| high-spin | 9 | 2 |
-| low-spin | 1 | 5 |
-
-So u90 learned to cancel a large spin; where the spin is already small, the
-same correction overshoots (the +1.05 rad lean tip-over seen in the trainer).
-
-**6. This explains the confusing training numbers.** Deterministic u90 in the
-trainer lands 94% (N=1, body at x=0) but 34 - 58% for other body counts, and 18%
-sampled with the learned noise (std ~ 0.3), because the body positions put a
-different share of bodies in each mode. The policy sees no absolute x, so it
-cannot tell which mode it is in. The default QA scenario (spawn x = 0) is a
-high-spin start, so it only measured one mode.
-
-## Ruled out
-
-| hypothesis | test | result |
-|---|---|---|
-| number of bodies | one body in QA at different x | still position-dependent |
-| floor position / length / shape | floor shifted with or against the character | outcome follows the character's world x |
-| GPU collision coordinates (tile/bin phase) | shifted all collision geometry by +/-210 px before the GPU pass, added back after | no change |
-| contact normals | logged every soft-vs-static normal; forced them vertical | median 0.000 deg off vertical, 4 of 2576 contacts > 1 deg; forced vertical: modes unchanged (1.66 / 0.43) |
-| which foot is lifted | foot-height difference at stroke start | +3.00 px and the same foot in every run |
-| the arms | arm particles 100x lighter | two modes remain |
-| penetration depth / substeps | 1, 2, 4, 8 solver substeps | penetration 17-21 -> 7-9 px, kick still -8..-14 px, spin spread not smaller (0.48 - 2.16 at 8) |
-| stance pin | `STANCE_PIN=0` | **not tested**: that switch lives in the walking controller, the jump path ignores it |
-
-One observation that is only a correlation: at ticks 143 - 145 the number of
-soft-vs-static contacts differs between a high-spin and a low-spin run
-(4/2/1 vs 1/1/2), i.e. the contact set differs just before the kick.
-
-## Open questions
-
-1. Where does the *horizontal* part of the release-tick kick come from? The
-   launch impulse in `walker.rs` is purely vertical (`Vec2::new(0.0, impulse)`).
-   Look at everything that changes at the Launch -> Flight tick: which pins /
-   constraints switch off, how the impulse reaches each particle, and how the
-   soft-body contact solver responds to the foot contacts at that moment.
-2. What in the pre-stroke state selects the mode? Lean, omega, angular
-   momentum and positions at t = 1.24 s did not separate the modes.
-3. Is the small late-run non-determinism (item 3) the `parallel` feature?
-
-## Consequences for training
-
-- Training survival % mixes both modes and is not a reliable bar. Judge
-  checkpoints with deterministic eval at several spawn x (for example 0, 60,
-  150, 210, 300), not a single QA start.
-- Fixing the expert so it has one consistent mode is probably worth more than
-  more PPO tuning.
-- u90 is a good candidate in the high-spin mode only.
+1. Train the PPO residual on the new physics and judge checkpoints with deterministic
+   evaluation at several spawn positions.
+2. Re-check walking with the flagged feet (planned: one model for both).
+3. The two positions that still fall; whether the launch impulse needs re-tuning for the
+   lower apex.
+4. Explain the one-tick sideways kick at the Launch -> Flight release (it survived every
+   physics change tried; it is much smaller in effect now that the foot is not driven in).
+5. The frame solver's partial correction (interpolation weights, averaging, skeleton
+   propagation `collision_scale = 1 - collision_damping` = 0.3 in this rig) is still there;
+   the contact mass works around it for the feet rather than removing it.
 
 ## Reproducing
 
-`tools/physics-qa/compare_runs.py A.csv B.csv` (committed) diffs two QA CSVs
-frame by frame and reports the takeover frame and the first divergent columns.
-
-The experiments above used small **diagnostic patches that are not committed**
-(env-gated, defaults unchanged):
-
-- `walker_qa/src/main.rs`: `SPAWN_X`, `FLOOR_X`, `FLOOR_HALF_LEN`
-- `walker_ppo/src/main.rs`: env id and spawn x in the `EXPERT_ONLY` episode log,
-  `CHAR_SPACING`
-- `src/integrations/physics/systems.rs`: `COLLISION_SHIFT_X`, `DEBUG_NORMALS`,
-  `FLOOR_NORMAL_FLAT`, `PHYS_SUBSTEPS`
-
-Typical run (expert only, spawn 20 px to the right):
-
 ```
+# expert only, spawn 20 px to the right
 tools/physics-qa/run_walker_qa.sh t SCRIPT=plans/walker_jump_hop_script.json SPAWN_X=20
+
+# with the contact mass disabled (control)
+CONTACT_MASS_D0=1000 CONTACT_MASS_D1=1001 tools/physics-qa/run_walker_qa.sh t \
+    SCRIPT=plans/walker_jump_hop_script.json SPAWN_X=20
 ```
 
 Raw CSVs and logs were kept only in a scratch directory and are not in the repo.
