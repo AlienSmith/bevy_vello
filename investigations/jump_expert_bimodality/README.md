@@ -2,7 +2,7 @@
 
 Started 2026-11-25, updated 2026-11-26.
 
-**Status (2026-11-26): the jump expert is now consistent. The cause was the light foot being driven into the floor by the heavy hip through the leg's constraints; a depth-driven "contact mass" on the feet fixes it (branches `jump-contact-mass` / `contact-mass`). Walking is not yet re-validated with it.**
+**Status (2026-11-26): the jump expert now lands from nearly every start (29 of 31 spawn positions) but its liftoff spin still takes several discrete levels; the heavy foot absorbs them. The large penetration was caused by the light foot being driven into the floor by the heavy hip through the leg's constraints; a depth-driven "contact mass" on the feet fixes that (branches `jump-contact-mass` / `contact-mass`). Walking is not yet re-validated with it.**
 
 The sections below up to "Resolution" are the investigation that led there: the
 original physics behaves inconsistently under the stroke, and the diagnostic experiments
@@ -131,12 +131,18 @@ original physics, no environment overrides:
 | | mass update off | new defaults |
 |---|---|---|
 | ends standing | 0 / 31 | **29 / 31** (still falls at x = 0.001 and 0.1) |
-| peak spin | two clusters (13 at 0.3 - 0.6, 15 at 1.5 - 1.9); largest gap 0.86 | one spread 0.25 - 1.24; largest gap 0.16 |
-| spin stdev | 0.61 | 0.30 |
+| signed spin 0.1 s after liftoff | two bundles: 17 runs at -1.9 .. -1.5, 14 at -0.55 .. -0.2; gap 0.93 | still several levels: 7 at about -1.1, 17 spread over -0.9 .. -0.3, 3 near -0.1, 4 at about +0.5 (opposite direction); largest gap 0.53 |
 | peak foot depth (median) | 19.0 px | 3.6 px |
 | foot slide in the push-off (median / max) | 18.5 / 22 px | 8.1 / 24 px |
 | hip sideways travel (median) | 63 px | 36 px |
 | apex rise (median) | 73 px | 44 px |
+
+Correction: an earlier version of this table (and the commit message of the commit that
+introduced it) used the maximum of |omega| after liftoff, which folds +0.5 and -0.5 together
+and wrongly suggested a single spin mode ("largest gap 0.16"). The signed values above, and
+the overlay of `omega_com` over the 31 runs, show that the discrete spin levels are still
+there. After landing, the two runs that fall (x = 0.001 and 0.1) do so slowly, about 1 - 2 s
+after touchdown, not in flight.
 
 Caveats: the earlier friction/estimator/contact-flicker experiments above were run on the
 original masses; they were diagnostics and their switches are not in this branch. The
