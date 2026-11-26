@@ -288,6 +288,9 @@ fn reward_cfg() -> reward::RewardConfig {
     if let Some(v) = env_f32("LAUNCH_MISS_GRACE") {
         c.launch_miss_grace = v;
     }
+    if let Some(v) = env_f32("MIN_FLIGHT") {
+        c.min_flight = v;
+    }
     c
 }
 
@@ -457,6 +460,8 @@ struct PpoState {
     /// clears it. Splitting the two means the swap lands on a fully parked
     /// generation, never mid-stroke on a live body.
     swap_pending: bool,
+    /// Generations collected since the last PPO update (`GENS_PER_UPDATE`).
+    gens_collected: u32,
 }
 
 /// Per-character episode bookkeeping (env state the harness owns).
@@ -705,6 +710,7 @@ fn main() {
             best_update: 0,
             early_stop: false,
             swap_pending: false,
+            gens_collected: 0,
         })
         // `perf_reset` seeds the meter's clock ONCE: running it per-frame in
         // `First` would zero `log_accum` before it could ever reach one second
@@ -1213,6 +1219,7 @@ fn ppo_collect_system(
                     reward::Termination::TiltedOver
                         | reward::Termination::BodyContact
                         | reward::Termination::LaunchMissed
+                        | reward::Termination::HopTooSmall
                 );
                 state.trace_summary.push(format!(
                     "{ep},{ticks},{stand_hip:.2},{min_hip:.2},{rise:.1},{},{}",
@@ -1272,7 +1279,7 @@ fn ppo_collect_system(
                 );
             }
             state.ep_rows.push(format!(
-                "{tick},{},{:.4},{},{},{:.1},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.3}",
+                "{tick},{},{:.4},{},{},{:.1},{},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{:.3},{:.0}",
                 env.root.index(),
                 env.ep_reward,
                 env.t,
@@ -1288,6 +1295,7 @@ fn ppo_collect_system(
                 env.reward.recovery_ticks,
                 mix.dominant_name(),
                 mix.dominant_share(),
+                env.spawn_x,
             ));
             // Park and flag for a full **respawn**: `ppo_reset_system` despawns
             // this character and the factory rebuilds it at its rest pose. That
@@ -1450,6 +1458,15 @@ fn ppo_update_system(
     if state.rollout.len() < n.0 {
         return;
     }
+    // `GENS_PER_UPDATE=k`: collect k generations (k x N episodes) before each update, so the
+    // gradient is less noisy. Between updates the generation is respawned with the SAME weights.
+    let gens_needed = env_usize("GENS_PER_UPDATE").unwrap_or(1).max(1) as u32;
+    state.gens_collected += 1;
+    if state.gens_collected < gens_needed {
+        state.swap_pending = true; // respawn without updating
+        return;
+    }
+    state.gens_collected = 0;
     let rollout = std::mem::take(&mut state.rollout);
     // This runs **on the main thread inside FixedUpdate**, so it stalls the
     // render loop for its whole duration — the visible "freeze" every
@@ -1760,6 +1777,7 @@ fn term_label(term: reward::Termination, over: bool) -> &'static str {
         reward::Termination::TiltedOver => "TiltedOver",
         reward::Termination::LaunchMissed => "LaunchMissed",
         reward::Termination::BodyContact => "BodyContact",
+        reward::Termination::HopTooSmall => "HopTooSmall",
         reward::Termination::None => {
             if over {
                 "Timeout"
@@ -1791,7 +1809,7 @@ const TRAIN_HEADER: &str = "update,tick,mean_ep_reward,mean_ep_len,mean_peak_hei
 ///   for standing);
 /// - `dom = survive` with `r_recovery ≈ 0` → survived the clock without the
 ///   upright term ever paying.
-const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,survived,term,r_launch,r_flight,r_recovery,r_survive,launch_ticks,flight_ticks,recovery_ticks,dom,dom_pct";
+const EP_HEADER: &str = "tick,env,ep_reward,ep_len,launch,survived,term,r_launch,r_flight,r_recovery,r_survive,launch_ticks,flight_ticks,recovery_ticks,dom,dom_pct,spawn_x";
 /// `TRACE=1`: per-tick particle state of ONE env, for its first episode. The
 /// trainer otherwise writes only per-update / per-episode aggregates, so a
 /// checkpoint's actual stroke could not be inspected at all — this is the

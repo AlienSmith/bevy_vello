@@ -116,6 +116,9 @@ pub enum Termination {
     /// docs): the check is constructed again once the collider set is reliable.
     #[allow(dead_code)]
     BodyContact,
+    /// The body touched down before [`RewardConfig::min_flight`] seconds of flight had passed:
+    /// a hop too small to count as the jump (off by default, `min_flight = 0`). Pays nothing.
+    HopTooSmall,
 }
 
 /// One reward tick's product.
@@ -179,6 +182,12 @@ pub struct RewardConfig {
     /// leave the floor; this must be long enough for a real launch to clear it
     /// and short enough to still terminate a dead stroke early.
     pub launch_miss_grace: f32,
+    /// Minimum flight time, seconds (`MIN_FLIGHT`). A touchdown before this much time has been
+    /// spent in the Flight stage ends the episode as [`Termination::HopTooSmall`] and pays no
+    /// completion bonus, so a policy cannot earn the landing reward by shrinking the jump to a
+    /// micro-hop. Measured as Flight-stage ticks x dt (liftoff itself is confirmed over
+    /// [`LIFTOFF_CONFIRM_TICKS`] ticks first, so real airtime is ~3 ticks longer). `0` = off.
+    pub min_flight: f32,
 }
 
 impl Default for RewardConfig {
@@ -200,6 +209,7 @@ impl Default for RewardConfig {
             r_survive: 2.0,
             fall_angle: FRAC_PI_3,
             launch_miss_grace: 0.20,
+            min_flight: 0.0,
         }
     }
 }
@@ -365,6 +375,10 @@ impl JumpReward {
                 // launch receipt there (so it requires a landing) and open the
                 // recovery window, which runs a full `recovery_window` seconds.
                 if f.grounded {
+                    // A hop shorter than `min_flight` is not the jump: no payment, episode over.
+                    if (self.flight_ticks as f32) * f.dt < self.cfg.min_flight {
+                        return self.fail(Termination::HopTooSmall);
+                    }
                     self.phase = Phase::Recovery;
                     self.recovery_t = 0.0;
                     events.touch_down = true;
@@ -834,6 +848,53 @@ mod tests {
         assert_eq!(out.reward, 0.0);
         assert!(!rw.launched());
         assert_eq!(rw.term_reason, Some(Termination::LaunchMissed));
+    }
+
+    #[test]
+    fn a_hop_shorter_than_min_flight_is_not_a_jump() {
+        let mut cfg = RewardConfig::default();
+        cfg.min_flight = 0.40;
+        let mut rw = JumpReward::new(cfg);
+        confirm_liftoff(&mut rw, 0.0);
+        // Airborne for 10 ticks (0.11 s), then touch down: a micro-hop.
+        for _ in 0..10 {
+            assert_eq!(rw.step(&airborne(0.0), false).termination, Termination::None);
+        }
+        let down = fiction(STAND_Z * 0.05, -60.0, 0.0, 0.0, [0.0, 0.0], false);
+        let out = rw.step(&down, false);
+        assert_eq!(out.termination, Termination::HopTooSmall);
+        assert_eq!(out.reward, 0.0);
+        assert_eq!(rw.term_reason, Some(Termination::HopTooSmall));
+        assert_eq!(rw.survive_pay, 0.0);
+    }
+
+    #[test]
+    fn a_full_hop_passes_min_flight() {
+        let mut cfg = RewardConfig::default();
+        cfg.min_flight = 0.40;
+        let mut rw = JumpReward::new(cfg);
+        confirm_liftoff(&mut rw, 0.0);
+        let needed = (cfg.min_flight / DT).ceil() as usize + 2;
+        for _ in 0..needed {
+            assert_eq!(rw.step(&airborne(0.0), false).termination, Termination::None);
+        }
+        let down = fiction(STAND_Z * 0.05, -60.0, 0.0, 0.0, [0.0, 0.0], false);
+        let out = rw.step(&down, false);
+        assert!(out.events.touch_down, "a long enough flight lands normally");
+        assert_eq!(out.termination, Termination::None);
+    }
+
+    #[test]
+    fn min_flight_is_off_by_default() {
+        let mut rw = JumpReward::new(RewardConfig::default());
+        confirm_liftoff(&mut rw, 0.0);
+        for _ in 0..2 {
+            rw.step(&airborne(0.0), false);
+        }
+        let down = fiction(STAND_Z * 0.05, -60.0, 0.0, 0.0, [0.0, 0.0], false);
+        let out = rw.step(&down, false);
+        assert!(out.events.touch_down);
+        assert_eq!(out.termination, Termination::None);
     }
 
     #[test]
