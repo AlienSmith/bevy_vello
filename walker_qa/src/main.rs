@@ -474,9 +474,16 @@ fn spawn_character(mut commands: Commands, assets: Res<CharacterAssetPaths>) {
     commands.spawn((
         VelloSceneBundle {
             transform: Transform {
-                // TEMPORARY `SPAWN_X=<px>` shifts the body along the floor.
+                // TEMPORARY `SPAWN_X=<px>` shifts the body along the floor;
+                // `SPAWN_Y=<px>` RAISES it (Bevy y-up: positive adds height, so the
+                // character falls onto the floor — used to reproduce free-fall
+                // landings / over-penetration).
                 translation: SPAWN_TRANSLATION
-                    + Vec3::new(env_f32("SPAWN_X").unwrap_or(0.0), 0.0, 0.0),
+                    + Vec3::new(
+                        env_f32("SPAWN_X").unwrap_or(0.0),
+                        env_f32("SPAWN_Y").unwrap_or(0.0),
+                        0.0,
+                    ),
                 scale: SPAWN_SCALE,
                 ..default()
             },
