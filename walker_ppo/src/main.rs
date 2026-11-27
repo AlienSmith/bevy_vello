@@ -246,9 +246,10 @@ fn land_lean() -> f32 {
 /// back to [`reward::RewardConfig::default`], so `cargo run -p walker_ppo`
 /// behaves without any env.
 ///
-/// Env names: `RECOVERY_WINDOW`, `R_SURVIVE`, `FALL_ANGLE_DEG` (degrees),
-/// `LAUNCH_MISS_GRACE`, `MIN_FLIGHT`. The reward is now a single completion
-/// bonus, so the dense shaping knobs (per-stage weights, spin caps) are gone.
+/// Env names: `RECOVERY_WINDOW`, `R_SURVIVE`, `R_FAIL` (negative = failure
+/// penalty; default −1), `FALL_ANGLE_DEG` (degrees), `LAUNCH_MISS_GRACE`,
+/// `MIN_FLIGHT`. The reward is a completion bonus with a failure penalty; the
+/// old dense per-stage shaping knobs are gone.
 fn reward_cfg() -> reward::RewardConfig {
     let mut c = reward::RewardConfig::default();
     if let Some(v) = env_f32("RECOVERY_WINDOW") {
@@ -256,6 +257,12 @@ fn reward_cfg() -> reward::RewardConfig {
     }
     if let Some(v) = env_f32("R_SURVIVE") {
         c.r_survive = v;
+    }
+    if let Some(v) = env_f32("R_FAIL") {
+        c.r_fail = v;
+    }
+    if let Some(v) = env_f32("R_HOLD_RATE") {
+        c.r_recovery = v;
     }
     if let Some(v) = env_f32("FALL_ANGLE_DEG") {
         c.fall_angle = v.to_radians();
@@ -545,6 +552,9 @@ fn main() {
     }
     if let Some(v) = env_f32("EPOCHS") {
         ppo_cfg.epochs = v as usize;
+    }
+    if let Some(v) = env_f32("TARGET_KL") {
+        ppo_cfg.target_kl = v;
     }
     if let Some(v) = env_f32("INIT_STD") {
         ppo_cfg.init_std = v;

@@ -1,9 +1,10 @@
-//! The jump & landing reward: **+1 on completion, 0 otherwise.**
+//! The jump & landing reward: **+1 on completion, −1 on failure, 0 otherwise.**
 //!
 //! The authored expert already performs the jump; the residual's two jobs are to
 //! avoid CoM rotation at liftoff and to survive the landing. The reward says only
 //! that: an episode that reaches the end of the recovery window without tipping
-//! over pays `r_survive` once, everything else pays nothing.
+//! over pays `r_survive` once, one that tilts over / misses the launch / hops
+//! too small pays `r_fail` (default −1), and anything in between pays nothing.
 //!
 //! Dense per-tick terms (upright, spin, momentum, a launch receipt) were tried and
 //! removed: a stochastic policy exploits its own noise through them, and the
@@ -18,7 +19,7 @@
 //!   Recovery ── `recovery_window` seconds without tipping ─▶ +r_survive, Completed
 //! ```
 //!
-//! Any phase ends as `TiltedOver` when `|lean| > fall_angle`. Failures pay 0.
+//! Any phase ends as `TiltedOver` when `|lean| > fall_angle`. Failures pay `r_fail` (−1).
 //!
 //! [`Fiction`] is Vello y-down; `tilt` is `fiction.lean`.
 
@@ -76,8 +77,20 @@ pub struct RewardEvents {
 pub struct RewardConfig {
     /// Recovery window length, seconds.
     pub recovery_window: f32,
-    /// Completion bonus, the only reward.
+    /// Completion bonus.
     pub r_survive: f32,
+    /// What a failed episode pays (tilt / launch miss / too-small hop). Negative
+    /// so the terminal returns are `{-1, 0, +1}` — with failures free (0), any
+    /// update whose batch contains no completions has all-zero returns and no
+    /// gradient at all, which lets the policy drift toward collapse.
+    pub r_fail: f32,
+    /// Dense hold term: per SECOND of upright time inside the recovery window
+    /// (scaled by `1 − |lean|/fall_angle`), so the recovery has an intra-episode
+    /// gradient to stay upright instead of only the terminal ±1. Deterministic
+    /// in the observed state, hence not grabbable by exploration noise. At the
+    /// default `0.25/s` a clean full 1.5 s hold earns ≈0.375 on top of the
+    /// terminal `r_survive` — a mild, secondary contribution.
+    pub r_recovery: f32,
     /// Torso tilt beyond which the episode is over, radians (60°).
     pub fall_angle: f32,
     /// Grace after the expert's launch window closes before a still-grounded
@@ -94,6 +107,8 @@ impl Default for RewardConfig {
         Self {
             recovery_window: 1.5,
             r_survive: 1.0,
+            r_fail: -1.0,
+            r_recovery: 0.25,
             fall_angle: FRAC_PI_3,
             launch_miss_grace: 0.20,
             min_flight: 0.0,
@@ -158,7 +173,7 @@ impl JumpReward {
         let mut events = RewardEvents::default();
 
         if f.lean.abs() > self.cfg.fall_angle {
-            return self.finish(0.0, events, Termination::TiltedOver);
+            return self.finish(self.cfg.r_fail, events, Termination::TiltedOver);
         }
 
         match self.phase {
@@ -175,7 +190,7 @@ impl JumpReward {
                         self.phase = Phase::Flight;
                         events.lift_off = true;
                     } else if self.launch_miss_t >= self.cfg.launch_miss_grace {
-                        return self.finish(0.0, events, Termination::LaunchMissed);
+                        return self.finish(self.cfg.r_fail, events, Termination::LaunchMissed);
                     }
                 } else {
                     // Still loading: contact flicker here is noise, not a liftoff.
@@ -187,7 +202,7 @@ impl JumpReward {
                 self.flight_ticks += 1;
                 if f.grounded {
                     if (self.flight_ticks as f32) * f.dt < self.cfg.min_flight {
-                        return self.finish(0.0, events, Termination::HopTooSmall);
+                        return self.finish(self.cfg.r_fail, events, Termination::HopTooSmall);
                     }
                     self.phase = Phase::Recovery;
                     self.recovery_t = 0.0;
@@ -197,10 +212,22 @@ impl JumpReward {
             Phase::Recovery => {
                 self.recovery_ticks += 1;
                 self.recovery_t += f.dt;
+                // Dense hold term: upright time inside the window earns a small
+                // per-second reward (scaled by uprightness), so the recovery has an
+                // intra-episode gradient to stay upright rather than only the
+                // terminal ±1. Deterministic in the observed state — exploration
+                // noise cannot grab it.
+                let upright = (1.0 - f.lean.abs() / self.cfg.fall_angle.max(1e-3)).clamp(0.0, 1.0);
+                let hold = self.cfg.r_recovery * f.dt * upright;
                 if self.recovery_t >= self.cfg.recovery_window {
                     events.survived = true;
-                    return self.finish(self.cfg.r_survive, events, Termination::Completed);
+                    return self.finish(self.cfg.r_survive + hold, events, Termination::Completed);
                 }
+                return StepOut {
+                    reward: hold,
+                    events,
+                    termination: Termination::None,
+                };
             }
         }
 
@@ -311,7 +338,11 @@ mod tests {
 
     #[test]
     fn nothing_pays_until_the_window_completes() {
-        let cfg = RewardConfig::default();
+        // The hold term disabled here: this test isolates the terminal bonus.
+        let cfg = RewardConfig {
+            r_recovery: 0.0,
+            ..Default::default()
+        };
         let mut rw = JumpReward::new(cfg);
         let mut outs = run(&mut rw, &standing(), 50);
         assert!(!rw.launched());
@@ -323,9 +354,11 @@ mod tests {
         assert!(touch.events.touch_down);
         outs.push(touch);
         let window_ticks = (cfg.recovery_window / DT).round() as usize;
-        outs.extend(run(&mut rw, &down, window_ticks - 2));
+        outs.extend(run(&mut rw, &down, window_ticks - 1));
         assert_eq!(total(&outs), 0.0, "no per-tick reward anywhere");
-        // The tick that reaches the window's end pays once.
+        // The tick that reaches the window's end pays once. (The touchdown tick
+        // resets `recovery_t` to 0, so the window needs `window_ticks` further
+        // Recovery increments; `window_ticks - 1` here because `done` is the last.)
         let done = rw.step(&down, false);
         assert!(done.events.survived);
         assert_eq!(done.termination, Termination::Completed);
@@ -346,6 +379,35 @@ mod tests {
             assert_eq!(rw.step(&down, false).termination, Termination::None);
         }
         assert_eq!(rw.step(&down, false).termination, Termination::Completed);
+    }
+
+    #[test]
+    fn recovery_hold_rewards_upright_time_and_scales_with_lean() {
+        let cfg = RewardConfig::default();
+        // Upright recovery time pays the hold term per tick.
+        let mut rw = JumpReward::new(cfg);
+        confirm_liftoff(&mut rw, 0.0);
+        let down = fiction(STAND_Z * 0.05, -60.0, 0.0, 0.0, [0.0, 0.0], false);
+        assert!(rw.step(&down, false).events.touch_down);
+        let out = rw.step(&down, false);
+        assert!(out.reward > 0.0, "upright recovery time pays the hold term");
+        // Half way to the fall angle earns half as much.
+        let mut rw = JumpReward::new(cfg);
+        confirm_liftoff(&mut rw, 0.0);
+        rw.step(&down, false);
+        let halfway =
+            fiction(STAND_Z * 0.05, -60.0, cfg.fall_angle * 0.5, 0.0, [0.0, 0.0], false);
+        let out2 = rw.step(&halfway, false);
+        assert!(out2.reward > 0.0 && out2.reward < out.reward);
+        // Beyond the fall angle it still pays r_fail — the hold never survives a tilt.
+        let mut rw = JumpReward::new(cfg);
+        confirm_liftoff(&mut rw, 0.0);
+        rw.step(&down, false);
+        let tipped =
+            fiction(STAND_Z * 0.05, -60.0, cfg.fall_angle + 0.05, 0.0, [0.0, 0.0], false);
+        let out3 = rw.step(&tipped, false);
+        assert_eq!(out3.reward, cfg.r_fail);
+        assert_eq!(out3.termination, Termination::TiltedOver);
     }
 
     #[test]
@@ -423,7 +485,7 @@ mod tests {
         let mut rw = JumpReward::new(cfg);
         confirm_liftoff(&mut rw, 0.0);
         let out = rw.step(&tipped, false);
-        assert_eq!(out.reward, 0.0);
+        assert_eq!(out.reward, -1.0, "tilting over pays r_fail");
         assert_eq!(out.termination, Termination::TiltedOver);
         assert_eq!(rw.term_reason, Some(Termination::TiltedOver));
 
@@ -434,7 +496,7 @@ mod tests {
         rw.step(&down, false);
         rw.step(&down, false);
         let out = rw.step(&tipped, false);
-        assert_eq!(out.reward, 0.0);
+        assert_eq!(out.reward, -1.0, "tilting in recovery forfeits the bonus and pays r_fail");
         assert_eq!(out.termination, Termination::TiltedOver);
     }
 
@@ -458,7 +520,7 @@ mod tests {
             out = rw.step(&standing(), true);
         }
         assert_eq!(out.termination, Termination::LaunchMissed);
-        assert_eq!(out.reward, 0.0);
+        assert_eq!(out.reward, -1.0, "a launch miss pays r_fail");
         assert!(!rw.launched());
     }
 
@@ -487,7 +549,7 @@ mod tests {
         let down = fiction(STAND_Z * 0.05, -60.0, 0.0, 0.0, [0.0, 0.0], false);
         let out = rw.step(&down, false);
         assert_eq!(out.termination, Termination::HopTooSmall);
-        assert_eq!(out.reward, 0.0);
+        assert_eq!(out.reward, -1.0, "a too-small hop pays r_fail");
         assert_eq!(rw.term_reason, Some(Termination::HopTooSmall));
     }
 

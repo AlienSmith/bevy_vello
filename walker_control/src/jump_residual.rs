@@ -377,7 +377,14 @@ impl Step for JumpResidual {
         let obs = self.build_obs(cmd, fiction, &prop, facing);
 
         // 3) Sample the residual δ.
-        let (action, logp, value) = {
+        // `RESIDUAL_DELTA="d0,d1,d2,d3,d4"` forces a CONSTANT residual (probe only):
+        // it bypasses the policy entirely, so the experiment can sweep fixed deltas
+        // over the polar scales (`r`×0.15, `s`×0.30, `θ`×0.30) at a given spawn —
+        // separating "the residual can't express a fix" (capacity) from "it isn't
+        // learning one" (signal). Empty / 5 numbers only.
+        let (action, logp, value) = if let Some(d) = residual_override() {
+            (d.to_vec(), 0.0, 0.0)
+        } else {
             let guard = match self.policy.read() {
                 Ok(g) => g,
                 Err(_) => {
@@ -419,6 +426,24 @@ impl Step for JumpResidual {
     fn mode(&self) -> LocoMode {
         LocoMode::Jumping
     }
+}
+
+/// One-time read of the `RESIDUAL_DELTA` probe override (see `JumpResidual::step`): five
+/// comma-separated floats in action order, or `None` when unset/malformed.
+fn residual_override() -> Option<[f32; ACTION_DIM]> {
+    use std::sync::OnceLock;
+    static V: OnceLock<Option<[f32; ACTION_DIM]>> = OnceLock::new();
+    *V.get_or_init(|| {
+        let s = std::env::var("RESIDUAL_DELTA").ok()?;
+        let v: Vec<f32> = s
+            .split(',')
+            .map(|x| x.trim().parse::<f32>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        if v.len() != ACTION_DIM {
+            return None;
+        }
+        Some([v[0], v[1], v[2], v[3], v[4]])
+    })
 }
 
 #[cfg(test)]

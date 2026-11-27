@@ -62,6 +62,13 @@ pub struct PpoConfig {
     pub max_grad_norm: f32,
     /// Optimization epochs per rollout.
     pub epochs: usize,
+    /// Target-KL early stop (the original PPO recipe): once the approximate KL
+    /// between the current and sampling policy exceeds this within the epoch
+    /// loop, the remaining epochs are skipped — the clipped surrogate is only a
+    /// valid local approximation inside this trust region, and grinding a stale
+    /// rollout past it walks the policy somewhere the data no longer supports.
+    /// `0` disables (always run all `epochs`).
+    pub target_kl: f32,
     /// Initial exploration std (sets `log_std`); annealed by learning it.
     pub init_std: f32,
 }
@@ -78,6 +85,7 @@ impl Default for PpoConfig {
             vf_coef: 0.5,
             max_grad_norm: 0.5,
             epochs: 8,
+            target_kl: 0.02,
             init_std: 0.5,
         }
     }
@@ -451,6 +459,12 @@ impl PpoTrainer {
                 clip_frac: clipped * inv,
                 mean_adv: a_std,
             };
+            // Target-KL early stop: the surrogate is only a valid local model of
+            // the objective inside this trust region; past it, the remaining
+            // epochs grind a stale rollout and can wreck the policy.
+            if self.config.target_kl > 0.0 && last.approx_kl > self.config.target_kl {
+                break;
+            }
         }
         last
     }
