@@ -86,13 +86,14 @@ grep -E 'character assets|attached|floor|wrote' "$OUTDIR/$TAG.log" | tail -4
 echo "== plot"
 python3 tools/physics-qa/plot_p3.py "$CSV" "$PNG"
 
-echo "== standing summary"
+echo "== standing + penetration summary"
 python3 - "$CSV" <<'EOF'
 import csv, statistics, sys
 rows = list(csv.DictReader(open(sys.argv[1])))
-def num(r, k): return float(r[k])
+def num(r, k): return float(r[k]) if r[k] else 0.0
 if not rows:
     sys.exit("empty csv")
+FLOOR = 312.0   # floor surface (physics y-down); feet at ~305-310 when standing
 tail = rows[-90:]
 print(f"t={num(rows[-1],'t'):.1f}s mode={rows[-1]['mode']} "
       f"grounded={sum(int(r['grounded']) for r in rows)/len(rows):.2f}")
@@ -101,6 +102,10 @@ print(f"hip y last-1s mean {statistics.mean(num(r,'P3y') for r in tail):.1f} "
 print(f"feet y last-1s mean {statistics.mean((num(r,'PLLLy')+num(r,'PRLLy'))/2 for r in tail):.1f}")
 print(f"hip x last-1s drift: {min(num(r,'P3x') for r in tail):.1f} .. {max(num(r,'P3x') for r in tail):.1f}")
 print(f"v_filt last-1s mean {statistics.mean(abs(num(r,'v_filt')) for r in tail):.1f} px/s")
+d = [max(0.0, num(r,'PLLLy')-FLOOR, num(r,'PRLLy')-FLOOR) for r in rows]
+over = [x for x in d if x > 2]
+print(f"foot penetration below floor (y>312): max {max(d):.1f} px, "
+      f">2px in {100*len(over)//max(1,len(d))}% of samples")
 EOF
 
 echo "== artifacts: $CSV  $PNG"

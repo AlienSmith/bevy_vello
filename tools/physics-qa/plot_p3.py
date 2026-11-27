@@ -145,7 +145,7 @@ def main():
         plan_l, plan_r = win(plan_l), win(plan_r)
         vx, vcmd, v_filt, v_des = win(vx), win(vcmd), win(v_filt), win(v_des)
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(14, 13), sharex=True)
 
     def shade(ax):
         for sig, c in ((gl, "#ffc2d1"), (gr, "#bfd4ff")):
@@ -215,7 +215,27 @@ def main():
     ax3.grid(alpha=0.3)
     ax3.legend(loc="upper left", ncol=2)
     ax3.set_ylabel("hip vx (px/s)")
-    ax3.set_xlabel("t (s)")
+
+    # Foot penetration below the floor surface: how far each foot's physics y
+    # (y-down) passes the floor at 312. In the plot's flipped frame the raw y is
+    # `-lft[:,1]`, so depth = max(0, (y_phys) - 312) = max(0, -(y_plot + 312)).
+    # A dedicated panel (rather than just the y trace) so the deep-contact
+    # windows read directly off the run instead of by eye against the floor.
+    FLOOR_Y = 312.0
+    shade(ax4)
+    dL = np.maximum(0.0, -(lft[:, 1] + FLOOR_Y))
+    dR = np.maximum(0.0, -(rft[:, 1] + FLOOR_Y))
+    ax4.plot(t, dL, lw=1.0, color="#d6336c", label="L foot depth below floor")
+    ax4.plot(t, dR, lw=1.0, color="#1971c2", label="R foot depth below floor")
+    ax4.axhline(0.0, color="gray", lw=0.6)
+    ax4.grid(alpha=0.3)
+    ax4.legend(loc="upper left", ncol=2)
+    ax4.set_ylabel("depth below floor (px)")
+    ax4.set_xlabel("t (s)")
+    print(
+        f"foot max depth below floor: L {dL.max():.1f} px, R {dR.max():.1f} px"
+        f" (>2 px in {int(100 * (dL > 2).mean()):02d}% / {int(100 * (dR > 2).mean()):02d}%)"
+    )
     if t_range is not None:
         ax1.set_xlim(t_range)
         ax1.set_title(
